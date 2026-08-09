@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+  "benchmarks/memory",
+  "feuer",
+  "feuer-memory",
+  "feuer-storage",
+  "feuer-tokio",
+  "feuer-types",
+]
+
+[workspace.package]
+version = "0.23.0-dev"
+edition = "2024"
+rust-version = "1.91.0"
+repository = "https://github.com/PSeitz/feuer"
+homepage = "https://github.com/PSeitz/feuer"
+keywords = ["cache", "range", "storage"]
+authors = ["Feuer Project Authors"]
+license = "MIT"
+readme = "README.md"
+exclude = []
+
+[workspace.dependencies]
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+feuer-memory = { version = "0.23.0-dev", path = "feuer-memory" }
+feuer-types = { version = "0.23.0-dev", path = "feuer-types" }
+fs4 = { version = "0.13", default-features = false }
+mixtrics = "0.2"
+parking_lot = "0.12"
+# Enable all features by default to make it possible to opt out of the madsim dependency.
+# See why we need this at https://github.com/rust-lang/cargo/issues/10801
+runtime-madsim-tokio = { package = "madsim-tokio", version = "0.2", features = [
+  "full",
+] }
+runtime-tokio = { package = "tokio", version = "1", default-features = false }
+rustc-hash = "2"
+tempfile = "3"
+thiserror = "2.0.20"
+tokio = { package = "feuer-tokio", version = "0.23.0-dev", path = "feuer-tokio", default-features = false }
+tracing = "0.1"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(madsim)'] }
+
+[workspace.lints.clippy]
+allow_attributes = "warn"
+
+[profile.release]
+debug = "full"

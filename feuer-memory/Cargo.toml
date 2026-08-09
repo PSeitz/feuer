@@ -1,0 +1,26 @@
+[package]
+name = "feuer-memory"
+description = "Internal payload-bounded range memory tier for Feuer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+authors.workspace = true
+license.workspace = true
+readme.workspace = true
+exclude.workspace = true
+
+[features]
+benchmark = []
+
+[dependencies]
+bytes = { workspace = true }
+feuer-types = { workspace = true }
+mixtrics = { workspace = true }
+parking_lot = { workspace = true }
+rustc-hash = { workspace = true }
+
+[lints]
+workspace = true

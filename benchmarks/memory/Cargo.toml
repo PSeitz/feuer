@@ -1,0 +1,17 @@
+[package]
+name = "feuer-memory-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+bytes.workspace = true
+clap.workspace = true
+feuer-memory = { workspace = true, features = ["benchmark"] }
+feuer-types.workspace = true
+foyer-memory = { git = "https://github.com/foyer-rs/foyer", rev = "165cde3d4e638aaf2680384c02f57222b40be128" }
+
+[lints]
+workspace = true

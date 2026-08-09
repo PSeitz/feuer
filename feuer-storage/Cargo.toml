@@ -1,0 +1,31 @@
+[package]
+name = "feuer-storage"
+description = "Internal range-storage primitives for Feuer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+authors.workspace = true
+license.workspace = true
+readme.workspace = true
+exclude.workspace = true
+
+[features]
+default = ["tokio/runtime-tokio"]
+
+[dependencies]
+bytes = { workspace = true }
+fs4 = { workspace = true, features = ["sync"] }
+mixtrics = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

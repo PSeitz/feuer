@@ -1,0 +1,8 @@
+* @PSeitz
+
+/Cargo.toml @PSeitz
+/feuer/ @PSeitz
+/feuer-memory/ @PSeitz
+/feuer-storage/ @PSeitz
+/feuer-tokio/ @PSeitz
+/feuer-types/ @PSeitz

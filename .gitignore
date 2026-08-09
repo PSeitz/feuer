@@ -1,0 +1,13 @@
+/.vscode
+
+/target
+
+lcov.info
+
+perf.data*
+flamegraph.svg
+
+trace.txt
+*.collapsed
+
+AGENTS.md
