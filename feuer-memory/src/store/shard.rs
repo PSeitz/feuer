@@ -10,27 +10,10 @@ use super::{
 };
 use crate::MemoryMetrics;
 
-/// Successful shard-local accesses granted to a broader admission before compaction.
-pub(super) const PREFETCH_GRACE_ACCESSES: u64 = 64;
+/// Successful shard-local accesses allowed before an extent can be trimmed.
+pub(super) const COMPACTION_GRACE_ACCESSES: u64 = 64;
 /// Maximum entries inspected for one pressure decision.
 const POLICY_SAMPLE_SIZE: usize = 64;
-
-/// The selected value policy plus a benchmark-only disabled control.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum CompactionMode {
-    /// Choose the available action with lower estimated value loss per byte.
-    ValueAware,
-    /// Retain and evict complete downloaded extents only.
-    #[cfg(feature = "benchmark")]
-    Disabled,
-}
-
-#[cfg(feature = "benchmark")]
-impl CompactionMode {
-    const fn is_disabled(self) -> bool {
-        matches!(self, Self::Disabled)
-    }
-}
 
 /// One retained downloaded range.
 struct Entry {
@@ -44,39 +27,11 @@ struct Entry {
     sequence: u64,
     /// Slot in the bounded-work policy candidate ring.
     candidate_slot: usize,
-    /// Successful-access clock at original admission.
+    /// Successful-access clock at admission.
     admitted_at: u64,
-    /// Whether the initial request was smaller than the downloaded extent.
-    broader_than_request: bool,
-    /// Most recently observed contiguous coverage on this extent.
-    observed: Option<ByteRange>,
-    /// Most recent access that demonstrated useful prefetched bytes.
-    reuse: Option<ReuseEvent>,
 }
 
 impl Entry {
-    fn new(
-        id: u64,
-        range: ByteRange,
-        bytes: Bytes,
-        sequence: u64,
-        candidate_slot: usize,
-        admitted_at: u64,
-        observed: Option<ByteRange>,
-    ) -> Self {
-        Self {
-            id,
-            range,
-            bytes,
-            sequence,
-            candidate_slot,
-            admitted_at,
-            broader_than_request: false,
-            observed,
-            reuse: None,
-        }
-    }
-
     fn requested_bytes(&self, requested_range: ByteRange) -> Bytes {
         debug_assert!(self.range.contains(requested_range));
         let start = usize::try_from(requested_range.start() - self.range.start())
@@ -84,63 +39,6 @@ impl Entry {
         let end = usize::try_from(requested_range.end() - self.range.start())
             .expect("an offset within a Bytes payload must fit in usize");
         self.bytes.slice(start..end)
-    }
-
-    /// Records one access and reports whether it used new prefetched coverage.
-    fn observe_access(&mut self, requested: ByteRange, epoch: u64) -> bool {
-        debug_assert!(self.range.contains(requested));
-        let Some(observed) = self.observed else {
-            self.broader_than_request = self.range != requested;
-            self.observed = Some(requested);
-            return false;
-        };
-
-        let demonstrated = self.broader_than_request && !observed.contains(requested);
-        if demonstrated {
-            self.reuse = Some(ReuseEvent {
-                range: requested,
-                epoch,
-            });
-        }
-        self.observed = Some(merge_or_replace(observed, requested));
-        demonstrated
-    }
-
-    fn reuse_retention(&self, epoch: u64) -> RetentionEvidence {
-        self.reuse.map_or_else(RetentionEvidence::default, |event| {
-            RetentionEvidence::for_access(event.range, event.epoch, epoch)
-        })
-    }
-
-    fn is_in_probation(&self, access_clock: u64) -> bool {
-        self.broader_than_request && access_clock.saturating_sub(self.admitted_at) < PREFETCH_GRACE_ACCESSES
-    }
-
-    fn compaction_eligible(&self, access_clock: u64) -> bool {
-        self.broader_than_request
-            && self.observed.is_some()
-            && access_clock.saturating_sub(self.admitted_at) >= PREFETCH_GRACE_ACCESSES
-    }
-}
-
-#[derive(Clone, Copy)]
-struct ReuseEvent {
-    range: ByteRange,
-    epoch: u64,
-}
-
-/// Merges adjacent or overlapping observations; a disjoint access replaces the
-/// old interval. One interval and one reuse event avoid per-entry collections
-/// while retaining a bounded, ageable prefetch signal.
-fn merge_or_replace(observed: ByteRange, requested: ByteRange) -> ByteRange {
-    if requested.start() <= observed.end() && observed.start() <= requested.end() {
-        ByteRange::new(
-            observed.start().min(requested.start()),
-            observed.end().max(requested.end()),
-        )
-        .expect("a union of non-empty ranges must remain non-empty")
-    } else {
-        requested
     }
 }
 
@@ -170,19 +68,17 @@ impl CachedRanges {
         requested: ByteRange,
         epoch: u64,
         project: impl FnOnce(&Entry) -> R,
-    ) -> Option<(R, bool)> {
-        let (projected, observation) = {
-            let (_, entry) = self.by_start.range_mut(..=requested.start()).next_back()?;
+    ) -> Option<R> {
+        let projected = {
+            let (_, entry) = self.by_start.range(..=requested.start()).next_back()?;
             if !entry.range.contains(requested) {
                 return None;
             }
-            let projected = project(entry);
-            let observation = entry.observe_access(requested, epoch);
-            (projected, observation)
+            project(entry)
         };
         self.generation = self.generation.saturating_add(1);
         self.accesses.record(requested, epoch);
-        Some((projected, observation))
+        Some(projected)
     }
 
     fn superseded_by(&self, range: ByteRange) -> Superseded {
@@ -257,7 +153,7 @@ impl PolicyCandidates {
     }
 }
 
-/// One entry considered by the retention comparator.
+/// One sampled entry, optionally trimmable to its observed request ranges.
 struct Victim {
     object_key: ObjectKey,
     range: ByteRange,
@@ -265,18 +161,8 @@ struct Victim {
     bytes: u64,
     sequence: u64,
     evidence: RetentionEvidence,
-    in_probation: bool,
-}
-
-/// One extent selected for shard-local compaction.
-struct PlannedCompaction {
-    object_key: ObjectKey,
-    start: u64,
-    id: u64,
-    sequence: u64,
     generation: u64,
-    prefetch_value: RetentionEvidence,
-    plan: CompactionPlan,
+    compaction: Option<CompactionPlan>,
 }
 
 /// A compaction source cloned under the metadata lock for copying afterward.
@@ -344,13 +230,11 @@ pub(super) struct Shard {
     insertion_sequence: u64,
     next_entry_id: u64,
     candidates: PolicyCandidates,
-    #[cfg(feature = "benchmark")]
-    compaction_mode: CompactionMode,
     metrics: Arc<MemoryMetrics>,
 }
 
 impl Shard {
-    pub(super) fn new(capacity: u64, metrics: Arc<MemoryMetrics>, _compaction_mode: CompactionMode) -> Self {
+    pub(super) fn new(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self {
         Self {
             capacity,
             used_bytes: 0,
@@ -359,8 +243,6 @@ impl Shard {
             insertion_sequence: 0,
             next_entry_id: 0,
             candidates: PolicyCandidates::default(),
-            #[cfg(feature = "benchmark")]
-            compaction_mode: _compaction_mode,
             metrics,
         }
     }
@@ -375,13 +257,13 @@ impl Shard {
         let accessed = self.ranges.get_mut(object_key).and_then(|entries| {
             entries.observe_covering(requested_range, epoch, |entry| entry.requested_bytes(requested_range))
         });
-        let Some((bytes, observation)) = accessed else {
+        let Some(bytes) = accessed else {
             self.metrics.record_lookup(false);
             return None;
         };
 
         self.access_clock = access_clock;
-        self.record_access_metrics(observation);
+        self.metrics.record_access();
         self.metrics.record_lookup(true);
         Some(bytes)
     }
@@ -393,19 +275,10 @@ impl Shard {
     fn record_successful_access(&mut self, object_key: &ObjectKey, requested_range: ByteRange) {
         self.access_clock = self.access_clock.saturating_add(1);
         let epoch = self.current_epoch();
-        let demonstrated = self
-            .ranges
+        self.ranges
             .get_mut(object_key)
-            .and_then(|entries| entries.observe_covering(requested_range, epoch, |_| ()))
-            .is_some_and(|(_, demonstrated)| demonstrated);
-        self.record_access_metrics(demonstrated);
-    }
-
-    fn record_access_metrics(&self, demonstrated: bool) {
+            .and_then(|entries| entries.observe_covering(requested_range, epoch, |_| ()));
         self.metrics.record_access();
-        if demonstrated {
-            self.metrics.record_prefetch_reuse();
-        }
     }
 
     /// Advances one bounded admission action while holding the shard lock.
@@ -448,27 +321,16 @@ impl Shard {
             return AdmissionStep::Complete;
         }
 
-        #[cfg(feature = "benchmark")]
-        let allow_compaction = allow_compaction && !self.compaction_mode.is_disabled();
-        let (victim, compaction) = self.pressure_candidates(object_key, range, allow_compaction);
-
-        let compact = match (&compaction, &victim) {
-            (Some(compaction), Some(victim)) => compare_action_loss(compaction, victim) != Ordering::Greater,
-            (Some(_), None) => true,
-            _ => false,
-        };
-        if compact {
-            return AdmissionStep::Compact(
-                self.compaction_work(compaction.expect("the selected compaction candidate must exist")),
-            );
-        }
-
-        let Some(victim) = victim else {
+        let Some(victim) = self.pressure_candidate(object_key, range, allow_compaction) else {
             // A rotating bounded sample can temporarily consist entirely of
             // entries superseded by this admission. Advancing its cursor and
             // retrying gives amortized full coverage without one long scan.
             return AdmissionStep::Retry;
         };
+        if victim.compaction.is_some() {
+            return AdmissionStep::Compact(self.compaction_work(victim));
+        }
+
         let removed = self
             .detach_entry(
                 &victim.object_key,
@@ -479,9 +341,6 @@ impl Shard {
             .expect("a sampled victim cannot disappear while its shard is locked");
         self.metrics.decrease_usage(removed, 1);
         self.metrics.record_evictions(1);
-        if victim.in_probation {
-            self.metrics.record_probation_eviction();
-        }
         AdmissionStep::Retry
     }
 
@@ -495,7 +354,14 @@ impl Shard {
             start: range.start(),
             id,
         });
-        let entry = Entry::new(id, range, bytes, sequence, candidate_slot, self.access_clock, None);
+        let entry = Entry {
+            id,
+            range,
+            bytes,
+            sequence,
+            candidate_slot,
+            admitted_at: self.access_clock,
+        };
 
         let entries = self.ranges.entry(object_key).or_default();
         entries.generation = entries.generation.saturating_add(1);
@@ -510,15 +376,14 @@ impl Shard {
             start: range.start(),
             id,
         });
-        let entry = Entry::new(
+        let entry = Entry {
             id,
             range,
             bytes,
             sequence,
             candidate_slot,
-            self.access_clock,
-            Some(range),
-        );
+            admitted_at: self.access_clock,
+        };
         let entries = self.ranges.entry(object_key.clone()).or_default();
         entries.generation = entries.generation.saturating_add(1);
         let replaced = entries.by_start.insert(range.start(), entry);
@@ -599,18 +464,18 @@ impl Shard {
         entry.candidate_slot = slot;
     }
 
-    /// Selects both pressure alternatives from one rotating bounded sample.
-    fn pressure_candidates(
+    /// Selects one victim from a rotating bounded sample. If its observed
+    /// requests form a useful smaller payload, pressure trims it instead.
+    fn pressure_candidate(
         &mut self,
         admitting_key: &ObjectKey,
         admitting_range: ByteRange,
         allow_compaction: bool,
-    ) -> (Option<Victim>, Option<PlannedCompaction>) {
+    ) -> Option<Victim> {
         let epoch = self.current_epoch();
         let (sample_start, sample_count) = self.candidates.sample();
         let candidate_count = self.candidates.entries.len();
         let mut victim: Option<Victim> = None;
-        let mut compaction: Option<PlannedCompaction> = None;
 
         for offset in 0..sample_count {
             let candidate = &self.candidates.entries[(sample_start + offset) % candidate_count];
@@ -627,64 +492,45 @@ impl Shard {
                 continue;
             }
 
-            let candidate_victim = Victim {
+            let mut candidate_victim = Victim {
                 object_key: candidate.object_key.clone(),
                 range: entry.range,
                 id: entry.id,
                 bytes: entry.bytes.len() as u64,
                 sequence: entry.sequence,
-                evidence: entries
-                    .accesses
-                    .retention(entry.range, epoch)
-                    .combine(entry.reuse_retention(epoch)),
-                in_probation: entry.is_in_probation(self.access_clock),
+                evidence: entries.accesses.retention(entry.range, epoch),
+                generation: entries.generation,
+                compaction: None,
             };
             if victim
                 .as_ref()
-                .is_none_or(|current| compare_retention(&candidate_victim, current).is_lt())
+                .is_some_and(|current| !compare_retention(&candidate_victim, current).is_lt())
             {
-                victim = Some(candidate_victim);
+                continue;
             }
 
-            if !allow_compaction || !entry.compaction_eligible(self.access_clock) {
-                continue;
+            if allow_compaction && self.access_clock.saturating_sub(entry.admitted_at) >= COMPACTION_GRACE_ACCESSES {
+                candidate_victim.compaction = plan_compaction(entry.range, entries.accesses.active_ranges(epoch));
             }
-            let Some(plan) = plan_compaction(entry.range, entries.accesses.active_ranges(epoch)) else {
-                continue;
-            };
-            let candidate_compaction = PlannedCompaction {
-                object_key: candidate.object_key.clone(),
-                start: candidate.start,
-                id: candidate.id,
-                sequence: entry.sequence,
-                generation: entries.generation,
-                prefetch_value: entry.reuse_retention(epoch),
-                plan,
-            };
-            if compaction
-                .as_ref()
-                .is_none_or(|current| compare_compaction(&candidate_compaction, current).is_lt())
-            {
-                compaction = Some(candidate_compaction);
-            }
+            victim = Some(candidate_victim);
         }
-        (victim, compaction)
+        victim
     }
 
-    fn compaction_work(&self, candidate: PlannedCompaction) -> CompactionWork {
+    fn compaction_work(&self, mut victim: Victim) -> CompactionWork {
         let entry = self
             .ranges
-            .get(&candidate.object_key)
-            .and_then(|entries| entries.by_start.get(&candidate.start))
-            .filter(|entry| entry.id == candidate.id)
+            .get(&victim.object_key)
+            .and_then(|entries| entries.by_start.get(&victim.range.start()))
+            .filter(|entry| entry.id == victim.id)
             .expect("a selected compaction source cannot disappear while its shard is locked");
         CompactionWork {
-            object_key: candidate.object_key,
-            start: candidate.start,
-            id: candidate.id,
-            sequence: candidate.sequence,
-            generation: candidate.generation,
-            plan: candidate.plan,
+            object_key: victim.object_key,
+            start: victim.range.start(),
+            id: victim.id,
+            sequence: victim.sequence,
+            generation: victim.generation,
+            plan: victim.compaction.take().expect("compaction work requires a plan"),
             source_bytes: entry.bytes.clone(),
         }
     }
@@ -754,25 +600,6 @@ impl Shard {
     }
 
     #[cfg(test)]
-    pub(super) fn active_reuse_events(&self, object_key: &ObjectKey, range: ByteRange) -> usize {
-        let epoch = self.current_epoch();
-        self.ranges
-            .get(object_key)
-            .and_then(|entries| entries.by_start.get(&range.start()))
-            .filter(|entry| entry.range == range)
-            .map_or(0, |entry| usize::from(entry.reuse_retention(epoch).weighted_value != 0))
-    }
-
-    #[cfg(test)]
-    pub(super) fn is_compaction_eligible(&self, object_key: &ObjectKey, range: ByteRange) -> bool {
-        self.ranges
-            .get(object_key)
-            .and_then(|entries| entries.by_start.get(&range.start()))
-            .filter(|entry| entry.range == range)
-            .is_some_and(|entry| entry.compaction_eligible(self.access_clock))
-    }
-
-    #[cfg(test)]
     pub(super) fn candidate_count(&self) -> usize {
         self.candidates.entries.len()
     }
@@ -784,30 +611,6 @@ fn compare_retention(left: &Victim, right: &Victim) -> Ordering {
         .then_with(|| left.sequence.cmp(&right.sequence))
         .then_with(|| left.object_key.cmp(&right.object_key))
         .then_with(|| left.range.cmp(&right.range))
-}
-
-/// Lower demonstrated-prefetch value per reclaimable byte is compacted first.
-fn compare_compaction(left: &PlannedCompaction, right: &PlannedCompaction) -> Ordering {
-    compare_density(
-        left.prefetch_value,
-        left.plan.reclaimed_bytes(),
-        right.prefetch_value,
-        right.plan.reclaimed_bytes(),
-    )
-    .then_with(|| left.sequence.cmp(&right.sequence))
-    .then_with(|| left.plan.retained_bytes().cmp(&right.plan.retained_bytes()))
-    .then_with(|| left.object_key.cmp(&right.object_key))
-    .then_with(|| left.start.cmp(&right.start))
-}
-
-/// Compares value lost per byte between partial compaction and complete eviction.
-fn compare_action_loss(compaction: &PlannedCompaction, victim: &Victim) -> Ordering {
-    compare_density(
-        compaction.prefetch_value,
-        compaction.plan.reclaimed_bytes(),
-        victim.evidence,
-        victim.bytes,
-    )
 }
 
 fn compare_density(left: RetentionEvidence, left_bytes: u64, right: RetentionEvidence, right_bytes: u64) -> Ordering {

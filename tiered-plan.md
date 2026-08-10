@@ -152,11 +152,11 @@ The retention objective is expected future source or lower-tier retrieval time a
 not raw object hit rate. Repeated access must increase retention value, stale frequency evidence must age, and
 only the exact requested interval receives observed-access credit.
 
-Broader admissions get bounded, deterministic shard-local probation before compaction. The most recent reuse
-outside prior contiguous request coverage grants ageable protection without pinning or duplicating exact access
-evidence. Unproven extents become compactable after probation.
+Every admission gets a short, deterministic shard-local grace before compaction. Policy keeps no separate
+prefetch-promotion state: bounded exact request evidence drives both retention and compaction. Grace never pins
+an extent against pressure eviction.
 
-Prefetch remains bounded in both tiers, and probation never blocks admission or pressure eviction.
+Prefetch remains bounded in both tiers, and compaction grace never blocks admission or pressure eviction.
 
 The internal policy must distinguish whether a range has no disk copy, has a queued or active disk write, or is
 available on disk so it can value a memory hit that avoids disk differently from one that avoids source I/O.
@@ -189,14 +189,14 @@ In-memory compaction remains an MVP feature. Feuer observes exact accessed range
 can replace a cached larger download with smaller cached payloads biased toward observed requests, releasing
 unrequested cache memory.
 
-Compaction is pressure-driven. A broader extent is ineligible until its probation of 64 successful accesses
-to the same shard expires; the most recent demonstrated reuse adds ageable protection but never prevents eviction.
+Compaction is pressure-driven. Policy samples at most 64 extents and selects the one with the lowest aged
+retrieval value per retained byte. Once its grace of 64 successful same-shard accesses expires, that same victim
+is trimmed when its observed requests can release at least one quarter of its payload; otherwise it is evicted.
 Compacted replacements use only observed requests, merge only overlapping or adjacent intervals, preserve gaps,
-create no access, and
-cannot affect lookup results or caller-held slices.
+create no access, and cannot affect lookup results or caller-held slices.
 
-Lookup and access recording must not scan every live shard entry. Victim and compaction selection have bounded
-or amortized work and bounded metadata; copies made outside the metadata lock require generation revalidation.
+Lookup and access recording must not scan every live shard entry. Victim selection has bounded work and metadata;
+copies made outside the metadata lock require generation revalidation.
 
 ## 7. Best-effort disk population
 
@@ -286,8 +286,7 @@ It must make it possible to observe:
 
 - memory hits, disk hits, callback misses, errors, callback invocations, and returned download bytes;
 - lookup, callback, and disk-I/O latency;
-- memory pressure, probation outcomes, demonstrated prefetch reuse, compaction, disk-write queue pressure, and
-  eviction;
+- memory pressure, victim trimming, compaction, disk-write queue pressure, and eviction;
 - useful disk payload, allocation overhead, dead or fragmented capacity, and cleaner or relocation traffic;
 - integrity and recovery outcomes; and
 - skipped, canceled, failed, and completed disk population.
@@ -312,12 +311,10 @@ The MVP is complete when tests demonstrate that:
 - every successful lookup appends its exact requested range once to its key's accessed ranges, independent of downloaded-range population;
 - controlled policy tests credit only the requested interval, favor repeated reuse, age stale frequency, and
   bound never-requested prefetch;
-- a broader memory admission receives its complete 64-successful-access probation, measured in its shard, even
-  when admitted at a shard cadence boundary, while pressure may still evict it;
-- a containment hit requiring previously unrequested downloaded bytes records one demonstrated-prefetch event
-  and promotes the broader extent without duplicating its exact access event;
-- an extent with no demonstrated prefetch reuse becomes compaction-eligible after probation, and the single
-  most recent demonstrated-reuse signal ages out;
+- a broader memory admission cannot be compacted until 64 successful accesses in its shard have elapsed, while
+  pressure may still evict it;
+- after that grace, pressure can trim the selected victim to its observed exact requests without separate
+  promotion or prefetch-reuse state;
 - returned `Bytes` may safely outlive cache eviction;
 - shard pressure evicts toward each shard's assigned target, while an oversized download empties its shard and remains cached even when aggregate retained payload exceeds the configured target;
 - pressure-driven in-memory compaction can release unrequested cached payload without changing results, and

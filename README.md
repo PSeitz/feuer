@@ -5,7 +5,7 @@ objects. It is designed for arbitrary, non-empty ranges and fixed disk
 capacities of at least 1 TiB.
 
 > **Status:** active development. The public per-call callback, covering-memory
-> path, and prefetch-aware, pressure-driven memory policy are present, but
+> path, and sampled, pressure-driven memory policy are present, but
 > best-effort disk population and recovery are not yet complete.
 > This repository is not ready for production use.
 
@@ -38,9 +38,8 @@ The internal `feuer-storage` crate currently provides an exclusively owned,
 fixed-capacity file and checked buffered positional I/O. Direct I/O and the
 recoverable range engine remain to be implemented. `feuer-memory` provides a
 sharded soft-capacity covering-range index with bounded aged request evidence,
-prefetch probation measured in successful same-shard accesses, one ageable
-recent demonstrated-reuse signal, sampled value-aware eviction, and
-pressure-driven compaction toward observed requests. Its [memory-only comparison](benchmarks/memory/results.md)
+sampled value-aware eviction, a short compaction grace, and pressure-driven
+trimming of the selected victim toward observed requests. Its [memory-only comparison](benchmarks/memory/results.md)
 records the current policy baseline. `feuer-types` holds shared range
 foundations, while `feuer-tokio` remains the Tokio/madsim runtime switch. None of these internal
 package boundaries is a public compatibility commitment.

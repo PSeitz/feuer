@@ -15,7 +15,7 @@ use bytes::Bytes;
 use feuer_types::{ByteRange, Download, ObjectKey};
 use parking_lot::Mutex;
 
-use self::shard::{AdmissionStep, CompactionMode, Shard};
+use self::shard::{AdmissionStep, Shard};
 use crate::MemoryMetrics;
 
 /// Caps lock partitioning to avoid excessive per-cache metadata.
@@ -35,11 +35,9 @@ const MAX_SHARDS: usize = 64;
 /// shard evicts locally before insertion. A payload larger than its shard's
 /// target is retained after that shard is emptied, so total usage can exceed the
 /// configured capacity. Victims are selected shard-locally from aged expected
-/// retrieval value per retained byte. Broader admissions receive probation
-/// measured in successful same-shard accesses, and the most recent novel
-/// containment use grants ageable promotion. Under pressure, one rotating sample
-/// selects the action with lower estimated value loss per reclaimed byte; retained
-/// copies contain only observed requests and are produced outside the shard lock.
+/// retrieval value per retained byte. Under pressure, a rotating sample selects
+/// one victim. If its observed requests form a useful smaller payload, Feuer
+/// trims that victim outside the shard lock instead of evicting it completely.
 pub struct MemoryCache {
     /// Total soft target divided among the shards.
     capacity: u64,
@@ -72,33 +70,16 @@ impl MemoryCache {
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
     pub fn with_shards_for_benchmark(capacity: u64, shard_count: usize) -> Self {
-        Self::with_shard_count_and_mode(capacity, MemoryMetrics::noop(), shard_count, CompactionMode::ValueAware)
-    }
-
-    /// Creates a benchmark cache with compaction disabled.
-    #[cfg(feature = "benchmark")]
-    #[doc(hidden)]
-    pub fn with_compaction_disabled_for_benchmark(capacity: u64, shard_count: usize) -> Self {
-        Self::with_shard_count_and_mode(capacity, MemoryMetrics::noop(), shard_count, CompactionMode::Disabled)
+        Self::with_shard_count(capacity, MemoryMetrics::noop(), shard_count)
     }
 
     fn with_shard_count(capacity: u64, metrics: Arc<MemoryMetrics>, shard_count: usize) -> Self {
-        Self::with_shard_count_and_mode(capacity, metrics, shard_count, CompactionMode::ValueAware)
-    }
-
-    fn with_shard_count_and_mode(
-        capacity: u64,
-        metrics: Arc<MemoryMetrics>,
-        shard_count: usize,
-        compaction_mode: CompactionMode,
-    ) -> Self {
         assert!(shard_count > 0, "memory cache requires at least one shard");
         let shards = (0..shard_count)
             .map(|index| {
                 Mutex::new(Shard::new(
                     shard_capacity_for(capacity, shard_count, index),
                     metrics.clone(),
-                    compaction_mode,
                 ))
             })
             .collect();

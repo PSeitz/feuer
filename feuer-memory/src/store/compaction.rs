@@ -20,10 +20,6 @@ impl CompactionPlan {
         &self.retained
     }
 
-    pub(super) const fn retained_bytes(&self) -> u64 {
-        self.retained_bytes
-    }
-
     pub(super) const fn reclaimed_bytes(&self) -> u64 {
         self.source.len() - self.retained_bytes
     }
@@ -98,7 +94,6 @@ mod tests {
 
         assert_eq!(plan.source(), range(10, 30));
         assert_eq!(plan.retained(), &[range(12, 14), range(18, 24)]);
-        assert_eq!(plan.retained_bytes(), 8);
         assert_eq!(plan.reclaimed_bytes(), 12);
     }
 

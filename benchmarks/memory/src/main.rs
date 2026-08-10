@@ -49,15 +49,6 @@ struct Args {
     )]
     downloaders: Vec<DownloadPolicy>,
 
-    /// Feuer's value-aware policy and optional disabled control.
-    #[arg(
-        long = "feuer-compaction",
-        value_enum,
-        default_value = "value-aware",
-        value_delimiter = ','
-    )]
-    feuer_compactions: Vec<FeuerCompaction>,
-
     /// Untimed passes executed against each cache before the measured pass.
     #[arg(long, default_value_t = 0)]
     warmup_iterations: usize,
@@ -82,23 +73,6 @@ impl DownloadPolicy {
         match self {
             Self::Expanded => "expanded",
             Self::Exact => "exact",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum FeuerCompaction {
-    /// Product policy: choose the lower estimated value loss per reclaimed byte.
-    ValueAware,
-    /// Disable compaction while preserving the rest of Feuer's policy.
-    Disabled,
-}
-
-impl FeuerCompaction {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::ValueAware => "feuer-value-aware",
-            Self::Disabled => "feuer-compaction-disabled",
         }
     }
 }
@@ -175,25 +149,19 @@ trait Engine {
 
 struct FeuerEngine {
     cache: MemoryCache,
-    name: &'static str,
 }
 
 impl FeuerEngine {
-    fn new(capacity: usize, shards: usize, compaction: FeuerCompaction) -> Self {
-        let cache = match compaction {
-            FeuerCompaction::ValueAware => MemoryCache::with_shards_for_benchmark(capacity as u64, shards),
-            FeuerCompaction::Disabled => MemoryCache::with_compaction_disabled_for_benchmark(capacity as u64, shards),
-        };
+    fn new(capacity: usize, shards: usize) -> Self {
         Self {
-            cache,
-            name: compaction.name(),
+            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, shards),
         }
     }
 }
 
 impl Engine for FeuerEngine {
     fn name(&self) -> &'static str {
-        self.name
+        "feuer-value-aware"
     }
 
     fn get(&mut self, access: &Access, _downloaded: ByteRange) -> bool {
@@ -360,18 +328,14 @@ fn main() -> Result<(), String> {
     if args.downloaders.is_empty() {
         return Err("at least one --downloader value is required".to_owned());
     }
-    if args.feuer_compactions.is_empty() {
-        return Err("at least one --feuer-compaction value is required".to_owned());
-    }
     let download_config = DownloadConfig::from_env()?;
     let workload = trace_workload(&args, download_config)?;
 
     if args.csv {
         eprintln!(
-            "foyer_revision={PINNED_FOYER_REVISION} trace={TRACE_FILE} shards={:?} downloaders={:?} feuer_compactions={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
+            "foyer_revision={PINNED_FOYER_REVISION} trace={TRACE_FILE} shards={:?} downloaders={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
             args.shards,
             args.downloaders,
-            args.feuer_compactions,
             args.warmup_iterations,
             download_config.coalescing_distance_bytes,
             download_config.whole_split_threshold_bytes,
@@ -388,12 +352,7 @@ fn main() -> Result<(), String> {
 
         for &shards in &args.shards {
             for &capacity in &args.capacities {
-                let mut engines: Vec<Box<dyn Engine>> = args
-                    .feuer_compactions
-                    .iter()
-                    .copied()
-                    .map(|compaction| Box::new(FeuerEngine::new(capacity, shards, compaction)) as Box<dyn Engine>)
-                    .collect();
+                let mut engines: Vec<Box<dyn Engine>> = vec![Box::new(FeuerEngine::new(capacity, shards))];
                 engines.push(Box::new(NativeFoyerEngine::new(
                     capacity,
                     shards,
@@ -696,7 +655,6 @@ fn print_human_report(report: &Report) {
 fn human_engine_name(engine: &str) -> &str {
     match engine {
         "feuer-value-aware" => "Feuer",
-        "feuer-compaction-disabled" => "Feuer (no compaction)",
         "foyer-native-exact-key" => "Foyer",
         "foyer-native-expanded-key" => "Foyer (expanded key)",
         other => other,

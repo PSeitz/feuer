@@ -6,7 +6,7 @@ use feuer_types::{ByteRange, Download, ObjectKey};
 use super::{
     MemoryCache,
     evidence::{ACCESSES_PER_EPOCH, MAX_ACCESS_EVENTS_PER_KEY, MAX_EVIDENCE_AGE_EPOCHS},
-    shard::{AdmissionStep, PREFETCH_GRACE_ACCESSES},
+    shard::{AdmissionStep, COMPACTION_GRACE_ACCESSES},
     shard_capacity_for,
 };
 use crate::MemoryMetrics;
@@ -35,18 +35,6 @@ fn accessed_ranges(cache: &MemoryCache, key: &ObjectKey) -> Vec<ByteRange> {
 
 fn access_evidence_len(cache: &MemoryCache, key: &ObjectKey) -> usize {
     cache.shards[cache.shard_index(key)].lock().access_evidence_len(key)
-}
-
-fn active_reuse_events(cache: &MemoryCache, key: &ObjectKey, retained: ByteRange) -> usize {
-    cache.shards[cache.shard_index(key)]
-        .lock()
-        .active_reuse_events(key, retained)
-}
-
-fn is_compaction_eligible(cache: &MemoryCache, key: &ObjectKey, retained: ByteRange) -> bool {
-    cache.shards[cache.shard_index(key)]
-        .lock()
-        .is_compaction_eligible(key, retained)
 }
 
 fn candidate_count(cache: &MemoryCache) -> usize {
@@ -375,7 +363,21 @@ fn stale_frequency_ages_behind_fresh_evidence() {
 }
 
 #[test]
-fn compaction_releases_unrequested_payload_under_pressure() {
+fn compaction_respects_grace_then_releases_unrequested_payload() {
+    let early_pressure = cache(10);
+    let early_key = ObjectKey::from("early-download");
+    early_pressure.insert_and_record(
+        early_key.clone(),
+        download(range(0, 10), Bytes::from_static(b"abcdefghij")),
+        range(2, 4),
+    );
+    populate(
+        &early_pressure,
+        ObjectKey::from("early-pressure"),
+        download(range(0, 2), Bytes::from_static(b"xy")),
+    );
+    assert!(early_pressure.get(&early_key, range(2, 4)).is_none());
+
     let cache = cache(10);
     let key = ObjectKey::from("download");
     let incoming = ObjectKey::from("incoming");
@@ -385,7 +387,7 @@ fn compaction_releases_unrequested_payload_under_pressure() {
     let returned = cache.get(&key, range(2, 4)).unwrap();
     assert_eq!(returned, Bytes::from_static(b"cd"));
     assert_eq!(returned.as_ptr(), original.slice(2..).as_ptr());
-    for _ in 1..PREFETCH_GRACE_ACCESSES {
+    for _ in 1..COMPACTION_GRACE_ACCESSES {
         cache.record_access(&key, range(2, 4));
     }
     populate(&cache, incoming, download(range(0, 2), Bytes::from_static(b"xy")));
@@ -412,7 +414,7 @@ fn compaction_preserves_disjoint_requested_coverage_without_filling_gaps() {
     );
     cache.record_access(&key, range(1, 3));
     cache.record_access(&key, range(7, 9));
-    for _ in 2..PREFETCH_GRACE_ACCESSES {
+    for _ in 2..COMPACTION_GRACE_ACCESSES {
         cache.record_access(&key, range(1, 3));
     }
 
@@ -436,7 +438,7 @@ fn compaction_waits_for_pressure_and_adds_no_access() {
     populate(&cache, key.clone(), download(range(0, 16), original.clone()));
 
     let returned = cache.get(&key, range(4, 8)).unwrap();
-    for _ in 1..PREFETCH_GRACE_ACCESSES {
+    for _ in 1..COMPACTION_GRACE_ACCESSES {
         cache.record_access(&key, range(4, 8));
     }
 
@@ -454,133 +456,6 @@ fn compaction_waits_for_pressure_and_adds_no_access() {
     let retained = cache.get(&key, range(4, 8)).unwrap();
     assert_eq!(retained, returned);
     assert_ne!(retained.as_ptr(), original.slice(4..).as_ptr());
-}
-
-#[test]
-fn broader_admission_gets_complete_same_shard_access_probation_at_epoch_boundary() {
-    let cache = cache(10);
-    let key = ObjectKey::from("download");
-    let absent = ObjectKey::from("successful-clock");
-    for _ in 0..ACCESSES_PER_EPOCH - 1 {
-        cache.record_access(&absent, range(0, 1));
-    }
-
-    cache.insert_and_record(
-        key.clone(),
-        download(range(0, 10), Bytes::from_static(b"abcdefghij")),
-        range(2, 4),
-    );
-    assert_eq!(cache.used_bytes(), 10);
-    assert!(!is_compaction_eligible(&cache, &key, range(0, 10)));
-
-    for _ in 1..PREFETCH_GRACE_ACCESSES - 1 {
-        cache.record_access(&key, range(2, 4));
-    }
-    assert!(!is_compaction_eligible(&cache, &key, range(0, 10)));
-    cache.record_access(&key, range(2, 4));
-    assert!(is_compaction_eligible(&cache, &key, range(0, 10)));
-    assert_eq!(cache.used_bytes(), 10, "grace expiry alone must not compact");
-}
-
-#[test]
-fn probation_never_pins_a_broader_extent_against_pressure() {
-    let cache = cache(10);
-    let key = ObjectKey::from("download");
-    cache.insert_and_record(
-        key.clone(),
-        download(range(0, 10), Bytes::from_static(b"abcdefghij")),
-        range(2, 4),
-    );
-
-    populate(
-        &cache,
-        ObjectKey::from("incoming"),
-        download(range(0, 1), Bytes::from_static(b"x")),
-    );
-
-    assert!(cache.get(&key, range(2, 4)).is_none());
-    assert_eq!(cache.used_bytes(), 1);
-}
-
-#[test]
-fn novel_containment_use_keeps_one_promotion_and_exact_accesses() {
-    let cache = cache(20);
-    let key = ObjectKey::from("download");
-    cache.insert_and_record(
-        key.clone(),
-        download(range(0, 10), Bytes::from_static(b"abcdefghij")),
-        range(2, 5),
-    );
-    assert_eq!(active_reuse_events(&cache, &key, range(0, 10)), 0);
-    assert_eq!(accessed_ranges(&cache, &key), vec![range(2, 5)]);
-
-    assert_eq!(cache.get(&key, range(3, 4)).unwrap(), Bytes::from_static(b"d"));
-    assert_eq!(active_reuse_events(&cache, &key, range(0, 10)), 0);
-
-    assert_eq!(cache.get(&key, range(4, 6)).unwrap(), Bytes::from_static(b"ef"));
-    assert_eq!(active_reuse_events(&cache, &key, range(0, 10)), 1);
-    assert_eq!(accessed_ranges(&cache, &key).last(), Some(&range(4, 6)));
-
-    assert_eq!(cache.get(&key, range(5, 6)).unwrap(), Bytes::from_static(b"f"));
-    assert_eq!(active_reuse_events(&cache, &key, range(0, 10)), 1);
-
-    // A disjoint novel request replaces, rather than appends to, promotion state.
-    assert_eq!(cache.get(&key, range(8, 9)).unwrap(), Bytes::from_static(b"i"));
-    assert_eq!(active_reuse_events(&cache, &key, range(0, 10)), 1);
-    assert_eq!(access_evidence_len(&cache, &key), 5);
-}
-
-#[test]
-fn demonstrated_reuse_resists_compaction_but_ages_out() {
-    let promoted_cache = cache(11);
-    let key = ObjectKey::from("promoted");
-    let cold = ObjectKey::from("cold");
-    promoted_cache.insert_and_record(
-        key.clone(),
-        download(range(0, 10), Bytes::from_static(b"abcdefghij")),
-        range(2, 4),
-    );
-    assert!(promoted_cache.get(&key, range(7, 9)).is_some());
-    for _ in 2..PREFETCH_GRACE_ACCESSES {
-        promoted_cache.record_access(&key, range(2, 4));
-    }
-    populate(
-        &promoted_cache,
-        cold.clone(),
-        download(range(0, 1), Bytes::from_static(b"c")),
-    );
-
-    populate(
-        &promoted_cache,
-        ObjectKey::from("incoming"),
-        download(range(0, 1), Bytes::from_static(b"i")),
-    );
-    assert!(promoted_cache.get(&cold, range(0, 1)).is_none());
-    assert!(promoted_cache.get(&key, range(0, 10)).is_some());
-
-    let aged_cache = cache(10);
-    let key = ObjectKey::from("aged-promotion");
-    aged_cache.insert_and_record(
-        key.clone(),
-        download(range(0, 10), Bytes::from_static(b"abcdefghij")),
-        range(2, 4),
-    );
-    assert!(aged_cache.get(&key, range(7, 9)).is_some());
-    let absent = ObjectKey::from("clock-only");
-    for _ in 0..ACCESSES_PER_EPOCH * (MAX_EVIDENCE_AGE_EPOCHS + 1) {
-        aged_cache.record_access(&absent, range(0, 1));
-    }
-    assert_eq!(active_reuse_events(&aged_cache, &key, range(0, 10)), 0);
-    aged_cache.record_access(&key, range(2, 4));
-
-    populate(
-        &aged_cache,
-        ObjectKey::from("pressure"),
-        download(range(0, 2), Bytes::from_static(b"xy")),
-    );
-    assert_eq!(aged_cache.used_bytes(), 4);
-    assert!(aged_cache.get(&key, range(2, 4)).is_some());
-    assert!(aged_cache.get(&key, range(7, 9)).is_none());
 }
 
 #[test]
@@ -605,7 +480,7 @@ fn copied_compaction_is_revalidated_before_publication_and_can_fall_back() {
         download(range(0, 10), Bytes::from_static(b"abcdefghij")),
         range(2, 4),
     );
-    for _ in 1..PREFETCH_GRACE_ACCESSES {
+    for _ in 1..COMPACTION_GRACE_ACCESSES {
         cache.record_access(&key, range(2, 4));
     }
 

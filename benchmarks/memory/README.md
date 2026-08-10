@@ -25,10 +25,8 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
 ## Compared engines
 
 - `feuer-value-aware`: `MemoryCache` with source-cost-weighted, ageable access
-  evidence, prefetch probation measured in successful same-shard accesses, one
-  recent demonstrated-reuse signal per extent, and value-aware pressure selection.
-- `feuer-compaction-disabled`: the benchmark-only no-compaction control. It
-  preserves Feuer's containment and eviction policy.
+  evidence and sampled value-aware eviction. After a 64-successful-access grace,
+  pressure trims the selected victim to its observed request ranges when useful.
 - `foyer-native-exact-key`: requested ranges are native Foyer keys. The
   complete callback payload is retained under that exact request key, but
   native Foyer does not perform containment lookup.
@@ -52,8 +50,7 @@ at 16 shards. The 32-GiB capacity is the upper-limit payload-accounting case:
 cargo run --release -p feuer-memory-bench -- \
   --capacity 256MiB,512MiB,1GiB,2GiB,4GiB,8GiB,16GiB,32GiB \
   --shards 16 \
-  --downloader expanded,exact \
-  --feuer-compaction value-aware
+  --downloader expanded,exact
 ```
 
 The default output is a human-readable table. Add `--csv` for machine-readable
@@ -73,9 +70,6 @@ To measure a cache warmed by one complete trace iteration, add
 and elapsed time. Coalescing uses trace lookahead rather than sleeping, so its
 5-ms wait is not included in throughput.
 
-The feature-gated `disabled` control remains available for explicit private
-experiments but is not part of the checked-in comparison.
-
 For a quick check:
 
 ```bash
@@ -83,7 +77,6 @@ cargo run --release -p feuer-memory-bench -- \
   --capacity 256MiB \
   --shards 16 \
   --downloader expanded \
-  --feuer-compaction value-aware \
   --operations 1000
 ```
 

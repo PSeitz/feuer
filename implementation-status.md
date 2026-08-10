@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `feuer` | One soft memory target, cloneable `Cache`, and per-call asynchronous `get_or_fetch` with typed callback and validation errors | Disk open/close, mode selection, `flush`, and memory/disk orchestration |
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, and keyless `Download { downloaded_start, bytes }` with a derived range | No work remaining for the current public type boundary |
-| `feuer-memory` | Sharded soft-capacity covering-range index, bounded and aged exact evidence, prefetch probation measured in successful same-shard accesses, one recent ageable demonstrated-reuse signal per extent, sampled value-aware retention, pressure-driven compaction, payload accounting, and metrics | Later tier-aware disk-state inputs and further trace-independent policy tuning |
+| `feuer-memory` | Sharded soft-capacity covering-range index, bounded and aged exact evidence, sampled value-aware retention, short compaction grace, pressure trimming of the selected victim, payload accounting, and metrics | Later tier-aware disk-state inputs and further trace-independent policy tuning |
 | Memory/disk orchestration | Public callback-to-memory path, including independent misses and redundant-population suppression | Best-effort bounded disk scheduling, cancellation on memory eviction, active-write generations, disk publication, and queue flushing |
 | `feuer-storage` | Exclusively locked fixed-capacity file, buffered positional I/O, synchronization, tracing, and metrics | Linux/macOS direct mode, range lookup, allocation, integrity validation, persistent metadata, and recovery |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, repository metadata, and a documented [memory-only comparison gate](benchmarks/memory/results.md) against pinned native Foyer | End-to-end acceptance tests, crash tests, examples, and disk/concurrent benchmarks |
@@ -71,27 +71,21 @@ This slice introduces no fill context, pre-fetch reservation, internal miss sing
 
 This slice adds no disk queue, storage lifecycle, or public policy configuration.
 
-### 3. Prefetch-aware memory retention and scalable policy
+### 3. Scalable and simplified memory policy
 
-- Added a private grace lasting 64 successful accesses in the same shard after each broader admission. It is
-  independent of epoch or global cadence, while ordinary pressure can still evict a probationary extent.
-- Track only the most recent contiguous observed interval and most recent demonstrated-prefetch event per
-  broader extent. A request outside that interval records one ageable promotion in addition to, not instead of,
-  its exact access event; a disjoint request replaces the interval instead of growing a collection.
-- Removed payload-free ghost/re-admission history after replay showed that it added substantial policy state for
-  negligible hit-rate benefit.
-- Removed unconditional access-cadence compaction. Admission pressure compares sampled compaction loss per
-  reclaimed byte with sampled complete-victim loss, while preserving probation and allowing pressure eviction.
 - Replaced full-shard policy scans with one dense rotating candidate ring and one shared sample of at most 64
   live entries per decision. Registration and removal are constant-work and leave no stale candidate backlog.
-- Split compaction into bounded metadata planning, payload copying without the shard lock, and generation-checked
-  publication. Concurrent access or same-object structural mutation rejects stale copied output.
+- Removed access-cadence compaction and reduced pressure policy to one decision: choose the sampled extent with
+  the lowest aged retrieval value per retained byte. After 64 successful same-shard accesses, trim that same
+  victim to observed exact requests when the planner can reclaim at least one quarter; otherwise evict it.
+- Removed the separate compaction-candidate ranking, demonstrated-prefetch tracking, promotion state, and
+  benchmark-only policy switch. Replay showed that selecting and trimming one victim preserved the checked hit
+  rates without those mechanisms.
+- Kept compaction copying outside the shard lock with generation-checked publication. Concurrent access or
+  same-object structural mutation rejects stale copied output, and admission falls back to eviction.
 - Preserved exact results, containment replacement, independent partial overlaps, oversized soft-target
   admission, bounded exact evidence, deterministic tie-breaking, and distinct population/access events.
-- Added fixed-label metrics for demonstrated reuse and probationary eviction, plus controlled tests for grace
-  boundaries, pressure eviction, promotion aging, exact candidate tracking, and stale-copy rejection.
-- Kept a feature-gated disabled-compaction control for private experiments, while the checked gate reports only
-  the value-aware product policy. Re-ran expanded and exact controls over all eight capacities with 16 shards; the
+- Re-ran expanded and exact controls over all eight capacities with 16 shards; the
   [full results](benchmarks/memory/results.md) report request and source-cost hit rates, actual used memory, and
   throughput without making a general superiority claim.
 
@@ -175,9 +169,8 @@ Until the remaining work lands:
 - each per-call callback returns one downloaded start and non-empty payload, from which its exact range is derived;
 - callback batching and source work remain application-owned;
 - every successful lookup records one requested-range event;
-- broader memory downloads receive bounded compaction probation measured in successful same-shard accesses;
-  the most recent demonstrated reuse may promote them but never pin them against pressure;
-- memory pressure evicts rather than waiting for disk throughput;
+- compaction considers only the selected sampled victim after 64 successful same-shard accesses;
+- memory pressure may evict any extent and never waits for disk throughput;
 - disk population remains bounded and best-effort;
 - physical I/O alignment does not force one full allocation unit per small retained value;
 - never-requested prefetch consumes bounded disk capacity;
