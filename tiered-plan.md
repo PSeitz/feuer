@@ -149,8 +149,10 @@ constant. Prefetch and downloaded-range selection are evaluated in a separate en
 charges each strategy for its actual source GETs and downloaded bytes.
 
 The retention objective is expected future source or lower-tier retrieval time avoided per retained footprint,
-not raw object hit rate. Repeated access must increase retention value, stale frequency evidence must age, and
-only the exact requested interval receives observed-access credit.
+not raw object hit rate. The memory-only policy values each exact access at the modeled fixed source-request
+cost plus its requested bytes, then compares recent retrieval value per retained byte. Repeated access must
+increase retention value, stale evidence must eventually expire, and only the exact requested interval receives
+observed-access credit.
 
 Every admission gets a short, deterministic shard-local grace before compaction. Policy keeps no separate
 prefetch-promotion state: bounded exact request evidence drives both retention and compaction. Grace never pins
@@ -169,7 +171,7 @@ footprint, read and write amplification, cleaning or relocation traffic, through
 
 The performance hypotheses are that integrated containment can reuse a larger downloaded range, request-sized
 disk reads avoid Foyer's complete-value load path, sub-alignment packing avoids its block engine's per-entry
-page rounding for small values, and exact range attribution improves cost- and frequency-aware retention.
+page rounding for small values, and exact range attribution improves frequency-aware retention.
 These are hypotheses to isolate, not evidence of superiority. Feuer must not claim to beat Foyer until the
 comparison demonstrates the claim without violating correctness or the stated resource guardrails.
 
@@ -189,9 +191,11 @@ In-memory compaction remains an MVP feature. Feuer observes exact accessed range
 can replace a cached larger download with smaller cached payloads biased toward observed requests, releasing
 unrequested cache memory.
 
-Compaction is pressure-driven. Policy samples at most 64 extents and selects the one with the lowest aged
-retrieval value per retained byte. Once its grace of 64 successful same-shard accesses expires, that same victim
-is trimmed when its observed requests can release at least one quarter of its payload; otherwise it is evicted.
+Compaction is pressure-driven. Policy samples at most 64 extents and selects the one with the lowest recent
+retrieval value per retained byte. Exact events are bounded to 64 per object and currently expire after 32,768
+later successful same-shard accesses. Once its grace of 64 successful same-shard accesses expires, that same
+victim is trimmed when its observed requests can release at least one quarter of its payload; otherwise it is
+evicted.
 Compacted replacements use only observed requests, merge only overlapping or adjacent intervals, preserve gaps,
 create no access, and cannot affect lookup results or caller-held slices.
 
@@ -333,8 +337,8 @@ The MVP is complete when tests demonstrate that:
 - restart recovers a safe useful subset after injected crashes;
 - unsupported persistent formats are reset and logged safely;
 - disk capacities of at least 1 TiB are representable with bounded internal accounting;
-- the memory-only gate runs exact and expanded downloader controls with 16 shards through 32 GiB, compares
-  actual retained payload, and reports policy throughput; and
+- the memory-only gate runs exact and expanded downloader controls with 1, 4, 16, and 64 shards through
+  32 GiB, compares actual retained payload, and reports policy throughput; and
 - the controlled native-Foyer comparison and separate end-to-end prefetch benchmark produce the metrics
   defined in Section 5.
 

@@ -6,7 +6,7 @@ use rustc_hash::FxHashMap;
 
 use super::{
     compaction::{CompactionPlan, plan_compaction},
-    evidence::{ACCESSES_PER_EPOCH, AccessEvidence, RetentionEvidence},
+    evidence::AccessEvidence,
 };
 use crate::MemoryMetrics;
 
@@ -17,14 +17,12 @@ const POLICY_SAMPLE_SIZE: usize = 64;
 
 /// One retained downloaded range.
 struct Entry {
-    /// Unique identity used to revalidate lazy policy references.
+    /// Monotonic identity used for revalidation and policy tie-breaking.
     id: u64,
     /// Exact object interval represented by `bytes`.
     range: ByteRange,
     /// Retained payload; lookup results share slices of this allocation.
     bytes: Bytes,
-    /// Stable age tie-breaker assigned at original admission.
-    sequence: u64,
     /// Slot in the bounded-work policy candidate ring.
     candidate_slot: usize,
     /// Successful-access clock at admission.
@@ -66,7 +64,7 @@ impl CachedRanges {
     fn observe_covering<R>(
         &mut self,
         requested: ByteRange,
-        epoch: u64,
+        access_clock: u64,
         project: impl FnOnce(&Entry) -> R,
     ) -> Option<R> {
         let projected = {
@@ -77,7 +75,7 @@ impl CachedRanges {
             project(entry)
         };
         self.generation = self.generation.saturating_add(1);
-        self.accesses.record(requested, epoch);
+        self.accesses.record(requested, access_clock);
         Some(projected)
     }
 
@@ -153,16 +151,13 @@ impl PolicyCandidates {
     }
 }
 
-/// One sampled entry, optionally trimmable to its observed request ranges.
+/// One entry selected by a pressure sample.
 struct Victim {
     object_key: ObjectKey,
     range: ByteRange,
     id: u64,
     bytes: u64,
-    sequence: u64,
-    evidence: RetentionEvidence,
-    generation: u64,
-    compaction: Option<CompactionPlan>,
+    retrieval_value: u64,
 }
 
 /// A compaction source cloned under the metadata lock for copying afterward.
@@ -170,7 +165,6 @@ pub(super) struct CompactionWork {
     object_key: ObjectKey,
     start: u64,
     id: u64,
-    sequence: u64,
     generation: u64,
     plan: CompactionPlan,
     source_bytes: Bytes,
@@ -195,7 +189,6 @@ impl CompactionWork {
             object_key: self.object_key,
             start: self.start,
             id: self.id,
-            sequence: self.sequence,
             generation: self.generation,
             plan: self.plan,
             retained,
@@ -208,7 +201,6 @@ pub(super) struct PreparedCompaction {
     object_key: ObjectKey,
     start: u64,
     id: u64,
-    sequence: u64,
     generation: u64,
     plan: CompactionPlan,
     retained: Vec<(ByteRange, Bytes)>,
@@ -227,7 +219,6 @@ pub(super) struct Shard {
     used_bytes: u64,
     ranges: FxHashMap<ObjectKey, CachedRanges>,
     access_clock: u64,
-    insertion_sequence: u64,
     next_entry_id: u64,
     candidates: PolicyCandidates,
     metrics: Arc<MemoryMetrics>,
@@ -240,7 +231,6 @@ impl Shard {
             used_bytes: 0,
             ranges: FxHashMap::default(),
             access_clock: 0,
-            insertion_sequence: 0,
             next_entry_id: 0,
             candidates: PolicyCandidates::default(),
             metrics,
@@ -253,9 +243,10 @@ impl Shard {
 
     pub(super) fn get(&mut self, object_key: &ObjectKey, requested_range: ByteRange) -> Option<Bytes> {
         let access_clock = self.access_clock.saturating_add(1);
-        let epoch = access_clock / ACCESSES_PER_EPOCH;
         let accessed = self.ranges.get_mut(object_key).and_then(|entries| {
-            entries.observe_covering(requested_range, epoch, |entry| entry.requested_bytes(requested_range))
+            entries.observe_covering(requested_range, access_clock, |entry| {
+                entry.requested_bytes(requested_range)
+            })
         });
         let Some(bytes) = accessed else {
             self.metrics.record_lookup(false);
@@ -274,10 +265,9 @@ impl Shard {
 
     fn record_successful_access(&mut self, object_key: &ObjectKey, requested_range: ByteRange) {
         self.access_clock = self.access_clock.saturating_add(1);
-        let epoch = self.current_epoch();
         self.ranges
             .get_mut(object_key)
-            .and_then(|entries| entries.observe_covering(requested_range, epoch, |_| ()));
+            .and_then(|entries| entries.observe_covering(requested_range, self.access_clock, |_| ()));
         self.metrics.record_access();
     }
 
@@ -321,14 +311,14 @@ impl Shard {
             return AdmissionStep::Complete;
         }
 
-        let Some(victim) = self.pressure_candidate(object_key, range, allow_compaction) else {
+        let Some(victim) = self.pressure_candidate(object_key, range) else {
             // A rotating bounded sample can temporarily consist entirely of
             // entries superseded by this admission. Advancing its cursor and
             // retrying gives amortized full coverage without one long scan.
             return AdmissionStep::Retry;
         };
-        if victim.compaction.is_some() {
-            return AdmissionStep::Compact(self.compaction_work(victim));
+        if allow_compaction && let Some(work) = self.compaction_work(&victim) {
+            return AdmissionStep::Compact(work);
         }
 
         let removed = self
@@ -346,8 +336,6 @@ impl Shard {
 
     fn insert_admission(&mut self, object_key: ObjectKey, range: ByteRange, bytes: Bytes) {
         self.used_bytes += bytes.len() as u64;
-        self.insertion_sequence = self.insertion_sequence.saturating_add(1);
-        let sequence = self.insertion_sequence;
         let id = self.allocate_entry_id();
         let candidate_slot = self.candidates.register(CandidateRef {
             object_key: object_key.clone(),
@@ -358,7 +346,6 @@ impl Shard {
             id,
             range,
             bytes,
-            sequence,
             candidate_slot,
             admitted_at: self.access_clock,
         };
@@ -369,7 +356,7 @@ impl Shard {
         debug_assert!(replaced.is_none());
     }
 
-    fn insert_compacted(&mut self, object_key: &ObjectKey, range: ByteRange, bytes: Bytes, sequence: u64) {
+    fn insert_compacted(&mut self, object_key: &ObjectKey, range: ByteRange, bytes: Bytes) {
         let id = self.allocate_entry_id();
         let candidate_slot = self.candidates.register(CandidateRef {
             object_key: object_key.clone(),
@@ -380,7 +367,6 @@ impl Shard {
             id,
             range,
             bytes,
-            sequence,
             candidate_slot,
             admitted_at: self.access_clock,
         };
@@ -464,15 +450,8 @@ impl Shard {
         entry.candidate_slot = slot;
     }
 
-    /// Selects one victim from a rotating bounded sample. If its observed
-    /// requests form a useful smaller payload, pressure trims it instead.
-    fn pressure_candidate(
-        &mut self,
-        admitting_key: &ObjectKey,
-        admitting_range: ByteRange,
-        allow_compaction: bool,
-    ) -> Option<Victim> {
-        let epoch = self.current_epoch();
+    /// Selects the lowest recent retrieval value per retained byte in a bounded sample.
+    fn pressure_candidate(&mut self, admitting_key: &ObjectKey, admitting_range: ByteRange) -> Option<Victim> {
         let (sample_start, sample_count) = self.candidates.sample();
         let candidate_count = self.candidates.entries.len();
         let mut victim: Option<Victim> = None;
@@ -492,47 +471,46 @@ impl Shard {
                 continue;
             }
 
-            let mut candidate_victim = Victim {
+            let candidate_victim = Victim {
                 object_key: candidate.object_key.clone(),
                 range: entry.range,
                 id: entry.id,
                 bytes: entry.bytes.len() as u64,
-                sequence: entry.sequence,
-                evidence: entries.accesses.retention(entry.range, epoch),
-                generation: entries.generation,
-                compaction: None,
+                retrieval_value: entries.accesses.retention_value(entry.range, self.access_clock),
             };
             if victim
                 .as_ref()
-                .is_some_and(|current| !compare_retention(&candidate_victim, current).is_lt())
+                .is_none_or(|current| compare_retention(&candidate_victim, current).is_lt())
             {
-                continue;
+                victim = Some(candidate_victim);
             }
-
-            if allow_compaction && self.access_clock.saturating_sub(entry.admitted_at) >= COMPACTION_GRACE_ACCESSES {
-                candidate_victim.compaction = plan_compaction(entry.range, entries.accesses.active_ranges(epoch));
-            }
-            victim = Some(candidate_victim);
         }
         victim
     }
 
-    fn compaction_work(&self, mut victim: Victim) -> CompactionWork {
-        let entry = self
+    /// Plans compaction only for the selected victim, after its grace expires.
+    fn compaction_work(&self, victim: &Victim) -> Option<CompactionWork> {
+        let entries = self
             .ranges
             .get(&victim.object_key)
-            .and_then(|entries| entries.by_start.get(&victim.range.start()))
+            .expect("a selected victim must have an object index");
+        let entry = entries
+            .by_start
+            .get(&victim.range.start())
             .filter(|entry| entry.id == victim.id)
-            .expect("a selected compaction source cannot disappear while its shard is locked");
-        CompactionWork {
-            object_key: victim.object_key,
+            .expect("a selected victim must identify a live entry");
+        if self.access_clock.saturating_sub(entry.admitted_at) < COMPACTION_GRACE_ACCESSES {
+            return None;
+        }
+        let plan = plan_compaction(entry.range, entries.accesses.active_ranges(self.access_clock))?;
+        Some(CompactionWork {
+            object_key: victim.object_key.clone(),
             start: victim.range.start(),
             id: victim.id,
-            sequence: victim.sequence,
-            generation: victim.generation,
-            plan: victim.compaction.take().expect("compaction work requires a plan"),
+            generation: entries.generation,
+            plan,
             source_bytes: entry.bytes.clone(),
-        }
+        })
     }
 
     /// Publishes copied compaction output only if source metadata is unchanged.
@@ -566,7 +544,7 @@ impl Shard {
             retained_bytes += bytes.len() as u64;
             retained_entries += 1;
             self.used_bytes += bytes.len() as u64;
-            self.insert_compacted(&prepared.object_key, retained_range, bytes, prepared.sequence);
+            self.insert_compacted(&prepared.object_key, retained_range, bytes);
         }
 
         let reclaimed = source_bytes - retained_bytes;
@@ -577,10 +555,6 @@ impl Shard {
         }
         self.metrics.record_compaction(reclaimed);
         true
-    }
-
-    const fn current_epoch(&self) -> u64 {
-        self.access_clock / ACCESSES_PER_EPOCH
     }
 
     pub(super) fn entry_count(&self) -> usize {
@@ -605,20 +579,16 @@ impl Shard {
     }
 }
 
-/// Lower density, older evidence, then older admission wins victim selection.
+/// Lower retrieval-value density, then the older entry wins victim selection.
 fn compare_retention(left: &Victim, right: &Victim) -> Ordering {
-    compare_density(left.evidence, left.bytes, right.evidence, right.bytes)
-        .then_with(|| left.sequence.cmp(&right.sequence))
+    compare_value_density(left.retrieval_value, left.bytes, right.retrieval_value, right.bytes)
+        .then_with(|| left.id.cmp(&right.id))
         .then_with(|| left.object_key.cmp(&right.object_key))
         .then_with(|| left.range.cmp(&right.range))
 }
 
-fn compare_density(left: RetentionEvidence, left_bytes: u64, right: RetentionEvidence, right_bytes: u64) -> Ordering {
-    let left_density = u128::from(left.weighted_value) * u128::from(right_bytes);
-    let right_density = u128::from(right.weighted_value) * u128::from(left_bytes);
-    left_density
-        .cmp(&right_density)
-        .then_with(|| left.newest_epoch.cmp(&right.newest_epoch))
+fn compare_value_density(left: u64, left_bytes: u64, right: u64, right_bytes: u64) -> Ordering {
+    (u128::from(left) * u128::from(right_bytes)).cmp(&(u128::from(right) * u128::from(left_bytes)))
 }
 
 impl Drop for Shard {

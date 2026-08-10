@@ -24,9 +24,12 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
 
 ## Compared engines
 
-- `feuer-value-aware`: `MemoryCache` with source-cost-weighted, ageable access
-  evidence and sampled value-aware eviction. After a 64-successful-access grace,
-  pressure trims the selected victim to its observed request ranges when useful.
+- `feuer-value-density`: `MemoryCache` with bounded exact access evidence
+  valued at one modeled source request plus its requested bytes. Evidence
+  expires after 32,768 later successful same-shard accesses. Sampled eviction
+  compares active retrieval value per retained byte. After a
+  64-successful-access grace, pressure trims the selected victim to its observed
+  request ranges when useful.
 - `foyer-native-exact-key`: requested ranges are native Foyer keys. The
   complete callback payload is retained under that exact request key, but
   native Foyer does not perform containment lookup.
@@ -35,21 +38,22 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
   native Foyer key. Distinct requests therefore hit when they expand to exactly
   the same bytes; unlike Feuer, a merely containing cached range is not enough.
 
-All use payload length as the capacity weight. Each variant gives every engine
-16 shards; Foyer uses default `S3FifoConfig`. Every engine starts empty. By
+All use payload length as the capacity weight. Each run gives every engine the
+same requested shard count; Foyer uses default `S3FifoConfig`. Every engine starts empty. By
 default it executes one measured trace pass; `--warmup-iterations N` first
 executes `N` untimed passes against that same cache, preserving the resulting
 cache and policy state for the measured pass.
 
 ## Running
 
-The default gate matrix crosses eight capacities and both downloader policies
-at 16 shards. The 32-GiB capacity is the upper-limit payload-accounting case:
+The checked gate matrix crosses eight capacities, both downloader policies, and
+1, 4, 16, and 64 shards. The 32-GiB capacity is the upper-limit
+payload-accounting case:
 
 ```bash
 cargo run --release -p feuer-memory-bench -- \
   --capacity 256MiB,512MiB,1GiB,2GiB,4GiB,8GiB,16GiB,32GiB \
-  --shards 16 \
+  --shards 1,4,16,64 \
   --downloader expanded,exact
 ```
 

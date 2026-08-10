@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `feuer` | One soft memory target, cloneable `Cache`, and per-call asynchronous `get_or_fetch` with typed callback and validation errors | Disk open/close, mode selection, `flush`, and memory/disk orchestration |
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, and keyless `Download { downloaded_start, bytes }` with a derived range | No work remaining for the current public type boundary |
-| `feuer-memory` | Sharded soft-capacity covering-range index, bounded and aged exact evidence, sampled value-aware retention, short compaction grace, pressure trimming of the selected victim, payload accounting, and metrics | Later tier-aware disk-state inputs and further trace-independent policy tuning |
+| `feuer-memory` | Sharded soft-capacity covering-range index, bounded ageable exact evidence, sampled retrieval-value-density retention, short compaction grace, pressure trimming of the selected victim, payload accounting, and metrics | Wall-clock evidence aging, later tier-aware disk-state inputs, and further trace-independent policy tuning |
 | Memory/disk orchestration | Public callback-to-memory path, including independent misses and redundant-population suppression | Best-effort bounded disk scheduling, cancellation on memory eviction, active-write generations, disk publication, and queue flushing |
 | `feuer-storage` | Exclusively locked fixed-capacity file, buffered positional I/O, synchronization, tracing, and metrics | Linux/macOS direct mode, range lookup, allocation, integrity validation, persistent metadata, and recovery |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, repository metadata, and a documented [memory-only comparison gate](benchmarks/memory/results.md) against pinned native Foyer | End-to-end acceptance tests, crash tests, examples, and disk/concurrent benchmarks |
@@ -46,12 +46,14 @@ This slice introduces no fill context, pre-fetch reservation, internal miss sing
 
 ### 2. Complete and evaluate the in-memory cache
 
-- Replaced each unbounded per-key access sequence with at most 64 exact, repeated events in deterministic
-  4,096-successful-access shard-local epochs. Evidence decays over eight epochs and expires, while removing a
-  key's last extent releases its metadata.
-- Replaced arbitrary `HashMap` victim selection with deterministic aged-retrieval-value-per-retained-byte
-  ordering. Only an extent that covers an exact requested event receives its source-cost-weighted credit;
-  repetition increases retention and stale popularity loses to fresh evidence.
+- Replaced each unbounded per-key access sequence with at most 64 exact, repeated events. Each event contributes
+  the target source request's 10,000,000 equivalent bytes plus its requested bytes, while removing a key's last
+  extent releases its metadata.
+- Retain each event for at most 32,768 later successful same-shard accesses. This remains a provisional logical
+  lifetime pending wall-clock aging based on object lifecycle.
+- Replaced arbitrary `HashMap` victim selection with deterministic retrieval-value-per-retained-byte ordering.
+  Only an extent that covers an exact requested event receives credit; repetition increases retention and stale
+  evidence eventually expires.
 - Added a pure compaction planner that projects active exact requests onto one downloaded extent, merges only
   overlapping or adjacent intervals, and requires a private minimum saving before copying.
 - Compaction runs opportunistically on a shard-local access cadence and before pressure eviction. Replacement
@@ -75,9 +77,12 @@ This slice adds no disk queue, storage lifecycle, or public policy configuration
 
 - Replaced full-shard policy scans with one dense rotating candidate ring and one shared sample of at most 64
   live entries per decision. Registration and removal are constant-work and leave no stale candidate backlog.
-- Removed access-cadence compaction and reduced pressure policy to one decision: choose the sampled extent with
-  the lowest aged retrieval value per retained byte. After 64 successful same-shard accesses, trim that same
-  victim to observed exact requests when the planner can reclaim at least one quarter; otherwise evict it.
+- Removed exponential 4,096-access epochs, the `RetentionEvidence` aggregate, newest-epoch tie-break state, and
+  the separate admission sequence. Each active event contributes its modeled source retrieval value directly,
+  and monotonic entry identity breaks equal-density ties.
+- Removed access-cadence compaction and reduced pressure policy to one decision. After 64 successful same-shard
+  accesses, trim that victim to observed exact requests when the planner can reclaim at least one quarter;
+  otherwise evict it.
 - Removed the separate compaction-candidate ranking, demonstrated-prefetch tracking, promotion state, and
   benchmark-only policy switch. Replay showed that selecting and trimming one victim preserved the checked hit
   rates without those mechanisms.
@@ -85,9 +90,9 @@ This slice adds no disk queue, storage lifecycle, or public policy configuration
   same-object structural mutation rejects stale copied output, and admission falls back to eviction.
 - Preserved exact results, containment replacement, independent partial overlaps, oversized soft-target
   admission, bounded exact evidence, deterministic tie-breaking, and distinct population/access events.
-- Re-ran expanded and exact controls over all eight capacities with 16 shards; the
-  [full results](benchmarks/memory/results.md) report request and source-cost hit rates, actual used memory, and
-  throughput without making a general superiority claim.
+- Retained source-cost weighting at 10,000,000 fixed-cost-equivalent bytes plus requested bytes for each exact
+  event. The [full results](benchmarks/memory/results.md) report request and source-cost hit rates, actual used
+  memory, throughput, and shard-count sensitivity without making a general superiority claim.
 
 This slice adds no disk lifecycle, public policy setting, or wall-clock timer.
 

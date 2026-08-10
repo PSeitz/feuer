@@ -37,9 +37,9 @@ request and appended once to the key's accessed ranges, independently of downloa
 The internal `feuer-storage` crate currently provides an exclusively owned,
 fixed-capacity file and checked buffered positional I/O. Direct I/O and the
 recoverable range engine remain to be implemented. `feuer-memory` provides a
-sharded soft-capacity covering-range index with bounded aged request evidence,
-sampled value-aware eviction, a short compaction grace, and pressure-driven
-trimming of the selected victim toward observed requests. Its [memory-only comparison](benchmarks/memory/results.md)
+sharded soft-capacity covering-range index with bounded ageable request evidence,
+sampled retrieval-value-per-byte eviction, a short compaction grace, and
+pressure-driven trimming of the selected victim toward observed requests. Its [memory-only comparison](benchmarks/memory/results.md)
 records the current policy baseline. `feuer-types` holds shared range
 foundations, while `feuer-tokio` remains the Tokio/madsim runtime switch. None of these internal
 package boundaries is a public compatibility commitment.

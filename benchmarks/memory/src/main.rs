@@ -161,7 +161,7 @@ impl FeuerEngine {
 
 impl Engine for FeuerEngine {
     fn name(&self) -> &'static str {
-        "feuer-value-aware"
+        "feuer-value-density"
     }
 
     fn get(&mut self, access: &Access, _downloaded: ByteRange) -> bool {
@@ -654,7 +654,7 @@ fn print_human_report(report: &Report) {
 
 fn human_engine_name(engine: &str) -> &str {
     match engine {
-        "feuer-value-aware" => "Feuer",
+        "feuer-value-density" => "Feuer",
         "foyer-native-exact-key" => "Foyer",
         "foyer-native-expanded-key" => "Foyer (expanded key)",
         other => other,

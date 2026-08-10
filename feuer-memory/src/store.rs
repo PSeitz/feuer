@@ -34,10 +34,10 @@ const MAX_SHARDS: usize = 64;
 /// The configured capacity is divided among independently locked shards. Each
 /// shard evicts locally before insertion. A payload larger than its shard's
 /// target is retained after that shard is emptied, so total usage can exceed the
-/// configured capacity. Victims are selected shard-locally from aged expected
-/// retrieval value per retained byte. Under pressure, a rotating sample selects
-/// one victim. If its observed requests form a useful smaller payload, Feuer
-/// trims that victim outside the shard lock instead of evicting it completely.
+/// configured capacity. Victims are selected shard-locally by recent modeled
+/// retrieval value per retained byte. Under pressure, a rotating sample selects one
+/// victim. If its observed requests form a useful smaller payload, Feuer trims
+/// that victim outside the shard lock instead of evicting it completely.
 pub struct MemoryCache {
     /// Total soft target divided among the shards.
     capacity: u64,

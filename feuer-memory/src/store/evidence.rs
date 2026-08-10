@@ -6,62 +6,60 @@ use feuer_types::ByteRange;
 pub(super) const FIXED_RETRIEVAL_EQUIVALENT_BYTES: u64 = 10_000_000;
 /// Maximum exact access events retained for one object key.
 pub(super) const MAX_ACCESS_EVENTS_PER_KEY: usize = 64;
-/// Shard-local successful accesses represented by one evidence epoch.
-pub(super) const ACCESSES_PER_EPOCH: u64 = 4_096;
-/// Oldest epoch that can still contribute retention value (eight epochs total).
-pub(super) const MAX_EVIDENCE_AGE_EPOCHS: u64 = 7;
+/// Maximum same-shard successful-access age that still contributes.
+pub(super) const EVIDENCE_LIFETIME_ACCESSES: u64 = 32_768;
 
-/// One exact requested interval and its shard-local observation epoch.
+/// One exact requested interval and its shard-local observation clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AccessEvent {
     range: ByteRange,
-    epoch: u64,
+    observed_at: u64,
 }
 
-/// Bounded, ageable access evidence for one complete object key.
+/// Bounded access evidence for one complete object key.
 ///
 /// Events are deliberately not coalesced: repeated requests remain repeated
-/// evidence until they age out or are displaced by the per-key bound.
+/// evidence until they expire or are displaced by the per-key bound.
 #[derive(Default)]
 pub(super) struct AccessEvidence {
     events: VecDeque<AccessEvent>,
 }
 
 impl AccessEvidence {
-    pub(super) fn record(&mut self, requested_range: ByteRange, epoch: u64) {
-        self.expire(epoch);
+    pub(super) fn record(&mut self, range: ByteRange, access_clock: u64) {
+        self.expire(access_clock);
         if self.events.len() == MAX_ACCESS_EVENTS_PER_KEY {
             self.events.pop_front();
         }
         self.events.push_back(AccessEvent {
-            range: requested_range,
-            epoch,
+            range,
+            observed_at: access_clock,
         });
     }
 
-    /// Iterates exact, repeated requested ranges that still have policy value.
-    pub(super) fn active_ranges(&self, epoch: u64) -> impl Iterator<Item = ByteRange> + '_ {
+    /// Iterates exact requested ranges that still have policy value.
+    pub(super) fn active_ranges(&self, access_clock: u64) -> impl Iterator<Item = ByteRange> + '_ {
         self.events
             .iter()
-            .filter(move |event| is_active(**event, epoch))
+            .filter(move |event| is_active(**event, access_clock))
             .map(|event| event.range)
     }
 
-    /// Projects active events onto an extent that could satisfy them exactly.
-    pub(super) fn retention(&self, extent: ByteRange, epoch: u64) -> RetentionEvidence {
-        let mut retention = RetentionEvidence::default();
-        for event in self.events.iter().filter(|event| is_active(**event, epoch)) {
-            if !extent.contains(event.range) {
-                continue;
-            }
-
-            retention = retention.combine(RetentionEvidence::for_access(event.range, event.epoch, epoch));
-        }
-        retention
+    /// Sums modeled source retrieval cost for active events covered by an extent.
+    pub(super) fn retention_value(&self, extent: ByteRange, access_clock: u64) -> u64 {
+        self.events
+            .iter()
+            .filter(|event| is_active(**event, access_clock) && extent.contains(event.range))
+            .map(|event| FIXED_RETRIEVAL_EQUIVALENT_BYTES.saturating_add(event.range.len()))
+            .fold(0, u64::saturating_add)
     }
 
-    fn expire(&mut self, epoch: u64) {
-        while self.events.front().is_some_and(|event| !is_active(*event, epoch)) {
+    fn expire(&mut self, access_clock: u64) {
+        while self
+            .events
+            .front()
+            .is_some_and(|event| !is_active(*event, access_clock))
+        {
             self.events.pop_front();
         }
     }
@@ -77,37 +75,8 @@ impl AccessEvidence {
     }
 }
 
-/// Retrieval value and recency projected onto one retained extent.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct RetentionEvidence {
-    pub(super) weighted_value: u64,
-    pub(super) newest_epoch: Option<u64>,
-}
-
-impl RetentionEvidence {
-    pub(super) fn for_access(range: ByteRange, observed_epoch: u64, epoch: u64) -> Self {
-        let age = epoch.saturating_sub(observed_epoch);
-        if age > MAX_EVIDENCE_AGE_EPOCHS {
-            return Self::default();
-        }
-        let shift = u32::try_from(MAX_EVIDENCE_AGE_EPOCHS - age).expect("an active evidence age must fit in u32");
-        let retrieval_value = FIXED_RETRIEVAL_EQUIVALENT_BYTES.saturating_add(range.len());
-        Self {
-            weighted_value: retrieval_value.checked_shl(shift).unwrap_or(u64::MAX),
-            newest_epoch: Some(observed_epoch),
-        }
-    }
-
-    pub(super) fn combine(self, other: Self) -> Self {
-        Self {
-            weighted_value: self.weighted_value.saturating_add(other.weighted_value),
-            newest_epoch: self.newest_epoch.max(other.newest_epoch),
-        }
-    }
-}
-
-fn is_active(event: AccessEvent, epoch: u64) -> bool {
-    epoch.saturating_sub(event.epoch) <= MAX_EVIDENCE_AGE_EPOCHS
+fn is_active(event: AccessEvent, access_clock: u64) -> bool {
+    access_clock.saturating_sub(event.observed_at) <= EVIDENCE_LIFETIME_ACCESSES
 }
 
 #[cfg(test)]
@@ -137,34 +106,19 @@ mod tests {
     }
 
     #[test]
-    fn ages_retrieval_value_deterministically_and_expires_stale_events() {
+    fn retains_full_retrieval_value_until_expiration() {
         let requested = range(2, 4);
         let extent = range(0, 8);
         let mut evidence = AccessEvidence::default();
         evidence.record(requested, 0);
         evidence.record(requested, 0);
 
-        assert_eq!(
-            evidence.retention(extent, 0),
-            RetentionEvidence {
-                weighted_value: (FIXED_RETRIEVAL_EQUIVALENT_BYTES + requested.len()) * 256,
-                newest_epoch: Some(0),
-            }
-        );
-        assert_eq!(
-            evidence.retention(extent, 1).weighted_value,
-            (FIXED_RETRIEVAL_EQUIVALENT_BYTES + requested.len()) * 128
-        );
-        assert_eq!(
-            evidence.retention(extent, MAX_EVIDENCE_AGE_EPOCHS).weighted_value,
-            (FIXED_RETRIEVAL_EQUIVALENT_BYTES + requested.len()) * 2
-        );
-        assert_eq!(
-            evidence.retention(extent, MAX_EVIDENCE_AGE_EPOCHS + 1).weighted_value,
-            0
-        );
+        let expected = 2 * (FIXED_RETRIEVAL_EQUIVALENT_BYTES + requested.len());
+        assert_eq!(evidence.retention_value(extent, 0), expected);
+        assert_eq!(evidence.retention_value(extent, EVIDENCE_LIFETIME_ACCESSES), expected);
+        assert_eq!(evidence.retention_value(extent, EVIDENCE_LIFETIME_ACCESSES + 1), 0);
 
-        evidence.record(range(6, 7), MAX_EVIDENCE_AGE_EPOCHS + 1);
+        evidence.record(range(6, 7), EVIDENCE_LIFETIME_ACCESSES + 1);
         assert_eq!(evidence.ranges(), vec![range(6, 7)]);
     }
 
@@ -174,10 +128,10 @@ mod tests {
         evidence.record(range(3, 7), 0);
 
         assert_eq!(
-            evidence.retention(range(0, 8), 0).weighted_value,
-            (FIXED_RETRIEVAL_EQUIVALENT_BYTES + 4) * 128
+            evidence.retention_value(range(0, 8), 0),
+            FIXED_RETRIEVAL_EQUIVALENT_BYTES + 4
         );
-        assert_eq!(evidence.retention(range(3, 5), 0).weighted_value, 0);
-        assert_eq!(evidence.retention(range(5, 8), 0).weighted_value, 0);
+        assert_eq!(evidence.retention_value(range(3, 5), 0), 0);
+        assert_eq!(evidence.retention_value(range(5, 8), 0), 0);
     }
 }

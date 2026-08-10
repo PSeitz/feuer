@@ -5,7 +5,7 @@ use feuer_types::{ByteRange, Download, ObjectKey};
 
 use super::{
     MemoryCache,
-    evidence::{ACCESSES_PER_EPOCH, MAX_ACCESS_EVENTS_PER_KEY, MAX_EVIDENCE_AGE_EPOCHS},
+    evidence::{EVIDENCE_LIFETIME_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY},
     shard::{AdmissionStep, COMPACTION_GRACE_ACCESSES},
     shard_capacity_for,
 };
@@ -325,6 +325,34 @@ fn repeated_requested_intervals_are_retained_over_single_accesses() {
 }
 
 #[test]
+fn requested_bytes_contribute_to_retrieval_value() {
+    let cache = cache(20);
+    let small = ObjectKey::from("small-request");
+    let large = ObjectKey::from("large-request");
+    populate(
+        &cache,
+        small.clone(),
+        download(range(0, 10), Bytes::from_static(b"0123456789")),
+    );
+    populate(
+        &cache,
+        large.clone(),
+        download(range(0, 10), Bytes::from_static(b"abcdefghij")),
+    );
+
+    cache.record_access(&small, range(0, 1));
+    cache.record_access(&large, range(0, 9));
+    populate(
+        &cache,
+        ObjectKey::from("incoming"),
+        download(range(0, 10), Bytes::from_static(b"klmnopqrst")),
+    );
+
+    assert!(cache.get(&small, range(0, 1)).is_none());
+    assert!(cache.get(&large, range(0, 9)).is_some());
+}
+
+#[test]
 fn retention_credit_is_projected_only_onto_the_requested_interval() {
     let cache = cache(2);
     let key = ObjectKey::from("split-object");
@@ -340,23 +368,27 @@ fn retention_credit_is_projected_only_onto_the_requested_interval() {
 }
 
 #[test]
-fn stale_frequency_ages_behind_fresh_evidence() {
-    let cache = cache(2);
+fn stale_frequency_eventually_expires() {
+    let cache = cache(3);
     let stale = ObjectKey::from("stale");
     let fresh = ObjectKey::from("fresh");
-    let incoming = ObjectKey::from("incoming");
+    let clock = ObjectKey::from("clock");
     populate(&cache, stale.clone(), download(range(0, 1), Bytes::from_static(b"s")));
     populate(&cache, fresh.clone(), download(range(0, 1), Bytes::from_static(b"f")));
+    populate(&cache, clock.clone(), download(range(0, 1), Bytes::from_static(b"c")));
 
     for _ in 0..8 {
         cache.record_access(&stale, range(0, 1));
     }
-    let absent = ObjectKey::from("clock-only");
-    for _ in 0..ACCESSES_PER_EPOCH * (MAX_EVIDENCE_AGE_EPOCHS + 1) {
-        cache.record_access(&absent, range(0, 1));
+    for _ in 0..=EVIDENCE_LIFETIME_ACCESSES {
+        cache.record_access(&clock, range(0, 1));
     }
     cache.record_access(&fresh, range(0, 1));
-    populate(&cache, incoming, download(range(0, 1), Bytes::from_static(b"i")));
+    populate(
+        &cache,
+        ObjectKey::from("incoming"),
+        download(range(0, 1), Bytes::from_static(b"i")),
+    );
 
     assert!(cache.get(&stale, range(0, 1)).is_none());
     assert!(cache.get(&fresh, range(0, 1)).is_some());
