@@ -10,7 +10,10 @@ use rustc_hash::FxHashMap;
 
 use super::{
     compaction::{CompactionPlan, plan_compaction},
-    evidence::{ACCESSES_PER_EPOCH, AccessEvidence, MAX_EVIDENCE_AGE_EPOCHS, RetentionEvidence},
+    evidence::{
+        ACCESSES_PER_EPOCH, AccessEvidence, FIXED_RETRIEVAL_EQUIVALENT_BYTES, MAX_EVIDENCE_AGE_EPOCHS,
+        RetentionEvidence,
+    },
 };
 use crate::MemoryMetrics;
 
@@ -147,7 +150,7 @@ impl Entry {
 
             let ghost_promoted = self.pending_ghost_promotion && self.broader_than_request;
             if ghost_promoted {
-                self.reuse.record(epoch);
+                self.reuse.record(requested_range, epoch);
                 self.probation_bypassed = true;
             }
             self.pending_ghost_promotion = false;
@@ -159,7 +162,7 @@ impl Entry {
 
         let demonstrated = self.broader_than_request && !self.observed.contains(requested_range);
         if demonstrated {
-            self.reuse.record(epoch);
+            self.reuse.record(requested_range, epoch);
         }
         self.observed.observe(requested_range, access_clock);
         PrefetchObservation {
@@ -246,44 +249,49 @@ impl ObservedCoverage {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ReuseEvent {
+    range: ByteRange,
+    epoch: u64,
+}
+
 /// Bounded and epoch-aged promotion evidence for one broader extent.
 #[derive(Default)]
 struct ReuseEvidence {
-    epochs: VecDeque<u64>,
+    events: VecDeque<ReuseEvent>,
 }
 
 impl ReuseEvidence {
-    fn record(&mut self, epoch: u64) {
-        if self.epochs.len() == MAX_REUSE_EVENTS_PER_ENTRY {
-            self.epochs.pop_front();
+    fn record(&mut self, range: ByteRange, epoch: u64) {
+        if self.events.len() == MAX_REUSE_EVENTS_PER_ENTRY {
+            self.events.pop_front();
         }
-        self.epochs.push_back(epoch);
+        self.events.push_back(ReuseEvent { range, epoch });
     }
 
     fn retention(&self, epoch: u64) -> RetentionEvidence {
         let mut retention = RetentionEvidence::default();
-        for &observed_epoch in &self.epochs {
-            let age = epoch.saturating_sub(observed_epoch);
+        for &event in &self.events {
+            let age = epoch.saturating_sub(event.epoch);
             if age > MAX_EVIDENCE_AGE_EPOCHS {
                 continue;
             }
             let shift =
                 u32::try_from(MAX_EVIDENCE_AGE_EPOCHS - age).expect("an active demonstrated-reuse age must fit in u32");
-            retention.weighted_frequency = retention.weighted_frequency.saturating_add(1_u64 << shift);
-            retention.newest_epoch = Some(
-                retention
-                    .newest_epoch
-                    .map_or(observed_epoch, |seen| seen.max(observed_epoch)),
-            );
+            let retrieval_value = FIXED_RETRIEVAL_EQUIVALENT_BYTES.saturating_add(event.range.len());
+            retention.weighted_value = retention
+                .weighted_value
+                .saturating_add(retrieval_value.checked_shl(shift).unwrap_or(u64::MAX));
+            retention.newest_epoch = Some(retention.newest_epoch.map_or(event.epoch, |seen| seen.max(event.epoch)));
         }
         retention
     }
 
     #[cfg(test)]
     fn active_len(&self, epoch: u64) -> usize {
-        self.epochs
+        self.events
             .iter()
-            .filter(|&&observed| epoch.saturating_sub(observed) <= MAX_EVIDENCE_AGE_EPOCHS)
+            .filter(|event| epoch.saturating_sub(event.epoch) <= MAX_EVIDENCE_AGE_EPOCHS)
             .count()
     }
 }
@@ -1080,13 +1088,13 @@ impl Shard {
 fn combine_retention(exact: RetentionEvidence, reuse: RetentionEvidence) -> RetentionEvidence {
     let reuse = scale_retention(reuse, PREFETCH_REUSE_WEIGHT);
     RetentionEvidence {
-        weighted_frequency: exact.weighted_frequency.saturating_add(reuse.weighted_frequency),
+        weighted_value: exact.weighted_value.saturating_add(reuse.weighted_value),
         newest_epoch: exact.newest_epoch.max(reuse.newest_epoch),
     }
 }
 
 fn scale_retention(mut evidence: RetentionEvidence, weight: u64) -> RetentionEvidence {
-    evidence.weighted_frequency = evidence.weighted_frequency.saturating_mul(weight);
+    evidence.weighted_value = evidence.weighted_value.saturating_mul(weight);
     evidence
 }
 
@@ -1123,8 +1131,8 @@ fn compare_action_loss(compaction: &PlannedCompaction, victim: &Victim) -> Order
 }
 
 fn compare_density(left: RetentionEvidence, left_bytes: u64, right: RetentionEvidence, right_bytes: u64) -> Ordering {
-    let left_density = u128::from(left.weighted_frequency) * u128::from(right_bytes);
-    let right_density = u128::from(right.weighted_frequency) * u128::from(left_bytes);
+    let left_density = u128::from(left.weighted_value) * u128::from(right_bytes);
+    let right_density = u128::from(right.weighted_value) * u128::from(left_bytes);
     left_density
         .cmp(&right_density)
         .then_with(|| left.newest_epoch.cmp(&right.newest_epoch))

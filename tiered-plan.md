@@ -118,18 +118,19 @@ Policy and implementation choices should reflect the target workload:
 The current 165,435-access sample in
 [`benchmarks/access_pattern.ndjson`](benchmarks/access_pattern.ndjson) has a 3.74-KiB median and
 1.96-MiB mean requested range; 72.9% of requests are at most 4 KiB, and the maximum is about 67.2 MiB. Under an
-uncached exact-request application of the source model below, fixed request latency contributes about 75.7% of
+uncached exact-request application of the source model below, fixed request latency contributes about 83.0% of
 total source time.
 
-The expanded benchmark downloads splits below 20 MiB whole, requests above 4 MiB exactly, and otherwise adds
-4 MiB on each side. Only 21.5% of padded admissions reuse prefetched bytes, and 96.5–98.0% of those finish
-within 64 shard-local accesses. Whole-split reuse is more common (79.5%) and longer-lived.
+On a miss, the source-bounded expanded benchmark looks 5 ms ahead and coalesces same-object ranges separated by
+less than the source model's 10,000,000-byte break-even distance. The initiating callback downloads the merged
+range before followers replay. Downloads default to whole splits below 8 MiB and exact ranges otherwise; the
+whole-split threshold and coalescing distance are environment-controlled.
 
 For target-workload evaluation, source retrieval cost means elapsed source-service time. The default controlled
 model is:
 
 ```text
-source_time = source_GETs * 80 ms + downloaded_bytes / 80 MB/s
+source_time = source_GETs * 125 ms + downloaded_bytes / 80 MB/s
 ```
 
 The constants describe the target S3 path and are benchmark inputs, not public cache configuration or a claim
@@ -335,8 +336,8 @@ The MVP is complete when tests demonstrate that:
 - restart recovers a safe useful subset after injected crashes;
 - unsupported persistent formats are reset and logged safely;
 - disk capacities of at least 1 TiB are representable with bounded internal accounting;
-- the memory-only gate runs exact and expanded downloader controls with 16 shards, includes a 128-GiB
-  upper-limit accounting case, compares actual retained payload, and reports policy throughput; and
+- the memory-only gate runs exact and expanded downloader controls with 16 shards through 32 GiB, compares
+  actual retained payload, and reports policy throughput; and
 - the controlled native-Foyer comparison and separate end-to-end prefetch benchmark produce the metrics
   defined in Section 5.
 

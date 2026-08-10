@@ -2,11 +2,13 @@ use std::collections::VecDeque;
 
 use feuer_types::ByteRange;
 
+/// Target 125-ms source-request cost at 80 MB/s, as equivalent transferred bytes.
+pub(super) const FIXED_RETRIEVAL_EQUIVALENT_BYTES: u64 = 10_000_000;
 /// Maximum exact access events retained for one object key.
 pub(super) const MAX_ACCESS_EVENTS_PER_KEY: usize = 64;
 /// Shard-local successful accesses represented by one evidence epoch.
-pub(super) const ACCESSES_PER_EPOCH: u64 = 64;
-/// Oldest epoch that can still contribute retention value.
+pub(super) const ACCESSES_PER_EPOCH: u64 = 4_096;
+/// Oldest epoch that can still contribute retention value (eight epochs total).
 pub(super) const MAX_EVIDENCE_AGE_EPOCHS: u64 = 7;
 
 /// One exact requested interval and its shard-local observation epoch.
@@ -55,7 +57,10 @@ impl AccessEvidence {
 
             let age = epoch.saturating_sub(event.epoch);
             let shift = u32::try_from(MAX_EVIDENCE_AGE_EPOCHS - age).expect("an active evidence age must fit in u32");
-            retention.weighted_frequency += 1_u64 << shift;
+            let retrieval_value = FIXED_RETRIEVAL_EQUIVALENT_BYTES.saturating_add(event.range.len());
+            retention.weighted_value = retention
+                .weighted_value
+                .saturating_add(retrieval_value.checked_shl(shift).unwrap_or(u64::MAX));
             retention.newest_epoch = Some(retention.newest_epoch.map_or(event.epoch, |seen| seen.max(event.epoch)));
         }
         retention
@@ -78,10 +83,10 @@ impl AccessEvidence {
     }
 }
 
-/// A frequency and recency projection used by shard-local victim ordering.
+/// Retrieval value and recency projected onto one retained extent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct RetentionEvidence {
-    pub(super) weighted_frequency: u64,
+    pub(super) weighted_value: u64,
     pub(super) newest_epoch: Option<u64>,
 }
 
@@ -116,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn ages_frequency_deterministically_and_expires_stale_events() {
+    fn ages_retrieval_value_deterministically_and_expires_stale_events() {
         let requested = range(2, 4);
         let extent = range(0, 8);
         let mut evidence = AccessEvidence::default();
@@ -126,19 +131,20 @@ mod tests {
         assert_eq!(
             evidence.retention(extent, 0),
             RetentionEvidence {
-                weighted_frequency: 256,
+                weighted_value: (FIXED_RETRIEVAL_EQUIVALENT_BYTES + requested.len()) * 256,
                 newest_epoch: Some(0),
             }
         );
-        assert_eq!(evidence.retention(extent, 1).weighted_frequency, 128);
         assert_eq!(
-            evidence.retention(extent, MAX_EVIDENCE_AGE_EPOCHS).weighted_frequency,
-            2
+            evidence.retention(extent, 1).weighted_value,
+            (FIXED_RETRIEVAL_EQUIVALENT_BYTES + requested.len()) * 128
         );
         assert_eq!(
-            evidence
-                .retention(extent, MAX_EVIDENCE_AGE_EPOCHS + 1)
-                .weighted_frequency,
+            evidence.retention(extent, MAX_EVIDENCE_AGE_EPOCHS).weighted_value,
+            (FIXED_RETRIEVAL_EQUIVALENT_BYTES + requested.len()) * 2
+        );
+        assert_eq!(
+            evidence.retention(extent, MAX_EVIDENCE_AGE_EPOCHS + 1).weighted_value,
             0
         );
 
@@ -151,8 +157,11 @@ mod tests {
         let mut evidence = AccessEvidence::default();
         evidence.record(range(3, 7), 0);
 
-        assert_eq!(evidence.retention(range(0, 8), 0).weighted_frequency, 128);
-        assert_eq!(evidence.retention(range(3, 5), 0).weighted_frequency, 0);
-        assert_eq!(evidence.retention(range(5, 8), 0).weighted_frequency, 0);
+        assert_eq!(
+            evidence.retention(range(0, 8), 0).weighted_value,
+            (FIXED_RETRIEVAL_EQUIVALENT_BYTES + 4) * 128
+        );
+        assert_eq!(evidence.retention(range(3, 5), 0).weighted_value, 0);
+        assert_eq!(evidence.retention(range(5, 8), 0).weighted_value, 0);
     }
 }

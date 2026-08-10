@@ -47,11 +47,11 @@ This slice introduces no fill context, pre-fetch reservation, internal miss sing
 ### 2. Complete and evaluate the in-memory cache
 
 - Replaced each unbounded per-key access sequence with at most 64 exact, repeated events in deterministic
-  shard-local epochs. Evidence decays by epoch and expires, while removing a key's last extent releases its
-  metadata.
-- Replaced arbitrary `HashMap` victim selection with deterministic aged-frequency-per-retained-byte ordering.
-  Only an extent that covers an exact requested event receives its credit; repetition increases retention and
-  stale popularity loses to fresh evidence.
+  4,096-successful-access shard-local epochs. Evidence decays over eight epochs and expires, while removing a
+  key's last extent releases its metadata.
+- Replaced arbitrary `HashMap` victim selection with deterministic aged-retrieval-value-per-retained-byte
+  ordering. Only an extent that covers an exact requested event receives its source-cost-weighted credit;
+  repetition increases retention and stale popularity loses to fresh evidence.
 - Added a pure compaction planner that projects active exact requests onto one downloaded extent, merges only
   overlapping or adjacent intervals, and requires a private minimum saving before copying.
 - Compaction runs opportunistically on a shard-local access cadence and before pressure eviction. Replacement
@@ -59,14 +59,15 @@ This slice introduces no fill context, pre-fetch reservation, internal miss sing
   payload/entry accounting and compaction metrics, create no access, and cannot invalidate caller-held slices.
 - Added atomic callback population plus attribution under one shard lock, while keeping population and access as
   distinct policy events and preserving access evidence across same-object replacement.
-- Extended the [memory benchmark](benchmarks/memory/README.md) with identical downloader decisions for every
-  engine over the complete captured trace. The expanded policy downloads splits below 20 MiB whole, downloads
-  requests above 4 MiB exactly, and adds 4 MiB on each side of smaller requests; an exact-range control runs
-  separately.
-- Ran the gate at 256, 512, 1,024, 2,048, 4,096, 8,192, and 131,072 MiB with 16 shards against pinned native
-  Foyer. The 128-GiB upper-limit case is an accounting test rather than a process-RSS claim. The
-  [configuration and results](benchmarks/memory/results.md) report cache-hit and source-cost hit rates,
-  end-of-run used-memory accounting, and throughput, exposing further policy and compaction tuning opportunities.
+- Extended the [memory benchmark](benchmarks/memory/README.md) with a source-bounded expanded strategy and an
+  exact-range control over the complete captured trace. On a miss, expanded replay looks 5 ms ahead and
+  coalesces same-object ranges whose gaps are below the 10,000,000-byte source-cost break-even distance.
+  Downloads default to whole splits below 8 MiB and exact ranges otherwise; environment variables can change
+  the whole-split threshold and coalescing distance.
+- Ran the gate at 256, 512, 1,024, 2,048, 4,096, 8,192, 16,384, and 32,768 MiB with 16 shards against pinned
+  native Foyer. The [configuration and results](benchmarks/memory/results.md) report cache-hit and source-cost
+  hit rates, end-of-run used-memory accounting, and throughput, exposing further policy and compaction tuning
+  opportunities.
 
 This slice adds no disk queue, storage lifecycle, or public policy configuration.
 
@@ -144,7 +145,7 @@ The MVP need not guarantee multi-extent assembly or physical difference-only sto
 - Extend the completed memory policy with `no disk copy`, `queued`, `active`, and `disk resident` state so memory
   retention can account for disk-versus-network cost.
 - Bound the disk share of prefetched bytes that have not yet received an observed request.
-- Evaluate tiered policy with the target source-time model of one 80-ms request plus transfer at 80 MB/s; do not
+- Evaluate tiered policy with the target source-time model of one 125-ms request plus transfer at 80 MB/s; do not
   expose those constants as public cache configuration.
 - Provide low-overhead signals for tier outcomes, callback invocations and returned bytes, latency, memory
   pressure, compaction, disk queue outcomes, allocator utilization and fragmentation, rewrite traffic,
@@ -160,7 +161,7 @@ The MVP need not guarantee multi-extent assembly or physical difference-only sto
   memory.
 - Pin and report the native Foyer revision and tuning.
 - Run prefetch and downloaded-range selection as a separate end-to-end benchmark, charging actual source GETs
-  and bytes to `GETs * 80 ms + bytes / 80 MB/s`.
+  and bytes to `GETs * 125 ms + bytes / 80 MB/s`.
 - Report cost-weighted, request, and byte hit rates; useful-payload utilization; fragmentation and metadata;
   read, write, cleaning, and relocation amplification; throughput; and tail latency.
 - Treat slabs, regions, size thresholds, compaction, and policy data structures as experiments until these

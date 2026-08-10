@@ -1,6 +1,8 @@
 //! Controlled memory-tier replay against Feuer and a pinned Foyer revision.
 
 use std::{
+    collections::HashMap,
+    env::{self, VarError},
     fs,
     path::Path,
     time::{Duration, Instant},
@@ -13,11 +15,14 @@ use feuer_types::{ByteRange, Download, ObjectKey};
 use foyer_memory::{Cache as FoyerCache, CacheBuilder, S3FifoConfig};
 
 const PINNED_FOYER_REVISION: &str = "165cde3d4e638aaf2680384c02f57222b40be128";
-const SOURCE_FIXED_EQUIVALENT_BYTES: u128 = 6_400_000;
+const SOURCE_FIXED_EQUIVALENT_BYTES: u64 = 10_000_000;
 const TRACE_FILE: &str = "access_pattern.ndjson";
-const LARGE_REQUEST_THRESHOLD_BYTES: u64 = 4 << 20;
-const SMALL_REQUEST_EXPANSION_BYTES: u64 = 4 << 20;
-const WHOLE_SPLIT_THRESHOLD_BYTES: u64 = 20 << 20;
+const COALESCING_DISTANCE_ENV: &str = "COALESCING_DISTANCE_BYTES";
+const WHOLE_SPLIT_THRESHOLD_ENV: &str = "WHOLE_SPLIT_THRESHOLD_BYTES";
+const DEFAULT_COALESCING_DISTANCE_BYTES: u64 = SOURCE_FIXED_EQUIVALENT_BYTES;
+const DEFAULT_WHOLE_SPLIT_THRESHOLD_BYTES: u64 = 8 << 20;
+const COALESCING_WINDOW_MILLIS: u64 = 5;
+const CSV_HEADER: &str = "workload,downloader,shards,capacity_bytes,engine,requests,requested_bytes,cache_hits,hit_bytes,cache_hit_pct,byte_hit_pct,source_cost_hit_pct,source_gets,source_bytes,used_payload_bytes,used_vs_target_pct,elapsed_ms,operations_per_second";
 
 #[derive(Debug, Parser)]
 #[command(about = "Replay the captured trace against Feuer and pinned Foyer")]
@@ -25,7 +30,7 @@ struct Args {
     /// Soft payload capacities. Repeat the flag or separate values with commas.
     #[arg(
         long = "capacity",
-        default_value = "256MiB,512MiB,1GiB,2GiB,4GiB,8GiB,128GiB",
+        default_value = "256MiB,512MiB,1GiB,2GiB,4GiB,8GiB,16GiB,32GiB",
         value_delimiter = ',',
         value_parser = parse_bytes
     )]
@@ -53,9 +58,17 @@ struct Args {
     )]
     feuer_compactions: Vec<FeuerCompaction>,
 
+    /// Untimed passes executed against each cache before the measured pass.
+    #[arg(long, default_value_t = 0)]
+    warmup_iterations: usize,
+
     /// Restrict the trace to its first N operations.
     #[arg(long)]
     operations: Option<usize>,
+
+    /// Emit machine-readable CSV instead of the human-readable table.
+    #[arg(long)]
+    csv: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -90,11 +103,30 @@ impl FeuerCompaction {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DownloadConfig {
+    coalescing_distance_bytes: u64,
+    whole_split_threshold_bytes: u64,
+}
+
+impl DownloadConfig {
+    fn from_env() -> Result<Self, String> {
+        Ok(Self {
+            coalescing_distance_bytes: byte_count_from_env(COALESCING_DISTANCE_ENV, DEFAULT_COALESCING_DISTANCE_BYTES)?,
+            whole_split_threshold_bytes: byte_count_from_env(
+                WHOLE_SPLIT_THRESHOLD_ENV,
+                DEFAULT_WHOLE_SPLIT_THRESHOLD_BYTES,
+            )?,
+        })
+    }
+}
+
 #[derive(Clone)]
 struct Access {
     object_key: ObjectKey,
     object_size: u64,
     requested: ByteRange,
+    timestamp_millis: u64,
 }
 
 impl Access {
@@ -110,41 +142,32 @@ impl Access {
         Ok(())
     }
 
-    fn downloaded_range(&self, policy: DownloadPolicy) -> ByteRange {
+    fn downloaded_range(&self, policy: DownloadPolicy, config: DownloadConfig) -> ByteRange {
         if matches!(policy, DownloadPolicy::Exact) {
             return self.requested;
         }
-        if self.object_size < WHOLE_SPLIT_THRESHOLD_BYTES {
-            return ByteRange::new(0, self.object_size)
-                .expect("an object containing a valid non-empty request must be non-empty");
+        if self.object_size < config.whole_split_threshold_bytes {
+            ByteRange::new(0, self.object_size)
+                .expect("an object containing a valid non-empty request must be non-empty")
+        } else {
+            self.requested
         }
-        if self.requested.len() > LARGE_REQUEST_THRESHOLD_BYTES {
-            return self.requested;
-        }
-
-        let start = self.requested.start().saturating_sub(SMALL_REQUEST_EXPANSION_BYTES);
-        let end = self
-            .requested
-            .end()
-            .saturating_add(SMALL_REQUEST_EXPANSION_BYTES)
-            .min(self.object_size);
-        let downloaded =
-            ByteRange::new(start, end).expect("expanded bounds around a valid non-empty request must be non-empty");
-        debug_assert!(downloaded.contains(self.requested));
-        downloaded
     }
 }
 
 struct Workload {
     name: &'static str,
     accesses: Vec<Access>,
+    expanded_downloads: Vec<ByteRange>,
+    download_config: DownloadConfig,
 }
 
 trait Engine {
     fn name(&self) -> &'static str;
 
-    /// Returns true on a cache hit and populates the supplied callback extent on a miss.
-    fn get_or_fetch(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<bool, String>;
+    fn get(&mut self, access: &Access) -> bool;
+
+    fn populate(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<(), String>;
 
     fn used_payload_bytes(&self) -> u64;
 }
@@ -172,17 +195,20 @@ impl Engine for FeuerEngine {
         self.name
     }
 
-    fn get_or_fetch(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<bool, String> {
-        if let Some(bytes) = self.cache.get(&access.object_key, access.requested) {
-            debug_assert_eq!(bytes.len() as u64, access.requested.len());
-            return Ok(true);
-        }
+    fn get(&mut self, access: &Access) -> bool {
+        let Some(bytes) = self.cache.get(&access.object_key, access.requested) else {
+            return false;
+        };
+        debug_assert_eq!(bytes.len() as u64, access.requested.len());
+        true
+    }
 
+    fn populate(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<(), String> {
         let download = Download::new(downloaded.start(), payload).map_err(|error| error.to_string())?;
         debug_assert_eq!(download.downloaded_range(), downloaded);
         self.cache
             .insert_and_record(access.object_key.clone(), download, access.requested);
-        Ok(false)
+        Ok(())
     }
 
     fn used_payload_bytes(&self) -> u64 {
@@ -192,8 +218,14 @@ impl Engine for FeuerEngine {
 
 type NativeFoyerKey = (ObjectKey, ByteRange);
 
+#[derive(Clone)]
+struct NativeFoyerValue {
+    downloaded: ByteRange,
+    payload: Bytes,
+}
+
 struct NativeFoyerEngine {
-    cache: FoyerCache<NativeFoyerKey, Bytes>,
+    cache: FoyerCache<NativeFoyerKey, NativeFoyerValue>,
 }
 
 impl NativeFoyerEngine {
@@ -209,15 +241,21 @@ impl Engine for NativeFoyerEngine {
         "foyer-native-exact-key"
     }
 
-    fn get_or_fetch(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<bool, String> {
+    fn get(&mut self, access: &Access) -> bool {
         let key = (access.object_key.clone(), access.requested);
-        if let Some(entry) = self.cache.get(&key) {
-            let result = requested_payload(entry.value(), downloaded, access.requested);
-            debug_assert_eq!(result.len() as u64, access.requested.len());
-            return Ok(true);
-        }
-        self.cache.insert(key, payload);
-        Ok(false)
+        let Some(entry) = self.cache.get(&key) else {
+            return false;
+        };
+        let value = entry.value();
+        let result = requested_payload(&value.payload, value.downloaded, access.requested);
+        debug_assert_eq!(result.len() as u64, access.requested.len());
+        true
+    }
+
+    fn populate(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<(), String> {
+        let key = (access.object_key.clone(), access.requested);
+        self.cache.insert(key, NativeFoyerValue { downloaded, payload });
+        Ok(())
     }
 
     fn used_payload_bytes(&self) -> u64 {
@@ -225,11 +263,11 @@ impl Engine for NativeFoyerEngine {
     }
 }
 
-fn foyer_cache(capacity: usize, shards: usize) -> FoyerCache<NativeFoyerKey, Bytes> {
+fn foyer_cache(capacity: usize, shards: usize) -> FoyerCache<NativeFoyerKey, NativeFoyerValue> {
     CacheBuilder::new(capacity)
         .with_shards(shards)
         .with_eviction_config(S3FifoConfig::default())
-        .with_weighter(|_key: &NativeFoyerKey, value: &Bytes| value.len())
+        .with_weighter(|_key: &NativeFoyerKey, value: &NativeFoyerValue| value.payload.len())
         .build()
 }
 
@@ -241,7 +279,6 @@ struct Traffic {
     hit_bytes: u64,
     source_requests: u64,
     source_bytes: u64,
-    uncached_source_bytes: u64,
 }
 
 struct Report {
@@ -265,10 +302,9 @@ impl Report {
     }
 
     fn source_cost_hit_rate(&self) -> f64 {
-        let baseline = u128::from(self.traffic.requests) * SOURCE_FIXED_EQUIVALENT_BYTES
-            + u128::from(self.traffic.uncached_source_bytes);
-        let actual = u128::from(self.traffic.source_requests) * SOURCE_FIXED_EQUIVALENT_BYTES
-            + u128::from(self.traffic.source_bytes);
+        let fixed_cost = u128::from(SOURCE_FIXED_EQUIVALENT_BYTES);
+        let baseline = u128::from(self.traffic.requests) * fixed_cost + u128::from(self.traffic.requested_bytes);
+        let actual = u128::from(self.traffic.source_requests) * fixed_cost + u128::from(self.traffic.source_bytes);
         if baseline == 0 {
             0.0
         } else {
@@ -295,23 +331,26 @@ fn main() -> Result<(), String> {
     if args.feuer_compactions.is_empty() {
         return Err("at least one --feuer-compaction value is required".to_owned());
     }
-    let workload = trace_workload(&args)?;
+    let download_config = DownloadConfig::from_env()?;
+    let workload = trace_workload(&args, download_config)?;
 
-    eprintln!(
-        "foyer_revision={PINNED_FOYER_REVISION} trace={TRACE_FILE} shards={:?} downloaders={:?} feuer_compactions={:?} large_request_threshold_bytes={LARGE_REQUEST_THRESHOLD_BYTES} small_request_expansion_bytes={SMALL_REQUEST_EXPANSION_BYTES} whole_split_threshold_bytes={WHOLE_SPLIT_THRESHOLD_BYTES}",
-        args.shards, args.downloaders, args.feuer_compactions
-    );
-    println!(
-        "workload,downloader,shards,capacity_bytes,engine,requests,requested_bytes,cache_hits,hit_bytes,cache_hit_pct,byte_hit_pct,source_cost_hit_pct,source_gets,source_bytes,used_payload_bytes,used_vs_target_pct,elapsed_ms,operations_per_second"
-    );
+    if args.csv {
+        eprintln!(
+            "foyer_revision={PINNED_FOYER_REVISION} trace={TRACE_FILE} shards={:?} downloaders={:?} feuer_compactions={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
+            args.shards,
+            args.downloaders,
+            args.feuer_compactions,
+            args.warmup_iterations,
+            download_config.coalescing_distance_bytes,
+            download_config.whole_split_threshold_bytes,
+        );
+        println!("{CSV_HEADER}");
+    } else {
+        print_human_header(&args, &workload);
+    }
 
     for &downloader in &args.downloaders {
-        let max_download = workload
-            .accesses
-            .iter()
-            .map(|access| access.downloaded_range(downloader).len())
-            .max()
-            .unwrap_or(1);
+        let max_download = max_download_len(&workload, downloader);
         let max_download = usize::try_from(max_download).map_err(|_| "largest callback payload does not fit usize")?;
         let source_payload = Bytes::from(vec![0x5a; max_download]);
 
@@ -325,8 +364,20 @@ fn main() -> Result<(), String> {
                     .collect();
                 engines.push(Box::new(NativeFoyerEngine::new(capacity, shards)));
                 for engine in engines {
-                    let report = run_engine(engine, &workload, downloader, shards, capacity, &source_payload)?;
-                    print_report(&report);
+                    let report = run_engine(
+                        engine,
+                        &workload,
+                        downloader,
+                        shards,
+                        capacity,
+                        args.warmup_iterations,
+                        &source_payload,
+                    )?;
+                    if args.csv {
+                        print_csv_report(&report);
+                    } else {
+                        print_human_report(&report);
+                    }
                 }
             }
         }
@@ -334,7 +385,7 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-fn trace_workload(args: &Args) -> Result<Workload, String> {
+fn trace_workload(args: &Args, download_config: DownloadConfig) -> Result<Workload, String> {
     let mut accesses = load_trace()?;
     if let Some(operations) = args.operations {
         accesses.truncate(operations);
@@ -344,10 +395,18 @@ fn trace_workload(args: &Args) -> Result<Workload, String> {
     }
     for (index, access) in accesses.iter().enumerate() {
         access.validate(index)?;
+        if index > 0 && access.timestamp_millis < accesses[index - 1].timestamp_millis {
+            return Err(format!(
+                "operation {index} has a timestamp earlier than its predecessor"
+            ));
+        }
     }
+    let expanded_downloads = expanded_download_ranges(&accesses, download_config);
     Ok(Workload {
         name: "trace",
         accesses,
+        expanded_downloads,
+        download_config,
     })
 }
 
@@ -357,17 +416,17 @@ fn run_engine(
     downloader: DownloadPolicy,
     shards: usize,
     capacity: usize,
+    warmup_iterations: usize,
     source_payload: &Bytes,
 ) -> Result<Report, String> {
+    for _ in 0..warmup_iterations {
+        let mut warmup_traffic = Traffic::default();
+        execute_pass(&mut *engine, workload, downloader, source_payload, &mut warmup_traffic)?;
+    }
+
     let mut traffic = Traffic::default();
     let started = Instant::now();
-    execute_pass(
-        &mut *engine,
-        &workload.accesses,
-        downloader,
-        source_payload,
-        &mut traffic,
-    )?;
+    execute_pass(&mut *engine, workload, downloader, source_payload, &mut traffic)?;
     let elapsed = started.elapsed();
 
     Ok(Report {
@@ -382,32 +441,157 @@ fn run_engine(
     })
 }
 
+#[derive(Clone, Copy)]
+struct PendingDownload<'a> {
+    order: usize,
+    access: &'a Access,
+    downloaded: ByteRange,
+}
+
+struct CoalescedDownload<'a> {
+    downloaded: ByteRange,
+    accesses: Vec<(usize, &'a Access)>,
+}
+
+fn expanded_download_ranges(workload: &[Access], config: DownloadConfig) -> Vec<ByteRange> {
+    let mut by_object: HashMap<(&str, u64), Vec<usize>> = HashMap::new();
+    for (index, access) in workload.iter().enumerate() {
+        by_object
+            .entry((&access.object_key, access.object_size))
+            .or_default()
+            .push(index);
+    }
+
+    let mut ranges: Vec<_> = workload
+        .iter()
+        .map(|access| access.downloaded_range(DownloadPolicy::Expanded, config))
+        .collect();
+    for indexes in by_object.values() {
+        for (position, &index) in indexes.iter().enumerate() {
+            let deadline = workload[index]
+                .timestamp_millis
+                .saturating_add(COALESCING_WINDOW_MILLIS);
+            let pending = indexes[position..]
+                .iter()
+                .copied()
+                .take_while(|&candidate| workload[candidate].timestamp_millis <= deadline)
+                .map(|candidate| PendingDownload {
+                    order: candidate,
+                    access: &workload[candidate],
+                    downloaded: ranges[candidate],
+                })
+                .collect();
+            let download = coalesced_downloads(pending, config.coalescing_distance_bytes)
+                .into_iter()
+                .find(|download| download.accesses.iter().any(|(order, _)| *order == index))
+                .expect("the current request must belong to one coalesced download");
+            ranges[index] = download.downloaded;
+        }
+    }
+    ranges
+}
+
+fn max_download_len(workload: &Workload, downloader: DownloadPolicy) -> u64 {
+    match downloader {
+        DownloadPolicy::Expanded => workload
+            .expanded_downloads
+            .iter()
+            .map(|range| range.len())
+            .max()
+            .unwrap_or(1),
+        DownloadPolicy::Exact => workload
+            .accesses
+            .iter()
+            .map(|access| {
+                access
+                    .downloaded_range(DownloadPolicy::Exact, workload.download_config)
+                    .len()
+            })
+            .max()
+            .unwrap_or(1),
+    }
+}
+
 fn execute_pass<E: Engine + ?Sized>(
     engine: &mut E,
-    workload: &[Access],
+    workload: &Workload,
     downloader: DownloadPolicy,
     source_payload: &Bytes,
     traffic: &mut Traffic,
 ) -> Result<(), String> {
-    for access in workload {
-        let downloaded = access.downloaded_range(downloader);
-        let payload_len =
-            usize::try_from(downloaded.len()).map_err(|_| "callback payload length does not fit usize")?;
-        let payload = source_payload.slice(..payload_len);
-        let hit = engine.get_or_fetch(access, downloaded, payload)?;
-
-        traffic.requests += 1;
-        traffic.requested_bytes += access.requested.len();
-        traffic.uncached_source_bytes += downloaded.len();
+    for (index, access) in workload.accesses.iter().enumerate() {
+        let hit = engine.get(access);
+        record_request(traffic, access, hit);
         if hit {
-            traffic.hits += 1;
-            traffic.hit_bytes += access.requested.len();
-        } else {
-            traffic.source_requests += 1;
-            traffic.source_bytes += downloaded.len();
+            continue;
         }
+
+        let downloaded = match downloader {
+            DownloadPolicy::Expanded => workload.expanded_downloads[index],
+            DownloadPolicy::Exact => access.downloaded_range(DownloadPolicy::Exact, workload.download_config),
+        };
+        let payload = source_payload_slice(source_payload, downloaded)?;
+        engine.populate(access, downloaded, payload)?;
+        traffic.source_requests += 1;
+        traffic.source_bytes += downloaded.len();
     }
     Ok(())
+}
+
+fn coalesced_downloads(
+    mut pending: Vec<PendingDownload<'_>>,
+    coalescing_distance_bytes: u64,
+) -> Vec<CoalescedDownload<'_>> {
+    pending.sort_by(|left, right| {
+        left.access
+            .object_key
+            .cmp(&right.access.object_key)
+            .then_with(|| left.access.object_size.cmp(&right.access.object_size))
+            .then_with(|| left.downloaded.cmp(&right.downloaded))
+            .then_with(|| left.order.cmp(&right.order))
+    });
+
+    let mut downloads: Vec<CoalescedDownload<'_>> = Vec::new();
+    for pending in pending {
+        let merge = downloads.last_mut().filter(|download| {
+            let representative = download.accesses[0].1;
+            let gap = pending.downloaded.start().saturating_sub(download.downloaded.end());
+            representative.object_key == pending.access.object_key
+                && representative.object_size == pending.access.object_size
+                && gap < coalescing_distance_bytes
+        });
+        if let Some(download) = merge {
+            download.downloaded = ByteRange::new(
+                download.downloaded.start().min(pending.downloaded.start()),
+                download.downloaded.end().max(pending.downloaded.end()),
+            )
+            .expect("the union of coalesced non-empty ranges must be non-empty");
+            download.accesses.push((pending.order, pending.access));
+        } else {
+            downloads.push(CoalescedDownload {
+                downloaded: pending.downloaded,
+                accesses: vec![(pending.order, pending.access)],
+            });
+        }
+    }
+    downloads
+}
+
+fn record_request(traffic: &mut Traffic, access: &Access, hit: bool) {
+    traffic.requests += 1;
+    traffic.requested_bytes += access.requested.len();
+    if hit {
+        traffic.hits += 1;
+        traffic.hit_bytes += access.requested.len();
+    }
+}
+
+fn source_payload_slice(source_payload: &Bytes, downloaded: ByteRange) -> Result<Bytes, String> {
+    let payload_len = usize::try_from(downloaded.len()).map_err(|_| "callback payload length does not fit usize")?;
+    if payload_len > source_payload.len() {
+        return Err("coalesced callback payload exceeded the precomputed source allocation".to_owned());
+    }
+    Ok(source_payload.slice(..payload_len))
 }
 
 fn requested_payload(bytes: &Bytes, downloaded: ByteRange, requested: ByteRange) -> Bytes {
@@ -419,7 +603,84 @@ fn requested_payload(bytes: &Bytes, downloaded: ByteRange, requested: ByteRange)
     bytes.slice(start..end)
 }
 
-fn print_report(report: &Report) {
+fn print_human_header(args: &Args, workload: &Workload) {
+    let shards = args.shards.iter().map(usize::to_string).collect::<Vec<_>>().join(", ");
+    println!("Feuer memory benchmark");
+    println!("Trace: {TRACE_FILE} ({} operations)", workload.accesses.len());
+    println!("Shards: {shards} | Warm-up passes: {}", args.warmup_iterations);
+    println!(
+        "Expanded: {COALESCING_WINDOW_MILLIS}-ms coalescing within {} | Whole below {}",
+        format_decimal_bytes(workload.download_config.coalescing_distance_bytes),
+        format_bytes(workload.download_config.whole_split_threshold_bytes),
+    );
+    println!("Source model: 125 ms per GET + transfer at 80 MB/s");
+    println!("Foyer revision: {PINNED_FOYER_REVISION}");
+    println!();
+    println!(
+        "Capacity   Downloader Engine                   Request hit Source-cost hit Source GETs Source bytes         Used   Throughput"
+    );
+    println!("{}", "-".repeat(131));
+}
+
+fn print_human_report(report: &Report) {
+    println!(
+        "{:<10} {:<10} {:<24} {:>11.2}% {:>14.2}% {:>11} {:>12} {:>12} {:>12}",
+        format_bytes(report.capacity as u64),
+        report.downloader,
+        human_engine_name(report.engine),
+        report.cache_hit_rate() * 100.0,
+        report.source_cost_hit_rate() * 100.0,
+        report.traffic.source_requests,
+        format_bytes(report.traffic.source_bytes),
+        format_bytes(report.used_payload_bytes),
+        format_rate(report.operations_per_second()),
+    );
+}
+
+fn human_engine_name(engine: &str) -> &str {
+    match engine {
+        "feuer-value-aware" => "Feuer",
+        "feuer-compaction-disabled" => "Feuer (no compaction)",
+        "foyer-native-exact-key" => "Foyer",
+        other => other,
+    }
+}
+
+fn format_decimal_bytes(bytes: u64) -> String {
+    for (unit_bytes, suffix) in [(1_000_000_000_u64, "GB"), (1_000_000, "MB"), (1_000, "KB")] {
+        if bytes >= unit_bytes {
+            if bytes.is_multiple_of(unit_bytes) {
+                return format!("{} {suffix}", bytes / unit_bytes);
+            }
+            return format!("{:.1} {suffix}", bytes as f64 / unit_bytes as f64);
+        }
+    }
+    format!("{bytes} B")
+}
+
+fn format_bytes(bytes: u64) -> String {
+    for (unit_bytes, suffix) in [(1_u64 << 30, "GiB"), (1_u64 << 20, "MiB"), (1_u64 << 10, "KiB")] {
+        if bytes >= unit_bytes {
+            if bytes.is_multiple_of(unit_bytes) {
+                return format!("{} {suffix}", bytes / unit_bytes);
+            }
+            return format!("{:.1} {suffix}", bytes as f64 / unit_bytes as f64);
+        }
+    }
+    format!("{bytes} B")
+}
+
+fn format_rate(operations_per_second: f64) -> String {
+    if operations_per_second >= 1_000_000.0 {
+        format!("{:.2} M/s", operations_per_second / 1_000_000.0)
+    } else if operations_per_second >= 1_000.0 {
+        format!("{:.2} K/s", operations_per_second / 1_000.0)
+    } else {
+        format!("{operations_per_second:.0}/s")
+    }
+}
+
+fn print_csv_report(report: &Report) {
     println!(
         "{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{:.4},{:.3},{:.0}",
         report.workload,
@@ -462,11 +723,75 @@ fn parse_trace_line(line: &str) -> Result<Access, String> {
     let start = find_json_u64(line, "requested_range_start")?;
     let end = find_json_u64(line, "requested_range_end")?;
     let requested = ByteRange::new(start, end).map_err(|error| error.to_string())?;
+    let timestamp = find_json_string(line, "timestamp")?;
+    let timestamp_millis = parse_timestamp_millis(&timestamp)?;
     Ok(Access {
         object_key: ObjectKey::from(object_key),
         object_size,
         requested,
+        timestamp_millis,
     })
+}
+
+fn parse_timestamp_millis(value: &str) -> Result<u64, String> {
+    let bytes = value.as_bytes();
+    let valid_suffix =
+        (bytes.len() == 20 && bytes[19] == b'Z') || (bytes.len() == 24 && bytes[19] == b'.' && bytes[23] == b'Z');
+    if !valid_suffix
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return Err(format!("timestamp {value:?} is not a supported UTC RFC 3339 value"));
+    }
+
+    let component = |start: usize, end: usize, name: &str| {
+        value[start..end]
+            .parse::<u64>()
+            .map_err(|error| format!("invalid timestamp {name}: {error}"))
+    };
+    let year = component(0, 4, "year")?;
+    let month = component(5, 7, "month")?;
+    let day = component(8, 10, "day")?;
+    let hour = component(11, 13, "hour")?;
+    let minute = component(14, 16, "minute")?;
+    let second = component(17, 19, "second")?;
+    let millis = if bytes.len() == 24 {
+        component(20, 23, "millisecond")?
+    } else {
+        0
+    };
+
+    if year == 0 || !(1..=12).contains(&month) || hour > 23 || minute > 59 || second > 59 {
+        return Err(format!("timestamp {value:?} contains an out-of-range component"));
+    }
+    let leap_year = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let month_lengths = [
+        31_u64,
+        28 + u64::from(leap_year),
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let month_index = usize::try_from(month - 1).expect("a validated month index must fit usize");
+    if day == 0 || day > month_lengths[month_index] {
+        return Err(format!("timestamp {value:?} contains an out-of-range day"));
+    }
+
+    let previous_year = year - 1;
+    let days_before_year = previous_year * 365 + previous_year / 4 - previous_year / 100 + previous_year / 400;
+    let days_before_month: u64 = month_lengths[..month_index].iter().sum();
+    let days = days_before_year + days_before_month + day - 1;
+    Ok(((((days * 24 + hour) * 60 + minute) * 60 + second) * 1_000) + millis)
 }
 
 fn find_json_string(line: &str, field: &str) -> Result<String, String> {
@@ -514,6 +839,16 @@ fn ratio(numerator: u64, denominator: u64) -> f64 {
     }
 }
 
+fn byte_count_from_env(name: &str, default: u64) -> Result<u64, String> {
+    let value = match env::var(name) {
+        Ok(value) => value,
+        Err(VarError::NotPresent) => return Ok(default),
+        Err(VarError::NotUnicode(_)) => return Err(format!("{name} is not valid Unicode")),
+    };
+    let bytes = parse_byte_count(&value).map_err(|error| format!("invalid {name}: {error}"))?;
+    u64::try_from(bytes).map_err(|_| format!("{name} does not fit u64"))
+}
+
 fn parse_bytes(value: &str) -> Result<usize, String> {
     let bytes = parse_byte_count(value)?;
     usize::try_from(bytes).map_err(|_| "byte count does not fit usize".to_owned())
@@ -547,61 +882,258 @@ fn parse_byte_count(value: &str) -> Result<u128, String> {
 mod tests {
     use super::*;
 
+    struct WarmupEngine {
+        populated: bool,
+    }
+
+    impl Engine for WarmupEngine {
+        fn name(&self) -> &'static str {
+            "warmup-test"
+        }
+
+        fn get(&mut self, _access: &Access) -> bool {
+            self.populated
+        }
+
+        fn populate(&mut self, _access: &Access, _downloaded: ByteRange, _payload: Bytes) -> Result<(), String> {
+            self.populated = true;
+            Ok(())
+        }
+
+        fn used_payload_bytes(&self) -> u64 {
+            u64::from(self.populated)
+        }
+    }
+
+    #[derive(Default)]
+    struct RangeEngine {
+        entries: Vec<(ObjectKey, ByteRange)>,
+    }
+
+    impl Engine for RangeEngine {
+        fn name(&self) -> &'static str {
+            "range-test"
+        }
+
+        fn get(&mut self, access: &Access) -> bool {
+            self.entries
+                .iter()
+                .any(|(key, downloaded)| key == &access.object_key && downloaded.contains(access.requested))
+        }
+
+        fn populate(&mut self, access: &Access, downloaded: ByteRange, _payload: Bytes) -> Result<(), String> {
+            assert!(downloaded.contains(access.requested));
+            self.entries.push((access.object_key.clone(), downloaded));
+            Ok(())
+        }
+
+        fn used_payload_bytes(&self) -> u64 {
+            self.entries.iter().map(|(_, range)| range.len()).sum()
+        }
+    }
+
+    #[test]
+    fn warmup_preserves_cache_state_but_not_reported_traffic() {
+        let workload = Workload {
+            name: "test",
+            accesses: vec![Access {
+                object_key: "object".into(),
+                object_size: 1,
+                requested: ByteRange::new(0, 1).unwrap(),
+                timestamp_millis: 0,
+            }],
+            expanded_downloads: vec![ByteRange::new(0, 1).unwrap()],
+            download_config: DownloadConfig {
+                coalescing_distance_bytes: DEFAULT_COALESCING_DISTANCE_BYTES,
+                whole_split_threshold_bytes: DEFAULT_WHOLE_SPLIT_THRESHOLD_BYTES,
+            },
+        };
+        let report = run_engine(
+            Box::new(WarmupEngine { populated: false }),
+            &workload,
+            DownloadPolicy::Exact,
+            1,
+            1,
+            1,
+            &Bytes::from_static(&[0]),
+        )
+        .unwrap();
+
+        assert_eq!(report.traffic.requests, 1);
+        assert_eq!(report.traffic.hits, 1);
+        assert_eq!(report.traffic.source_requests, 0);
+        assert_eq!(report.used_payload_bytes, 1);
+    }
+
+    #[test]
+    fn expanded_downloader_populates_the_coalesced_range_before_followers() {
+        let access = |start, end, timestamp_millis| Access {
+            object_key: "object".into(),
+            object_size: 100,
+            requested: ByteRange::new(start, end).unwrap(),
+            timestamp_millis,
+        };
+        let accesses = vec![
+            access(0, 10, 0),
+            access(10, 20, 1),
+            access(20, 30, 5),
+            access(50, 60, 6),
+        ];
+        let download_config = DownloadConfig {
+            coalescing_distance_bytes: DEFAULT_COALESCING_DISTANCE_BYTES,
+            whole_split_threshold_bytes: 0,
+        };
+        let expanded_downloads = expanded_download_ranges(&accesses, download_config);
+        let workload = Workload {
+            name: "test",
+            accesses,
+            expanded_downloads,
+            download_config,
+        };
+        let report = run_engine(
+            Box::new(RangeEngine::default()),
+            &workload,
+            DownloadPolicy::Expanded,
+            1,
+            100,
+            0,
+            &Bytes::from(vec![0; 60]),
+        )
+        .unwrap();
+
+        assert_eq!(report.traffic.requests, 4);
+        assert_eq!(report.traffic.hits, 2);
+        assert_eq!(report.traffic.source_requests, 2);
+        assert_eq!(report.traffic.source_bytes, 40);
+    }
+
+    #[test]
+    fn coalescing_distance_parameter_is_a_strict_upper_bound() {
+        let distance = DEFAULT_COALESCING_DISTANCE_BYTES;
+        let ranges_for_gap = |gap| {
+            let accesses = vec![
+                Access {
+                    object_key: "object".into(),
+                    object_size: 2 * distance,
+                    requested: ByteRange::new(0, 1).unwrap(),
+                    timestamp_millis: 0,
+                },
+                Access {
+                    object_key: "object".into(),
+                    object_size: 2 * distance,
+                    requested: ByteRange::new(1 + gap, 2 + gap).unwrap(),
+                    timestamp_millis: 1,
+                },
+            ];
+            expanded_download_ranges(
+                &accesses,
+                DownloadConfig {
+                    coalescing_distance_bytes: distance,
+                    whole_split_threshold_bytes: 0,
+                },
+            )
+        };
+
+        assert_eq!(
+            ranges_for_gap(distance - 1)[0],
+            ByteRange::new(0, distance + 1).unwrap()
+        );
+        assert_eq!(ranges_for_gap(distance)[0], ByteRange::new(0, 1).unwrap());
+    }
+
+    #[test]
+    fn source_cost_baseline_uses_requested_bytes_not_downloaded_bytes() {
+        let report = Report {
+            workload: "test",
+            downloader: "expanded",
+            shards: 1,
+            capacity: 1,
+            engine: "test",
+            traffic: Traffic {
+                requests: 1,
+                requested_bytes: 100,
+                source_requests: 1,
+                source_bytes: 200,
+                ..Traffic::default()
+            },
+            used_payload_bytes: 0,
+            elapsed: Duration::from_secs(1),
+        };
+
+        assert!(report.source_cost_hit_rate() < 0.0);
+    }
+
     #[test]
     fn parses_the_captured_trace_shape() {
         let access = parse_trace_line(
-            r#"{"object_num_bytes":100,"object_id":"object-a","requested_range_end":11,"requested_range_start":7}"#,
+            r#"{"object_num_bytes":100,"object_id":"object-a","requested_range_end":11,"requested_range_start":7,"timestamp":"2026-08-08T01:12:49.481Z"}"#,
         )
         .unwrap();
         assert_eq!(access.object_key, ObjectKey::from("object-a"));
         assert_eq!(access.object_size, 100);
         assert_eq!(access.requested, ByteRange::new(7, 11).unwrap());
+        assert_eq!(
+            access.timestamp_millis,
+            parse_timestamp_millis("2026-08-08T01:12:49.481Z").unwrap()
+        );
     }
 
     #[test]
-    fn expanded_downloader_uses_whole_small_splits_exact_large_requests_and_four_mib_padding() {
+    fn expanded_downloader_honors_the_whole_split_threshold() {
+        let config = DownloadConfig {
+            coalescing_distance_bytes: DEFAULT_COALESCING_DISTANCE_BYTES,
+            whole_split_threshold_bytes: 8 << 20,
+        };
         let small_split = Access {
             object_key: "small-split".into(),
-            object_size: WHOLE_SPLIT_THRESHOLD_BYTES - 1,
-            requested: ByteRange::new(3 << 20, (8 << 20) + 1).unwrap(),
+            object_size: config.whole_split_threshold_bytes - 1,
+            requested: ByteRange::new(3 << 20, 6 << 20).unwrap(),
+            timestamp_millis: 0,
         };
         assert_eq!(
-            small_split.downloaded_range(DownloadPolicy::Expanded),
-            ByteRange::new(0, WHOLE_SPLIT_THRESHOLD_BYTES - 1).unwrap()
+            small_split.downloaded_range(DownloadPolicy::Expanded, config),
+            ByteRange::new(0, config.whole_split_threshold_bytes - 1).unwrap()
         );
         assert_eq!(
-            small_split.downloaded_range(DownloadPolicy::Exact),
+            small_split.downloaded_range(DownloadPolicy::Exact, config),
             small_split.requested
         );
 
-        let large_request = Access {
-            object_key: "large-request".into(),
-            object_size: 64 << 20,
-            requested: ByteRange::new((5 << 20) + 3, (9 << 20) + 4).unwrap(),
+        let threshold_split = Access {
+            object_key: "threshold-split".into(),
+            object_size: config.whole_split_threshold_bytes,
+            requested: ByteRange::new((1 << 20) + 3, (2 << 20) + 3).unwrap(),
+            timestamp_millis: 0,
         };
         assert_eq!(
-            large_request.downloaded_range(DownloadPolicy::Expanded),
-            large_request.requested
+            threshold_split.downloaded_range(DownloadPolicy::Expanded, config),
+            threshold_split.requested
         );
+    }
 
-        let four_mib_request = Access {
-            object_key: "four-mib-request".into(),
-            object_size: 64 << 20,
-            requested: ByteRange::new((10 << 20) + 3, (14 << 20) + 3).unwrap(),
-        };
-        assert_eq!(
-            four_mib_request.downloaded_range(DownloadPolicy::Expanded),
-            ByteRange::new((6 << 20) + 3, (18 << 20) + 3).unwrap()
+    #[test]
+    fn timestamp_parser_handles_day_boundaries() {
+        let before = parse_timestamp_millis("2026-08-08T23:59:59.999Z").unwrap();
+        let after = parse_timestamp_millis("2026-08-09T00:00:00.000Z").unwrap();
+        assert_eq!(after - before, 1);
+        assert!(
+            parse_timestamp_millis("2026-08-09T00:00:01Z")
+                .unwrap()
+                .is_multiple_of(1_000)
         );
+    }
 
-        let tail = Access {
-            object_key: "tail".into(),
-            object_size: (22 << 20) + 3,
-            requested: ByteRange::new((21 << 20) + 1, (22 << 20) + 3).unwrap(),
-        };
-        assert_eq!(
-            tail.downloaded_range(DownloadPolicy::Expanded),
-            ByteRange::new((17 << 20) + 1, (22 << 20) + 3).unwrap()
-        );
+    #[test]
+    fn environment_byte_counts_accept_documented_units() {
+        assert_eq!(parse_byte_count("1MB").unwrap(), 1_000_000);
+        assert_eq!(parse_byte_count("8MiB").unwrap(), 8 << 20);
+    }
+
+    #[test]
+    fn human_output_is_default_and_csv_is_opt_in() {
+        assert!(!Args::try_parse_from(["benchmark"]).unwrap().csv);
+        assert!(Args::try_parse_from(["benchmark", "--csv"]).unwrap().csv);
+        assert_eq!(format_bytes(8 << 20), "8 MiB");
+        assert_eq!(format_decimal_bytes(10_000_000), "10 MB");
     }
 }

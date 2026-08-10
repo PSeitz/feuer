@@ -11,20 +11,21 @@ The benchmark replays all 165,435 operations in
 [`access_pattern.ndjson`](../access_pattern.ndjson). `--operations` can truncate
 the trace for a quick run.
 
-Every engine receives identical callback downloads selected independently of
-cache state. The benchmark runs two downloader policies:
+Every engine uses the same downloader rules. The benchmark runs two policies:
 
-- `expanded`: splits smaller than 20 MiB are downloaded whole, requests larger
-  than 4 MiB are downloaded exactly, and all other requests gain 4 MiB on each
-  side before clipping to the split bounds. The whole-split rule takes
-  precedence.
+- `expanded`: on a miss, the downloader looks 5 ms ahead in trace time and
+  combines same-object ranges separated by less than
+  `COALESCING_DISTANCE_BYTES`. The initiating callback downloads that range
+  before following requests replay. Splits below
+  `WHOLE_SPLIT_THRESHOLD_BYTES` are selected whole. The defaults are 10 MB and
+  8 MiB respectively.
 - `exact`: every callback downloads only its requested range.
 
 ## Compared engines
 
-- `feuer-value-aware`: `MemoryCache` with prefetch probation
-  measured in successful same-shard accesses, demonstrated-reuse/ghost
-  promotion, and value-aware pressure-driven policy.
+- `feuer-value-aware`: `MemoryCache` with source-cost-weighted, ageable access
+  evidence, prefetch probation measured in successful same-shard accesses,
+  demonstrated-reuse/ghost promotion, and value-aware pressure selection.
 - `feuer-compaction-disabled`: the benchmark-only no-compaction control. It
   preserves Feuer's containment and eviction policy.
 - `foyer-native-exact-key`: requested ranges are native Foyer keys. The
@@ -32,22 +33,40 @@ cache state. The benchmark runs two downloader policies:
   native Foyer does not perform containment lookup.
 
 All use payload length as the capacity weight. Each variant gives every engine
-16 shards; Foyer uses default `S3FifoConfig`. Every engine starts empty and
-executes the trace exactly once.
+16 shards; Foyer uses default `S3FifoConfig`. Every engine starts empty. By
+default it executes one measured trace pass; `--warmup-iterations N` first
+executes `N` untimed passes against that same cache, preserving the resulting
+cache and policy state for the measured pass.
 
 ## Running
 
-The default gate matrix crosses seven capacities and both downloader policies
-at 16 shards. The 128-GiB capacity is an upper-limit policy and accounting
-case, not a claim that the process reaches 128 GiB of RSS:
+The default gate matrix crosses eight capacities and both downloader policies
+at 16 shards. The 32-GiB capacity is the upper-limit payload-accounting case:
 
 ```bash
 cargo run --release -p feuer-memory-bench -- \
-  --capacity 256MiB,512MiB,1GiB,2GiB,4GiB,8GiB,128GiB \
+  --capacity 256MiB,512MiB,1GiB,2GiB,4GiB,8GiB,16GiB,32GiB \
   --shards 16 \
   --downloader expanded,exact \
   --feuer-compaction value-aware
 ```
+
+The default output is a human-readable table. Add `--csv` for machine-readable
+output.
+
+`COALESCING_DISTANCE_BYTES` and `WHOLE_SPLIT_THRESHOLD_BYTES` override the
+default 10-MB coalescing distance and 8-MiB whole-split threshold. Both accept
+raw bytes or units accepted by `--capacity`; for example:
+
+```bash
+COALESCING_DISTANCE_BYTES=5MB WHOLE_SPLIT_THRESHOLD_BYTES=8MiB \
+  cargo run --release -p feuer-memory-bench -- --capacity 1GiB
+```
+
+To measure a cache warmed by one complete trace iteration, add
+`--warmup-iterations 1`. Warm-up traffic is excluded from the reported rates
+and elapsed time. Coalescing uses trace lookahead rather than sleeping, so its
+5-ms wait is not included in throughput.
 
 The feature-gated `disabled` control remains available for explicit private
 experiments but is not part of the checked-in comparison.
@@ -65,27 +84,26 @@ cargo run --release -p feuer-memory-bench -- \
 
 ## Accounting and metrics
 
-CSV rows report:
+The human-readable table reports request and source-cost hit rates, source GETs
+and bytes, retained payload, and throughput. `--csv` additionally emits
+requested-byte hit rate, raw byte counts, target utilization, and elapsed time.
 
-- request, requested-byte, and source-cost hit rates;
-- source GETs and downloaded bytes;
-- used payload weight at the end of the run (not merely the configured soft
-  target), together with its percentage of that target; and
-- elapsed time and operations per second.
-
-The source-cost model is 80 ms per GET plus transfer at 80 MB/s, represented
+The source-cost model is 125 ms per GET plus transfer at 80 MB/s, represented
 without floating-point accumulation as:
 
 ```text
-source cost = GETs * 6,400,000 + downloaded bytes
+source cost = GETs * 10,000,000 + downloaded bytes
 ```
 
-The cache-disabled denominator uses the same downloader policy as the measured
-row. Payload values share one immutable benchmark source allocation, so
+The cache-disabled denominator is independent of downloader policy: every
+request incurs one GET and transfers exactly its requested bytes. Actual cost
+uses the selected downloader's callback bytes, so overfetch can produce
+negative source-cost savings when its extra transfer costs exceed the cache's
+savings. Payload values share one immutable benchmark source allocation, so
 `used_payload_bytes` is cache accounting rather than a process-RSS
 measurement. Foyer's internal record and allocator metadata is not exposed by
 the pinned API and is excluded.
 
-This is a policy replay, not an end-to-end latency benchmark. It does not
-measure concurrent scaling, tail latency, callback coordination, disk I/O, or
-recovery.
+This is a policy replay, not an end-to-end latency benchmark. It simulates
+coalescing deterministically but does not measure real scheduling, concurrent
+scaling, tail latency, disk I/O, or recovery.

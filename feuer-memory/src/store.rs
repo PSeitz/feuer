@@ -34,8 +34,8 @@ const MAX_SHARDS: usize = 64;
 /// The configured capacity is divided among independently locked shards. Each
 /// shard evicts locally before insertion. A payload larger than its shard's
 /// target is retained after that shard is emptied, so total usage can exceed the
-/// configured capacity. Victims are selected shard-locally from aged request
-/// frequency per retained byte. Broader admissions receive probation measured
+/// configured capacity. Victims are selected shard-locally from aged expected
+/// retrieval value per retained byte. Broader admissions receive probation measured
 /// in successful same-shard accesses, novel containment reuse grants bounded
 /// promotion, and bounded ghost state recognizes exact re-admission. Under
 /// pressure, rotating samples choose the action with lower estimated value loss
