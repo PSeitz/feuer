@@ -55,13 +55,7 @@ impl AccessEvidence {
                 continue;
             }
 
-            let age = epoch.saturating_sub(event.epoch);
-            let shift = u32::try_from(MAX_EVIDENCE_AGE_EPOCHS - age).expect("an active evidence age must fit in u32");
-            let retrieval_value = FIXED_RETRIEVAL_EQUIVALENT_BYTES.saturating_add(event.range.len());
-            retention.weighted_value = retention
-                .weighted_value
-                .saturating_add(retrieval_value.checked_shl(shift).unwrap_or(u64::MAX));
-            retention.newest_epoch = Some(retention.newest_epoch.map_or(event.epoch, |seen| seen.max(event.epoch)));
+            retention = retention.combine(RetentionEvidence::for_access(event.range, event.epoch, epoch));
         }
         retention
     }
@@ -88,6 +82,28 @@ impl AccessEvidence {
 pub(super) struct RetentionEvidence {
     pub(super) weighted_value: u64,
     pub(super) newest_epoch: Option<u64>,
+}
+
+impl RetentionEvidence {
+    pub(super) fn for_access(range: ByteRange, observed_epoch: u64, epoch: u64) -> Self {
+        let age = epoch.saturating_sub(observed_epoch);
+        if age > MAX_EVIDENCE_AGE_EPOCHS {
+            return Self::default();
+        }
+        let shift = u32::try_from(MAX_EVIDENCE_AGE_EPOCHS - age).expect("an active evidence age must fit in u32");
+        let retrieval_value = FIXED_RETRIEVAL_EQUIVALENT_BYTES.saturating_add(range.len());
+        Self {
+            weighted_value: retrieval_value.checked_shl(shift).unwrap_or(u64::MAX),
+            newest_epoch: Some(observed_epoch),
+        }
+    }
+
+    pub(super) fn combine(self, other: Self) -> Self {
+        Self {
+            weighted_value: self.weighted_value.saturating_add(other.weighted_value),
+            newest_epoch: self.newest_epoch.max(other.newest_epoch),
+        }
+    }
 }
 
 fn is_active(event: AccessEvent, epoch: u64) -> bool {

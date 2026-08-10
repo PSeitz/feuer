@@ -35,12 +35,11 @@ const MAX_SHARDS: usize = 64;
 /// shard evicts locally before insertion. A payload larger than its shard's
 /// target is retained after that shard is emptied, so total usage can exceed the
 /// configured capacity. Victims are selected shard-locally from aged expected
-/// retrieval value per retained byte. Broader admissions receive probation measured
-/// in successful same-shard accesses, novel containment reuse grants bounded
-/// promotion, and bounded ghost state recognizes exact re-admission. Under
-/// pressure, rotating samples choose the action with lower estimated value loss
-/// per reclaimed byte; retained copies contain only observed requests and are
-/// produced outside the shard metadata lock.
+/// retrieval value per retained byte. Broader admissions receive probation
+/// measured in successful same-shard accesses, and the most recent novel
+/// containment use grants ageable promotion. Under pressure, one rotating sample
+/// selects the action with lower estimated value loss per reclaimed byte; retained
+/// copies contain only observed requests and are produced outside the shard lock.
 pub struct MemoryCache {
     /// Total soft target divided among the shards.
     capacity: u64,

@@ -6,7 +6,7 @@ use feuer_types::{ByteRange, Download, ObjectKey};
 use super::{
     MemoryCache,
     evidence::{ACCESSES_PER_EPOCH, MAX_ACCESS_EVENTS_PER_KEY, MAX_EVIDENCE_AGE_EPOCHS},
-    shard::{AdmissionStep, GHOST_LIFETIME_ACCESSES, MAX_GHOST_ENTRIES_PER_SHARD, PREFETCH_GRACE_ACCESSES},
+    shard::{AdmissionStep, PREFETCH_GRACE_ACCESSES},
     shard_capacity_for,
 };
 use crate::MemoryMetrics;
@@ -47,10 +47,6 @@ fn is_compaction_eligible(cache: &MemoryCache, key: &ObjectKey, retained: ByteRa
     cache.shards[cache.shard_index(key)]
         .lock()
         .is_compaction_eligible(key, retained)
-}
-
-fn ghost_count(cache: &MemoryCache) -> usize {
-    cache.shards[0].lock().ghost_count()
 }
 
 fn candidate_count(cache: &MemoryCache) -> usize {
@@ -504,11 +500,10 @@ fn probation_never_pins_a_broader_extent_against_pressure() {
 
     assert!(cache.get(&key, range(2, 4)).is_none());
     assert_eq!(cache.used_bytes(), 1);
-    assert_eq!(ghost_count(&cache), 1);
 }
 
 #[test]
-fn novel_containment_use_records_one_separate_promotion_and_one_exact_access() {
+fn novel_containment_use_keeps_one_promotion_and_exact_accesses() {
     let cache = cache(20);
     let key = ObjectKey::from("download");
     cache.insert_and_record(
@@ -528,7 +523,11 @@ fn novel_containment_use_records_one_separate_promotion_and_one_exact_access() {
 
     assert_eq!(cache.get(&key, range(5, 6)).unwrap(), Bytes::from_static(b"f"));
     assert_eq!(active_reuse_events(&cache, &key, range(0, 10)), 1);
-    assert_eq!(access_evidence_len(&cache, &key), 4);
+
+    // A disjoint novel request replaces, rather than appends to, promotion state.
+    assert_eq!(cache.get(&key, range(8, 9)).unwrap(), Bytes::from_static(b"i"));
+    assert_eq!(active_reuse_events(&cache, &key, range(0, 10)), 1);
+    assert_eq!(access_evidence_len(&cache, &key), 5);
 }
 
 #[test]
@@ -585,37 +584,9 @@ fn demonstrated_reuse_resists_compaction_but_ages_out() {
 }
 
 #[test]
-fn ghost_readmission_promotes_an_exact_repeated_download_without_payload_retention() {
-    let cache = cache(10);
-    let key = ObjectKey::from("download");
-    cache.insert_and_record(
-        key.clone(),
-        download(range(0, 10), Bytes::from_static(b"abcdefghij")),
-        range(2, 4),
-    );
-    let incoming = ObjectKey::from("incoming");
-    populate(
-        &cache,
-        incoming.clone(),
-        download(range(0, 1), Bytes::from_static(b"x")),
-    );
-    assert_eq!(ghost_count(&cache), 1);
-    assert!(cache.remove(&incoming, range(0, 1)));
-
-    cache.insert_and_record(
-        key.clone(),
-        download(range(0, 10), Bytes::from_static(b"abcdefghij")),
-        range(2, 4),
-    );
-    assert_eq!(ghost_count(&cache), 0);
-    assert_eq!(active_reuse_events(&cache, &key, range(0, 10)), 1);
-    assert!(is_compaction_eligible(&cache, &key, range(0, 10)));
-}
-
-#[test]
-fn ghost_and_candidate_state_stay_bounded_during_oversized_churn() {
+fn candidate_state_tracks_entries_during_oversized_churn() {
     let cache = cache(1);
-    for index in 0..MAX_GHOST_ENTRIES_PER_SHARD + 17 {
+    for index in 0..300 {
         let key = ObjectKey::from(format!("download-{index}"));
         cache.insert_and_record(key, download(range(0, 2), Bytes::from_static(b"ab")), range(0, 1));
     }
@@ -623,26 +594,6 @@ fn ghost_and_candidate_state_stay_bounded_during_oversized_churn() {
     assert_eq!(cache.used_bytes(), 2);
     assert_eq!(cache.entry_count(), 1);
     assert_eq!(candidate_count(&cache), cache.entry_count() as usize);
-    assert_eq!(ghost_count(&cache), MAX_GHOST_ENTRIES_PER_SHARD);
-}
-
-#[test]
-fn ghost_evidence_expires_by_the_shard_access_clock() {
-    let cache = cache(2);
-    let key = ObjectKey::from("download");
-    cache.insert_and_record(key, download(range(0, 2), Bytes::from_static(b"ab")), range(0, 1));
-    populate(
-        &cache,
-        ObjectKey::from("incoming"),
-        download(range(0, 3), Bytes::from_static(b"xyz")),
-    );
-    assert_eq!(ghost_count(&cache), 1);
-
-    let absent = ObjectKey::from("clock-only");
-    for _ in 0..=GHOST_LIFETIME_ACCESSES {
-        cache.record_access(&absent, range(0, 1));
-    }
-    assert_eq!(ghost_count(&cache), 0);
 }
 
 #[test]

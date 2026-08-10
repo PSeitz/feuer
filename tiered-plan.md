@@ -152,9 +152,9 @@ The retention objective is expected future source or lower-tier retrieval time a
 not raw object hit rate. Repeated access must increase retention value, stale frequency evidence must age, and
 only the exact requested interval receives observed-access credit.
 
-Broader admissions get bounded, deterministic shard-local probation before compaction. Reuse outside prior
-exact-request coverage grants bounded, ageable protection without pinning or duplicating access evidence.
-Unproven extents become compactable after probation; bounded ghost state may recognize re-admission.
+Broader admissions get bounded, deterministic shard-local probation before compaction. The most recent reuse
+outside prior contiguous request coverage grants ageable protection without pinning or duplicating exact access
+evidence. Unproven extents become compactable after probation.
 
 Prefetch remains bounded in both tiers, and probation never blocks admission or pressure eviction.
 
@@ -190,7 +190,7 @@ can replace a cached larger download with smaller cached payloads biased toward 
 unrequested cache memory.
 
 Compaction is pressure-driven. A broader extent is ineligible until its probation of 64 successful accesses
-to the same shard expires; demonstrated reuse adds bounded, ageable protection but never prevents eviction.
+to the same shard expires; the most recent demonstrated reuse adds ageable protection but never prevents eviction.
 Compacted replacements use only observed requests, merge only overlapping or adjacent intervals, preserve gaps,
 create no access, and
 cannot affect lookup results or caller-held slices.
@@ -316,8 +316,8 @@ The MVP is complete when tests demonstrate that:
   when admitted at a shard cadence boundary, while pressure may still evict it;
 - a containment hit requiring previously unrequested downloaded bytes records one demonstrated-prefetch event
   and promotes the broader extent without duplicating its exact access event;
-- an extent with no demonstrated prefetch reuse becomes compaction-eligible after probation, demonstrated reuse
-  ages, and ghost/re-admission evidence remains bounded;
+- an extent with no demonstrated prefetch reuse becomes compaction-eligible after probation, and the single
+  most recent demonstrated-reuse signal ages out;
 - returned `Bytes` may safely outlive cache eviction;
 - shard pressure evicts toward each shard's assigned target, while an oversized download empties its shard and remains cached even when aggregate retained payload exceeds the configured target;
 - pressure-driven in-memory compaction can release unrequested cached payload without changing results, and

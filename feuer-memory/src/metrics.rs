@@ -17,8 +17,6 @@ pub struct MemoryMetrics {
     evict: BoxedCounter,
     compact: BoxedCounter,
     prefetch_reuse: BoxedCounter,
-    ghost_hit: BoxedCounter,
-    ghost_promotion: BoxedCounter,
     probation_evict: BoxedCounter,
     compacted_payload_bytes: BoxedCounter,
     payload_bytes: BoxedGauge,
@@ -67,8 +65,6 @@ impl MemoryMetrics {
             evict: operation("evict"),
             compact: operation("compact"),
             prefetch_reuse: operation("prefetch_reuse"),
-            ghost_hit: operation("ghost_hit"),
-            ghost_promotion: operation("ghost_promotion"),
             probation_evict: operation("probation_evict"),
             compacted_payload_bytes: compacted_payload_bytes.counter(&[]),
             payload_bytes: payload_bytes.gauge(&[]),
@@ -117,14 +113,6 @@ impl MemoryMetrics {
         self.prefetch_reuse.increase(1);
     }
 
-    pub(crate) fn record_ghost_hit(&self) {
-        self.ghost_hit.increase(1);
-    }
-
-    pub(crate) fn record_ghost_promotion(&self) {
-        self.ghost_promotion.increase(1);
-    }
-
     pub(crate) fn record_probation_eviction(&self) {
         self.probation_evict.increase(1);
     }
@@ -161,8 +149,6 @@ mod tests {
         metrics.record_evictions(1);
         metrics.record_compaction(3);
         metrics.record_prefetch_reuse();
-        metrics.record_ghost_hit();
-        metrics.record_ghost_promotion();
         metrics.record_probation_eviction();
         metrics.decrease_usage(17, 1);
     }

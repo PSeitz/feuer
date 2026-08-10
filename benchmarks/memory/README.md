@@ -13,9 +13,10 @@ the trace for a quick run.
 
 Every engine uses the same downloader rules. The benchmark runs two policies:
 
-- `expanded`: on a miss, the downloader looks 5 ms ahead in trace time and
+- `expanded`: the first unbatched request looks 5 ms ahead in trace time and
   combines same-object ranges separated by less than
-  `COALESCING_DISTANCE_BYTES`. The initiating callback downloads that range
+  `COALESCING_DISTANCE_BYTES`. Every request assigned to that batch expands to
+  the exact same combined range, and the initiating callback downloads it
   before following requests replay. Splits below
   `WHOLE_SPLIT_THRESHOLD_BYTES` are selected whole. The defaults are 10 MB and
   8 MiB respectively.
@@ -24,13 +25,17 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
 ## Compared engines
 
 - `feuer-value-aware`: `MemoryCache` with source-cost-weighted, ageable access
-  evidence, prefetch probation measured in successful same-shard accesses,
-  demonstrated-reuse/ghost promotion, and value-aware pressure selection.
+  evidence, prefetch probation measured in successful same-shard accesses, one
+  recent demonstrated-reuse signal per extent, and value-aware pressure selection.
 - `feuer-compaction-disabled`: the benchmark-only no-compaction control. It
   preserves Feuer's containment and eviction policy.
 - `foyer-native-exact-key`: requested ranges are native Foyer keys. The
   complete callback payload is retained under that exact request key, but
   native Foyer does not perform containment lookup.
+- `foyer-native-expanded-key`: included with the `expanded` downloader. The
+  application expands before lookup and uses that exact expanded range as the
+  native Foyer key. Distinct requests therefore hit when they expand to exactly
+  the same bytes; unlike Feuer, a merely containing cached range is not enough.
 
 All use payload length as the capacity weight. Each variant gives every engine
 16 shards; Foyer uses default `S3FifoConfig`. Every engine starts empty. By

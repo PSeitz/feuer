@@ -165,7 +165,8 @@ struct Workload {
 trait Engine {
     fn name(&self) -> &'static str;
 
-    fn get(&mut self, access: &Access) -> bool;
+    /// Looks up an access using the range this downloader would fetch on a miss.
+    fn get(&mut self, access: &Access, downloaded: ByteRange) -> bool;
 
     fn populate(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<(), String>;
 
@@ -195,7 +196,7 @@ impl Engine for FeuerEngine {
         self.name
     }
 
-    fn get(&mut self, access: &Access) -> bool {
+    fn get(&mut self, access: &Access, _downloaded: ByteRange) -> bool {
         let Some(bytes) = self.cache.get(&access.object_key, access.requested) else {
             return false;
         };
@@ -224,36 +225,67 @@ struct NativeFoyerValue {
     payload: Bytes,
 }
 
+#[derive(Clone, Copy)]
+enum NativeFoyerKeyMode {
+    /// Key entries by the application's exact requested range.
+    ExactRequest,
+    /// Expand before lookup and key entries by that exact expanded range.
+    ExpandedDownload,
+}
+
+impl NativeFoyerKeyMode {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::ExactRequest => "foyer-native-exact-key",
+            Self::ExpandedDownload => "foyer-native-expanded-key",
+        }
+    }
+
+    const fn range(self, access: &Access, downloaded: ByteRange) -> ByteRange {
+        match self {
+            Self::ExactRequest => access.requested,
+            Self::ExpandedDownload => downloaded,
+        }
+    }
+}
+
 struct NativeFoyerEngine {
     cache: FoyerCache<NativeFoyerKey, NativeFoyerValue>,
+    key_mode: NativeFoyerKeyMode,
 }
 
 impl NativeFoyerEngine {
-    fn new(capacity: usize, shards: usize) -> Self {
+    fn new(capacity: usize, shards: usize, key_mode: NativeFoyerKeyMode) -> Self {
         Self {
             cache: foyer_cache(capacity, shards),
+            key_mode,
         }
+    }
+
+    fn key(&self, access: &Access, downloaded: ByteRange) -> NativeFoyerKey {
+        (access.object_key.clone(), self.key_mode.range(access, downloaded))
     }
 }
 
 impl Engine for NativeFoyerEngine {
     fn name(&self) -> &'static str {
-        "foyer-native-exact-key"
+        self.key_mode.name()
     }
 
-    fn get(&mut self, access: &Access) -> bool {
-        let key = (access.object_key.clone(), access.requested);
+    fn get(&mut self, access: &Access, downloaded: ByteRange) -> bool {
+        let key = self.key(access, downloaded);
         let Some(entry) = self.cache.get(&key) else {
             return false;
         };
         let value = entry.value();
+        debug_assert!(value.downloaded.contains(access.requested));
         let result = requested_payload(&value.payload, value.downloaded, access.requested);
         debug_assert_eq!(result.len() as u64, access.requested.len());
         true
     }
 
     fn populate(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<(), String> {
-        let key = (access.object_key.clone(), access.requested);
+        let key = self.key(access, downloaded);
         self.cache.insert(key, NativeFoyerValue { downloaded, payload });
         Ok(())
     }
@@ -362,7 +394,18 @@ fn main() -> Result<(), String> {
                     .copied()
                     .map(|compaction| Box::new(FeuerEngine::new(capacity, shards, compaction)) as Box<dyn Engine>)
                     .collect();
-                engines.push(Box::new(NativeFoyerEngine::new(capacity, shards)));
+                engines.push(Box::new(NativeFoyerEngine::new(
+                    capacity,
+                    shards,
+                    NativeFoyerKeyMode::ExactRequest,
+                )));
+                if matches!(downloader, DownloadPolicy::Expanded) {
+                    engines.push(Box::new(NativeFoyerEngine::new(
+                        capacity,
+                        shards,
+                        NativeFoyerKeyMode::ExpandedDownload,
+                    )));
+                }
                 for engine in engines {
                     let report = run_engine(
                         engine,
@@ -462,12 +505,21 @@ fn expanded_download_ranges(workload: &[Access], config: DownloadConfig) -> Vec<
             .push(index);
     }
 
-    let mut ranges: Vec<_> = workload
+    let base_ranges: Vec<_> = workload
         .iter()
         .map(|access| access.downloaded_range(DownloadPolicy::Expanded, config))
         .collect();
+    let mut ranges = base_ranges.clone();
+    // The first batch that claims a request fixes its expansion. Recomputing a
+    // sliding window for each member would produce different native Foyer keys
+    // for requests served by the same coalesced download.
+    let mut assigned = vec![false; workload.len()];
     for indexes in by_object.values() {
         for (position, &index) in indexes.iter().enumerate() {
+            if assigned[index] {
+                continue;
+            }
+
             let deadline = workload[index]
                 .timestamp_millis
                 .saturating_add(COALESCING_WINDOW_MILLIS);
@@ -475,17 +527,21 @@ fn expanded_download_ranges(workload: &[Access], config: DownloadConfig) -> Vec<
                 .iter()
                 .copied()
                 .take_while(|&candidate| workload[candidate].timestamp_millis <= deadline)
+                .filter(|&candidate| !assigned[candidate])
                 .map(|candidate| PendingDownload {
                     order: candidate,
                     access: &workload[candidate],
-                    downloaded: ranges[candidate],
+                    downloaded: base_ranges[candidate],
                 })
                 .collect();
             let download = coalesced_downloads(pending, config.coalescing_distance_bytes)
                 .into_iter()
                 .find(|download| download.accesses.iter().any(|(order, _)| *order == index))
                 .expect("the current request must belong to one coalesced download");
-            ranges[index] = download.downloaded;
+            for (member, _) in download.accesses {
+                ranges[member] = download.downloaded;
+                assigned[member] = true;
+            }
         }
     }
     ranges
@@ -520,16 +576,16 @@ fn execute_pass<E: Engine + ?Sized>(
     traffic: &mut Traffic,
 ) -> Result<(), String> {
     for (index, access) in workload.accesses.iter().enumerate() {
-        let hit = engine.get(access);
+        let downloaded = match downloader {
+            DownloadPolicy::Expanded => workload.expanded_downloads[index],
+            DownloadPolicy::Exact => access.downloaded_range(DownloadPolicy::Exact, workload.download_config),
+        };
+        let hit = engine.get(access, downloaded);
         record_request(traffic, access, hit);
         if hit {
             continue;
         }
 
-        let downloaded = match downloader {
-            DownloadPolicy::Expanded => workload.expanded_downloads[index],
-            DownloadPolicy::Exact => access.downloaded_range(DownloadPolicy::Exact, workload.download_config),
-        };
         let payload = source_payload_slice(source_payload, downloaded)?;
         engine.populate(access, downloaded, payload)?;
         traffic.source_requests += 1;
@@ -642,6 +698,7 @@ fn human_engine_name(engine: &str) -> &str {
         "feuer-value-aware" => "Feuer",
         "feuer-compaction-disabled" => "Feuer (no compaction)",
         "foyer-native-exact-key" => "Foyer",
+        "foyer-native-expanded-key" => "Foyer (expanded key)",
         other => other,
     }
 }
@@ -891,7 +948,7 @@ mod tests {
             "warmup-test"
         }
 
-        fn get(&mut self, _access: &Access) -> bool {
+        fn get(&mut self, _access: &Access, _downloaded: ByteRange) -> bool {
             self.populated
         }
 
@@ -915,7 +972,7 @@ mod tests {
             "range-test"
         }
 
-        fn get(&mut self, access: &Access) -> bool {
+        fn get(&mut self, access: &Access, _downloaded: ByteRange) -> bool {
             self.entries
                 .iter()
                 .any(|(key, downloaded)| key == &access.object_key && downloaded.contains(access.requested))
@@ -966,7 +1023,31 @@ mod tests {
     }
 
     #[test]
-    fn expanded_downloader_populates_the_coalesced_range_before_followers() {
+    fn foyer_expanded_key_reuses_identical_expansions_for_distinct_requests() {
+        let access = |start, end| Access {
+            object_key: "object".into(),
+            object_size: 20,
+            requested: ByteRange::new(start, end).unwrap(),
+            timestamp_millis: 0,
+        };
+        let first = access(2, 4);
+        let second = access(12, 14);
+        let expanded = ByteRange::new(0, 20).unwrap();
+
+        let mut expanded_key = NativeFoyerEngine::new(1 << 20, 1, NativeFoyerKeyMode::ExpandedDownload);
+        assert!(!expanded_key.get(&first, expanded));
+        expanded_key
+            .populate(&first, expanded, Bytes::from(vec![0; 20]))
+            .unwrap();
+        assert!(expanded_key.get(&second, expanded));
+
+        let mut exact_key = NativeFoyerEngine::new(1 << 20, 1, NativeFoyerKeyMode::ExactRequest);
+        exact_key.populate(&first, expanded, Bytes::from(vec![0; 20])).unwrap();
+        assert!(!exact_key.get(&second, expanded));
+    }
+
+    #[test]
+    fn expanded_downloader_assigns_one_coalesced_range_to_all_batch_members() {
         let access = |start, end, timestamp_millis| Access {
             object_key: "object".into(),
             object_size: 100,
@@ -990,6 +1071,8 @@ mod tests {
             expanded_downloads,
             download_config,
         };
+        assert_eq!(&workload.expanded_downloads[..3], &[ByteRange::new(0, 30).unwrap(); 3]);
+
         let report = run_engine(
             Box::new(RangeEngine::default()),
             &workload,
