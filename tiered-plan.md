@@ -211,8 +211,12 @@ Disk population is bounded and best-effort, not mandatory.
 - Under queue pressure, the internal policy may skip or replace a disk-population candidate. This never fails
   an otherwise successful lookup.
 - If a memory-cached range is evicted before its queued write starts, that write is canceled or discarded.
-- A write already issued to the operating system may finish after memory eviction. It may publish a disk entry
-  only if its generation is still current and the disk policy still admits it.
+- A write already issued to the operating system may finish after memory eviction or caller cancellation.
+  Its `DiskRegion` must remain reserved and protected against conflicting access until the submitted I/O
+  completes; abandoning its result does not stop the write. The task owning the reservation must keep
+  awaiting completion rather than being aborted. A region whose completion is unknown after queue failure
+  must not be reused. A completed write may publish a disk entry only if its generation is still current
+  and the disk policy still admits it.
 - A failed write is logged and never becomes disk-lookup-visible. Its memory entry, if still present, remains
   subject to ordinary memory policy.
 
@@ -226,6 +230,12 @@ Disk capacity is fixed at open time and must be respected. Internal allocation, 
 partial retention, rewriting, checksums, metadata persistence, and submission engines are implementation
 details. Any bytes made lookup-visible on disk must still be attributable to an exact object identity and
 known downloaded object bytes.
+
+The upper storage layer, not the I/O queue, prevents conflicting reads and writes across physical byte
+ranges rounded outward to the I/O alignment. A `DiskRegionReadGuard` prevents overwriting or reusing a disk
+region while a read depends on its contents; multiple reads may hold guards concurrently. A canceled read
+whose result is discarded no longer needs unchanged disk contents, but its submitted I/O buffer must still
+survive until completion. The I/O layer owns that buffer lifetime.
 
 Physical I/O alignment must not become a minimum allocation charge for every retained value. Values smaller
 than the required I/O alignment must be physically packable so the target population of small ranges can use

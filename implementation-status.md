@@ -101,25 +101,29 @@ This slice adds no disk lifecycle, public policy setting, or wall-clock timer.
 
 ### Direct-I/O foundation
 
-- One dedicated thread/ring overlaps up to 64 independent reads and writes. Nonconflicting requests
-  are scheduled in arrival order without a read-triggered write throttle; either class can fill the ring.
+- One dedicated thread/ring overlaps up to 64 reads and writes. Requests are scheduled in arrival order
+  without overlap checks or a read-triggered write throttle; either class can fill the ring.
 - Admission independently reserves 64 requests and 64 MiB of staging buffers for each of reads and
   writes, so a write backlog cannot block read admission. Chunks are at most 1 MiB; RMW also charges
   its staging payload. Caller inputs and read-result allocations are outside the 128-MiB total staging budget.
 - Small-read-heavy workloads may warrant future write throttling; the
   [SSD benchmarks](benchmarks/ssd/ssd-concurrent-read-write.md) show mixed-size reads can tolerate moderate
-  concurrent writes. Overlapping envelopes retain ordering even when a read must wait for an earlier write.
+  concurrent writes.
 - The driver wakes for new requests while earlier I/O is outstanding, without polling or registered buffers.
-- Unaligned writes use read-modify-write; intersecting physical envelopes serialize, including readers.
+- Unaligned writes use read-modify-write. Callers must prevent conflicting access across full physical
+  byte ranges rounded outward to 4 KiB boundaries, including neighboring bytes in shared pages.
 - No durability-flush operations or global scheduling barriers. Multi-chunk calls are not atomic;
   cancellation may leave partial writes, so publication still belongs to the range engine.
   Write completion allows subsequent reads but does not guarantee crash durability.
+- Canceling a caller does not cancel submitted kernel writes. The upper layer must retain each write's
+  disk region and prevent conflicting access until completion, even if its result is abandoned. The task
+  owning that reservation must keep awaiting the write rather than aborting it.
 - Submitted buffers survive caller cancellation. Last-handle drop drains the driver and joins its thread.
   An abnormal driver failure retains uncertain active buffers and the directory lock until process exit
   rather than risking use-after-free or physical reuse.
 - Raw capacity must be positive, 4-KiB-aligned, and representable as a Linux signed file offset.
   Opening requires usable io_uring and compatible `STATX_DIOALIGN`; there is no backend or buffered fallback.
-- Tests exercise mixed concurrency, overlapping envelopes, bounds, short I/O, cancellation, and reopening.
+- Tests exercise mixed concurrency, caller-serialized shared pages, bounds, short I/O, cancellation, and reopening.
 - A [direct-I/O smoke benchmark](benchmarks/storage/README.md) measures the actual driver on the local SSD;
   this is not yet an end-to-end cache benchmark or a matched backend comparison.
 

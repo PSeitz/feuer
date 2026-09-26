@@ -202,13 +202,13 @@ impl Drop for AlignedIoBuffer {
 struct IoRequest {
     // Caller operation; an RMW stays classified as a write during its read phase.
     operation: IoOperation,
-    // Aligned physical start, used for kernel offsets and overlap checks.
+    // Aligned physical start, used for kernel offsets.
     aligned_offset: u64,
     // Requested data starts at this byte offset in `io_buffer`.
     data_offset_in_buffer: usize,
     // Logical byte count, excluding alignment padding from results and RMW updates.
     length: usize,
-    // Physical byte count including padding, for I/O and overlap serialization.
+    // Physical byte count including padding, for I/O.
     aligned_length: usize,
     // Aligned memory for disk reads/writes; kept alive until I/O completes.
     io_buffer: AlignedIoBuffer,
@@ -262,12 +262,6 @@ impl IoRequest {
             _request_permit: permits.0,
             _staging_pages_permit: permits.1,
         })
-    }
-
-    fn conflicts(&self, other: &Self) -> bool {
-        (self.operation == IoOperation::Write || other.operation == IoOperation::Write)
-            && self.aligned_offset < other.aligned_offset + other.aligned_length as u64
-            && other.aligned_offset < self.aligned_offset + self.aligned_length as u64
     }
 
     fn submission_entry(&mut self, fd: i32, slot: usize) -> squeue::Entry {
@@ -354,7 +348,7 @@ struct IoQueue {
     wake_fd: Arc<OwnedFd>,
     // Incoming admitted requests; disconnection starts draining shutdown.
     receiver: mpsc::Receiver<IoRequest>,
-    // Unsubmitted requests in arrival order, preserving overlap ordering.
+    // Unsubmitted requests in arrival order; callers prevent conflicting I/O.
     pending: VecDeque<IoRequest>,
     // Owns in-flight requests through completion; CQEs identify their slot indices.
     active: Vec<Option<IoRequest>>,
@@ -414,20 +408,16 @@ impl IoQueue {
         // SSD benchmarks (benchmarks/ssd/ssd-concurrent-read-write.md) suggest a
         // future write throttle for small-read-heavy workloads. Mixed-size reads
         // tolerate moderate concurrent writes, so leave writes unthrottled for now.
-        // Fill slots in arrival order, skipping only conflicting requests.
-        let mut index = 0;
-        while index < self.pending.len() {
-            let Some(slot) = self.active.iter().position(Option::is_none) else {
-                return;
-            };
-            let request = &self.pending[index];
-            let blocked = self.active.iter().flatten().any(|other| request.conflicts(other))
-                || self.pending.iter().take(index).any(|other| request.conflicts(other));
-            if blocked {
-                index += 1;
+        // Callers own conflict prevention and disk-region lifetime through completion.
+        // Cancellation discards pending requests, but never releases active requests.
+        for slot in 0..self.active.len() {
+            if self.active[slot].is_some() {
                 continue;
             }
-            self.active[slot] = self.pending.remove(index);
+            let Some(request) = self.pending.pop_front() else {
+                break;
+            };
+            self.active[slot] = Some(request);
             self.submit_slot(slot);
         }
     }

@@ -28,15 +28,33 @@ struct DataFileState {
 /// One exclusively owned, fixed-capacity Linux direct-I/O payload file.
 ///
 /// A dedicated io_uring thread overlaps up to 64 operations, scheduling requests
-/// in arrival order unless they conflict with earlier I/O. Reads do not throttle
-/// writes; either class can fill the ring.
+/// in arrival order without checking for conflicts. Submission order does not
+/// guarantee completion order. Reads do not throttle writes; either class can fill the ring.
 /// Admission reserves 64 requests and 64 MiB of staging buffers for each of
 /// reads and writes. Caller inputs and read-result allocations are outside
 /// this staging-buffer budget.
-/// Reads and writes accept arbitrary byte ranges; unaligned writes use guarded
-/// read-modify-write envelopes. Overlapping envelopes serialize, independent
-/// reads and writes overlap. Multi-chunk operations are not atomic.
-/// Write completion permits subsequent reads, but does not guarantee crash durability.
+/// Reads and writes accept arbitrary byte ranges; unaligned writes use
+/// read-modify-write. Multi-chunk operations are not atomic. Write completion
+/// permits subsequent reads, but does not guarantee crash durability.
+///
+/// # Caller-owned concurrency and cancellation
+///
+/// Callers must prevent overlapping I/O when either operation is a write. This
+/// applies to physical byte ranges rounded outward to 4 KiB boundaries, not just
+/// the requested bytes: disjoint unaligned writes can modify the same page.
+/// Multiple reads may run concurrently. The upper storage layer owns disk-region
+/// allocation and read guards; this file neither checks conflicts nor protects
+/// disk regions from reuse.
+///
+/// Dropping an I/O future does not cancel submitted kernel I/O. In particular,
+/// an abandoned write may still modify disk. Its disk region must remain reserved
+/// and protected against conflicting access until the submitted I/O completes.
+/// Keep the write future running to completion in the task that owns the region;
+/// abandoning the result must not abort that task or release its reservation.
+/// On queue failure, do not reuse regions whose completion is unknown.
+/// Submitted buffers remain owned by this I/O layer until completion, even when
+/// the caller drops its future. A canceled read whose result is discarded no
+/// longer requires its disk contents to remain unchanged.
 ///
 /// Capacity must be a positive multiple of 4096, at most i64::MAX. Opening fails
 /// if io_uring or verified O_DIRECT alignment is unavailable; there is no fallback.
@@ -110,15 +128,19 @@ impl DataFile {
 
     /// Reads exactly the requested bytes with at most two partial alignment pages
     /// of overhead. The result owns a compact allocation, not an I/O buffer.
+    /// Callers must prevent writes to the aligned byte range while this read
+    /// depends on its contents; see [`DataFile`]'s concurrency contract.
     pub async fn read_at(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
         self.execute_measured(IoOperation::Read, offset, length, &[]).await
     }
 
     /// Writes arbitrary bytes without modifying neighboring bytes in their pages.
     ///
-    /// Internally copies bounded chunks into aligned buffers. Cancellation may
-    /// leave a partial write, but submitted chunks retain their buffers through
-    /// completion. A storage engine must publish a cached byte range only after success.
+    /// Internally copies bounded chunks into aligned buffers. Callers must protect
+    /// the full aligned byte range from conflicting access through completion.
+    /// Dropping this future may leave a partial write and does not stop submitted
+    /// writes: retain the disk region until they complete, as described in
+    /// [`DataFile`]'s cancellation contract. Publish a cached byte range only after success.
     pub async fn write_at(&self, offset: u64, bytes: &Bytes) -> DataFileResult<()> {
         self.execute_measured(IoOperation::Write, offset, bytes.len(), bytes)
             .await
@@ -428,18 +450,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates() {
+    async fn concurrent_mixed_io_with_caller_serialized_same_page_rmw() {
         let temp = tempdir().unwrap();
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
         let mut tasks = Vec::new();
-        // More callers than both QD and pending capacity, with disjoint writes
-        // sharing physical pages. This also stresses admission backpressure.
+        let shared_pages = Arc::new(tokio::sync::Mutex::new(()));
+        // Callers serialize access to shared pages; page-disjoint I/O runs concurrently.
         for i in 0..256u64 {
             let file = file.clone();
+            let shared_pages = shared_pages.clone();
             tasks.push(tokio::spawn(async move {
-                let value = Bytes::from(vec![(i % 251) as u8; 31]);
-                file.write_at(i * 33, &value).await.unwrap();
-                assert_eq!(file.read_at(i * 33, value.len()).await.unwrap(), value);
+                {
+                    let _guard = shared_pages.lock().await;
+                    let value = Bytes::from(vec![(i % 251) as u8; 31]);
+                    file.write_at(i * 33, &value).await.unwrap();
+                    assert_eq!(file.read_at(i * 33, value.len()).await.unwrap(), value);
+                }
                 let value = Bytes::from(vec![(i % 251) as u8; 4096]);
                 let offset = 16384 + i * 4096;
                 file.write_at(offset, &value).await.unwrap();

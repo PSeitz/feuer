@@ -15,7 +15,7 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 
 ## Naming review
 
-Each type below was described from its fields, construction, and use before choosing its name. The description is the naming test: every substantive word in the chosen name must refer to something in that description. A retained name is a decision, not an exemption for public APIs or conventional terminology. Associated items, fields, variants, constants, parameters, and local bindings were checked in source order in all 22 files; the complete symbol list follows this review. Every listed symbol has a keep/rename decision; a renamed parent's unchanged members are marked **Keep**, with the new parent visible in their qualified names.
+Each type below was described from its fields, construction, and use before choosing its name. The description is the naming test: every substantive word in the chosen name must refer to something in that description. A retained name is a decision, not an exemption for public APIs or conventional terminology. Associated items, fields, variants, constants, parameters, and local bindings were checked in source order in all 22 files; the complete symbol list follows this review. Every listed symbol has a review decision; a renamed parent's unchanged members are marked **Keep**, with the new parent visible in their qualified names. Symbols introduced or replaced by the subsequent storage update are marked separately below.
 
 ### Types, one by one
 
@@ -106,7 +106,16 @@ No reserved disk-region or read-guard types exist yet. Future implementations mu
 
 ### Compatibility
 
-Public source-level renames: `Config` → `CacheConfig`, `ConfigError` → `CacheConfigError`, `InvalidRange` → `InvalidByteRange`, and storage `Error` / `ErrorKind` / `Result` → `DataFileError` / `DataFileErrorKind` / `DataFileResult`. All workspace uses, re-exports, and current documentation references are updated. No old-name aliases are retained. CLI flags, environment variables, CSV columns, metric names, tracing labels, and algorithm behavior are unchanged.
+Public source-level renames: `Config` → `CacheConfig`, `ConfigError` → `CacheConfigError`, `InvalidRange` → `InvalidByteRange`, and storage `Error` / `ErrorKind` / `Result` → `DataFileError` / `DataFileErrorKind` / `DataFileResult`. All workspace uses, re-exports, and current documentation references are updated. No old-name aliases are retained. The naming changes preserve CLI flags, environment variables, CSV columns, metric names, tracing labels, and algorithm behavior.
+
+### Subsequent storage update
+
+This inventory reflects the later change to caller-owned I/O conflict prevention, not just the naming-only snapshot:
+
+- Removed `IoRequest::conflicts` and the queue's overlap scan. `IoQueue::schedule` now fills free slots in arrival order; callers must prevent conflicting access to aligned byte ranges.
+- Replaced the overlap-blocking test with `canceled_submitted_rmw_retains_resources_and_still_writes`, checking that abandoning a result does not release an active write's resources or stop its write phase.
+- Changed the mixed-I/O test to `concurrent_mixed_io_with_caller_serialized_same_page_rmw`, with caller-side synchronization for shared pages.
+- Symbols added or replaced by these test changes are marked **Storage update** rather than being presented as naming-only changes. Removed symbols no longer appear in the current inventory; counts and source locations have been refreshed.
 
 ## Counts
 
@@ -118,13 +127,13 @@ Public source-level renames: `Config` → `CacheConfig`, `ConfigError` → `Cach
 | Function | 164 |
 | Impl | 51 |
 | Local | 544 |
-| Method | 135 |
+| Method | 134 |
 | Module | 25 |
 | Struct | 44 |
 | Trait | 1 |
 | TypeAlias | 5 |
 | Variant | 38 |
-| **Total** | **1223** |
+| **Total** | **1222** |
 
 ## Packages
 
@@ -133,7 +142,7 @@ Public source-level renames: `Config` → `CacheConfig`, `ConfigError` → `Cach
 | `feuer` | 3 | 42 | 3 | 51 |
 | `feuer-memory` | 7 | 211 | 12 | 180 |
 | `feuer-memory-bench` | 1 | 149 | 12 | 109 |
-| `feuer-storage` | 7 | 182 | 18 | 196 |
+| `feuer-storage` | 7 | 181 | 18 | 196 |
 | `feuer-tokio` | 1 | 0 | 0 | 0 |
 | `feuer-types` | 3 | 44 | 6 | 8 |
 
@@ -1167,106 +1176,109 @@ Public source-level renames: `Config` → `CacheConfig`, `ConfigError` → `Cach
 | [23](feuer-storage/src/file.rs#L23) | Field | `DataFileState::queue` | `uring::IoQueueHandle` | Keep |
 | [24](feuer-storage/src/file.rs#L24) | Field | `DataFileState::data_path` | `PathBuf` | Keep |
 | [25](feuer-storage/src/file.rs#L25) | Field | `DataFileState::capacity` | `u64` | Keep |
-| [46](feuer-storage/src/file.rs#L46) | Struct | `DataFile` | — | Keep |
-| [47](feuer-storage/src/file.rs#L47) | Field | `DataFile::state` | `Arc<DataFileState>` | Keep |
-| [48](feuer-storage/src/file.rs#L48) | Field | `DataFile::metrics` | `Arc<IoMetrics>` | Keep |
-| [51](feuer-storage/src/file.rs#L51) | Impl | `impl fmt::Debug for DataFile` | — | Keep |
-| [52](feuer-storage/src/file.rs#L52) | Method | `impl fmt::Debug for DataFile::fmt` | `fn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result` | Keep |
-| [59](feuer-storage/src/file.rs#L59) | Impl | `impl DataFile` | — | Keep |
-| [65](feuer-storage/src/file.rs#L65) | Function | `impl DataFile::open` | `fn(directory: impl AsRef<Path>, capacity: u64, metrics: Arc<IoMetrics>) -> DataFileResult<Self>` | Keep |
-| [107](feuer-storage/src/file.rs#L107) | Method | `impl DataFile::capacity` | `fn(&self) -> u64` | Keep |
-| [113](feuer-storage/src/file.rs#L113) | Method | `impl DataFile::read_at` | `fn(&self, offset: u64, length: usize) -> DataFileResult<Bytes>` | Keep |
-| [122](feuer-storage/src/file.rs#L122) | Method | `impl DataFile::write_at` | `fn(&self, offset: u64, bytes: &Bytes) -> DataFileResult<()>` | Keep |
-| [128](feuer-storage/src/file.rs#L128) | Method | `impl DataFile::execute_measured` | `fn( &self, operation: IoOperation, offset: u64, length: usize, payload: &[u8], ) -> DataFileResult<Bytes>` | Rename from `execute` |
-| [157](feuer-storage/src/file.rs#L157) | Method | `impl DataFile::execute_chunks` | `fn( &self, operation: IoOperation, offset: u64, length: usize, payload: &[u8], ) -> DataFileResult<Bytes>` | Rename from `execute_inner` |
-| [207](feuer-storage/src/file.rs#L207) | Function | `open_file_state` | `fn(directory: PathBuf, capacity: u64) -> DataFileResult<DataFileState>` | Keep |
-| [275](feuer-storage/src/file.rs#L275) | Function | `check_direct_io_alignment` | `fn(file: &File) -> io::Result<()>` | Rename from `check_direct_alignment` |
-| [306](feuer-storage/src/file.rs#L306) | Function | `check_range` | `fn(operation: IoOperation, offset: u64, length: u64, capacity: u64) -> DataFileResult<()>` | Keep |
-| [318](feuer-storage/src/file.rs#L318) | Function | `record_span_outcome` | `fn<T>(span: &Span, elapsed: std::time::Duration, result: &DataFileResult<T>)` | Keep |
-| [332](feuer-storage/src/file.rs#L332) | Module | `tests` | — | Keep |
-| [337](feuer-storage/src/file.rs#L337) | Const | `tests::CAPACITY` | `u64` | Keep |
-| [340](feuer-storage/src/file.rs#L340) | Function | `tests::public_io_types_are_send_sync_static` | `fn()` | Keep |
-| [341](feuer-storage/src/file.rs#L341) | Function | `tests::public_io_types_are_send_sync_static::assert_send_sync_static` | `fn<T: Send + Sync + 'static>()` | Keep |
-| [347](feuer-storage/src/file.rs#L347) | Function | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors` | `fn()` | Keep |
-| [374](feuer-storage/src/file.rs#L374) | Function | `tests::rejects_out_of_bounds_and_accepts_empty_ranges` | `fn()` | Keep |
-| [393](feuer-storage/src/file.rs#L393) | Function | `tests::fails_short_reads_instead_of_returning_uncertain_bytes` | `fn()` | Keep |
-| [409](feuer-storage/src/file.rs#L409) | Function | `tests::holds_exclusive_ownership_and_reopens_after_shutdown` | `fn()` | Keep |
-| [431](feuer-storage/src/file.rs#L431) | Function | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates` | `fn()` | Keep |
-| [462](feuer-storage/src/file.rs#L462) | Function | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early` | `fn()` | Keep |
-| [491](feuer-storage/src/file.rs#L491) | Function | `tests::reports_missing_runtime` | `fn()` | Keep |
-| [506](feuer-storage/src/file.rs#L506) | Function | `tests::rejects_unverified_direct_io_instead_of_falling_back` | `fn()` | Keep |
-| [522](feuer-storage/src/file.rs#L522) | Function | `tests::validates_capacity_and_omits_paths_from_debug` | `fn()` | Keep |
+| [64](feuer-storage/src/file.rs#L64) | Struct | `DataFile` | — | Keep |
+| [65](feuer-storage/src/file.rs#L65) | Field | `DataFile::state` | `Arc<DataFileState>` | Keep |
+| [66](feuer-storage/src/file.rs#L66) | Field | `DataFile::metrics` | `Arc<IoMetrics>` | Keep |
+| [69](feuer-storage/src/file.rs#L69) | Impl | `impl fmt::Debug for DataFile` | — | Keep |
+| [70](feuer-storage/src/file.rs#L70) | Method | `impl fmt::Debug for DataFile::fmt` | `fn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result` | Keep |
+| [77](feuer-storage/src/file.rs#L77) | Impl | `impl DataFile` | — | Keep |
+| [83](feuer-storage/src/file.rs#L83) | Function | `impl DataFile::open` | `fn(directory: impl AsRef<Path>, capacity: u64, metrics: Arc<IoMetrics>) -> DataFileResult<Self>` | Keep |
+| [125](feuer-storage/src/file.rs#L125) | Method | `impl DataFile::capacity` | `fn(&self) -> u64` | Keep |
+| [133](feuer-storage/src/file.rs#L133) | Method | `impl DataFile::read_at` | `fn(&self, offset: u64, length: usize) -> DataFileResult<Bytes>` | Keep |
+| [144](feuer-storage/src/file.rs#L144) | Method | `impl DataFile::write_at` | `fn(&self, offset: u64, bytes: &Bytes) -> DataFileResult<()>` | Keep |
+| [150](feuer-storage/src/file.rs#L150) | Method | `impl DataFile::execute_measured` | `fn( &self, operation: IoOperation, offset: u64, length: usize, payload: &[u8], ) -> DataFileResult<Bytes>` | Rename from `execute` |
+| [179](feuer-storage/src/file.rs#L179) | Method | `impl DataFile::execute_chunks` | `fn( &self, operation: IoOperation, offset: u64, length: usize, payload: &[u8], ) -> DataFileResult<Bytes>` | Rename from `execute_inner` |
+| [229](feuer-storage/src/file.rs#L229) | Function | `open_file_state` | `fn(directory: PathBuf, capacity: u64) -> DataFileResult<DataFileState>` | Keep |
+| [297](feuer-storage/src/file.rs#L297) | Function | `check_direct_io_alignment` | `fn(file: &File) -> io::Result<()>` | Rename from `check_direct_alignment` |
+| [328](feuer-storage/src/file.rs#L328) | Function | `check_range` | `fn(operation: IoOperation, offset: u64, length: u64, capacity: u64) -> DataFileResult<()>` | Keep |
+| [340](feuer-storage/src/file.rs#L340) | Function | `record_span_outcome` | `fn<T>(span: &Span, elapsed: std::time::Duration, result: &DataFileResult<T>)` | Keep |
+| [354](feuer-storage/src/file.rs#L354) | Module | `tests` | — | Keep |
+| [359](feuer-storage/src/file.rs#L359) | Const | `tests::CAPACITY` | `u64` | Keep |
+| [362](feuer-storage/src/file.rs#L362) | Function | `tests::public_io_types_are_send_sync_static` | `fn()` | Keep |
+| [363](feuer-storage/src/file.rs#L363) | Function | `tests::public_io_types_are_send_sync_static::assert_send_sync_static` | `fn<T: Send + Sync + 'static>()` | Keep |
+| [369](feuer-storage/src/file.rs#L369) | Function | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors` | `fn()` | Keep |
+| [396](feuer-storage/src/file.rs#L396) | Function | `tests::rejects_out_of_bounds_and_accepts_empty_ranges` | `fn()` | Keep |
+| [415](feuer-storage/src/file.rs#L415) | Function | `tests::fails_short_reads_instead_of_returning_uncertain_bytes` | `fn()` | Keep |
+| [431](feuer-storage/src/file.rs#L431) | Function | `tests::holds_exclusive_ownership_and_reopens_after_shutdown` | `fn()` | Keep |
+| [453](feuer-storage/src/file.rs#L453) | Function | `tests::concurrent_mixed_io_with_caller_serialized_same_page_rmw` | `fn()` | Storage update (see above) |
+| [488](feuer-storage/src/file.rs#L488) | Function | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early` | `fn()` | Keep |
+| [517](feuer-storage/src/file.rs#L517) | Function | `tests::reports_missing_runtime` | `fn()` | Keep |
+| [532](feuer-storage/src/file.rs#L532) | Function | `tests::rejects_unverified_direct_io_instead_of_falling_back` | `fn()` | Keep |
+| [548](feuer-storage/src/file.rs#L548) | Function | `tests::validates_capacity_and_omits_paths_from_debug` | `fn()` | Keep |
 
 <details>
-<summary>Local bindings (65)</summary>
+<summary>Local bindings (68)</summary>
 
 | Line | Kind | Name / source parent | Signature or type | Review decision |
 | ---: | --- | --- | --- | --- |
-| [66](feuer-storage/src/file.rs#L66) | Local | `impl DataFile::open::directory` | — | Keep |
-| [67](feuer-storage/src/file.rs#L67) | Local | `impl DataFile::open::runtime` | — | Keep |
-| [68](feuer-storage/src/file.rs#L68) | Local | `impl DataFile::open::started` | — | Keep |
-| [69](feuer-storage/src/file.rs#L69) | Local | `impl DataFile::open::span` | — | Keep |
-| [77](feuer-storage/src/file.rs#L77) | Local | `impl DataFile::open::result` | — | Keep |
-| [78](feuer-storage/src/file.rs#L78) | Local | `impl DataFile::open::result::state` | — | Keep |
-| [135](feuer-storage/src/file.rs#L135) | Local | `impl DataFile::execute_measured::started` | — | Keep |
-| [136](feuer-storage/src/file.rs#L136) | Local | `impl DataFile::execute_measured::observed_bytes` | — | Keep |
-| [137](feuer-storage/src/file.rs#L137) | Local | `impl DataFile::execute_measured::span` | — | Keep |
-| [147](feuer-storage/src/file.rs#L147) | Local | `impl DataFile::execute_measured::result` | — | Keep |
-| [151](feuer-storage/src/file.rs#L151) | Local | `impl DataFile::execute_measured::elapsed` | — | Keep |
-| [164](feuer-storage/src/file.rs#L164) | Local | `impl DataFile::execute_chunks::length_u64` | — | Keep |
-| [166](feuer-storage/src/file.rs#L166) | Local | `impl DataFile::execute_chunks::io_error` | — | Keep |
-| [171](feuer-storage/src/file.rs#L171) | Local | `impl DataFile::execute_chunks::mut read_bytes` | — | Rename from `mut result` |
-| [179](feuer-storage/src/file.rs#L179) | Local | `impl DataFile::execute_chunks::mut completed_bytes` | — | Keep |
-| [181](feuer-storage/src/file.rs#L181) | Local | `impl DataFile::execute_chunks::chunk_offset` | — | Keep |
-| [182](feuer-storage/src/file.rs#L182) | Local | `impl DataFile::execute_chunks::chunk_length` | — | Keep |
-| [184](feuer-storage/src/file.rs#L184) | Local | `impl DataFile::execute_chunks::chunk_payload` | — | Rename from `input` |
-| [189](feuer-storage/src/file.rs#L189) | Local | `impl DataFile::execute_chunks::bytes` | — | Keep |
-| [217](feuer-storage/src/file.rs#L217) | Local | `open_file_state::lock_path` | — | Keep |
-| [218](feuer-storage/src/file.rs#L218) | Local | `open_file_state::lock_file` | — | Keep |
-| [229](feuer-storage/src/file.rs#L229) | Local | `open_file_state::locked` | — | Keep |
-| [237](feuer-storage/src/file.rs#L237) | Local | `open_file_state::data_path` | — | Keep |
-| [238](feuer-storage/src/file.rs#L238) | Local | `open_file_state::error` | — | Keep |
-| [243](feuer-storage/src/file.rs#L243) | Local | `open_file_state::file` | — | Keep |
-| [260](feuer-storage/src/file.rs#L260) | Local | `open_file_state::resize_file` | — | Keep |
-| [263](feuer-storage/src/file.rs#L263) | Local | `open_file_state::queue` | — | Keep |
-| [276](feuer-storage/src/file.rs#L276) | Local | `check_direct_io_alignment::mut stat` | — | Keep |
-| [278](feuer-storage/src/file.rs#L278) | Local | `check_direct_io_alignment::result` | — | Keep |
-| [291](feuer-storage/src/file.rs#L291) | Local | `check_direct_io_alignment::stat` | — | Keep |
-| [348](feuer-storage/src/file.rs#L348) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::temp` | — | Keep |
-| [349](feuer-storage/src/file.rs#L349) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::directory` | — | Keep |
-| [350](feuer-storage/src/file.rs#L350) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::file` | — | Keep |
-| [351](feuer-storage/src/file.rs#L351) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::original` | — | Keep |
-| [353](feuer-storage/src/file.rs#L353) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::payload` | — | Keep |
-| [362](feuer-storage/src/file.rs#L362) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::payload` | — | Keep |
-| [375](feuer-storage/src/file.rs#L375) | Local | `tests::rejects_out_of_bounds_and_accepts_empty_ranges::temp` | — | Keep |
-| [376](feuer-storage/src/file.rs#L376) | Local | `tests::rejects_out_of_bounds_and_accepts_empty_ranges::file` | — | Keep |
-| [394](feuer-storage/src/file.rs#L394) | Local | `tests::fails_short_reads_instead_of_returning_uncertain_bytes::temp` | — | Keep |
-| [395](feuer-storage/src/file.rs#L395) | Local | `tests::fails_short_reads_instead_of_returning_uncertain_bytes::file` | — | Keep |
-| [410](feuer-storage/src/file.rs#L410) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::temp` | — | Keep |
-| [411](feuer-storage/src/file.rs#L411) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::file` | — | Keep |
-| [412](feuer-storage/src/file.rs#L412) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::clone` | — | Keep |
-| [423](feuer-storage/src/file.rs#L423) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::file` | — | Keep |
-| [432](feuer-storage/src/file.rs#L432) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::temp` | — | Keep |
-| [433](feuer-storage/src/file.rs#L433) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::file` | — | Keep |
-| [434](feuer-storage/src/file.rs#L434) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::mut tasks` | — | Keep |
-| [438](feuer-storage/src/file.rs#L438) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::file` | — | Keep |
-| [440](feuer-storage/src/file.rs#L440) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::value` | — | Keep |
-| [443](feuer-storage/src/file.rs#L443) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::value` | — | Keep |
-| [444](feuer-storage/src/file.rs#L444) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::offset` | — | Keep |
-| [463](feuer-storage/src/file.rs#L463) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::temp` | — | Keep |
-| [464](feuer-storage/src/file.rs#L464) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — | Keep |
-| [465](feuer-storage/src/file.rs#L465) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::mut tasks` | — | Keep |
-| [467](feuer-storage/src/file.rs#L467) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — | Keep |
-| [477](feuer-storage/src/file.rs#L477) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::_` | — | Keep |
-| [480](feuer-storage/src/file.rs#L480) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — | Keep |
-| [496](feuer-storage/src/file.rs#L496) | Local | `tests::reports_missing_runtime::temp` | — | Keep |
-| [497](feuer-storage/src/file.rs#L497) | Local | `tests::reports_missing_runtime::mut open` | — | Keep |
-| [498](feuer-storage/src/file.rs#L498) | Local | `tests::reports_missing_runtime::mut context` | — | Keep |
-| [499](feuer-storage/src/file.rs#L499) | Local | `tests::reports_missing_runtime::Poll::Ready(result)` | — | Keep |
-| [511](feuer-storage/src/file.rs#L511) | Local | `tests::rejects_unverified_direct_io_instead_of_falling_back::fd` | — | Keep |
-| [514](feuer-storage/src/file.rs#L514) | Local | `tests::rejects_unverified_direct_io_instead_of_falling_back::file` | — | Keep |
-| [523](feuer-storage/src/file.rs#L523) | Local | `tests::validates_capacity_and_omits_paths_from_debug::temp` | — | Keep |
-| [533](feuer-storage/src/file.rs#L533) | Local | `tests::validates_capacity_and_omits_paths_from_debug::file` | — | Keep |
+| [84](feuer-storage/src/file.rs#L84) | Local | `impl DataFile::open::directory` | — | Keep |
+| [85](feuer-storage/src/file.rs#L85) | Local | `impl DataFile::open::runtime` | — | Keep |
+| [86](feuer-storage/src/file.rs#L86) | Local | `impl DataFile::open::started` | — | Keep |
+| [87](feuer-storage/src/file.rs#L87) | Local | `impl DataFile::open::span` | — | Keep |
+| [95](feuer-storage/src/file.rs#L95) | Local | `impl DataFile::open::result` | — | Keep |
+| [96](feuer-storage/src/file.rs#L96) | Local | `impl DataFile::open::result::state` | — | Keep |
+| [157](feuer-storage/src/file.rs#L157) | Local | `impl DataFile::execute_measured::started` | — | Keep |
+| [158](feuer-storage/src/file.rs#L158) | Local | `impl DataFile::execute_measured::observed_bytes` | — | Keep |
+| [159](feuer-storage/src/file.rs#L159) | Local | `impl DataFile::execute_measured::span` | — | Keep |
+| [169](feuer-storage/src/file.rs#L169) | Local | `impl DataFile::execute_measured::result` | — | Keep |
+| [173](feuer-storage/src/file.rs#L173) | Local | `impl DataFile::execute_measured::elapsed` | — | Keep |
+| [186](feuer-storage/src/file.rs#L186) | Local | `impl DataFile::execute_chunks::length_u64` | — | Keep |
+| [188](feuer-storage/src/file.rs#L188) | Local | `impl DataFile::execute_chunks::io_error` | — | Keep |
+| [193](feuer-storage/src/file.rs#L193) | Local | `impl DataFile::execute_chunks::mut read_bytes` | — | Rename from `mut result` |
+| [201](feuer-storage/src/file.rs#L201) | Local | `impl DataFile::execute_chunks::mut completed_bytes` | — | Keep |
+| [203](feuer-storage/src/file.rs#L203) | Local | `impl DataFile::execute_chunks::chunk_offset` | — | Keep |
+| [204](feuer-storage/src/file.rs#L204) | Local | `impl DataFile::execute_chunks::chunk_length` | — | Keep |
+| [206](feuer-storage/src/file.rs#L206) | Local | `impl DataFile::execute_chunks::chunk_payload` | — | Rename from `input` |
+| [211](feuer-storage/src/file.rs#L211) | Local | `impl DataFile::execute_chunks::bytes` | — | Keep |
+| [239](feuer-storage/src/file.rs#L239) | Local | `open_file_state::lock_path` | — | Keep |
+| [240](feuer-storage/src/file.rs#L240) | Local | `open_file_state::lock_file` | — | Keep |
+| [251](feuer-storage/src/file.rs#L251) | Local | `open_file_state::locked` | — | Keep |
+| [259](feuer-storage/src/file.rs#L259) | Local | `open_file_state::data_path` | — | Keep |
+| [260](feuer-storage/src/file.rs#L260) | Local | `open_file_state::error` | — | Keep |
+| [265](feuer-storage/src/file.rs#L265) | Local | `open_file_state::file` | — | Keep |
+| [282](feuer-storage/src/file.rs#L282) | Local | `open_file_state::resize_file` | — | Keep |
+| [285](feuer-storage/src/file.rs#L285) | Local | `open_file_state::queue` | — | Keep |
+| [298](feuer-storage/src/file.rs#L298) | Local | `check_direct_io_alignment::mut stat` | — | Keep |
+| [300](feuer-storage/src/file.rs#L300) | Local | `check_direct_io_alignment::result` | — | Keep |
+| [313](feuer-storage/src/file.rs#L313) | Local | `check_direct_io_alignment::stat` | — | Keep |
+| [370](feuer-storage/src/file.rs#L370) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::temp` | — | Keep |
+| [371](feuer-storage/src/file.rs#L371) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::directory` | — | Keep |
+| [372](feuer-storage/src/file.rs#L372) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::file` | — | Keep |
+| [373](feuer-storage/src/file.rs#L373) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::original` | — | Keep |
+| [375](feuer-storage/src/file.rs#L375) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::payload` | — | Keep |
+| [384](feuer-storage/src/file.rs#L384) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::payload` | — | Keep |
+| [397](feuer-storage/src/file.rs#L397) | Local | `tests::rejects_out_of_bounds_and_accepts_empty_ranges::temp` | — | Keep |
+| [398](feuer-storage/src/file.rs#L398) | Local | `tests::rejects_out_of_bounds_and_accepts_empty_ranges::file` | — | Keep |
+| [416](feuer-storage/src/file.rs#L416) | Local | `tests::fails_short_reads_instead_of_returning_uncertain_bytes::temp` | — | Keep |
+| [417](feuer-storage/src/file.rs#L417) | Local | `tests::fails_short_reads_instead_of_returning_uncertain_bytes::file` | — | Keep |
+| [432](feuer-storage/src/file.rs#L432) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::temp` | — | Keep |
+| [433](feuer-storage/src/file.rs#L433) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::file` | — | Keep |
+| [434](feuer-storage/src/file.rs#L434) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::clone` | — | Keep |
+| [445](feuer-storage/src/file.rs#L445) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::file` | — | Keep |
+| [454](feuer-storage/src/file.rs#L454) | Local | `tests::concurrent_mixed_io_with_caller_serialized_same_page_rmw::temp` | — | Storage update (see above) |
+| [455](feuer-storage/src/file.rs#L455) | Local | `tests::concurrent_mixed_io_with_caller_serialized_same_page_rmw::file` | — | Storage update (see above) |
+| [456](feuer-storage/src/file.rs#L456) | Local | `tests::concurrent_mixed_io_with_caller_serialized_same_page_rmw::mut tasks` | — | Storage update (see above) |
+| [457](feuer-storage/src/file.rs#L457) | Local | `tests::concurrent_mixed_io_with_caller_serialized_same_page_rmw::shared_pages` | — | Storage update (see above) |
+| [460](feuer-storage/src/file.rs#L460) | Local | `tests::concurrent_mixed_io_with_caller_serialized_same_page_rmw::file` | — | Storage update (see above) |
+| [461](feuer-storage/src/file.rs#L461) | Local | `tests::concurrent_mixed_io_with_caller_serialized_same_page_rmw::shared_pages` | — | Storage update (see above) |
+| [464](feuer-storage/src/file.rs#L464) | Local | `tests::concurrent_mixed_io_with_caller_serialized_same_page_rmw::_guard` | — | Storage update (see above) |
+| [465](feuer-storage/src/file.rs#L465) | Local | `tests::concurrent_mixed_io_with_caller_serialized_same_page_rmw::value` | — | Storage update (see above) |
+| [469](feuer-storage/src/file.rs#L469) | Local | `tests::concurrent_mixed_io_with_caller_serialized_same_page_rmw::value` | — | Storage update (see above) |
+| [470](feuer-storage/src/file.rs#L470) | Local | `tests::concurrent_mixed_io_with_caller_serialized_same_page_rmw::offset` | — | Storage update (see above) |
+| [489](feuer-storage/src/file.rs#L489) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::temp` | — | Keep |
+| [490](feuer-storage/src/file.rs#L490) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — | Keep |
+| [491](feuer-storage/src/file.rs#L491) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::mut tasks` | — | Keep |
+| [493](feuer-storage/src/file.rs#L493) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — | Keep |
+| [503](feuer-storage/src/file.rs#L503) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::_` | — | Keep |
+| [506](feuer-storage/src/file.rs#L506) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — | Keep |
+| [522](feuer-storage/src/file.rs#L522) | Local | `tests::reports_missing_runtime::temp` | — | Keep |
+| [523](feuer-storage/src/file.rs#L523) | Local | `tests::reports_missing_runtime::mut open` | — | Keep |
+| [524](feuer-storage/src/file.rs#L524) | Local | `tests::reports_missing_runtime::mut context` | — | Keep |
+| [525](feuer-storage/src/file.rs#L525) | Local | `tests::reports_missing_runtime::Poll::Ready(result)` | — | Keep |
+| [537](feuer-storage/src/file.rs#L537) | Local | `tests::rejects_unverified_direct_io_instead_of_falling_back::fd` | — | Keep |
+| [540](feuer-storage/src/file.rs#L540) | Local | `tests::rejects_unverified_direct_io_instead_of_falling_back::file` | — | Keep |
+| [549](feuer-storage/src/file.rs#L549) | Local | `tests::validates_capacity_and_omits_paths_from_debug::temp` | — | Keep |
+| [559](feuer-storage/src/file.rs#L559) | Local | `tests::validates_capacity_and_omits_paths_from_debug::file` | — | Keep |
 
 </details>
 
@@ -1328,10 +1340,10 @@ Public source-level renames: `Config` → `CacheConfig`, `ConfigError` → `Cach
 | [141](feuer-storage/src/uring/tests.rs#L141) | Function | `write_only_fills_the_ring_but_an_older_queued_read_gets_the_next_slot` | `fn()` | Keep |
 | [195](feuer-storage/src/uring/tests.rs#L195) | Function | `active_read_does_not_throttle_rmw_writes` | `fn()` | Keep |
 | [230](feuer-storage/src/uring/tests.rs#L230) | Function | `full_write_admission_and_buffers_leave_a_full_read_ring_available` | `fn()` | Keep |
-| [262](feuer-storage/src/uring/tests.rs#L262) | Function | `overlap_blocks_only_the_requests_it_must` | `fn()` | Keep |
-| [300](feuer-storage/src/uring/tests.rs#L300) | Function | `discarded_queued_requests_never_reach_the_ring` | `fn()` | Keep |
-| [319](feuer-storage/src/uring/tests.rs#L319) | Function | `completion_state_handles_short_io_errors_and_rmw` | `fn()` | Keep |
-| [346](feuer-storage/src/uring/tests.rs#L346) | Function | `byte_budget_bounds_rmw_requests_and_releases_on_cancel` | `fn()` | Keep |
+| [262](feuer-storage/src/uring/tests.rs#L262) | Function | `canceled_submitted_rmw_retains_resources_and_still_writes` | `fn()` | Storage update (see above) |
+| [296](feuer-storage/src/uring/tests.rs#L296) | Function | `discarded_queued_requests_never_reach_the_ring` | `fn()` | Keep |
+| [315](feuer-storage/src/uring/tests.rs#L315) | Function | `completion_state_handles_short_io_errors_and_rmw` | `fn()` | Keep |
+| [342](feuer-storage/src/uring/tests.rs#L342) | Function | `byte_budget_bounds_rmw_requests_and_releases_on_cancel` | `fn()` | Keep |
 
 <details>
 <summary>Local bindings (41)</summary>
@@ -1366,19 +1378,19 @@ Public source-level renames: `Config` → `CacheConfig`, `ConfigError` → `Cach
 | [231](feuer-storage/src/uring/tests.rs#L231) | Local | `full_write_admission_and_buffers_leave_a_full_read_ring_available::queue` | — | Rename from `driver` |
 | [232](feuer-storage/src/uring/tests.rs#L232) | Local | `full_write_admission_and_buffers_leave_a_full_read_ring_available::mut writes` | — | Keep |
 | [233](feuer-storage/src/uring/tests.rs#L233) | Local | `full_write_admission_and_buffers_leave_a_full_read_ring_available::mut reads` | — | Keep |
-| [263](feuer-storage/src/uring/tests.rs#L263) | Local | `overlap_blocks_only_the_requests_it_must::mut queue` | — | Rename from `mut driver` |
-| [264](feuer-storage/src/uring/tests.rs#L264) | Local | `overlap_blocks_only_the_requests_it_must::mut replies` | — | Keep |
-| [284](feuer-storage/src/uring/tests.rs#L284) | Local | `overlap_blocks_only_the_requests_it_must::(request, reply)` | — | Keep |
-| [301](feuer-storage/src/uring/tests.rs#L301) | Local | `discarded_queued_requests_never_reach_the_ring::mut queue` | — | Rename from `mut driver` |
-| [302](feuer-storage/src/uring/tests.rs#L302) | Local | `discarded_queued_requests_never_reach_the_ring::(request, reply)` | — | Keep |
-| [320](feuer-storage/src/uring/tests.rs#L320) | Local | `completion_state_handles_short_io_errors_and_rmw::queue` | — | Rename from `driver` |
-| [321](feuer-storage/src/uring/tests.rs#L321) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut read, _reply)` | — | Keep |
-| [327](feuer-storage/src/uring/tests.rs#L327) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut read, _reply)` | — | Keep |
-| [329](feuer-storage/src/uring/tests.rs#L329) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut write, _reply)` | — | Keep |
-| [336](feuer-storage/src/uring/tests.rs#L336) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut rmw, _reply)` | — | Keep |
-| [347](feuer-storage/src/uring/tests.rs#L347) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::queue` | — | Rename from `driver` |
-| [348](feuer-storage/src/uring/tests.rs#L348) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::mut requests` | — | Keep |
-| [356](feuer-storage/src/uring/tests.rs#L356) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::_read` | — | Keep |
+| [263](feuer-storage/src/uring/tests.rs#L263) | Local | `canceled_submitted_rmw_retains_resources_and_still_writes::mut queue` | — | Storage update (see above) |
+| [264](feuer-storage/src/uring/tests.rs#L264) | Local | `canceled_submitted_rmw_retains_resources_and_still_writes::(write, reply)` | — | Storage update (see above) |
+| [289](feuer-storage/src/uring/tests.rs#L289) | Local | `canceled_submitted_rmw_retains_resources_and_still_writes::(read, mut reply)` | — | Storage update (see above) |
+| [297](feuer-storage/src/uring/tests.rs#L297) | Local | `discarded_queued_requests_never_reach_the_ring::mut queue` | — | Rename from `mut driver` |
+| [298](feuer-storage/src/uring/tests.rs#L298) | Local | `discarded_queued_requests_never_reach_the_ring::(request, reply)` | — | Keep |
+| [316](feuer-storage/src/uring/tests.rs#L316) | Local | `completion_state_handles_short_io_errors_and_rmw::queue` | — | Rename from `driver` |
+| [317](feuer-storage/src/uring/tests.rs#L317) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut read, _reply)` | — | Keep |
+| [323](feuer-storage/src/uring/tests.rs#L323) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut read, _reply)` | — | Keep |
+| [325](feuer-storage/src/uring/tests.rs#L325) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut write, _reply)` | — | Keep |
+| [332](feuer-storage/src/uring/tests.rs#L332) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut rmw, _reply)` | — | Keep |
+| [343](feuer-storage/src/uring/tests.rs#L343) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::queue` | — | Rename from `driver` |
+| [344](feuer-storage/src/uring/tests.rs#L344) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::mut requests` | — | Keep |
+| [352](feuer-storage/src/uring/tests.rs#L352) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::_read` | — | Keep |
 
 </details>
 
@@ -1433,31 +1445,30 @@ Public source-level renames: `Config` → `CacheConfig`, `ConfigError` → `Cach
 | [226](feuer-storage/src/uring.rs#L226) | Field | `IoRequest::_staging_pages_permit` | `OwnedSemaphorePermit` | Rename from `_staging_permit` |
 | [229](feuer-storage/src/uring.rs#L229) | Impl | `impl IoRequest` | — | Keep |
 | [230](feuer-storage/src/uring.rs#L230) | Function | `impl IoRequest::new` | `fn( operation: IoOperation, offset: u64, length: usize, payload: &[u8], reply: oneshot::Sender<io::Result<Bytes>>, permits: (OwnedSemaphorePermit, OwnedSemaphorePermit), ) -> io::Result<Self>` | Keep |
-| [267](feuer-storage/src/uring.rs#L267) | Method | `impl IoRequest::conflicts` | `fn(&self, other: &Self) -> bool` | Keep |
-| [273](feuer-storage/src/uring.rs#L273) | Method | `impl IoRequest::submission_entry` | `fn(&mut self, fd: i32, slot: usize) -> squeue::Entry` | Keep |
-| [289](feuer-storage/src/uring.rs#L289) | Method | `impl IoRequest::complete` | `fn(&mut self, result: i32) -> io::Result<bool>` | Keep |
-| [318](feuer-storage/src/uring.rs#L318) | Method | `impl IoRequest::incomplete_io_error` | `fn(&self) -> io::Error` | Rename from `short_error` |
-| [329](feuer-storage/src/uring.rs#L329) | Method | `impl IoRequest::finish` | `fn(mut self, result: io::Result<()>)` | Keep |
-| [344](feuer-storage/src/uring.rs#L344) | Struct | `IoQueue` | — | Keep |
-| [346](feuer-storage/src/uring.rs#L346) | Field | `IoQueue::admission` | `Arc<IoAdmissionBudgets>` | Keep |
-| [348](feuer-storage/src/uring.rs#L348) | Field | `IoQueue::ring` | `IoUring` | Keep |
-| [350](feuer-storage/src/uring.rs#L350) | Field | `IoQueue::file` | `Option<File>` | Keep |
-| [352](feuer-storage/src/uring.rs#L352) | Field | `IoQueue::directory_lock` | `Option<File>` | Rename from `lock` |
-| [354](feuer-storage/src/uring.rs#L354) | Field | `IoQueue::wake_fd` | `Arc<OwnedFd>` | Rename from `wake` |
-| [356](feuer-storage/src/uring.rs#L356) | Field | `IoQueue::receiver` | `mpsc::Receiver<IoRequest>` | Keep |
-| [358](feuer-storage/src/uring.rs#L358) | Field | `IoQueue::pending` | `VecDeque<IoRequest>` | Keep |
-| [360](feuer-storage/src/uring.rs#L360) | Field | `IoQueue::active` | `Vec<Option<IoRequest>>` | Keep |
-| [363](feuer-storage/src/uring.rs#L363) | Impl | `impl IoQueue` | — | Keep |
-| [364](feuer-storage/src/uring.rs#L364) | Method | `impl IoQueue::run` | `fn(&mut self) -> io::Result<()>` | Keep |
-| [411](feuer-storage/src/uring.rs#L411) | Method | `impl IoQueue::schedule` | `fn(&mut self)` | Keep |
-| [435](feuer-storage/src/uring.rs#L435) | Method | `impl IoQueue::submit_slot` | `fn(&mut self, slot: usize)` | Keep |
-| [450](feuer-storage/src/uring.rs#L450) | Method | `impl IoQueue::wait` | `fn(&self) -> io::Result<()>` | Keep |
-| [488](feuer-storage/src/uring.rs#L488) | Impl | `impl Drop for IoQueue` | — | Keep |
-| [489](feuer-storage/src/uring.rs#L489) | Method | `impl Drop for IoQueue::drop` | `fn(&mut self)` | Keep |
-| [511](feuer-storage/src/uring.rs#L511) | Function | `notify` | `fn(wake_fd: &OwnedFd)` | Keep |
+| [267](feuer-storage/src/uring.rs#L267) | Method | `impl IoRequest::submission_entry` | `fn(&mut self, fd: i32, slot: usize) -> squeue::Entry` | Keep |
+| [283](feuer-storage/src/uring.rs#L283) | Method | `impl IoRequest::complete` | `fn(&mut self, result: i32) -> io::Result<bool>` | Keep |
+| [312](feuer-storage/src/uring.rs#L312) | Method | `impl IoRequest::incomplete_io_error` | `fn(&self) -> io::Error` | Rename from `short_error` |
+| [323](feuer-storage/src/uring.rs#L323) | Method | `impl IoRequest::finish` | `fn(mut self, result: io::Result<()>)` | Keep |
+| [338](feuer-storage/src/uring.rs#L338) | Struct | `IoQueue` | — | Keep |
+| [340](feuer-storage/src/uring.rs#L340) | Field | `IoQueue::admission` | `Arc<IoAdmissionBudgets>` | Keep |
+| [342](feuer-storage/src/uring.rs#L342) | Field | `IoQueue::ring` | `IoUring` | Keep |
+| [344](feuer-storage/src/uring.rs#L344) | Field | `IoQueue::file` | `Option<File>` | Keep |
+| [346](feuer-storage/src/uring.rs#L346) | Field | `IoQueue::directory_lock` | `Option<File>` | Rename from `lock` |
+| [348](feuer-storage/src/uring.rs#L348) | Field | `IoQueue::wake_fd` | `Arc<OwnedFd>` | Rename from `wake` |
+| [350](feuer-storage/src/uring.rs#L350) | Field | `IoQueue::receiver` | `mpsc::Receiver<IoRequest>` | Keep |
+| [352](feuer-storage/src/uring.rs#L352) | Field | `IoQueue::pending` | `VecDeque<IoRequest>` | Keep |
+| [354](feuer-storage/src/uring.rs#L354) | Field | `IoQueue::active` | `Vec<Option<IoRequest>>` | Keep |
+| [357](feuer-storage/src/uring.rs#L357) | Impl | `impl IoQueue` | — | Keep |
+| [358](feuer-storage/src/uring.rs#L358) | Method | `impl IoQueue::run` | `fn(&mut self) -> io::Result<()>` | Keep |
+| [405](feuer-storage/src/uring.rs#L405) | Method | `impl IoQueue::schedule` | `fn(&mut self)` | Keep |
+| [425](feuer-storage/src/uring.rs#L425) | Method | `impl IoQueue::submit_slot` | `fn(&mut self, slot: usize)` | Keep |
+| [440](feuer-storage/src/uring.rs#L440) | Method | `impl IoQueue::wait` | `fn(&self) -> io::Result<()>` | Keep |
+| [478](feuer-storage/src/uring.rs#L478) | Impl | `impl Drop for IoQueue` | — | Keep |
+| [479](feuer-storage/src/uring.rs#L479) | Method | `impl Drop for IoQueue::drop` | `fn(&mut self)` | Keep |
+| [501](feuer-storage/src/uring.rs#L501) | Function | `notify` | `fn(wake_fd: &OwnedFd)` | Keep |
 
 <details>
-<summary>Local bindings (48)</summary>
+<summary>Local bindings (45)</summary>
 
 | Line | Kind | Name / source parent | Signature or type | Review decision |
 | ---: | --- | --- | --- | --- |
@@ -1484,31 +1495,28 @@ Public source-level renames: `Config` → `CacheConfig`, `ConfigError` → `Cach
 | [240](feuer-storage/src/uring.rs#L240) | Local | `impl IoRequest::new::mut io_buffer` | — | Keep |
 | [241](feuer-storage/src/uring.rs#L241) | Local | `impl IoRequest::new::needs_read_modify_write` | — | Keep |
 | [243](feuer-storage/src/uring.rs#L243) | Local | `impl IoRequest::new::payload` | — | Keep |
-| [274](feuer-storage/src/uring.rs#L274) | Local | `impl IoRequest::submission_entry::fd` | — | Keep |
-| [277](feuer-storage/src/uring.rs#L277) | Local | `impl IoRequest::submission_entry::ptr` | — | Keep |
-| [278](feuer-storage/src/uring.rs#L278) | Local | `impl IoRequest::submission_entry::length` | — | Keep |
-| [279](feuer-storage/src/uring.rs#L279) | Local | `impl IoRequest::submission_entry::offset` | — | Keep |
-| [280](feuer-storage/src/uring.rs#L280) | Local | `impl IoRequest::submission_entry::entry` | — | Keep |
-| [296](feuer-storage/src/uring.rs#L296) | Local | `impl IoRequest::complete::count` | — | Keep |
-| [330](feuer-storage/src/uring.rs#L330) | Local | `impl IoRequest::finish::result` | — | Keep |
-| [340](feuer-storage/src/uring.rs#L340) | Local | `impl IoRequest::finish::_` | — | Keep |
-| [365](feuer-storage/src/uring.rs#L365) | Local | `impl IoQueue::run::mut disconnected` | — | Keep |
-| [367](feuer-storage/src/uring.rs#L367) | Local | `impl IoQueue::run::completions` | `Vec<_>` | Keep |
-| [373](feuer-storage/src/uring.rs#L373) | Local | `impl IoQueue::run::slot` | — | Keep |
-| [374](feuer-storage/src/uring.rs#L374) | Local | `impl IoQueue::run::request` | — | Keep |
-| [391](feuer-storage/src/uring.rs#L391) | Local | `impl IoQueue::run::active` | — | Keep |
-| [418](feuer-storage/src/uring.rs#L418) | Local | `impl IoQueue::schedule::mut index` | — | Keep |
-| [420](feuer-storage/src/uring.rs#L420) | Local | `impl IoQueue::schedule::Some(slot)` | — | Keep |
-| [423](feuer-storage/src/uring.rs#L423) | Local | `impl IoQueue::schedule::request` | — | Keep |
-| [424](feuer-storage/src/uring.rs#L424) | Local | `impl IoQueue::schedule::blocked` | — | Keep |
-| [436](feuer-storage/src/uring.rs#L436) | Local | `impl IoQueue::submit_slot::entry` | — | Keep |
-| [451](feuer-storage/src/uring.rs#L451) | Local | `impl IoQueue::wait::mut fds` | — | Keep |
-| [464](feuer-storage/src/uring.rs#L464) | Local | `impl IoQueue::wait::result` | — | Keep |
-| [466](feuer-storage/src/uring.rs#L466) | Local | `impl IoQueue::wait::error` | — | Keep |
-| [480](feuer-storage/src/uring.rs#L480) | Local | `impl IoQueue::wait::mut value` | — | Keep |
-| [501](feuer-storage/src/uring.rs#L501) | Local | `impl Drop for IoQueue::drop::_` | — | Keep |
-| [512](feuer-storage/src/uring.rs#L512) | Local | `notify::value` | — | Keep |
-| [515](feuer-storage/src/uring.rs#L515) | Local | `notify::result` | — | Keep |
+| [268](feuer-storage/src/uring.rs#L268) | Local | `impl IoRequest::submission_entry::fd` | — | Keep |
+| [271](feuer-storage/src/uring.rs#L271) | Local | `impl IoRequest::submission_entry::ptr` | — | Keep |
+| [272](feuer-storage/src/uring.rs#L272) | Local | `impl IoRequest::submission_entry::length` | — | Keep |
+| [273](feuer-storage/src/uring.rs#L273) | Local | `impl IoRequest::submission_entry::offset` | — | Keep |
+| [274](feuer-storage/src/uring.rs#L274) | Local | `impl IoRequest::submission_entry::entry` | — | Keep |
+| [290](feuer-storage/src/uring.rs#L290) | Local | `impl IoRequest::complete::count` | — | Keep |
+| [324](feuer-storage/src/uring.rs#L324) | Local | `impl IoRequest::finish::result` | — | Keep |
+| [334](feuer-storage/src/uring.rs#L334) | Local | `impl IoRequest::finish::_` | — | Keep |
+| [359](feuer-storage/src/uring.rs#L359) | Local | `impl IoQueue::run::mut disconnected` | — | Keep |
+| [361](feuer-storage/src/uring.rs#L361) | Local | `impl IoQueue::run::completions` | `Vec<_>` | Keep |
+| [367](feuer-storage/src/uring.rs#L367) | Local | `impl IoQueue::run::slot` | — | Keep |
+| [368](feuer-storage/src/uring.rs#L368) | Local | `impl IoQueue::run::request` | — | Keep |
+| [385](feuer-storage/src/uring.rs#L385) | Local | `impl IoQueue::run::active` | — | Keep |
+| [417](feuer-storage/src/uring.rs#L417) | Local | `impl IoQueue::schedule::Some(request)` | — | Storage update (see above) |
+| [426](feuer-storage/src/uring.rs#L426) | Local | `impl IoQueue::submit_slot::entry` | — | Keep |
+| [441](feuer-storage/src/uring.rs#L441) | Local | `impl IoQueue::wait::mut fds` | — | Keep |
+| [454](feuer-storage/src/uring.rs#L454) | Local | `impl IoQueue::wait::result` | — | Keep |
+| [456](feuer-storage/src/uring.rs#L456) | Local | `impl IoQueue::wait::error` | — | Keep |
+| [470](feuer-storage/src/uring.rs#L470) | Local | `impl IoQueue::wait::mut value` | — | Keep |
+| [491](feuer-storage/src/uring.rs#L491) | Local | `impl Drop for IoQueue::drop::_` | — | Keep |
+| [502](feuer-storage/src/uring.rs#L502) | Local | `notify::value` | — | Keep |
+| [505](feuer-storage/src/uring.rs#L505) | Local | `notify::result` | — | Keep |
 
 </details>
 

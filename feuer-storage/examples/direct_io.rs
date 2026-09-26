@@ -68,7 +68,7 @@ async fn run_case(file: &DataFile, read_size: usize, readers: usize, writers: us
     let deadline = measure_start + Duration::from_secs(seconds);
     let mut tasks = Vec::new();
     // Random reads and sequential 1-MiB writes use disjoint regions. Write lanes
-    // are disjoint too, avoiding overlap serialization as an artificial limit.
+    // are disjoint too, satisfying DataFile's caller-owned conflict prevention.
     let payload = Arc::new(Bytes::from(vec![0x5a; MIB]));
     for id in 0..readers + writers {
         let file = file.clone();

@@ -259,41 +259,37 @@ fn full_write_admission_and_buffers_leave_a_full_read_ring_available() {
 }
 
 #[test]
-fn overlap_blocks_only_the_requests_it_must() {
+fn canceled_submitted_rmw_retains_resources_and_still_writes() {
     let mut queue = queue();
-    let mut replies = Vec::new();
-    for (operation, offset, length) in [
-        (IoOperation::Write, 1, 1), // RMW holds the entire first page
-        (IoOperation::Read, 2, 1),  // blocked despite disjoint logical bytes
-        (
-            IoOperation::Write,
-            DIRECT_IO_ALIGNMENT_BYTES as u64,
-            DIRECT_IO_ALIGNMENT_BYTES,
-        ),
-        (
-            IoOperation::Read,
-            2 * DIRECT_IO_ALIGNMENT_BYTES as u64,
-            DIRECT_IO_ALIGNMENT_BYTES,
-        ),
-        (
-            IoOperation::Write,
-            3 * DIRECT_IO_ALIGNMENT_BYTES as u64,
-            DIRECT_IO_ALIGNMENT_BYTES,
-        ), // independent writes can pass the blocked read
-    ] {
-        let (request, reply) = request(&queue, operation, offset, length);
-        queue.pending.push_back(request);
-        replies.push(reply);
-    }
+    let (write, reply) = request(&queue, IoOperation::Write, 1, 1);
+    queue.pending.push_back(write);
     queue.schedule();
-    assert_eq!(queue.active.iter().flatten().count(), 4);
-    assert_eq!(queue.pending.len(), 1);
-    assert_eq!(queue.pending[0].operation, IoOperation::Read);
-    assert_eq!(queue.pending[0].aligned_offset, 0);
+    // The RMW read has reached the kernel, but its completion is not yet processed.
+    queue.ring.submit_and_wait(1).unwrap();
+    drop(reply);
+    queue.schedule();
+    assert!(queue.active[0].is_some());
+    assert_eq!(
+        queue.admission.request_slots[1].available_permits(),
+        MAX_IN_FLIGHT_IO - 1
+    );
+    assert_eq!(
+        queue.admission.staging_pages[1].available_permits(),
+        MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES - 2
+    );
     queue.run().unwrap();
-    for mut reply in replies {
-        reply.try_recv().unwrap().unwrap();
-    }
+    assert!(queue.active.iter().all(Option::is_none));
+    assert_eq!(queue.admission.request_slots[1].available_permits(), MAX_IN_FLIGHT_IO);
+    assert_eq!(
+        queue.admission.staging_pages[1].available_permits(),
+        MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES
+    );
+
+    // Only read/reuse the region after completion, not after dropping the receiver.
+    let (read, mut reply) = request(&queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    queue.pending.push_back(read);
+    queue.run().unwrap();
+    assert_eq!(&reply.try_recv().unwrap().unwrap()[..3], &[0, 0x99, 0]);
 }
 
 #[test]
