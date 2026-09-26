@@ -91,7 +91,25 @@ This is a raw I/O layer, not a disk cache or population queue. Disk storage and 
   an end-to-end cache or matched backend comparison. Separate [SSD measurements](benchmarks/ssd/ssd-concurrent-read-write.md)
   explore mixed reads and writes; small-read-heavy workloads may still warrant write throttling.
 
-## Next: best-effort disk scheduling
+## In progress: disk allocation/recovery prototype
+
+Before public-cache integration, [`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) records
+an experimental physical layout and ownership/reuse rules. The test-only allocator uses 1-MiB units with a
+reserved 4-KiB index page, sparse subdivision into 4-KiB blocks, and coalesced free-unit runs. Large entries
+can own multiple regions and share subdivided units for their tails. Shared small-block ownership and
+`DiskRegionReadGuard` delay reuse until all owners/readers release the allocation; unknown-completion
+regions can be quarantined.
+
+This is not a disk range engine: tests model eviction by dropping allocations and manually pack small values.
+Entry metadata, integrity, recovery, publication, eviction policy, and a population packer remain unimplemented.
+One mutex protects each prototype allocator; production concurrency and allocator selection remain open.
+
+On `m8g-32cpu-local-ssd`, all 36 storage tests (13 new allocator tests) and all 96 workspace tests passed,
+with real direct I/O and io_uring on the local ext4 SSD. Storage Clippy also passed with warnings denied.
+The tests include fragmented reuse, concurrent readers, abandoned writer results, sparse 40-TiB accounting,
+and a real 100-MiB write with subrange reads. These are correctness checks, not comparative measurements.
+
+## Later: best-effort disk scheduling
 
 - Bound the pending-write queue by payload bytes and entry count.
 - Allow policy to skip or replace candidates without blocking or failing a successful lookup.

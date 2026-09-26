@@ -6,6 +6,9 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("feuer-storage requires Linux with io_uring and O_DIRECT support");
 
+// Experimental allocator, not yet connected to the disk range engine.
+#[cfg(all(test, target_os = "linux"))]
+mod allocation;
 mod error;
 #[cfg(target_os = "linux")]
 mod file;
