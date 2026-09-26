@@ -1,4 +1,5 @@
 //! A single-owner ring. Only this module hands buffer pointers to the kernel.
+//! Writes require offsets and lengths aligned to DIRECT_IO_ALIGNMENT_BYTES.
 
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
@@ -29,8 +30,8 @@ const MAX_IN_FLIGHT_IO: usize = 64;
 // Writes cannot consume read permits; each class can independently fill the ring.
 const MAX_ADMITTED_REQUESTS: usize = 2 * MAX_IN_FLIGHT_IO;
 // Staging budget split equally between reads and writes. Each half can
-// hold MAX_IN_FLIGHT_IO full-size aligned buffers. RMW also charges its staging payload;
-// caller inputs and read-result allocations are outside this budget.
+// hold MAX_IN_FLIGHT_IO full-size aligned buffers. Caller inputs and read-result
+// allocations are outside this budget.
 const MAX_STAGING_BUFFER_BYTES: usize = 128 * 1024 * 1024;
 
 #[cfg(test)]
@@ -68,13 +69,10 @@ impl IoAdmissionBudgets {
     }
 }
 
-fn staging_pages_for(operation: IoOperation, offset: u64, length: usize) -> u32 {
+fn staging_pages_for(offset: u64, length: usize) -> u32 {
     let data_offset_in_buffer = offset as usize % DIRECT_IO_ALIGNMENT_BYTES;
     let aligned_length = (data_offset_in_buffer + length).next_multiple_of(DIRECT_IO_ALIGNMENT_BYTES);
-    let needs_read_modify_write =
-        operation == IoOperation::Write && (data_offset_in_buffer != 0 || length != aligned_length);
-    (aligned_length.max(DIRECT_IO_ALIGNMENT_BYTES) / DIRECT_IO_ALIGNMENT_BYTES
-        * if needs_read_modify_write { 2 } else { 1 }) as u32
+    (aligned_length.max(DIRECT_IO_ALIGNMENT_BYTES) / DIRECT_IO_ALIGNMENT_BYTES) as u32
 }
 
 impl IoQueueHandle {
@@ -127,7 +125,7 @@ impl IoQueueHandle {
             .map_err(|_| queue_stopped_error())?;
         let staging_pages_permit = self.admission.staging_pages[class]
             .clone()
-            .acquire_many_owned(staging_pages_for(operation, offset, length))
+            .acquire_many_owned(staging_pages_for(offset, length))
             .await
             .map_err(|_| queue_stopped_error())?;
         let (reply, receive) = oneshot::channel();
@@ -200,19 +198,17 @@ impl Drop for AlignedIoBuffer {
 
 /// One admitted I/O request, owning its buffers and permits through completion.
 struct IoRequest {
-    // Caller operation; an RMW stays classified as a write during its read phase.
+    // I/O direction, unchanged through short-I/O continuations.
     operation: IoOperation,
     // Aligned physical start, used for kernel offsets.
     aligned_offset: u64,
     // Requested data starts at this byte offset in `io_buffer`.
     data_offset_in_buffer: usize,
-    // Logical byte count, excluding alignment padding from results and RMW updates.
+    // Logical byte count, excluding alignment padding from read results.
     length: usize,
     // Aligned memory for disk reads/writes; kept alive until I/O completes.
     io_buffer: AlignedIoBuffer,
-    // RMW input preserved during the initial read, then merged into `io_buffer`.
-    read_modify_write_payload: Option<Bytes>,
-    // Bytes completed in this phase, allowing aligned short-I/O continuations.
+    // Bytes completed, allowing aligned short-I/O continuations.
     completed_bytes: usize,
     // Caller result channel; taken on finish/failure, also detects cancellation.
     reply: Option<oneshot::Sender<io::Result<Bytes>>>,
@@ -231,26 +227,22 @@ impl IoRequest {
         reply: oneshot::Sender<io::Result<Bytes>>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
     ) -> io::Result<Self> {
+        if operation == IoOperation::Write {
+            assert!(offset.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES as u64));
+            assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
+        }
         let data_offset_in_buffer = offset as usize % DIRECT_IO_ALIGNMENT_BYTES;
         let aligned_length = (data_offset_in_buffer + length).next_multiple_of(DIRECT_IO_ALIGNMENT_BYTES);
         let mut io_buffer = AlignedIoBuffer::new(aligned_length)?;
-        let needs_read_modify_write =
-            operation == IoOperation::Write && (data_offset_in_buffer != 0 || length != aligned_length);
-        let payload = if needs_read_modify_write {
-            Some(Bytes::copy_from_slice(payload))
-        } else {
-            if operation == IoOperation::Write {
-                io_buffer.as_mut_slice()[..length].copy_from_slice(payload);
-            }
-            None
-        };
+        if operation == IoOperation::Write {
+            io_buffer.as_mut_slice()[..length].copy_from_slice(payload);
+        }
         Ok(Self {
             operation,
             aligned_offset: offset - data_offset_in_buffer as u64,
             data_offset_in_buffer,
             length,
             io_buffer,
-            read_modify_write_payload: payload,
             completed_bytes: 0,
             reply: Some(reply),
             _request_permit: permits.0,
@@ -262,10 +254,6 @@ impl IoRequest {
         (self.data_offset_in_buffer + self.length).next_multiple_of(DIRECT_IO_ALIGNMENT_BYTES)
     }
 
-    fn is_reading(&self) -> bool {
-        self.operation == IoOperation::Read || self.read_modify_write_payload.is_some()
-    }
-
     fn submission_entry(&mut self, fd: i32, slot: usize) -> squeue::Entry {
         let fd = types::Fd(fd);
         // SAFETY: completed_bytes is within io_buffer. The request owns this memory
@@ -273,7 +261,7 @@ impl IoRequest {
         let ptr = unsafe { self.io_buffer.ptr.as_ptr().add(self.completed_bytes) };
         let length = (self.aligned_length() - self.completed_bytes) as u32;
         let offset = self.aligned_offset + self.completed_bytes as u64;
-        let entry = if self.is_reading() {
+        let entry = if self.operation == IoOperation::Read {
             opcode::Read::new(fd, ptr, length).offset(offset).build()
         } else {
             opcode::Write::new(fd, ptr, length).offset(offset).build()
@@ -281,7 +269,7 @@ impl IoRequest {
         entry.user_data(slot as u64)
     }
 
-    // true means a further operation (short-I/O remainder or RMW write) is needed.
+    // true means the operation needs to be retried or its remainder submitted.
     fn complete(&mut self, result: i32) -> io::Result<bool> {
         if result == -libc::EINTR {
             return Ok(true);
@@ -301,18 +289,12 @@ impl IoRequest {
             }
             return Ok(true);
         }
-        if let Some(payload) = self.read_modify_write_payload.take() {
-            self.io_buffer.as_mut_slice()[self.data_offset_in_buffer..self.data_offset_in_buffer + self.length]
-                .copy_from_slice(&payload);
-            self.completed_bytes = 0;
-            return Ok(true);
-        }
         Ok(false)
     }
 
     fn incomplete_io_error(&self) -> io::Error {
         io::Error::new(
-            if self.is_reading() {
+            if self.operation == IoOperation::Read {
                 io::ErrorKind::UnexpectedEof
             } else {
                 io::ErrorKind::WriteZero

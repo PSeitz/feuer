@@ -13,7 +13,7 @@ fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) 
         .unwrap();
     let staging_pages_permit = queue.admission.staging_pages[class]
         .clone()
-        .try_acquire_many_owned(staging_pages_for(operation, offset, length))
+        .try_acquire_many_owned(staging_pages_for(offset, length))
         .unwrap();
     let payload = if operation == IoOperation::Write {
         vec![0x99; length]
@@ -192,7 +192,7 @@ fn write_only_fills_the_ring_but_an_older_queued_read_gets_the_next_slot() {
 }
 
 #[test]
-fn active_read_does_not_throttle_rmw_writes() {
+fn active_read_does_not_throttle_writes() {
     let mut queue = queue();
     let (read, reply) = request(&queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
     queue.pending.push_back(read);
@@ -202,8 +202,8 @@ fn active_read_does_not_throttle_rmw_writes() {
         let (request, reply) = request(
             &queue,
             IoOperation::Write,
-            (i * DIRECT_IO_ALIGNMENT_BYTES + 1) as u64,
-            1,
+            (i * DIRECT_IO_ALIGNMENT_BYTES) as u64,
+            DIRECT_IO_ALIGNMENT_BYTES,
         );
         queue.pending.push_back(request);
         replies.push(reply);
@@ -259,12 +259,12 @@ fn full_write_admission_and_buffers_leave_a_full_read_ring_available() {
 }
 
 #[test]
-fn canceled_submitted_rmw_retains_resources_and_still_writes() {
+fn canceled_submitted_write_retains_resources() {
     let mut queue = queue();
-    let (write, reply) = request(&queue, IoOperation::Write, 1, 1);
+    let (write, reply) = request(&queue, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
     queue.pending.push_back(write);
     queue.schedule();
-    // The RMW read has reached the kernel, but its completion is not yet processed.
+    // The write has reached the kernel, but its completion is not yet processed.
     queue.ring.submit_and_wait(1).unwrap();
     drop(reply);
     queue.schedule();
@@ -275,7 +275,7 @@ fn canceled_submitted_rmw_retains_resources_and_still_writes() {
     );
     assert_eq!(
         queue.admission.staging_pages[1].available_permits(),
-        MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES - 2
+        MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES - 1
     );
     queue.run().unwrap();
     assert!(queue.active.iter().all(Option::is_none));
@@ -289,7 +289,10 @@ fn canceled_submitted_rmw_retains_resources_and_still_writes() {
     let (read, mut reply) = request(&queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
     queue.pending.push_back(read);
     queue.run().unwrap();
-    assert_eq!(&reply.try_recv().unwrap().unwrap()[..3], &[0, 0x99, 0]);
+    assert_eq!(
+        &reply.try_recv().unwrap().unwrap()[..],
+        &[0x99; DIRECT_IO_ALIGNMENT_BYTES]
+    );
 }
 
 #[test]
@@ -312,7 +315,7 @@ fn discarded_queued_requests_never_reach_the_ring() {
 }
 
 #[test]
-fn completion_state_handles_short_io_errors_and_rmw() {
+fn completion_state_handles_short_io_and_errors() {
     let queue = queue();
     let (mut read, _reply) = request(&queue, IoOperation::Read, 0, 2 * DIRECT_IO_ALIGNMENT_BYTES);
     assert!(read.complete(-libc::EINTR).unwrap());
@@ -329,33 +332,20 @@ fn completion_state_handles_short_io_errors_and_rmw() {
         Some(libc::ENOSPC)
     );
 
-    let (mut rmw, _reply) = request(&queue, IoOperation::Write, 1, 3);
-    assert!(rmw.is_reading());
-    assert_eq!(rmw.aligned_length(), DIRECT_IO_ALIGNMENT_BYTES);
-    rmw.io_buffer.as_mut_slice().fill(0x55);
-    assert!(rmw.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
-    assert!(!rmw.is_reading());
-    assert_eq!(rmw.completed_bytes, 0);
-    assert_eq!(&rmw.io_buffer.as_mut_slice()[..5], &[0x55, 0x99, 0x99, 0x99, 0x55]);
-    assert!(!rmw.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+    let (mut write, _reply) = request(&queue, IoOperation::Write, 0, 2 * DIRECT_IO_ALIGNMENT_BYTES);
+    assert!(write.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+    assert_eq!(write.completed_bytes, DIRECT_IO_ALIGNMENT_BYTES);
+    assert!(!write.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
 }
 
 #[test]
-fn byte_budget_bounds_rmw_requests_and_releases_on_cancel() {
-    let queue = queue();
-    let mut requests = Vec::new();
-    for _ in 0..MAX_STAGING_BUFFER_BYTES / 2 / (2 * MAX_IO_CHUNK_BYTES) {
-        requests.push(request(&queue, IoOperation::Write, 1, MAX_IO_CHUNK_BYTES - 1));
-    }
-    assert_eq!(queue.admission.staging_pages[1].available_permits(), 0);
-    assert!(queue.admission.staging_pages[1].clone().try_acquire_owned().is_err());
-    assert!(queue.admission.request_slots[1].available_permits() > 0);
-    // Saturated write buffers do not consume any read admission or buffers.
-    let _read = request(&queue, IoOperation::Read, 0, MAX_IO_CHUNK_BYTES);
-    drop(requests);
-    assert_eq!(
-        queue.admission.staging_pages[1].available_permits(),
-        MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES
-    );
-    assert_eq!(queue.admission.request_slots[1].available_permits(), MAX_IN_FLIGHT_IO);
+#[should_panic(expected = "offset.is_multiple_of")]
+fn rejects_unaligned_write_offset() {
+    request(&queue(), IoOperation::Write, 1, DIRECT_IO_ALIGNMENT_BYTES);
+}
+
+#[test]
+#[should_panic(expected = "length.is_multiple_of")]
+fn rejects_unaligned_write_length() {
+    request(&queue(), IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES - 1);
 }

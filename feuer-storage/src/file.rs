@@ -33,15 +33,15 @@ struct DataFileState {
 /// Admission reserves 64 requests and 64 MiB of staging buffers for each of
 /// reads and writes. Caller inputs and read-result allocations are outside
 /// this staging-buffer budget.
-/// Reads and writes accept arbitrary byte ranges; unaligned writes use
-/// read-modify-write. Multi-chunk operations are not atomic. Write completion
+/// Reads accept arbitrary byte ranges; write offsets and lengths must be
+/// multiples of 4096 bytes. Multi-chunk operations are not atomic. Write completion
 /// permits subsequent reads, but does not guarantee crash durability.
 ///
 /// # Caller-owned concurrency and cancellation
 ///
 /// Callers must prevent overlapping I/O when either operation is a write. This
 /// applies to physical byte ranges rounded outward to 4 KiB boundaries, not just
-/// the requested bytes: disjoint unaligned writes can modify the same page.
+/// the requested bytes of an unaligned read.
 /// Multiple reads may run concurrently. The upper storage layer owns disk-region
 /// allocation and read guards; this file neither checks conflicts nor protects
 /// disk regions from reuse.
@@ -134,14 +134,20 @@ impl DataFile {
         self.execute_measured(IoOperation::Read, offset, length, &[]).await
     }
 
-    /// Writes arbitrary bytes without modifying neighboring bytes in their pages.
+    /// Writes complete 4096-byte-aligned blocks.
     ///
     /// Internally copies bounded chunks into aligned buffers. Callers must protect
     /// the full aligned byte range from conflicting access through completion.
     /// Dropping this future may leave a partial write and does not stop submitted
     /// writes: retain the disk region until they complete, as described in
     /// [`DataFile`]'s cancellation contract. Publish a cached byte range only after success.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the offset or byte count is not a multiple of 4096.
     pub async fn write_at(&self, offset: u64, bytes: &Bytes) -> DataFileResult<()> {
+        assert!(offset.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64));
+        assert!(bytes.len().is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
         self.execute_measured(IoOperation::Write, offset, bytes.len(), bytes)
             .await
             .map(|_| ())
@@ -366,25 +372,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_exact_unaligned_ranges_and_preserves_neighbors() {
+    async fn reads_exact_unaligned_ranges_after_aligned_writes() {
         let temp = tempdir().unwrap();
         let directory = temp.path().join("cache/inner");
         let file = DataFile::open(&directory, CAPACITY, IoMetrics::noop()).await.unwrap();
         let original = Bytes::from(vec![0x55; CAPACITY as usize]);
         file.write_at(0, &original).await.unwrap();
-        let payload = Bytes::from_static(b"unaligned positional payload");
-        file.write_at(3, &payload).await.unwrap();
+        let mut page = vec![0x55; 4096];
+        page[3..31].copy_from_slice(b"unaligned positional payload");
+        file.write_at(0, &Bytes::from(page)).await.unwrap();
         assert_eq!(file.read_at(13, 10).await.unwrap(), Bytes::from_static(b"positional"));
         assert_eq!(file.read_at(0, 3).await.unwrap(), original.slice(..3));
+        assert_eq!(file.read_at(4096, 16).await.unwrap(), original.slice(..16));
+        // Exercise multi-chunk writes, unaligned reads across a chunk boundary,
+        // and the final physical page.
+        let payload = Bytes::from(vec![0x99; uring::MAX_IO_CHUNK_BYTES + 4096]);
+        file.write_at(4096, &payload).await.unwrap();
         assert_eq!(
-            file.read_at(3 + payload.len() as u64, 16).await.unwrap(),
-            original.slice(..16)
+            file.read_at(4099, payload.len() - 6).await.unwrap(),
+            payload.slice(3..payload.len() - 3)
         );
-        // Exercise a boundary crossing and the final physical page.
-        let payload = Bytes::from(vec![0x99; uring::MAX_IO_CHUNK_BYTES + 17]);
-        file.write_at(4093, &payload).await.unwrap();
-        assert_eq!(file.read_at(4093, payload.len()).await.unwrap(), payload);
-        file.write_at(CAPACITY - 3, &Bytes::from_static(b"end")).await.unwrap();
+        let mut page = vec![0x55; 4096];
+        page[4093..].copy_from_slice(b"end");
+        file.write_at(CAPACITY - 4096, &Bytes::from(page)).await.unwrap();
         assert_eq!(file.read_at(CAPACITY - 3, 3).await.unwrap(), Bytes::from_static(b"end"));
         assert_eq!(
             std::fs::metadata(directory.join(DATA_FILE_NAME)).unwrap().len(),
@@ -401,7 +411,7 @@ mod tests {
             DataFileErrorKind::OutOfBounds
         );
         assert_eq!(
-            file.write_at(u64::MAX, &Bytes::from_static(b"ab"))
+            file.write_at(u64::MAX - 4095, &Bytes::from(vec![0; 4096]))
                 .await
                 .unwrap_err()
                 .kind(),
@@ -440,7 +450,9 @@ mod tests {
                 .kind(),
             DataFileErrorKind::AlreadyOpen
         );
-        clone.write_at(17, &Bytes::from_static(b"persistent")).await.unwrap();
+        let mut page = vec![0; 4096];
+        page[17..27].copy_from_slice(b"persistent");
+        clone.write_at(0, &Bytes::from(page)).await.unwrap();
         drop(clone);
         let file = DataFile::open(temp.path(), CAPACITY / 2, IoMetrics::noop())
             .await
@@ -450,7 +462,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_mixed_io_with_caller_serialized_same_page_rmw() {
+    async fn concurrent_mixed_io_with_caller_serialized_shared_page() {
         let temp = tempdir().unwrap();
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
         let mut tasks = Vec::new();
@@ -462,9 +474,9 @@ mod tests {
             tasks.push(tokio::spawn(async move {
                 {
                     let _guard = shared_pages.lock().await;
-                    let value = Bytes::from(vec![(i % 251) as u8; 31]);
-                    file.write_at(i * 33, &value).await.unwrap();
-                    assert_eq!(file.read_at(i * 33, value.len()).await.unwrap(), value);
+                    let value = Bytes::from(vec![(i % 251) as u8; 4096]);
+                    file.write_at(0, &value).await.unwrap();
+                    assert_eq!(file.read_at(3, 31).await.unwrap(), value.slice(3..34));
                 }
                 let value = Bytes::from(vec![(i % 251) as u8; 4096]);
                 let offset = 16384 + i * 4096;
@@ -476,11 +488,10 @@ mod tests {
             task.await.unwrap();
         }
         for i in 0..256u64 {
-            assert_eq!(file.read_at(i * 33, 33).await.unwrap(), {
-                let mut value = vec![(i % 251) as u8; 31];
-                value.extend_from_slice(&[0, 0]);
-                Bytes::from(value)
-            });
+            assert_eq!(
+                file.read_at(16384 + i * 4096, 4096).await.unwrap(),
+                Bytes::from(vec![(i % 251) as u8; 4096])
+            );
         }
     }
 

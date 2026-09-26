@@ -13,7 +13,7 @@ Linux direct-I/O layer is implemented separately but is not yet connected to cac
 | `feuer` | Cloneable `Cache`, one soft memory target, per-call asynchronous `get_or_fetch`, typed callback and validation errors | Disk lifecycle, I/O mode selection, and tier orchestration |
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range | None for the current public type boundary |
 | `feuer-memory` | Sharded covering-range index, bounded exact access evidence, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
-| `feuer-storage` | Exclusively locked fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, arbitrary-range I/O, tracing, metrics | Buffered mode, range index, allocation, integrity, persistent metadata, recovery |
+| `feuer-storage` | Exclusively locked fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, arbitrary-range reads, aligned writes, tracing, metrics | Buffered mode, range index, allocation, integrity, persistent metadata, recovery |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
 
 ## Implemented behavior
@@ -57,11 +57,11 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
 - One dedicated thread/ring overlaps up to 64 reads and writes in arrival order. It wakes for new requests
   while I/O is outstanding, without polling or registered buffers.
 - Read and write admission each reserve up to 64 requests and 64 MiB of staging buffers. Chunks are at most
-  1 MiB, and read-modify-write charges its staging payload. Caller inputs and read-result allocations are
-  outside the combined 128-MiB staging budget.
-- Arbitrary-range writes use read-modify-write when unaligned. The driver performs no overlap checks: the
-  upper layer must prevent conflicting access across physical byte ranges rounded outward to 4 KiB,
-  including neighboring bytes in shared pages.
+  1 MiB. Caller inputs and read-result allocations are outside the combined 128-MiB staging budget.
+- Reads accept arbitrary byte ranges; write offsets and lengths must be multiples of 4 KiB, enforced by
+  assertions. The driver performs no read-modify-write or overlap checks: the upper layer must supply
+  complete aligned blocks and prevent conflicting access across physical byte ranges rounded outward
+  to 4 KiB.
 - Multi-chunk operations are not atomic. Completion permits subsequent reads but does not guarantee crash
   durability; there are no global scheduling barriers.
 - Caller cancellation does not cancel submitted kernel writes. The task owning a write's `DiskRegion` must
