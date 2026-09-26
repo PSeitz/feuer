@@ -27,8 +27,6 @@ impl fmt::Debug for OperationMetrics {
 pub struct IoMetrics {
     read: OperationMetrics,
     write: OperationMetrics,
-    sync_data: OperationMetrics,
-    sync_all: OperationMetrics,
 }
 
 impl IoMetrics {
@@ -62,8 +60,6 @@ impl IoMetrics {
         Arc::new(Self {
             read: operation(IoOperation::Read.as_str()),
             write: operation(IoOperation::Write.as_str()),
-            sync_data: operation(IoOperation::SyncData.as_str()),
-            sync_all: operation(IoOperation::SyncAll.as_str()),
         })
     }
 
@@ -71,8 +67,6 @@ impl IoMetrics {
         let metrics = match operation {
             IoOperation::Read => &self.read,
             IoOperation::Write => &self.write,
-            IoOperation::SyncData => &self.sync_data,
-            IoOperation::SyncAll => &self.sync_all,
             _ => return,
         };
 

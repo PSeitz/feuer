@@ -7,10 +7,10 @@
   slots with reads. Already-submitted writes (including their RMW/short-I/O continuations) must drain;
   they cannot be preempted. This is not an instantaneous cap on existing writes.
 - A small write allowance prevents continuous reads from starving independent writes. When no writes
-  are pending, reads can use all 64 slots. Overlapping operations and sync barriers retain their ordering.
+  are pending, reads can use all 64 slots. Overlapping operations retain their ordering.
 - Read demand is signaled before admission and removed when the read future finishes or is canceled.
   Submitted reads remain visible in the driver's active set even if their callers cancel.
-- Reads and writes/syncs each have 64 request permits and 64 MiB of staging-buffer capacity. Writes
+- Reads and writes each have 64 request permits and 64 MiB of staging-buffer capacity. Writes
   cannot exhaust read admission or queue ahead of reads on a shared buffer semaphore.
 - Aligned buffers are charged once; RMW also charges its staging payload. Read-result allocations and
   caller inputs are outside the staging budget. Each class can stage a full ring of aligned 1-MiB requests;
@@ -20,6 +20,9 @@ Four is an initial write allowance, not a measured optimum. Four 1-MiB writes ar
 4-KiB writes in device cost. No claim is made that background writes are free or that slots bound read p99.
 
 ## Comparison, 2026-09-25
+
+These measurements and their validation predate removal of durability-flush operations. Recorded runs
+flushed initialization writes; the current example only waits for their completion. Overlap protection remains.
 
 Same host/mount and methodology as the [initial benchmark](README.md): `m8g-32cpu-local-ssd`, Linux
 6.17/aarch64, ext4 on local NVMe, release build, four Tokio workers, driver QD64, fully initialized 8-GiB

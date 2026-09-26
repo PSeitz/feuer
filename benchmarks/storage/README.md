@@ -23,7 +23,8 @@ cargo run -p feuer-storage --release --example direct_io -- /mnt/local-ssd 5 64
 The example creates a fresh temporary directory under the supplied directory, fully initializes an
 8-GiB file, and removes only its own directory on successful exit. It does not open an existing cache or
 write a raw device. Allow at least 8 GiB of free space. An interrupted process can leave its named temporary
-directory behind.
+directory behind. Initialization awaits every write; the current driver has no durability-flush API.
+Recorded results below predate its removal and included an initialization flush.
 
 ## Conditions (2026-09-25)
 

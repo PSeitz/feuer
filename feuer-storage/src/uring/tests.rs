@@ -217,7 +217,7 @@ fn full_write_admission_and_buffers_leave_a_full_read_ring_available() {
 }
 
 #[test]
-fn overlap_and_sync_block_only_the_requests_they_must() {
+fn overlap_blocks_only_the_requests_it_must() {
     let mut driver = driver();
     let mut replies = Vec::new();
     for (operation, offset, length) in [
@@ -225,16 +225,17 @@ fn overlap_and_sync_block_only_the_requests_they_must() {
         (IoOperation::Read, 2, 1),  // blocked despite disjoint logical bytes
         (IoOperation::Write, ALIGN as u64, ALIGN),
         (IoOperation::Read, 2 * ALIGN as u64, ALIGN),
-        (IoOperation::SyncAll, 0, 0),
-        (IoOperation::Write, 3 * ALIGN as u64, ALIGN), // cannot pass sync
+        (IoOperation::Write, 3 * ALIGN as u64, ALIGN), // independent writes can pass the blocked read
     ] {
         let (request, reply) = request(&driver, operation, offset, length);
         driver.pending.push_back(request);
         replies.push(reply);
     }
     driver.schedule();
-    assert_eq!(driver.active.iter().flatten().count(), 3);
-    assert_eq!(driver.pending.len(), 3);
+    assert_eq!(driver.active.iter().flatten().count(), 4);
+    assert_eq!(driver.pending.len(), 1);
+    assert_eq!(driver.pending[0].operation, IoOperation::Read);
+    assert_eq!(driver.pending[0].offset, 0);
     driver.run().unwrap();
     for mut reply in replies {
         reply.try_recv().unwrap().unwrap();
@@ -279,11 +280,11 @@ fn completion_state_handles_short_io_errors_and_rmw() {
     );
 
     let (mut rmw, _reply) = request(&driver, IoOperation::Write, 1, 3);
-    rmw.buffer.bytes().fill(0x55);
+    rmw.io_buffer.bytes().fill(0x55);
     assert!(rmw.complete(ALIGN as i32).unwrap());
     assert!(!rmw.reading);
     assert_eq!(rmw.completed, 0);
-    assert_eq!(&rmw.buffer.bytes()[..5], &[0x55, 0x99, 0x99, 0x99, 0x55]);
+    assert_eq!(&rmw.io_buffer.bytes()[..5], &[0x55, 0x99, 0x99, 0x99, 0x55]);
     assert!(!rmw.complete(ALIGN as i32).unwrap());
 }
 

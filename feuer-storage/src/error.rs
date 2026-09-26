@@ -19,10 +19,6 @@ pub enum IoOperation {
     Read,
     /// Positionally write payload bytes.
     Write,
-    /// Synchronize payload data without requiring all file metadata.
-    SyncData,
-    /// Synchronize payload data and file metadata.
-    SyncAll,
 }
 
 impl IoOperation {
@@ -37,8 +33,6 @@ impl IoOperation {
             Self::ResizeDataFile => "resize_data_file",
             Self::Read => "read",
             Self::Write => "write",
-            Self::SyncData => "sync_data",
-            Self::SyncAll => "sync_all",
         }
     }
 }

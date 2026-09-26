@@ -27,15 +27,15 @@ pub(crate) const ALIGN: usize = 4096;
 // Maximum physical bytes per chunk, including alignment padding. DataFile
 // reduces the logical chunk size when its starting offset is unaligned.
 pub(crate) const MAX_IO_CHUNK_BYTES: usize = 1024 * 1024;
-// Maximum outstanding ring operations, shared by reads, writes, and syncs.
+// Maximum outstanding ring operations, shared by reads and writes.
 const MAX_IN_FLIGHT_IO: usize = 64;
 // Under read demand, allow only this many outstanding writes (including RMW).
 // With no reads, writes may use all MAX_IN_FLIGHT_IO slots. Initial policy, not an optimum.
 const WRITES_WITH_READS: usize = 4;
-// Separate admission pools: MAX_IN_FLIGHT_IO reads and MAX_IN_FLIGHT_IO writes/syncs.
+// Separate admission pools: MAX_IN_FLIGHT_IO reads and MAX_IN_FLIGHT_IO writes.
 // Writes cannot consume read permits; each class can independently fill the ring.
 const REQUESTS: usize = 2 * MAX_IN_FLIGHT_IO;
-// Staging budget split equally between reads and writes/syncs. Each half can
+// Staging budget split equally between reads and writes. Each half can
 // hold MAX_IN_FLIGHT_IO full-size aligned buffers. RMW also charges its staging payload;
 // caller inputs and read-result allocations are outside this budget.
 const BUFFER_BYTES: usize = 128 * 1024 * 1024;
@@ -44,17 +44,24 @@ const BUFFER_BYTES: usize = 128 * 1024 * 1024;
 mod tests;
 
 pub(crate) struct Handle {
+    // Sends admitted requests; taken on drop to signal shutdown before joining.
     sender: Option<mpsc::SyncSender<Request>>,
+    // Shared eventfd wakes the driver for new work, demand changes, or shutdown.
     wake: Arc<OwnedFd>,
+    // Worker ownership; taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
+    // Shared budgets and read demand, enforced before allocating or queueing work.
     admission: Arc<Admission>,
 }
 
-// Index 0 is demand reads; index 1 is writes and syncs. Separate pools avoid
+// Index 0 is demand reads; index 1 is writes. Separate pools avoid
 // priority inversion in semaphore wait queues before requests reach the driver.
 struct Admission {
+    // Per-class limits covering preparing, queued, and active requests.
     requests: [Arc<Semaphore>; 2],
+    // Per-class staging budgets in ALIGN-sized units; acquired before allocation.
     buffers: [Arc<Semaphore>; 2],
+    // Live read futures, including admission waiters, so writes yield early.
     reads: AtomicUsize,
 }
 
@@ -72,7 +79,9 @@ impl Admission {
 // removes their demand, waking an otherwise idle driver when full-speed writes
 // can resume. Submitted reads remain visible through the driver's active slots.
 struct ReadDemandGuard {
+    // Owns one read-demand count, removed on completion or cancellation.
     admission: Arc<Admission>,
+    // Wakes the driver when demand starts or ends to update the write allowance.
     wake: Arc<OwnedFd>,
 }
 
@@ -97,9 +106,9 @@ impl Drop for ReadDemandGuard {
 }
 
 fn buffer_charge(operation: IoOperation, offset: u64, length: usize) -> u32 {
-    let prefix = offset as usize % ALIGN;
-    let aligned_length = (prefix + length).next_multiple_of(ALIGN);
-    let rmw = operation == IoOperation::Write && (prefix != 0 || length != aligned_length);
+    let data_offset_in_buffer = offset as usize % ALIGN;
+    let aligned_length = (data_offset_in_buffer + length).next_multiple_of(ALIGN);
+    let rmw = operation == IoOperation::Write && (data_offset_in_buffer != 0 || length != aligned_length);
     (aligned_length.max(ALIGN) / ALIGN * if rmw { 2 } else { 1 }) as u32
 }
 
@@ -181,12 +190,10 @@ fn stopped() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "io_uring driver stopped")
 }
 
-fn is_sync(operation: IoOperation) -> bool {
-    matches!(operation, IoOperation::SyncData | IoOperation::SyncAll)
-}
-
 struct AlignedBuffer {
+    // Owned, aligned allocation whose address stays stable while the kernel uses it.
     ptr: NonNull<u8>,
+    // Allocation size/alignment for slice bounds and matching deallocation.
     layout: Layout,
 }
 
@@ -217,17 +224,29 @@ impl Drop for AlignedBuffer {
 }
 
 struct Request {
+    // Caller operation; an RMW stays classified as a write during its read phase.
     operation: IoOperation,
+    // Aligned physical start, used for kernel offsets and overlap checks.
     offset: u64,
-    prefix: usize,
+    // Requested data starts at this byte offset in `io_buffer`.
+    data_offset_in_buffer: usize,
+    // Logical byte count, excluding alignment padding from results and RMW updates.
     length: usize,
+    // Physical byte count including padding, for I/O and overlap serialization.
     aligned_length: usize,
-    buffer: AlignedBuffer,
+    // Aligned memory for disk reads/writes; kept alive until I/O completes.
+    io_buffer: AlignedBuffer,
+    // RMW input preserved during the initial read, then merged into `io_buffer`.
     payload: Option<Bytes>,
+    // Current I/O direction; flips from read to write after an RMW read completes.
     reading: bool,
+    // Bytes completed in this phase, allowing aligned short-I/O continuations.
     completed: usize,
+    // Caller result channel; taken on finish/failure, also detects cancellation.
     reply: Option<oneshot::Sender<io::Result<Bytes>>>,
+    // Holds request admission until this request is dropped.
     _slot: OwnedSemaphorePermit,
+    // Holds the staging-buffer charge until this request is dropped.
     _bytes: OwnedSemaphorePermit,
 }
 
@@ -240,25 +259,25 @@ impl Request {
         reply: oneshot::Sender<io::Result<Bytes>>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
     ) -> io::Result<Self> {
-        let prefix = offset as usize % ALIGN;
-        let aligned_length = (prefix + length).next_multiple_of(ALIGN);
-        let mut buffer = AlignedBuffer::new(aligned_length)?;
-        let rmw = operation == IoOperation::Write && (prefix != 0 || length != aligned_length);
+        let data_offset_in_buffer = offset as usize % ALIGN;
+        let aligned_length = (data_offset_in_buffer + length).next_multiple_of(ALIGN);
+        let mut io_buffer = AlignedBuffer::new(aligned_length)?;
+        let rmw = operation == IoOperation::Write && (data_offset_in_buffer != 0 || length != aligned_length);
         let payload = if rmw {
             Some(Bytes::copy_from_slice(payload))
         } else {
             if operation == IoOperation::Write {
-                buffer.bytes()[..length].copy_from_slice(payload);
+                io_buffer.bytes()[..length].copy_from_slice(payload);
             }
             None
         };
         Ok(Self {
             operation,
-            offset: offset - prefix as u64,
-            prefix,
+            offset: offset - data_offset_in_buffer as u64,
+            data_offset_in_buffer,
             length,
             aligned_length,
-            buffer,
+            io_buffer,
             payload,
             reading: operation == IoOperation::Read || rmw,
             completed: 0,
@@ -269,33 +288,22 @@ impl Request {
     }
 
     fn conflicts(&self, other: &Self) -> bool {
-        is_sync(self.operation)
-            || is_sync(other.operation)
-            || ((self.operation == IoOperation::Write || other.operation == IoOperation::Write)
-                && self.offset < other.offset + other.aligned_length as u64
-                && other.offset < self.offset + self.aligned_length as u64)
+        (self.operation == IoOperation::Write || other.operation == IoOperation::Write)
+            && self.offset < other.offset + other.aligned_length as u64
+            && other.offset < self.offset + self.aligned_length as u64
     }
 
     fn entry(&mut self, fd: i32, slot: usize) -> squeue::Entry {
         let fd = types::Fd(fd);
-        let entry = if is_sync(self.operation) {
-            let flags = if self.operation == IoOperation::SyncData {
-                types::FsyncFlags::DATASYNC
-            } else {
-                types::FsyncFlags::empty()
-            };
-            opcode::Fsync::new(fd).flags(flags).build()
+        // SAFETY: completed is within io_buffer. The request owns this memory
+        // in its active slot until the completion is consumed.
+        let ptr = unsafe { self.io_buffer.ptr.as_ptr().add(self.completed) };
+        let length = (self.aligned_length - self.completed) as u32;
+        let offset = self.offset + self.completed as u64;
+        let entry = if self.reading {
+            opcode::Read::new(fd, ptr, length).offset(offset).build()
         } else {
-            // SAFETY: completed is within the allocation. The request stays in its active
-            // slot, owning this allocation, until the completion is consumed.
-            let ptr = unsafe { self.buffer.ptr.as_ptr().add(self.completed) };
-            let length = (self.aligned_length - self.completed) as u32;
-            let offset = self.offset + self.completed as u64;
-            if self.reading {
-                opcode::Read::new(fd, ptr, length).offset(offset).build()
-            } else {
-                opcode::Write::new(fd, ptr, length).offset(offset).build()
-            }
+            opcode::Write::new(fd, ptr, length).offset(offset).build()
         };
         entry.user_data(slot as u64)
     }
@@ -307,9 +315,6 @@ impl Request {
         }
         if result < 0 {
             return Err(io::Error::from_raw_os_error(-result));
-        }
-        if is_sync(self.operation) {
-            return Ok(false);
         }
         let count = result as usize;
         if count == 0 || count > self.aligned_length - self.completed {
@@ -324,7 +329,8 @@ impl Request {
             return Ok(true);
         }
         if let Some(payload) = self.payload.take() {
-            self.buffer.bytes()[self.prefix..self.prefix + self.length].copy_from_slice(&payload);
+            self.io_buffer.bytes()[self.data_offset_in_buffer..self.data_offset_in_buffer + self.length]
+                .copy_from_slice(&payload);
             self.reading = false;
             self.completed = 0;
             return Ok(true);
@@ -346,7 +352,9 @@ impl Request {
     fn finish(mut self, result: io::Result<()>) {
         let result = result.map(|()| {
             if self.operation == IoOperation::Read {
-                Bytes::copy_from_slice(&self.buffer.bytes()[self.prefix..self.prefix + self.length])
+                Bytes::copy_from_slice(
+                    &self.io_buffer.bytes()[self.data_offset_in_buffer..self.data_offset_in_buffer + self.length],
+                )
             } else {
                 Bytes::new()
             }
@@ -356,13 +364,21 @@ impl Request {
 }
 
 struct Driver {
+    // Reads caller demand for scheduling; closes budgets on exit to release waiters.
     admission: Arc<Admission>,
+    // Thread-owned kernel submission/completion queues; no cross-thread ring access.
     ring: IoUring,
+    // Direct-I/O payload file; taken to retain ownership on abnormal exit.
     file: Option<File>,
+    // Exclusive directory lock, retained if kernel I/O may still be active.
     lock: Option<File>,
+    // Eventfd polled alongside the ring so new work need not wait for completion.
     wake: Arc<OwnedFd>,
+    // Incoming admitted requests; disconnection starts draining shutdown.
     receiver: mpsc::Receiver<Request>,
+    // Unsubmitted requests in arrival order, preserving overlap ordering.
     pending: VecDeque<Request>,
+    // Owns in-flight requests through completion; CQEs identify their slot indices.
     active: Vec<Option<Request>>,
 }
 
@@ -427,7 +443,7 @@ impl Driver {
             .count();
         // First admit the small write allowance, so continuous reads cannot starve
         // writes. Reads then get every remaining slot; with no writes they get all
-        // MAX_IN_FLIGHT_IO. Never preempt active writes or reorder conflicting I/O / syncs.
+        // MAX_IN_FLIGHT_IO. Never preempt active writes or reorder conflicting I/O.
         for reading in [false, true] {
             let mut index = 0;
             while index < self.pending.len() {

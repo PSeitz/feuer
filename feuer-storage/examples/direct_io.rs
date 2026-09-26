@@ -46,7 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for offset in (0..CAPACITY).step_by(MIB) {
         file.write_at(offset, &payload).await?;
     }
-    file.sync_all().await?;
     println!(
         "read_bytes,read_callers,write_callers,seconds,read_MB_s,write_MB_s,read_iops,read_p50_us,read_p99_us,cpu_percent"
     );

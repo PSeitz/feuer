@@ -30,11 +30,12 @@ struct Inner {
 /// ring when there are no reads; under read demand, new writes are limited to
 /// four outstanding slots. Already-submitted writes must drain, not preempt.
 /// Admission reserves 64 requests and 64 MiB of staging buffers for each of
-/// reads and writes/syncs. Caller inputs and read-result allocations are outside
+/// reads and writes. Caller inputs and read-result allocations are outside
 /// this staging-buffer budget.
 /// Reads and writes accept arbitrary byte ranges; unaligned writes use guarded
 /// read-modify-write envelopes. Overlapping envelopes serialize, independent
 /// reads and writes overlap. Multi-chunk operations are not atomic.
+/// Write completion permits subsequent reads, but does not guarantee crash durability.
 ///
 /// Capacity must be a positive multiple of 4096, at most i64::MAX. Opening fails
 /// if io_uring or verified O_DIRECT alignment is unavailable; there is no fallback.
@@ -123,18 +124,6 @@ impl DataFile {
             .map(|_| ())
     }
 
-    /// Synchronizes data after earlier driver requests have completed.
-    /// Await writes before calling this to include all chunks of those writes.
-    pub async fn sync_data(&self) -> Result<()> {
-        self.execute(IoOperation::SyncData, 0, 0, &[]).await.map(|_| ())
-    }
-
-    /// Synchronizes data and metadata after earlier driver requests have completed.
-    /// Await writes before calling this to include all chunks of those writes.
-    pub async fn sync_all(&self) -> Result<()> {
-        self.execute(IoOperation::SyncAll, 0, 0, &[]).await.map(|_| ())
-    }
-
     async fn execute(&self, operation: IoOperation, offset: u64, length: usize, payload: &[u8]) -> Result<Bytes> {
         let started = Instant::now();
         let observed_bytes = u64::try_from(length).unwrap_or(u64::MAX);
@@ -166,9 +155,6 @@ impl DataFile {
             path: self.inner.data_path.clone(),
             source,
         };
-        if matches!(operation, IoOperation::SyncData | IoOperation::SyncAll) {
-            return self.inner.driver.execute(operation, 0, 0, &[]).await.map_err(io_error);
-        }
         let mut result = Vec::new();
         if operation == IoOperation::Read && length > uring::MAX_IO_CHUNK_BYTES - offset as usize % uring::ALIGN {
             result
@@ -360,8 +346,6 @@ mod tests {
         assert_eq!(file.read_at(4093, payload.len()).await.unwrap(), payload);
         file.write_at(CAPACITY - 3, &Bytes::from_static(b"end")).await.unwrap();
         assert_eq!(file.read_at(CAPACITY - 3, 3).await.unwrap(), Bytes::from_static(b"end"));
-        file.sync_data().await.unwrap();
-        file.sync_all().await.unwrap();
         assert_eq!(
             std::fs::metadata(directory.join(DATA_FILE_NAME)).unwrap().len(),
             CAPACITY
@@ -417,7 +401,6 @@ mod tests {
             ErrorKind::AlreadyOpen
         );
         clone.write_at(17, &Bytes::from_static(b"persistent")).await.unwrap();
-        clone.sync_all().await.unwrap();
         drop(clone);
         let file = DataFile::open(temp.path(), CAPACITY / 2, IoMetrics::noop())
             .await
