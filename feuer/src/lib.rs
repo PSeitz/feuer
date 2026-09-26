@@ -8,6 +8,6 @@
 mod cache;
 mod config;
 
-pub use cache::{Cache, GetOrFetchError};
+pub use cache::{GetOrFetchError, TieredMemoryDiskCache};
 pub use config::{CacheConfig, CacheConfigError};
 pub use feuer_types::{ByteRange, Download, DownloadError, InvalidByteRange, ObjectKey};

@@ -10,7 +10,7 @@ Linux direct-I/O layer is implemented separately but is not yet connected to cac
 
 | Area | Implemented | Remaining |
 | --- | --- | --- |
-| `feuer` | Cloneable `Cache`, one soft memory target, per-call asynchronous `get_or_fetch`, typed callback and validation errors | Disk lifecycle, I/O mode selection, and tier orchestration |
+| `feuer` | Cloneable `TieredMemoryDiskCache`, one soft memory target, per-call asynchronous `get_or_fetch`, typed callback and validation errors | Disk lifecycle, I/O mode selection, and tier orchestration |
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range | None for the current public type boundary |
 | `feuer-memory` | Sharded covering-range index, bounded exact access evidence, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
 | `feuer-storage` | Exclusively locked fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, arbitrary-range reads, aligned writes, tracing, metrics | Buffered mode, range index, allocation, integrity, persistent metadata, recovery |

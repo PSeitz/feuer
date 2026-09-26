@@ -29,7 +29,7 @@ work are tracked in [`implementation-status.md`](implementation-status.md).
 ## Current workspace
 
 The public boundary contains `ObjectKey`, `ByteRange`, a keyless validated
-`Download`, explicit capacities in `CacheConfig`, and a cloneable `Cache`. Each
+`Download`, explicit capacities in `CacheConfig`, and a cloneable `TieredMemoryDiskCache`. Each
 `get_or_fetch` checks for a covering memory range before independently invoking
 that call's asynchronous callback. Successful results are sliced to the exact
 request and appended once to the key's accessed ranges, independently of downloaded-range population.

@@ -20,20 +20,20 @@ struct CacheState {
 /// slices; constructing a handle does not yet open or modify the configured
 /// cache directory.
 #[derive(Clone)]
-pub struct Cache {
+pub struct TieredMemoryDiskCache {
     state: Arc<CacheState>,
 }
 
-impl fmt::Debug for Cache {
+impl fmt::Debug for TieredMemoryDiskCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Cache")
+        f.debug_struct("TieredMemoryDiskCache")
             .field("memory_capacity", &self.state.config.memory_capacity())
             .field("disk_capacity", &self.state.config.disk_capacity())
             .finish_non_exhaustive()
     }
 }
 
-impl Cache {
+impl TieredMemoryDiskCache {
     /// Creates a cache handle from a validated configuration.
     pub fn new(config: CacheConfig) -> Self {
         let memory = MemoryCache::new(config.memory_capacity());
@@ -91,7 +91,7 @@ impl Cache {
     }
 }
 
-/// A failed [`Cache::get_or_fetch`] operation.
+/// A failed [`TieredMemoryDiskCache::get_or_fetch`] operation.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum GetOrFetchError<E> {
     /// The callback supplied to this lookup failed.
@@ -134,14 +134,14 @@ mod tests {
         ByteRange::new(start, end).unwrap()
     }
 
-    fn cache(memory_capacity: u64) -> Cache {
-        Cache::new(CacheConfig::new("unused", 1024, memory_capacity).unwrap())
+    fn cache(memory_capacity: u64) -> TieredMemoryDiskCache {
+        TieredMemoryDiskCache::new(CacheConfig::new("unused", 1024, memory_capacity).unwrap())
     }
 
     #[test]
     fn cache_handle_is_send_sync_static() {
         fn assert_send_sync_static<T: Send + Sync + 'static>() {}
-        assert_send_sync_static::<Cache>();
+        assert_send_sync_static::<TieredMemoryDiskCache>();
     }
 
     #[tokio::test]
