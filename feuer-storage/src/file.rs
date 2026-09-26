@@ -19,7 +19,7 @@ const DATA_FILE_NAME: &str = "data";
 const LOCK_FILE_NAME: &str = ".feuer.lock";
 
 struct Inner {
-    driver: uring::Handle,
+    queue_access: uring::IoQueueAccess,
     data_path: PathBuf,
     capacity: u64,
 }
@@ -39,8 +39,8 @@ struct Inner {
 ///
 /// Capacity must be a positive multiple of 4096, at most i64::MAX. Opening fails
 /// if io_uring or verified O_DIRECT alignment is unavailable; there is no fallback.
-/// Dropping the last handle drains submitted I/O and joins the driver thread,
-/// which can block. Returned Bytes never retain the file or driver.
+/// Dropping the last handle drains submitted I/O and joins the queue thread,
+/// which can block. Returned Bytes never retain the file or queue.
 #[derive(Clone)]
 pub struct DataFile {
     inner: Arc<Inner>,
@@ -83,7 +83,7 @@ impl DataFile {
                 })??;
             // Exercise an actual aligned direct read before claiming open succeeded.
             inner
-                .driver
+                .queue_access
                 .execute(IoOperation::Read, 0, uring::ALIGN, &[])
                 .await
                 .map_err(|source| Error::Io {
@@ -172,7 +172,7 @@ impl DataFile {
             };
             let bytes = self
                 .inner
-                .driver
+                .queue_access
                 .execute(operation, at, chunk, input)
                 .await
                 .map_err(io_error)?;
@@ -243,12 +243,13 @@ fn open_inner(directory: PathBuf, capacity: u64) -> Result<Inner> {
     let resize = file
         .try_clone()
         .map_err(|source| error(IoOperation::OpenDataFile, source))?;
-    let driver = uring::Handle::new(file, lock_file).map_err(|source| error(IoOperation::OpenDataFile, source))?;
+    let queue_access =
+        uring::IoQueueAccess::new(file, lock_file).map_err(|source| error(IoOperation::OpenDataFile, source))?;
     resize
         .set_len(capacity)
         .map_err(|source| error(IoOperation::ResizeDataFile, source))?;
     Ok(Inner {
-        driver,
+        queue_access,
         data_path,
         capacity,
     })
@@ -458,7 +459,7 @@ mod tests {
         for task in tasks {
             let _ = task.await;
         }
-        drop(file); // joins the driver, even if completion receivers were dropped
+        drop(file); // joins the queue thread, even if completion receivers were dropped
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
         file.write_at(0, &Bytes::from(vec![0x55; uring::MAX_IO_CHUNK_BYTES]))
             .await

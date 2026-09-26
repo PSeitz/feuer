@@ -43,12 +43,12 @@ const BUFFER_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(test)]
 mod tests;
 
-pub(crate) struct Handle {
+pub(crate) struct IoQueueAccess {
     // Sends admitted requests; taken on drop to signal shutdown before joining.
     sender: Option<mpsc::SyncSender<Request>>,
-    // Shared eventfd wakes the driver for new work, demand changes, or shutdown.
+    // Shared eventfd wakes the queue for new work, demand changes, or shutdown.
     wake: Arc<OwnedFd>,
-    // Worker ownership; taken and joined on drop so submitted I/O drains first.
+    // Queue thread; taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
     // Shared budgets and read demand, enforced before allocating or queueing work.
     admission: Arc<Admission>,
@@ -112,7 +112,7 @@ fn buffer_charge(operation: IoOperation, offset: u64, length: usize) -> u32 {
     (aligned_length.max(ALIGN) / ALIGN * if rmw { 2 } else { 1 }) as u32
 }
 
-impl Handle {
+impl IoQueueAccess {
     pub(crate) fn new(file: File, lock: File) -> io::Result<Self> {
         let ring = IoUring::new(MAX_IN_FLIGHT_IO as u32)?;
         // SAFETY: eventfd has no pointer arguments and returns a new owned fd.
@@ -124,7 +124,7 @@ impl Handle {
         let wake = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
         let (sender, receiver) = mpsc::sync_channel(REQUESTS);
         let admission = Arc::new(Admission::new());
-        let mut driver = Driver {
+        let mut queue = IoQueue {
             admission: admission.clone(),
             ring,
             file: Some(file),
@@ -135,8 +135,8 @@ impl Handle {
             active: (0..MAX_IN_FLIGHT_IO).map(|_| None).collect(),
         };
         let thread = thread::Builder::new().name("feuer-io".into()).spawn(move || {
-            if let Err(error) = driver.run() {
-                tracing::error!(target: "feuer::storage::io", %error, "io_uring driver stopped");
+            if let Err(error) = queue.run() {
+                tracing::error!(target: "feuer::storage::io", %error, "io_uring queue stopped");
             }
         })?;
         Ok(Self {
@@ -175,11 +175,11 @@ impl Handle {
     }
 }
 
-impl Drop for Handle {
+impl Drop for IoQueueAccess {
     fn drop(&mut self) {
         self.sender.take();
         notify(&self.wake);
-        // The worker drains submitted I/O before releasing buffers and the directory lock.
+        // The queue drains submitted I/O before releasing buffers and the directory lock.
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -187,7 +187,7 @@ impl Drop for Handle {
 }
 
 fn stopped() -> io::Error {
-    io::Error::new(io::ErrorKind::BrokenPipe, "io_uring driver stopped")
+    io::Error::new(io::ErrorKind::BrokenPipe, "io_uring queue stopped")
 }
 
 struct AlignedBuffer {
@@ -363,7 +363,7 @@ impl Request {
     }
 }
 
-struct Driver {
+struct IoQueue {
     // Reads caller demand for scheduling; closes budgets on exit to release waiters.
     admission: Arc<Admission>,
     // Thread-owned kernel submission/completion queues; no cross-thread ring access.
@@ -382,7 +382,7 @@ struct Driver {
     active: Vec<Option<Request>>,
 }
 
-impl Driver {
+impl IoQueue {
     fn run(&mut self) -> io::Result<()> {
         let mut disconnected = false;
         loop {
@@ -527,17 +527,17 @@ impl Driver {
     }
 }
 
-impl Drop for Driver {
+impl Drop for IoQueue {
     fn drop(&mut self) {
         for semaphore in self.admission.requests.iter().chain(&self.admission.buffers) {
             semaphore.close();
         }
         if self.active.iter().any(Option::is_some) {
-            // An abnormal driver exit cannot prove the kernel has stopped using pointers.
+            // An abnormal queue exit cannot prove the kernel has stopped using pointers.
             // Closing a ring may tear it down asynchronously. Leak only the bounded active
             // set and file/lock owners rather than risking use-after-free or early reuse.
             // Normal shutdown drains all completions and never takes this path.
-            tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after driver failure");
+            tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
             for mut request in self.active.iter_mut().filter_map(Option::take) {
                 if let Some(reply) = request.reply.take() {
                     let _ = reply.send(Err(stopped()));

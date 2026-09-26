@@ -4,7 +4,7 @@ use super::*;
 
 type Reply = oneshot::Receiver<io::Result<Bytes>>;
 
-fn request(driver: &Driver, operation: IoOperation, offset: u64, length: usize) -> (Request, Reply) {
+fn request(driver: &IoQueue, operation: IoOperation, offset: u64, length: usize) -> (Request, Reply) {
     let (reply, receive) = oneshot::channel();
     let class = usize::from(operation != IoOperation::Read);
     let slots = driver.admission.requests[class].clone().try_acquire_owned().unwrap();
@@ -23,7 +23,7 @@ fn request(driver: &Driver, operation: IoOperation, offset: u64, length: usize) 
     )
 }
 
-fn driver() -> Driver {
+fn driver() -> IoQueue {
     let temporary = tempfile::NamedTempFile::new().unwrap();
     let file = OpenOptions::new()
         .read(true)
@@ -38,7 +38,7 @@ fn driver() -> Driver {
     // SAFETY: fd was just created and has no other owner.
     let wake = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
     let (_, receiver) = mpsc::sync_channel(REQUESTS); // disconnected: run() will drain and exit
-    Driver {
+    IoQueue {
         admission: Arc::new(Admission::new()),
         ring: IoUring::new(MAX_IN_FLIGHT_IO as u32).unwrap(),
         file: Some(file),
@@ -110,7 +110,7 @@ fn fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission() {
 
 // Consume just one real completion without running the scheduler. This lets
 // tests inspect the exact next-slot decision even if the whole batch completed.
-fn complete_one(driver: &mut Driver) {
+fn complete_one(driver: &mut IoQueue) {
     driver.ring.submit_and_wait(1).unwrap();
     let cqe = driver.ring.completion().next().unwrap();
     let mut request = driver.active[cqe.user_data() as usize].take().unwrap();
