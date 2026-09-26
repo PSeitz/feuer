@@ -32,11 +32,7 @@ struct DataFileState {
 /// up to 64 operations. Each queue schedules in arrival order without checking for
 /// conflicts. Submission order does not guarantee completion order.
 /// Admission reserves 64 requests and 64 MiB of staging buffers for each of
-/// reads and writes. Caller inputs and read-result allocations are outside
-/// this staging-buffer budget.
-/// Reads accept arbitrary byte ranges; write offsets and lengths must be
-/// multiples of 4096 bytes. Multi-chunk operations are not atomic. Write completion
-/// permits subsequent reads, but does not guarantee crash durability.
+/// reads and writes. 
 ///
 /// # Caller-owned concurrency and cancellation
 ///
@@ -57,7 +53,7 @@ struct DataFileState {
 /// the caller drops its future. A canceled read whose result is discarded no
 /// longer requires its disk contents to remain unchanged.
 ///
-/// Capacity must be a positive multiple of 4096, at most i64::MAX. Opening fails
+/// Capacity must be a positive multiple of 4096. Opening fails
 /// if io_uring or verified O_DIRECT alignment is unavailable; there is no fallback.
 /// Dropping the last handle drains submitted I/O and joins both queue threads,
 /// which can block. Returned Bytes never retain the file or queue.
