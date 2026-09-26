@@ -330,9 +330,11 @@ fn completion_state_handles_short_io_errors_and_rmw() {
     );
 
     let (mut rmw, _reply) = request(&queue, IoOperation::Write, 1, 3);
+    assert!(rmw.is_reading());
+    assert_eq!(rmw.aligned_length(), DIRECT_IO_ALIGNMENT_BYTES);
     rmw.io_buffer.as_mut_slice().fill(0x55);
     assert!(rmw.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
-    assert!(!rmw.reading_phase);
+    assert!(!rmw.is_reading());
     assert_eq!(rmw.completed_bytes, 0);
     assert_eq!(&rmw.io_buffer.as_mut_slice()[..5], &[0x55, 0x99, 0x99, 0x99, 0x55]);
     assert!(!rmw.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());

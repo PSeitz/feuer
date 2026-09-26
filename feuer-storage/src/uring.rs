@@ -208,14 +208,10 @@ struct IoRequest {
     data_offset_in_buffer: usize,
     // Logical byte count, excluding alignment padding from results and RMW updates.
     length: usize,
-    // Physical byte count including padding, for I/O.
-    aligned_length: usize,
     // Aligned memory for disk reads/writes; kept alive until I/O completes.
     io_buffer: AlignedIoBuffer,
     // RMW input preserved during the initial read, then merged into `io_buffer`.
     read_modify_write_payload: Option<Bytes>,
-    // Current I/O direction; flips from read to write after an RMW read completes.
-    reading_phase: bool,
     // Bytes completed in this phase, allowing aligned short-I/O continuations.
     completed_bytes: usize,
     // Caller result channel; taken on finish/failure, also detects cancellation.
@@ -253,10 +249,8 @@ impl IoRequest {
             aligned_offset: offset - data_offset_in_buffer as u64,
             data_offset_in_buffer,
             length,
-            aligned_length,
             io_buffer,
             read_modify_write_payload: payload,
-            reading_phase: operation == IoOperation::Read || needs_read_modify_write,
             completed_bytes: 0,
             reply: Some(reply),
             _request_permit: permits.0,
@@ -264,14 +258,22 @@ impl IoRequest {
         })
     }
 
+    fn aligned_length(&self) -> usize {
+        (self.data_offset_in_buffer + self.length).next_multiple_of(DIRECT_IO_ALIGNMENT_BYTES)
+    }
+
+    fn is_reading(&self) -> bool {
+        self.operation == IoOperation::Read || self.read_modify_write_payload.is_some()
+    }
+
     fn submission_entry(&mut self, fd: i32, slot: usize) -> squeue::Entry {
         let fd = types::Fd(fd);
         // SAFETY: completed_bytes is within io_buffer. The request owns this memory
         // in its active slot until the completion is consumed.
         let ptr = unsafe { self.io_buffer.ptr.as_ptr().add(self.completed_bytes) };
-        let length = (self.aligned_length - self.completed_bytes) as u32;
+        let length = (self.aligned_length() - self.completed_bytes) as u32;
         let offset = self.aligned_offset + self.completed_bytes as u64;
-        let entry = if self.reading_phase {
+        let entry = if self.is_reading() {
             opcode::Read::new(fd, ptr, length).offset(offset).build()
         } else {
             opcode::Write::new(fd, ptr, length).offset(offset).build()
@@ -288,11 +290,11 @@ impl IoRequest {
             return Err(io::Error::from_raw_os_error(-result));
         }
         let count = result as usize;
-        if count == 0 || count > self.aligned_length - self.completed_bytes {
+        if count == 0 || count > self.aligned_length() - self.completed_bytes {
             return Err(self.incomplete_io_error());
         }
         self.completed_bytes += count;
-        if self.completed_bytes != self.aligned_length {
+        if self.completed_bytes != self.aligned_length() {
             // An unaligned remainder cannot be resubmitted with O_DIRECT.
             if !self.completed_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
                 return Err(self.incomplete_io_error());
@@ -302,7 +304,6 @@ impl IoRequest {
         if let Some(payload) = self.read_modify_write_payload.take() {
             self.io_buffer.as_mut_slice()[self.data_offset_in_buffer..self.data_offset_in_buffer + self.length]
                 .copy_from_slice(&payload);
-            self.reading_phase = false;
             self.completed_bytes = 0;
             return Ok(true);
         }
@@ -311,7 +312,7 @@ impl IoRequest {
 
     fn incomplete_io_error(&self) -> io::Error {
         io::Error::new(
-            if self.reading_phase {
+            if self.is_reading() {
                 io::ErrorKind::UnexpectedEof
             } else {
                 io::ErrorKind::WriteZero
