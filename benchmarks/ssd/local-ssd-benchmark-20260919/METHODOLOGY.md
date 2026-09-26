@@ -14,7 +14,7 @@ Measured on **2026-09-19**, on `m8g-32cpu-local-ssd` (EC2 **m8gd.8xlarge**):
 
 ## Workload
 
-Dedicated files: **128 GiB for reads**, **64 GiB for writes**, on the same SSD. Both were fully initialized with sequential 1 MiB writes and an end-of-initialization fsync. No sparse/unwritten read extents. Results/logs were written to the root EBS volume.
+Dedicated files: **128 GiB for reads**, **64 GiB for writes**, on the same SSD. Both were fully initialized with sequential 1 MiB writes and an end-of-initialization fsync. No reads from sparse or unwritten disk regions. Results/logs were written to the root EBS volume.
 
 | Test | Matrix |
 |---|---|

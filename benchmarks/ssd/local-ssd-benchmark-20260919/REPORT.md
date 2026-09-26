@@ -10,7 +10,7 @@ All throughput values are **decimal MB/s** (1 MB = 1,000,000 bytes). Block sizes
 - Each measured case: 5 s warmup followed by 30 s measurement. Case order randomized with a fixed seed.
 - Standalone tests: queue depth (QD) 1 and 32. QD1 means one outstanding request, not maximum device throughput.
 - Mixed tests: one sequential reader at QD32 plus one sequential writer at up to QD32 using **1 MiB writes**. Writer caps apply to decimal bytes/s; actual achieved rates are reported separately.
-- Separate, fully sequentially initialized 128 GiB read and 64 GiB write files. Reads never access sparse/unwritten extents. Streams wrap at file boundaries.
+- Separate, fully sequentially initialized 128 GiB read and 64 GiB write files. Reads never access sparse or unwritten disk regions. Streams wrap at file boundaries.
 - Existing data untouched; only the two benchmark data files are removed after successful completion. No raw-device writes, random writes, tuning, or cache dropping.
 - SSD initially empty and idle. These are low-occupancy file overwrite measurements, not a fully preconditioned/full-drive endurance benchmark.
 - Writes use direct I/O, **not per-write fsync**. This measures throughput rather than transactional durable-write latency.

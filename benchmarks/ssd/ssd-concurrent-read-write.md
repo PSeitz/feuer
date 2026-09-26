@@ -1,7 +1,21 @@
 # Local SSD: concurrent sequential reads and writes
 
 > **Random-read follow-up (2026-09-25):** see [random reads with sequential writes](local-ssd-random-read-write-20260925/REPORT.md).
-> That new 42-case sweep measures the cache-relevant access pattern; the historical sequential-read results below are unchanged.
+> That 42-case sweep measures the cache-relevant access pattern.
+>
+> **Writer-QD follow-up (2026-09-26):** see the [QD1–32 sweep, including 32 KiB reads](local-ssd-write-qd-20260926/REPORT.md)
+> and [policy implications](local-ssd-write-qd-20260926/METHODOLOGY.md#findings-and-policy-implications).
+> With 1 MiB writes, even QD1 saturates standalone write bandwidth and substantially slows small reads;
+> a concurrency cap is not a substitute for a write-rate cap.
+>
+> **Mixed-size screening (2026-09-26):** [50/50 4 KiB / 1 MiB reads by request count](local-ssd-mixed-read-sizes-20260926/REPORT.md).
+> In two short rounds, 450 MB/s writes roughly preserve read throughput and raise 4 KiB read p99 by about 2%.
+> The presence of small reads alone does not predict the pure-small-read slowdown.
+>
+> **Write-chunk screening (2026-09-26):** [1 MiB/QD1 versus 64 KiB chunks](local-ssd-write-chunks-20260926/REPORT.md).
+> Submitting sixteen chunks together showed no repeatable improvement in the mixed-read workload;
+> 64 KiB/QD1 preserved write throughput with only a small read-latency improvement in these short runs.
+> Historical results below are unchanged.
 
 Measurements from **2026-09-19** on `m8g-32cpu-local-ssd` (EC2 **m8gd.8xlarge**).
 
