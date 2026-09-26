@@ -8,7 +8,7 @@ Status: authoritative behavioral contract. Implementation sequencing and current
 Feuer is an embedded read-through cache for applications that access immutable objects by byte range. It sits
 between the application and an authoritative source such as object storage, combining a soft-capacity
 in-memory tier with a fixed-capacity, best-effort restart-recoverable local disk tier designed to scale to at
-least 1 TiB.
+least 30 TiB.
 
 Its purpose is to reduce source requests, lookup latency, and retrieval cost without forcing source-I/O
 boundaries onto callers. On a miss, an application callback may coalesce work or prefetch a downloaded range
