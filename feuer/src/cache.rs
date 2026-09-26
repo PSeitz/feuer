@@ -7,7 +7,8 @@ use thiserror::Error;
 
 use crate::Config;
 
-struct Inner {
+/// Configuration and memory-cache state shared by cloned cache handles.
+struct CacheState {
     config: Config,
     memory: MemoryCache,
 }
@@ -20,14 +21,14 @@ struct Inner {
 /// cache directory.
 #[derive(Clone)]
 pub struct Cache {
-    inner: Arc<Inner>,
+    state: Arc<CacheState>,
 }
 
 impl fmt::Debug for Cache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Cache")
-            .field("memory_capacity", &self.inner.config.memory_capacity())
-            .field("disk_capacity", &self.inner.config.disk_capacity())
+            .field("memory_capacity", &self.state.config.memory_capacity())
+            .field("disk_capacity", &self.state.config.disk_capacity())
             .finish_non_exhaustive()
     }
 }
@@ -37,13 +38,13 @@ impl Cache {
     pub fn new(config: Config) -> Self {
         let memory = MemoryCache::new(config.memory_capacity());
         Self {
-            inner: Arc::new(Inner { config, memory }),
+            state: Arc::new(CacheState { config, memory }),
         }
     }
 
     /// Returns this cache's configuration.
     pub fn config(&self) -> &Config {
-        &self.inner.config
+        &self.state.config
     }
 
     /// Returns the requested bytes from memory or invokes this call's callback.
@@ -68,7 +69,7 @@ impl Cache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Download, E>>,
     {
-        if let Some(bytes) = self.inner.memory.get(&object_key, requested_range) {
+        if let Some(bytes) = self.state.memory.get(&object_key, requested_range) {
             return Ok(bytes);
         }
 
@@ -82,7 +83,7 @@ impl Cache {
         }
 
         let requested_bytes = requested_slice(download.bytes(), downloaded_range, requested_range);
-        self.inner
+        self.state
             .memory
             .insert_and_record(object_key, download, requested_range);
 

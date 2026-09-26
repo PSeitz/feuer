@@ -518,18 +518,18 @@ fn copied_compaction_is_revalidated_before_publication_and_can_fall_back() {
 
     let incoming = ObjectKey::from("incoming");
     let incoming_bytes = Bytes::from_static(b"xy");
-    let prepared = {
+    let replacement = {
         let mut shard = cache.shards[0].lock();
-        let AdmissionStep::Compact(work) = shard.admission_step(&incoming, range(0, 2), &incoming_bytes, None, true)
+        let AdmissionStep::Compact(source) = shard.admission_step(&incoming, range(0, 2), &incoming_bytes, None, true)
         else {
             panic!("pressure should select the cold compactable cached range");
         };
         drop(shard);
-        work.copy_payload()
+        source.copy_payload()
     };
 
     cache.record_access(&key, range(6, 8));
-    assert!(!cache.shards[0].lock().publish_compaction(prepared));
+    assert!(!cache.shards[0].lock().publish_compaction(replacement));
     assert_eq!(cache.used_bytes(), 10);
     assert!(cache.get(&key, range(6, 8)).is_some());
 

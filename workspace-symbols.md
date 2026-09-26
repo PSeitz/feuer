@@ -13,23 +13,56 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 - Names are qualified by their source parent where rust-analyzer provides one; locations distinguish duplicate names.
 - This is a snapshot of the current source symbols for naming review.
 
+## Naming review
+
+Reviewed declarations, fields, variants, methods, parameters, and local bindings against `AGENTS.md`, using the source to check what each name represents. The inventory below reflects the resulting names.
+
+| What it represents | Name |
+| --- | --- |
+| Configuration and memory-cache state shared by cache handles | `CacheState` |
+| Queue, path, and capacity state shared by data-file handles | `DataFileState` |
+| One retained downloaded range and its bytes | `CachedRange` |
+| One object's cached ranges and access history | `ObjectCachedRanges` |
+| Cached ranges superseded by a larger download | `SupersededRanges` |
+| Payload-byte and entry usage removed during admission | `RemovedUsage` |
+| A cached range's identity: object key, start offset, and entry ID | `CachedRangeIdentity` |
+| Cached-range candidates sampled under memory pressure | `PressureCandidates` |
+| A cached range selected for compaction or eviction under memory pressure | `PressureCandidate` |
+| Source bytes, identity, and plan for compaction outside the shard lock | `CompactionSource` |
+| Copied compaction replacement payload awaiting revalidated publication | `CompactionReplacement` |
+| One memory-cache shard's range indexes, access history, and accounting | `MemoryShard` |
+| A handle that submits I/O requests and owns the queue thread's lifetime | `IoQueueHandle` |
+| Per-operation-class request and staging-buffer admission budgets | `IoAdmissionBudgets` |
+| An admitted I/O request owning its buffers and permits through completion | `IoRequest` |
+| A cache populated and queried during workload replay | `ReplayCache` |
+| Feuer and Foyer caches used for workload replay | `FeuerReplayCache`, `FoyerReplayCache` |
+| Test caches for warmup and range-coverage replay | `WarmupTestCache`, `RangeTestCache` |
+| Completed I/O counts and sampled latencies for a measurement interval | `IoMeasurements` |
+| The receiver for an I/O request's result in tests | `IoResultReceiver` |
+
+- Clarified physical versus logical offsets (`aligned_offset`), progress (`completed_bytes`), read-modify-write input (`read_modify_write_payload`), admission permits, retained-byte counts, and latency-sample units.
+- Named I/O limits by their purpose and units: `DIRECT_IO_ALIGNMENT_BYTES`, `MAX_ADMITTED_REQUESTS`, and `MAX_STAGING_BUFFER_BYTES`. `staging_pages_for` returns alignment-page units, not bytes.
+- Kept names that are already concrete in context, public APIs, Rust trait-required names, and conventional short local names where their meaning is unambiguous. Benchmark CLI flags, CSV columns, metric names, and tracing labels are unchanged.
+- No reserved disk-region or read-guard types exist yet. When implemented, use `DiskRegion` and `DiskRegionReadGuard` as required by `AGENTS.md`; the I/O request's semaphore permits are not disk-region read guards.
+- The separate `foyer/` workspace was not edited.
+
 ## Counts
 
 | Kind | Count |
 | --- | ---: |
-| Const | 29 |
+| Const | 28 |
 | Enum | 10 |
-| Field | 183 |
-| Function | 166 |
-| Impl | 53 |
-| Local | 549 |
-| Method | 138 |
+| Field | 178 |
+| Function | 164 |
+| Impl | 51 |
+| Local | 544 |
+| Method | 135 |
 | Module | 25 |
-| Struct | 45 |
+| Struct | 44 |
 | Trait | 1 |
 | TypeAlias | 5 |
-| Variant | 40 |
-| **Total** | **1244** |
+| Variant | 38 |
+| **Total** | **1223** |
 
 ## Packages
 
@@ -38,7 +71,7 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | `feuer` | 3 | 42 | 3 | 51 |
 | `feuer-memory` | 7 | 211 | 12 | 180 |
 | `feuer-memory-bench` | 1 | 149 | 12 | 109 |
-| `feuer-storage` | 7 | 196 | 20 | 201 |
+| `feuer-storage` | 7 | 182 | 18 | 196 |
 | `feuer-tokio` | 1 | 0 | 0 | 0 |
 | `feuer-types` | 3 | 44 | 6 | 8 |
 
@@ -48,87 +81,87 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
-| [10](feuer/src/cache.rs#L10) | Struct | `Inner` | — |
-| [11](feuer/src/cache.rs#L11) | Field | `Inner::config` | `Config` |
-| [12](feuer/src/cache.rs#L12) | Field | `Inner::memory` | `MemoryCache` |
-| [22](feuer/src/cache.rs#L22) | Struct | `Cache` | — |
-| [23](feuer/src/cache.rs#L23) | Field | `Cache::inner` | `Arc<Inner>` |
-| [26](feuer/src/cache.rs#L26) | Impl | `impl fmt::Debug for Cache` | — |
-| [27](feuer/src/cache.rs#L27) | Method | `impl fmt::Debug for Cache::fmt` | `fn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result` |
-| [35](feuer/src/cache.rs#L35) | Impl | `impl Cache` | — |
-| [37](feuer/src/cache.rs#L37) | Function | `impl Cache::new` | `fn(config: Config) -> Self` |
-| [45](feuer/src/cache.rs#L45) | Method | `impl Cache::config` | `fn(&self) -> &Config` |
-| [61](feuer/src/cache.rs#L61) | Method | `impl Cache::get_or_fetch` | `fn<F, Fut, E>( &self, object_key: ObjectKey, requested_range: ByteRange, callback: F, ) -> Result<Bytes, GetOrFetchError<E>>` |
-| [95](feuer/src/cache.rs#L95) | Enum | `GetOrFetchError` | — |
-| [98](feuer/src/cache.rs#L98) | Variant | `GetOrFetchError::Callback` | — |
-| [101](feuer/src/cache.rs#L101) | Variant | `GetOrFetchError::DownloadDoesNotCover` | — |
-| [103](feuer/src/cache.rs#L103) | Field | `GetOrFetchError::DownloadDoesNotCover::requested_range` | `ByteRange` |
-| [105](feuer/src/cache.rs#L105) | Field | `GetOrFetchError::DownloadDoesNotCover::downloaded_range` | `ByteRange` |
-| [109](feuer/src/cache.rs#L109) | Function | `requested_slice` | `fn(bytes: &Bytes, downloaded_range: ByteRange, requested_range: ByteRange) -> Bytes` |
-| [119](feuer/src/cache.rs#L119) | Module | `tests` | — |
-| [132](feuer/src/cache.rs#L132) | Function | `tests::range` | `fn(start: u64, end: u64) -> ByteRange` |
-| [136](feuer/src/cache.rs#L136) | Function | `tests::cache` | `fn(memory_capacity: u64) -> Cache` |
-| [141](feuer/src/cache.rs#L141) | Function | `tests::cache_handle_is_send_sync_static` | `fn()` |
-| [142](feuer/src/cache.rs#L142) | Function | `tests::cache_handle_is_send_sync_static::assert_send_sync_static` | `fn<T: Send + Sync + 'static>()` |
-| [147](feuer/src/cache.rs#L147) | Function | `tests::callback_result_and_covering_memory_hit_return_the_exact_request` | `fn()` |
-| [178](feuer/src/cache.rs#L178) | Function | `tests::every_concurrent_miss_invokes_its_own_callback` | `fn()` |
-| [210](feuer/src/cache.rs#L210) | Function | `tests::callback_errors_are_returned_without_retry_or_population` | `fn()` |
-| [231](feuer/src/cache.rs#L231) | Function | `tests::rejects_noncovering_but_retains_oversized_callback_results` | `fn()` |
-| [271](feuer/src/cache.rs#L271) | Function | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes` | `fn()` |
+| [11](feuer/src/cache.rs#L11) | Struct | `CacheState` | — |
+| [12](feuer/src/cache.rs#L12) | Field | `CacheState::config` | `Config` |
+| [13](feuer/src/cache.rs#L13) | Field | `CacheState::memory` | `MemoryCache` |
+| [23](feuer/src/cache.rs#L23) | Struct | `Cache` | — |
+| [24](feuer/src/cache.rs#L24) | Field | `Cache::state` | `Arc<CacheState>` |
+| [27](feuer/src/cache.rs#L27) | Impl | `impl fmt::Debug for Cache` | — |
+| [28](feuer/src/cache.rs#L28) | Method | `impl fmt::Debug for Cache::fmt` | `fn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result` |
+| [36](feuer/src/cache.rs#L36) | Impl | `impl Cache` | — |
+| [38](feuer/src/cache.rs#L38) | Function | `impl Cache::new` | `fn(config: Config) -> Self` |
+| [46](feuer/src/cache.rs#L46) | Method | `impl Cache::config` | `fn(&self) -> &Config` |
+| [62](feuer/src/cache.rs#L62) | Method | `impl Cache::get_or_fetch` | `fn<F, Fut, E>( &self, object_key: ObjectKey, requested_range: ByteRange, callback: F, ) -> Result<Bytes, GetOrFetchError<E>>` |
+| [96](feuer/src/cache.rs#L96) | Enum | `GetOrFetchError` | — |
+| [99](feuer/src/cache.rs#L99) | Variant | `GetOrFetchError::Callback` | — |
+| [102](feuer/src/cache.rs#L102) | Variant | `GetOrFetchError::DownloadDoesNotCover` | — |
+| [104](feuer/src/cache.rs#L104) | Field | `GetOrFetchError::DownloadDoesNotCover::requested_range` | `ByteRange` |
+| [106](feuer/src/cache.rs#L106) | Field | `GetOrFetchError::DownloadDoesNotCover::downloaded_range` | `ByteRange` |
+| [110](feuer/src/cache.rs#L110) | Function | `requested_slice` | `fn(bytes: &Bytes, downloaded_range: ByteRange, requested_range: ByteRange) -> Bytes` |
+| [120](feuer/src/cache.rs#L120) | Module | `tests` | — |
+| [133](feuer/src/cache.rs#L133) | Function | `tests::range` | `fn(start: u64, end: u64) -> ByteRange` |
+| [137](feuer/src/cache.rs#L137) | Function | `tests::cache` | `fn(memory_capacity: u64) -> Cache` |
+| [142](feuer/src/cache.rs#L142) | Function | `tests::cache_handle_is_send_sync_static` | `fn()` |
+| [143](feuer/src/cache.rs#L143) | Function | `tests::cache_handle_is_send_sync_static::assert_send_sync_static` | `fn<T: Send + Sync + 'static>()` |
+| [148](feuer/src/cache.rs#L148) | Function | `tests::callback_result_and_covering_memory_hit_return_the_exact_request` | `fn()` |
+| [179](feuer/src/cache.rs#L179) | Function | `tests::every_concurrent_miss_invokes_its_own_callback` | `fn()` |
+| [211](feuer/src/cache.rs#L211) | Function | `tests::callback_errors_are_returned_without_retry_or_population` | `fn()` |
+| [232](feuer/src/cache.rs#L232) | Function | `tests::rejects_noncovering_but_retains_oversized_callback_results` | `fn()` |
+| [272](feuer/src/cache.rs#L272) | Function | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes` | `fn()` |
 
 <details>
 <summary>Local bindings (48)</summary>
 
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
-| [38](feuer/src/cache.rs#L38) | Local | `impl Cache::new::memory` | — |
-| [75](feuer/src/cache.rs#L75) | Local | `impl Cache::get_or_fetch::download` | — |
-| [76](feuer/src/cache.rs#L76) | Local | `impl Cache::get_or_fetch::downloaded_range` | — |
-| [84](feuer/src/cache.rs#L84) | Local | `impl Cache::get_or_fetch::requested_bytes` | — |
-| [111](feuer/src/cache.rs#L111) | Local | `requested_slice::start` | — |
-| [113](feuer/src/cache.rs#L113) | Local | `requested_slice::end` | — |
-| [148](feuer/src/cache.rs#L148) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::cache` | — |
-| [149](feuer/src/cache.rs#L149) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::key` | — |
-| [150](feuer/src/cache.rs#L150) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::payload` | — |
-| [151](feuer/src/cache.rs#L151) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::callback_count` | — |
-| [153](feuer/src/cache.rs#L153) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::count` | — |
-| [154](feuer/src/cache.rs#L154) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::callback_payload` | — |
-| [155](feuer/src/cache.rs#L155) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::result` | — |
-| [165](feuer/src/cache.rs#L165) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::count` | — |
-| [166](feuer/src/cache.rs#L166) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::result` | — |
-| [179](feuer/src/cache.rs#L179) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::cache` | — |
-| [180](feuer/src/cache.rs#L180) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::key` | — |
-| [181](feuer/src/cache.rs#L181) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::barrier` | — |
-| [182](feuer/src/cache.rs#L182) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::callback_count` | — |
-| [183](feuer/src/cache.rs#L183) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::mut tasks` | — |
-| [186](feuer/src/cache.rs#L186) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::cache` | — |
-| [187](feuer/src/cache.rs#L187) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::key` | — |
-| [188](feuer/src/cache.rs#L188) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::barrier` | — |
-| [189](feuer/src/cache.rs#L189) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::callback_count` | — |
-| [211](feuer/src/cache.rs#L211) | Local | `tests::callback_errors_are_returned_without_retry_or_population::cache` | — |
-| [212](feuer/src/cache.rs#L212) | Local | `tests::callback_errors_are_returned_without_retry_or_population::key` | — |
-| [213](feuer/src/cache.rs#L213) | Local | `tests::callback_errors_are_returned_without_retry_or_population::callback_count` | — |
-| [216](feuer/src/cache.rs#L216) | Local | `tests::callback_errors_are_returned_without_retry_or_population::invocation_count` | — |
-| [217](feuer/src/cache.rs#L217) | Local | `tests::callback_errors_are_returned_without_retry_or_population::error` | — |
-| [232](feuer/src/cache.rs#L232) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::cache` | — |
-| [233](feuer/src/cache.rs#L233) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::key` | — |
-| [235](feuer/src/cache.rs#L235) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::error` | — |
-| [249](feuer/src/cache.rs#L249) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::result` | — |
-| [257](feuer/src/cache.rs#L257) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::unexpected_callback_count` | — |
-| [258](feuer/src/cache.rs#L258) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::count` | — |
-| [259](feuer/src/cache.rs#L259) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::result` | — |
-| [272](feuer/src/cache.rs#L272) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::cache` | — |
-| [273](feuer/src/cache.rs#L273) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::key` | — |
-| [274](feuer/src/cache.rs#L274) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::callback_entered` | — |
-| [275](feuer/src/cache.rs#L275) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::release_callback` | — |
-| [277](feuer/src/cache.rs#L277) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::pending` | — |
-| [278](feuer/src/cache.rs#L278) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::pending::cache` | — |
-| [279](feuer/src/cache.rs#L279) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::pending::key` | — |
-| [280](feuer/src/cache.rs#L280) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::pending::callback_entered` | — |
-| [281](feuer/src/cache.rs#L281) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::pending::release_callback` | — |
-| [304](feuer/src/cache.rs#L304) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::unexpected_callback_count` | — |
-| [305](feuer/src/cache.rs#L305) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::count` | — |
-| [306](feuer/src/cache.rs#L306) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::cached` | — |
+| [39](feuer/src/cache.rs#L39) | Local | `impl Cache::new::memory` | — |
+| [76](feuer/src/cache.rs#L76) | Local | `impl Cache::get_or_fetch::download` | — |
+| [77](feuer/src/cache.rs#L77) | Local | `impl Cache::get_or_fetch::downloaded_range` | — |
+| [85](feuer/src/cache.rs#L85) | Local | `impl Cache::get_or_fetch::requested_bytes` | — |
+| [112](feuer/src/cache.rs#L112) | Local | `requested_slice::start` | — |
+| [114](feuer/src/cache.rs#L114) | Local | `requested_slice::end` | — |
+| [149](feuer/src/cache.rs#L149) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::cache` | — |
+| [150](feuer/src/cache.rs#L150) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::key` | — |
+| [151](feuer/src/cache.rs#L151) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::payload` | — |
+| [152](feuer/src/cache.rs#L152) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::callback_count` | — |
+| [154](feuer/src/cache.rs#L154) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::count` | — |
+| [155](feuer/src/cache.rs#L155) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::callback_payload` | — |
+| [156](feuer/src/cache.rs#L156) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::result` | — |
+| [166](feuer/src/cache.rs#L166) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::count` | — |
+| [167](feuer/src/cache.rs#L167) | Local | `tests::callback_result_and_covering_memory_hit_return_the_exact_request::result` | — |
+| [180](feuer/src/cache.rs#L180) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::cache` | — |
+| [181](feuer/src/cache.rs#L181) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::key` | — |
+| [182](feuer/src/cache.rs#L182) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::barrier` | — |
+| [183](feuer/src/cache.rs#L183) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::callback_count` | — |
+| [184](feuer/src/cache.rs#L184) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::mut tasks` | — |
+| [187](feuer/src/cache.rs#L187) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::cache` | — |
+| [188](feuer/src/cache.rs#L188) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::key` | — |
+| [189](feuer/src/cache.rs#L189) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::barrier` | — |
+| [190](feuer/src/cache.rs#L190) | Local | `tests::every_concurrent_miss_invokes_its_own_callback::callback_count` | — |
+| [212](feuer/src/cache.rs#L212) | Local | `tests::callback_errors_are_returned_without_retry_or_population::cache` | — |
+| [213](feuer/src/cache.rs#L213) | Local | `tests::callback_errors_are_returned_without_retry_or_population::key` | — |
+| [214](feuer/src/cache.rs#L214) | Local | `tests::callback_errors_are_returned_without_retry_or_population::callback_count` | — |
+| [217](feuer/src/cache.rs#L217) | Local | `tests::callback_errors_are_returned_without_retry_or_population::invocation_count` | — |
+| [218](feuer/src/cache.rs#L218) | Local | `tests::callback_errors_are_returned_without_retry_or_population::error` | — |
+| [233](feuer/src/cache.rs#L233) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::cache` | — |
+| [234](feuer/src/cache.rs#L234) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::key` | — |
+| [236](feuer/src/cache.rs#L236) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::error` | — |
+| [250](feuer/src/cache.rs#L250) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::result` | — |
+| [258](feuer/src/cache.rs#L258) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::unexpected_callback_count` | — |
+| [259](feuer/src/cache.rs#L259) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::count` | — |
+| [260](feuer/src/cache.rs#L260) | Local | `tests::rejects_noncovering_but_retains_oversized_callback_results::result` | — |
+| [273](feuer/src/cache.rs#L273) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::cache` | — |
+| [274](feuer/src/cache.rs#L274) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::key` | — |
+| [275](feuer/src/cache.rs#L275) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::callback_entered` | — |
+| [276](feuer/src/cache.rs#L276) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::release_callback` | — |
+| [278](feuer/src/cache.rs#L278) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::pending` | — |
+| [279](feuer/src/cache.rs#L279) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::pending::cache` | — |
+| [280](feuer/src/cache.rs#L280) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::pending::key` | — |
+| [281](feuer/src/cache.rs#L281) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::pending::callback_entered` | — |
+| [282](feuer/src/cache.rs#L282) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::pending::release_callback` | — |
+| [305](feuer/src/cache.rs#L305) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::unexpected_callback_count` | — |
+| [306](feuer/src/cache.rs#L306) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::count` | — |
+| [307](feuer/src/cache.rs#L307) | Local | `tests::a_racing_contained_download_is_discarded_but_returns_its_own_bytes::cached` | — |
 
 </details>
 
@@ -310,167 +343,167 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
 | [14](feuer-memory/src/store/shard.rs#L14) | Const | `COMPACTION_GRACE_ACCESSES` | `u64` |
-| [16](feuer-memory/src/store/shard.rs#L16) | Const | `POLICY_SAMPLE_SIZE` | `usize` |
-| [19](feuer-memory/src/store/shard.rs#L19) | Struct | `Entry` | — |
-| [21](feuer-memory/src/store/shard.rs#L21) | Field | `Entry::id` | `u64` |
-| [23](feuer-memory/src/store/shard.rs#L23) | Field | `Entry::range` | `ByteRange` |
-| [25](feuer-memory/src/store/shard.rs#L25) | Field | `Entry::bytes` | `Bytes` |
-| [27](feuer-memory/src/store/shard.rs#L27) | Field | `Entry::candidate_slot` | `usize` |
-| [29](feuer-memory/src/store/shard.rs#L29) | Field | `Entry::admitted_at` | `u64` |
-| [32](feuer-memory/src/store/shard.rs#L32) | Impl | `impl Entry` | — |
-| [33](feuer-memory/src/store/shard.rs#L33) | Method | `impl Entry::requested_bytes` | `fn(&self, requested_range: ByteRange) -> Bytes` |
-| [49](feuer-memory/src/store/shard.rs#L49) | Struct | `CachedRanges` | — |
-| [51](feuer-memory/src/store/shard.rs#L51) | Field | `CachedRanges::by_start` | `BTreeMap<u64, Entry>` |
-| [53](feuer-memory/src/store/shard.rs#L53) | Field | `CachedRanges::accesses` | `AccessHistory` |
-| [55](feuer-memory/src/store/shard.rs#L55) | Field | `CachedRanges::generation` | `u64` |
-| [58](feuer-memory/src/store/shard.rs#L58) | Impl | `impl CachedRanges` | — |
-| [59](feuer-memory/src/store/shard.rs#L59) | Method | `impl CachedRanges::covering` | `fn(&self, range: ByteRange) -> Option<&Entry>` |
-| [64](feuer-memory/src/store/shard.rs#L64) | Method | `impl CachedRanges::observe_covering` | `fn<R>( &mut self, requested: ByteRange, access_clock: u64, project: impl FnOnce(&Entry) -> R, ) -> Option<R>` |
-| [82](feuer-memory/src/store/shard.rs#L82) | Method | `impl CachedRanges::superseded_by` | `fn(&self, range: ByteRange) -> Superseded` |
-| [96](feuer-memory/src/store/shard.rs#L96) | Struct | `Superseded` | — |
-| [97](feuer-memory/src/store/shard.rs#L97) | Field | `Superseded::ranges` | `Vec<ByteRange>` |
-| [98](feuer-memory/src/store/shard.rs#L98) | Field | `Superseded::bytes` | `u64` |
-| [103](feuer-memory/src/store/shard.rs#L103) | Struct | `Removal` | — |
-| [104](feuer-memory/src/store/shard.rs#L104) | Field | `Removal::bytes` | `u64` |
-| [105](feuer-memory/src/store/shard.rs#L105) | Field | `Removal::entries` | `u64` |
-| [109](feuer-memory/src/store/shard.rs#L109) | Struct | `CandidateRef` | — |
-| [110](feuer-memory/src/store/shard.rs#L110) | Field | `CandidateRef::object_key` | `ObjectKey` |
-| [111](feuer-memory/src/store/shard.rs#L111) | Field | `CandidateRef::start` | `u64` |
-| [112](feuer-memory/src/store/shard.rs#L112) | Field | `CandidateRef::id` | `u64` |
-| [117](feuer-memory/src/store/shard.rs#L117) | Struct | `PolicyCandidates` | — |
-| [118](feuer-memory/src/store/shard.rs#L118) | Field | `PolicyCandidates::entries` | `Vec<CandidateRef>` |
-| [119](feuer-memory/src/store/shard.rs#L119) | Field | `PolicyCandidates::cursor` | `usize` |
-| [122](feuer-memory/src/store/shard.rs#L122) | Impl | `impl PolicyCandidates` | — |
-| [123](feuer-memory/src/store/shard.rs#L123) | Method | `impl PolicyCandidates::register` | `fn(&mut self, candidate: CandidateRef) -> usize` |
-| [130](feuer-memory/src/store/shard.rs#L130) | Method | `impl PolicyCandidates::remove` | `fn(&mut self, slot: usize, expected_id: u64) -> Option<CandidateRef>` |
-| [143](feuer-memory/src/store/shard.rs#L143) | Method | `impl PolicyCandidates::sample` | `fn(&mut self) -> (usize, usize)` |
-| [155](feuer-memory/src/store/shard.rs#L155) | Struct | `Victim` | — |
-| [156](feuer-memory/src/store/shard.rs#L156) | Field | `Victim::object_key` | `ObjectKey` |
-| [157](feuer-memory/src/store/shard.rs#L157) | Field | `Victim::range` | `ByteRange` |
-| [158](feuer-memory/src/store/shard.rs#L158) | Field | `Victim::id` | `u64` |
-| [159](feuer-memory/src/store/shard.rs#L159) | Field | `Victim::bytes` | `u64` |
-| [160](feuer-memory/src/store/shard.rs#L160) | Field | `Victim::retrieval_value` | `u64` |
-| [164](feuer-memory/src/store/shard.rs#L164) | Struct | `CompactionWork` | — |
-| [165](feuer-memory/src/store/shard.rs#L165) | Field | `CompactionWork::object_key` | `ObjectKey` |
-| [166](feuer-memory/src/store/shard.rs#L166) | Field | `CompactionWork::start` | `u64` |
-| [167](feuer-memory/src/store/shard.rs#L167) | Field | `CompactionWork::id` | `u64` |
-| [168](feuer-memory/src/store/shard.rs#L168) | Field | `CompactionWork::generation` | `u64` |
-| [169](feuer-memory/src/store/shard.rs#L169) | Field | `CompactionWork::plan` | `CompactionPlan` |
-| [170](feuer-memory/src/store/shard.rs#L170) | Field | `CompactionWork::source_bytes` | `Bytes` |
-| [173](feuer-memory/src/store/shard.rs#L173) | Impl | `impl CompactionWork` | — |
-| [175](feuer-memory/src/store/shard.rs#L175) | Method | `impl CompactionWork::copy_payload` | `fn(self) -> PreparedCompaction` |
-| [200](feuer-memory/src/store/shard.rs#L200) | Struct | `PreparedCompaction` | — |
-| [201](feuer-memory/src/store/shard.rs#L201) | Field | `PreparedCompaction::object_key` | `ObjectKey` |
-| [202](feuer-memory/src/store/shard.rs#L202) | Field | `PreparedCompaction::start` | `u64` |
-| [203](feuer-memory/src/store/shard.rs#L203) | Field | `PreparedCompaction::id` | `u64` |
-| [204](feuer-memory/src/store/shard.rs#L204) | Field | `PreparedCompaction::generation` | `u64` |
-| [205](feuer-memory/src/store/shard.rs#L205) | Field | `PreparedCompaction::plan` | `CompactionPlan` |
-| [206](feuer-memory/src/store/shard.rs#L206) | Field | `PreparedCompaction::retained` | `Vec<(ByteRange, Bytes)>` |
-| [210](feuer-memory/src/store/shard.rs#L210) | Enum | `AdmissionStep` | — |
-| [211](feuer-memory/src/store/shard.rs#L211) | Variant | `AdmissionStep::Complete` | — |
-| [212](feuer-memory/src/store/shard.rs#L212) | Variant | `AdmissionStep::Retry` | — |
-| [213](feuer-memory/src/store/shard.rs#L213) | Variant | `AdmissionStep::Compact` | — |
-| [217](feuer-memory/src/store/shard.rs#L217) | Struct | `Shard` | — |
-| [218](feuer-memory/src/store/shard.rs#L218) | Field | `Shard::capacity` | `u64` |
-| [219](feuer-memory/src/store/shard.rs#L219) | Field | `Shard::used_bytes` | `u64` |
-| [220](feuer-memory/src/store/shard.rs#L220) | Field | `Shard::ranges` | `FxHashMap<ObjectKey, CachedRanges>` |
-| [221](feuer-memory/src/store/shard.rs#L221) | Field | `Shard::access_clock` | `u64` |
-| [222](feuer-memory/src/store/shard.rs#L222) | Field | `Shard::next_entry_id` | `u64` |
-| [223](feuer-memory/src/store/shard.rs#L223) | Field | `Shard::candidates` | `PolicyCandidates` |
-| [224](feuer-memory/src/store/shard.rs#L224) | Field | `Shard::metrics` | `Arc<MemoryMetrics>` |
-| [227](feuer-memory/src/store/shard.rs#L227) | Impl | `impl Shard` | — |
-| [228](feuer-memory/src/store/shard.rs#L228) | Function | `impl Shard::new` | `fn(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self` |
-| [240](feuer-memory/src/store/shard.rs#L240) | Method | `impl Shard::used_bytes` | `fn(&self) -> u64` |
-| [244](feuer-memory/src/store/shard.rs#L244) | Method | `impl Shard::get` | `fn(&mut self, object_key: &ObjectKey, requested_range: ByteRange) -> Option<Bytes>` |
-| [262](feuer-memory/src/store/shard.rs#L262) | Method | `impl Shard::record_access` | `fn(&mut self, object_key: &ObjectKey, requested_range: ByteRange)` |
-| [266](feuer-memory/src/store/shard.rs#L266) | Method | `impl Shard::record_successful_access` | `fn(&mut self, object_key: &ObjectKey, requested_range: ByteRange)` |
-| [275](feuer-memory/src/store/shard.rs#L275) | Method | `impl Shard::admission_step` | `fn( &mut self, object_key: &ObjectKey, range: ByteRange, bytes: &Bytes, requested_range: Option<ByteRange>, allow_compaction: bool, ) -> AdmissionStep` |
-| [337](feuer-memory/src/store/shard.rs#L337) | Method | `impl Shard::insert_admission` | `fn(&mut self, object_key: ObjectKey, range: ByteRange, bytes: Bytes)` |
-| [359](feuer-memory/src/store/shard.rs#L359) | Method | `impl Shard::insert_compacted` | `fn(&mut self, object_key: &ObjectKey, range: ByteRange, bytes: Bytes)` |
-| [379](feuer-memory/src/store/shard.rs#L379) | Method | `impl Shard::allocate_entry_id` | `fn(&mut self) -> u64` |
-| [387](feuer-memory/src/store/shard.rs#L387) | Method | `impl Shard::remove_superseded` | `fn(&mut self, object_key: &ObjectKey, ranges: &[ByteRange]) -> Removal` |
-| [399](feuer-memory/src/store/shard.rs#L399) | Method | `impl Shard::remove` | `fn(&mut self, object_key: &ObjectKey, range: ByteRange) -> bool` |
-| [408](feuer-memory/src/store/shard.rs#L408) | Method | `impl Shard::detach_entry` | `fn( &mut self, object_key: &ObjectKey, range: ByteRange, expected_id: Option<u64>, preserve_access: bool, ) -> Option<u64>` |
-| [439](feuer-memory/src/store/shard.rs#L439) | Method | `impl Shard::unregister_candidate` | `fn(&mut self, slot: usize, expected_id: u64)` |
-| [454](feuer-memory/src/store/shard.rs#L454) | Method | `impl Shard::pressure_candidate` | `fn(&mut self, admitting_key: &ObjectKey, admitting_range: ByteRange) -> Option<Victim>` |
-| [492](feuer-memory/src/store/shard.rs#L492) | Method | `impl Shard::compaction_work` | `fn(&self, victim: &Victim) -> Option<CompactionWork>` |
-| [517](feuer-memory/src/store/shard.rs#L517) | Method | `impl Shard::publish_compaction` | `fn(&mut self, prepared: PreparedCompaction) -> bool` |
-| [560](feuer-memory/src/store/shard.rs#L560) | Method | `impl Shard::entry_count` | `fn(&self) -> usize` |
-| [565](feuer-memory/src/store/shard.rs#L565) | Method | `impl Shard::accessed_ranges` | `fn(&self, object_key: &ObjectKey) -> Vec<ByteRange>` |
-| [572](feuer-memory/src/store/shard.rs#L572) | Method | `impl Shard::access_history_len` | `fn(&self, object_key: &ObjectKey) -> usize` |
-| [577](feuer-memory/src/store/shard.rs#L577) | Method | `impl Shard::candidate_count` | `fn(&self) -> usize` |
-| [583](feuer-memory/src/store/shard.rs#L583) | Function | `compare_retention` | `fn(left: &Victim, right: &Victim) -> Ordering` |
-| [590](feuer-memory/src/store/shard.rs#L590) | Function | `compare_value_density` | `fn(left: u64, left_bytes: u64, right: u64, right_bytes: u64) -> Ordering` |
-| [594](feuer-memory/src/store/shard.rs#L594) | Impl | `impl Drop for Shard` | — |
-| [595](feuer-memory/src/store/shard.rs#L595) | Method | `impl Drop for Shard::drop` | `fn(&mut self)` |
+| [16](feuer-memory/src/store/shard.rs#L16) | Const | `PRESSURE_SAMPLE_SIZE` | `usize` |
+| [19](feuer-memory/src/store/shard.rs#L19) | Struct | `CachedRange` | — |
+| [21](feuer-memory/src/store/shard.rs#L21) | Field | `CachedRange::id` | `u64` |
+| [23](feuer-memory/src/store/shard.rs#L23) | Field | `CachedRange::range` | `ByteRange` |
+| [25](feuer-memory/src/store/shard.rs#L25) | Field | `CachedRange::bytes` | `Bytes` |
+| [27](feuer-memory/src/store/shard.rs#L27) | Field | `CachedRange::candidate_slot` | `usize` |
+| [29](feuer-memory/src/store/shard.rs#L29) | Field | `CachedRange::admitted_at` | `u64` |
+| [32](feuer-memory/src/store/shard.rs#L32) | Impl | `impl CachedRange` | — |
+| [33](feuer-memory/src/store/shard.rs#L33) | Method | `impl CachedRange::requested_bytes` | `fn(&self, requested_range: ByteRange) -> Bytes` |
+| [49](feuer-memory/src/store/shard.rs#L49) | Struct | `ObjectCachedRanges` | — |
+| [51](feuer-memory/src/store/shard.rs#L51) | Field | `ObjectCachedRanges::by_start` | `BTreeMap<u64, CachedRange>` |
+| [53](feuer-memory/src/store/shard.rs#L53) | Field | `ObjectCachedRanges::accesses` | `AccessHistory` |
+| [55](feuer-memory/src/store/shard.rs#L55) | Field | `ObjectCachedRanges::generation` | `u64` |
+| [58](feuer-memory/src/store/shard.rs#L58) | Impl | `impl ObjectCachedRanges` | — |
+| [59](feuer-memory/src/store/shard.rs#L59) | Method | `impl ObjectCachedRanges::covering` | `fn(&self, range: ByteRange) -> Option<&CachedRange>` |
+| [64](feuer-memory/src/store/shard.rs#L64) | Method | `impl ObjectCachedRanges::observe_covering` | `fn<R>( &mut self, requested: ByteRange, access_clock: u64, project: impl FnOnce(&CachedRange) -> R, ) -> Option<R>` |
+| [82](feuer-memory/src/store/shard.rs#L82) | Method | `impl ObjectCachedRanges::superseded_by` | `fn(&self, range: ByteRange) -> SupersededRanges` |
+| [96](feuer-memory/src/store/shard.rs#L96) | Struct | `SupersededRanges` | — |
+| [97](feuer-memory/src/store/shard.rs#L97) | Field | `SupersededRanges::ranges` | `Vec<ByteRange>` |
+| [98](feuer-memory/src/store/shard.rs#L98) | Field | `SupersededRanges::bytes` | `u64` |
+| [103](feuer-memory/src/store/shard.rs#L103) | Struct | `RemovedUsage` | — |
+| [104](feuer-memory/src/store/shard.rs#L104) | Field | `RemovedUsage::bytes` | `u64` |
+| [105](feuer-memory/src/store/shard.rs#L105) | Field | `RemovedUsage::entries` | `u64` |
+| [110](feuer-memory/src/store/shard.rs#L110) | Struct | `CachedRangeIdentity` | — |
+| [111](feuer-memory/src/store/shard.rs#L111) | Field | `CachedRangeIdentity::object_key` | `ObjectKey` |
+| [112](feuer-memory/src/store/shard.rs#L112) | Field | `CachedRangeIdentity::start` | `u64` |
+| [113](feuer-memory/src/store/shard.rs#L113) | Field | `CachedRangeIdentity::id` | `u64` |
+| [118](feuer-memory/src/store/shard.rs#L118) | Struct | `PressureCandidates` | — |
+| [119](feuer-memory/src/store/shard.rs#L119) | Field | `PressureCandidates::entries` | `Vec<CachedRangeIdentity>` |
+| [120](feuer-memory/src/store/shard.rs#L120) | Field | `PressureCandidates::cursor` | `usize` |
+| [123](feuer-memory/src/store/shard.rs#L123) | Impl | `impl PressureCandidates` | — |
+| [124](feuer-memory/src/store/shard.rs#L124) | Method | `impl PressureCandidates::register` | `fn(&mut self, candidate: CachedRangeIdentity) -> usize` |
+| [131](feuer-memory/src/store/shard.rs#L131) | Method | `impl PressureCandidates::remove` | `fn(&mut self, slot: usize, expected_id: u64) -> Option<CachedRangeIdentity>` |
+| [144](feuer-memory/src/store/shard.rs#L144) | Method | `impl PressureCandidates::sample` | `fn(&mut self) -> (usize, usize)` |
+| [156](feuer-memory/src/store/shard.rs#L156) | Struct | `PressureCandidate` | — |
+| [157](feuer-memory/src/store/shard.rs#L157) | Field | `PressureCandidate::object_key` | `ObjectKey` |
+| [158](feuer-memory/src/store/shard.rs#L158) | Field | `PressureCandidate::range` | `ByteRange` |
+| [159](feuer-memory/src/store/shard.rs#L159) | Field | `PressureCandidate::id` | `u64` |
+| [160](feuer-memory/src/store/shard.rs#L160) | Field | `PressureCandidate::retained_bytes` | `u64` |
+| [161](feuer-memory/src/store/shard.rs#L161) | Field | `PressureCandidate::retrieval_value` | `u64` |
+| [165](feuer-memory/src/store/shard.rs#L165) | Struct | `CompactionSource` | — |
+| [166](feuer-memory/src/store/shard.rs#L166) | Field | `CompactionSource::object_key` | `ObjectKey` |
+| [167](feuer-memory/src/store/shard.rs#L167) | Field | `CompactionSource::start` | `u64` |
+| [168](feuer-memory/src/store/shard.rs#L168) | Field | `CompactionSource::id` | `u64` |
+| [169](feuer-memory/src/store/shard.rs#L169) | Field | `CompactionSource::generation` | `u64` |
+| [170](feuer-memory/src/store/shard.rs#L170) | Field | `CompactionSource::plan` | `CompactionPlan` |
+| [171](feuer-memory/src/store/shard.rs#L171) | Field | `CompactionSource::source_bytes` | `Bytes` |
+| [174](feuer-memory/src/store/shard.rs#L174) | Impl | `impl CompactionSource` | — |
+| [176](feuer-memory/src/store/shard.rs#L176) | Method | `impl CompactionSource::copy_payload` | `fn(self) -> CompactionReplacement` |
+| [201](feuer-memory/src/store/shard.rs#L201) | Struct | `CompactionReplacement` | — |
+| [202](feuer-memory/src/store/shard.rs#L202) | Field | `CompactionReplacement::object_key` | `ObjectKey` |
+| [203](feuer-memory/src/store/shard.rs#L203) | Field | `CompactionReplacement::start` | `u64` |
+| [204](feuer-memory/src/store/shard.rs#L204) | Field | `CompactionReplacement::id` | `u64` |
+| [205](feuer-memory/src/store/shard.rs#L205) | Field | `CompactionReplacement::generation` | `u64` |
+| [206](feuer-memory/src/store/shard.rs#L206) | Field | `CompactionReplacement::plan` | `CompactionPlan` |
+| [207](feuer-memory/src/store/shard.rs#L207) | Field | `CompactionReplacement::retained` | `Vec<(ByteRange, Bytes)>` |
+| [211](feuer-memory/src/store/shard.rs#L211) | Enum | `AdmissionStep` | — |
+| [212](feuer-memory/src/store/shard.rs#L212) | Variant | `AdmissionStep::Complete` | — |
+| [213](feuer-memory/src/store/shard.rs#L213) | Variant | `AdmissionStep::Retry` | — |
+| [214](feuer-memory/src/store/shard.rs#L214) | Variant | `AdmissionStep::Compact` | — |
+| [218](feuer-memory/src/store/shard.rs#L218) | Struct | `MemoryShard` | — |
+| [219](feuer-memory/src/store/shard.rs#L219) | Field | `MemoryShard::capacity` | `u64` |
+| [220](feuer-memory/src/store/shard.rs#L220) | Field | `MemoryShard::used_bytes` | `u64` |
+| [221](feuer-memory/src/store/shard.rs#L221) | Field | `MemoryShard::ranges` | `FxHashMap<ObjectKey, ObjectCachedRanges>` |
+| [222](feuer-memory/src/store/shard.rs#L222) | Field | `MemoryShard::access_clock` | `u64` |
+| [223](feuer-memory/src/store/shard.rs#L223) | Field | `MemoryShard::next_entry_id` | `u64` |
+| [224](feuer-memory/src/store/shard.rs#L224) | Field | `MemoryShard::candidates` | `PressureCandidates` |
+| [225](feuer-memory/src/store/shard.rs#L225) | Field | `MemoryShard::metrics` | `Arc<MemoryMetrics>` |
+| [228](feuer-memory/src/store/shard.rs#L228) | Impl | `impl MemoryShard` | — |
+| [229](feuer-memory/src/store/shard.rs#L229) | Function | `impl MemoryShard::new` | `fn(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self` |
+| [241](feuer-memory/src/store/shard.rs#L241) | Method | `impl MemoryShard::used_bytes` | `fn(&self) -> u64` |
+| [245](feuer-memory/src/store/shard.rs#L245) | Method | `impl MemoryShard::get` | `fn(&mut self, object_key: &ObjectKey, requested_range: ByteRange) -> Option<Bytes>` |
+| [263](feuer-memory/src/store/shard.rs#L263) | Method | `impl MemoryShard::record_access` | `fn(&mut self, object_key: &ObjectKey, requested_range: ByteRange)` |
+| [267](feuer-memory/src/store/shard.rs#L267) | Method | `impl MemoryShard::record_successful_access` | `fn(&mut self, object_key: &ObjectKey, requested_range: ByteRange)` |
+| [276](feuer-memory/src/store/shard.rs#L276) | Method | `impl MemoryShard::admission_step` | `fn( &mut self, object_key: &ObjectKey, range: ByteRange, bytes: &Bytes, requested_range: Option<ByteRange>, allow_compaction: bool, ) -> AdmissionStep` |
+| [338](feuer-memory/src/store/shard.rs#L338) | Method | `impl MemoryShard::insert_admission` | `fn(&mut self, object_key: ObjectKey, range: ByteRange, bytes: Bytes)` |
+| [360](feuer-memory/src/store/shard.rs#L360) | Method | `impl MemoryShard::insert_compacted` | `fn(&mut self, object_key: &ObjectKey, range: ByteRange, bytes: Bytes)` |
+| [380](feuer-memory/src/store/shard.rs#L380) | Method | `impl MemoryShard::allocate_entry_id` | `fn(&mut self) -> u64` |
+| [388](feuer-memory/src/store/shard.rs#L388) | Method | `impl MemoryShard::remove_superseded` | `fn(&mut self, object_key: &ObjectKey, ranges: &[ByteRange]) -> RemovedUsage` |
+| [400](feuer-memory/src/store/shard.rs#L400) | Method | `impl MemoryShard::remove` | `fn(&mut self, object_key: &ObjectKey, range: ByteRange) -> bool` |
+| [409](feuer-memory/src/store/shard.rs#L409) | Method | `impl MemoryShard::detach_entry` | `fn( &mut self, object_key: &ObjectKey, range: ByteRange, expected_id: Option<u64>, preserve_access: bool, ) -> Option<u64>` |
+| [440](feuer-memory/src/store/shard.rs#L440) | Method | `impl MemoryShard::unregister_candidate` | `fn(&mut self, slot: usize, expected_id: u64)` |
+| [455](feuer-memory/src/store/shard.rs#L455) | Method | `impl MemoryShard::pressure_candidate` | `fn( &mut self, admitting_key: &ObjectKey, admitting_range: ByteRange, ) -> Option<PressureCandidate>` |
+| [497](feuer-memory/src/store/shard.rs#L497) | Method | `impl MemoryShard::compaction_source` | `fn(&self, candidate: &PressureCandidate) -> Option<CompactionSource>` |
+| [522](feuer-memory/src/store/shard.rs#L522) | Method | `impl MemoryShard::publish_compaction` | `fn(&mut self, replacement: CompactionReplacement) -> bool` |
+| [570](feuer-memory/src/store/shard.rs#L570) | Method | `impl MemoryShard::entry_count` | `fn(&self) -> usize` |
+| [575](feuer-memory/src/store/shard.rs#L575) | Method | `impl MemoryShard::accessed_ranges` | `fn(&self, object_key: &ObjectKey) -> Vec<ByteRange>` |
+| [582](feuer-memory/src/store/shard.rs#L582) | Method | `impl MemoryShard::access_history_len` | `fn(&self, object_key: &ObjectKey) -> usize` |
+| [587](feuer-memory/src/store/shard.rs#L587) | Method | `impl MemoryShard::candidate_count` | `fn(&self) -> usize` |
+| [593](feuer-memory/src/store/shard.rs#L593) | Function | `compare_retention` | `fn(left: &PressureCandidate, right: &PressureCandidate) -> Ordering` |
+| [605](feuer-memory/src/store/shard.rs#L605) | Function | `compare_value_density` | `fn(left: u64, left_bytes: u64, right: u64, right_bytes: u64) -> Ordering` |
+| [609](feuer-memory/src/store/shard.rs#L609) | Impl | `impl Drop for MemoryShard` | — |
+| [610](feuer-memory/src/store/shard.rs#L610) | Method | `impl Drop for MemoryShard::drop` | `fn(&mut self)` |
 
 <details>
 <summary>Local bindings (62)</summary>
 
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
-| [35](feuer-memory/src/store/shard.rs#L35) | Local | `impl Entry::requested_bytes::start` | — |
-| [37](feuer-memory/src/store/shard.rs#L37) | Local | `impl Entry::requested_bytes::end` | — |
-| [60](feuer-memory/src/store/shard.rs#L60) | Local | `impl CachedRanges::covering::(_, entry)` | — |
-| [70](feuer-memory/src/store/shard.rs#L70) | Local | `impl CachedRanges::observe_covering::projected` | — |
-| [71](feuer-memory/src/store/shard.rs#L71) | Local | `impl CachedRanges::observe_covering::projected::(_, entry)` | — |
-| [83](feuer-memory/src/store/shard.rs#L83) | Local | `impl CachedRanges::superseded_by::mut superseded` | — |
-| [124](feuer-memory/src/store/shard.rs#L124) | Local | `impl PolicyCandidates::register::slot` | — |
-| [132](feuer-memory/src/store/shard.rs#L132) | Local | `impl PolicyCandidates::remove::last` | — |
-| [134](feuer-memory/src/store/shard.rs#L134) | Local | `impl PolicyCandidates::remove::moved` | — |
-| [144](feuer-memory/src/store/shard.rs#L144) | Local | `impl PolicyCandidates::sample::count` | — |
-| [148](feuer-memory/src/store/shard.rs#L148) | Local | `impl PolicyCandidates::sample::start` | — |
-| [176](feuer-memory/src/store/shard.rs#L176) | Local | `impl CompactionWork::copy_payload::retained` | — |
-| [181](feuer-memory/src/store/shard.rs#L181) | Local | `impl CompactionWork::copy_payload::retained::start` | — |
-| [183](feuer-memory/src/store/shard.rs#L183) | Local | `impl CompactionWork::copy_payload::retained::end` | — |
-| [245](feuer-memory/src/store/shard.rs#L245) | Local | `impl Shard::get::access_clock` | — |
-| [246](feuer-memory/src/store/shard.rs#L246) | Local | `impl Shard::get::accessed` | — |
-| [251](feuer-memory/src/store/shard.rs#L251) | Local | `impl Shard::get::Some(bytes)` | — |
-| [283](feuer-memory/src/store/shard.rs#L283) | Local | `impl Shard::admission_step::superseded` | — |
-| [294](feuer-memory/src/store/shard.rs#L294) | Local | `impl Shard::admission_step::added_bytes` | — |
-| [295](feuer-memory/src/store/shard.rs#L295) | Local | `impl Shard::admission_step::effective_used` | — |
-| [296](feuer-memory/src/store/shard.rs#L296) | Local | `impl Shard::admission_step::target` | — |
-| [299](feuer-memory/src/store/shard.rs#L299) | Local | `impl Shard::admission_step::removal` | — |
-| [314](feuer-memory/src/store/shard.rs#L314) | Local | `impl Shard::admission_step::Some(victim)` | — |
-| [324](feuer-memory/src/store/shard.rs#L324) | Local | `impl Shard::admission_step::removed` | — |
-| [339](feuer-memory/src/store/shard.rs#L339) | Local | `impl Shard::insert_admission::id` | — |
-| [340](feuer-memory/src/store/shard.rs#L340) | Local | `impl Shard::insert_admission::candidate_slot` | — |
-| [345](feuer-memory/src/store/shard.rs#L345) | Local | `impl Shard::insert_admission::entry` | — |
-| [353](feuer-memory/src/store/shard.rs#L353) | Local | `impl Shard::insert_admission::entries` | — |
-| [355](feuer-memory/src/store/shard.rs#L355) | Local | `impl Shard::insert_admission::replaced` | — |
-| [360](feuer-memory/src/store/shard.rs#L360) | Local | `impl Shard::insert_compacted::id` | — |
-| [361](feuer-memory/src/store/shard.rs#L361) | Local | `impl Shard::insert_compacted::candidate_slot` | — |
-| [366](feuer-memory/src/store/shard.rs#L366) | Local | `impl Shard::insert_compacted::entry` | — |
-| [373](feuer-memory/src/store/shard.rs#L373) | Local | `impl Shard::insert_compacted::entries` | — |
-| [375](feuer-memory/src/store/shard.rs#L375) | Local | `impl Shard::insert_compacted::replaced` | — |
-| [388](feuer-memory/src/store/shard.rs#L388) | Local | `impl Shard::remove_superseded::mut removal` | — |
-| [390](feuer-memory/src/store/shard.rs#L390) | Local | `impl Shard::remove_superseded::bytes` | — |
-| [400](feuer-memory/src/store/shard.rs#L400) | Local | `impl Shard::remove::Some(bytes)` | — |
-| [415](feuer-memory/src/store/shard.rs#L415) | Local | `impl Shard::detach_entry::(entry, object_is_empty)` | — |
-| [416](feuer-memory/src/store/shard.rs#L416) | Local | `impl Shard::detach_entry::(entry, object_is_empty)::entries` | — |
-| [417](feuer-memory/src/store/shard.rs#L417) | Local | `impl Shard::detach_entry::(entry, object_is_empty)::current` | — |
-| [421](feuer-memory/src/store/shard.rs#L421) | Local | `impl Shard::detach_entry::(entry, object_is_empty)::entry` | — |
-| [426](feuer-memory/src/store/shard.rs#L426) | Local | `impl Shard::detach_entry::(entry, object_is_empty)::object_is_empty` | — |
-| [434](feuer-memory/src/store/shard.rs#L434) | Local | `impl Shard::detach_entry::bytes` | — |
-| [440](feuer-memory/src/store/shard.rs#L440) | Local | `impl Shard::unregister_candidate::moved` | — |
-| [441](feuer-memory/src/store/shard.rs#L441) | Local | `impl Shard::unregister_candidate::Some(moved)` | — |
-| [444](feuer-memory/src/store/shard.rs#L444) | Local | `impl Shard::unregister_candidate::entry` | — |
-| [455](feuer-memory/src/store/shard.rs#L455) | Local | `impl Shard::pressure_candidate::(sample_start, sample_count)` | — |
-| [456](feuer-memory/src/store/shard.rs#L456) | Local | `impl Shard::pressure_candidate::candidate_count` | — |
-| [457](feuer-memory/src/store/shard.rs#L457) | Local | `impl Shard::pressure_candidate::mut victim` | `Option<Victim>` |
-| [460](feuer-memory/src/store/shard.rs#L460) | Local | `impl Shard::pressure_candidate::candidate` | — |
-| [461](feuer-memory/src/store/shard.rs#L461) | Local | `impl Shard::pressure_candidate::entries` | — |
-| [465](feuer-memory/src/store/shard.rs#L465) | Local | `impl Shard::pressure_candidate::entry` | — |
-| [474](feuer-memory/src/store/shard.rs#L474) | Local | `impl Shard::pressure_candidate::candidate_victim` | — |
-| [493](feuer-memory/src/store/shard.rs#L493) | Local | `impl Shard::compaction_work::entries` | — |
-| [497](feuer-memory/src/store/shard.rs#L497) | Local | `impl Shard::compaction_work::entry` | — |
-| [505](feuer-memory/src/store/shard.rs#L505) | Local | `impl Shard::compaction_work::plan` | — |
-| [518](feuer-memory/src/store/shard.rs#L518) | Local | `impl Shard::publish_compaction::valid` | — |
-| [529](feuer-memory/src/store/shard.rs#L529) | Local | `impl Shard::publish_compaction::source_bytes` | — |
-| [532](feuer-memory/src/store/shard.rs#L532) | Local | `impl Shard::publish_compaction::mut retained_bytes` | — |
-| [533](feuer-memory/src/store/shard.rs#L533) | Local | `impl Shard::publish_compaction::mut retained_entries` | — |
-| [550](feuer-memory/src/store/shard.rs#L550) | Local | `impl Shard::publish_compaction::reclaimed` | — |
-| [596](feuer-memory/src/store/shard.rs#L596) | Local | `impl Drop for Shard::drop::entries` | — |
+| [35](feuer-memory/src/store/shard.rs#L35) | Local | `impl CachedRange::requested_bytes::start` | — |
+| [37](feuer-memory/src/store/shard.rs#L37) | Local | `impl CachedRange::requested_bytes::end` | — |
+| [60](feuer-memory/src/store/shard.rs#L60) | Local | `impl ObjectCachedRanges::covering::(_, entry)` | — |
+| [70](feuer-memory/src/store/shard.rs#L70) | Local | `impl ObjectCachedRanges::observe_covering::projected` | — |
+| [71](feuer-memory/src/store/shard.rs#L71) | Local | `impl ObjectCachedRanges::observe_covering::projected::(_, entry)` | — |
+| [83](feuer-memory/src/store/shard.rs#L83) | Local | `impl ObjectCachedRanges::superseded_by::mut superseded` | — |
+| [125](feuer-memory/src/store/shard.rs#L125) | Local | `impl PressureCandidates::register::slot` | — |
+| [133](feuer-memory/src/store/shard.rs#L133) | Local | `impl PressureCandidates::remove::last` | — |
+| [135](feuer-memory/src/store/shard.rs#L135) | Local | `impl PressureCandidates::remove::moved` | — |
+| [145](feuer-memory/src/store/shard.rs#L145) | Local | `impl PressureCandidates::sample::count` | — |
+| [149](feuer-memory/src/store/shard.rs#L149) | Local | `impl PressureCandidates::sample::start` | — |
+| [177](feuer-memory/src/store/shard.rs#L177) | Local | `impl CompactionSource::copy_payload::retained` | — |
+| [182](feuer-memory/src/store/shard.rs#L182) | Local | `impl CompactionSource::copy_payload::retained::start` | — |
+| [184](feuer-memory/src/store/shard.rs#L184) | Local | `impl CompactionSource::copy_payload::retained::end` | — |
+| [246](feuer-memory/src/store/shard.rs#L246) | Local | `impl MemoryShard::get::access_clock` | — |
+| [247](feuer-memory/src/store/shard.rs#L247) | Local | `impl MemoryShard::get::accessed` | — |
+| [252](feuer-memory/src/store/shard.rs#L252) | Local | `impl MemoryShard::get::Some(bytes)` | — |
+| [284](feuer-memory/src/store/shard.rs#L284) | Local | `impl MemoryShard::admission_step::superseded` | — |
+| [295](feuer-memory/src/store/shard.rs#L295) | Local | `impl MemoryShard::admission_step::added_bytes` | — |
+| [296](feuer-memory/src/store/shard.rs#L296) | Local | `impl MemoryShard::admission_step::effective_used` | — |
+| [297](feuer-memory/src/store/shard.rs#L297) | Local | `impl MemoryShard::admission_step::target` | — |
+| [300](feuer-memory/src/store/shard.rs#L300) | Local | `impl MemoryShard::admission_step::removal` | — |
+| [315](feuer-memory/src/store/shard.rs#L315) | Local | `impl MemoryShard::admission_step::Some(candidate)` | — |
+| [325](feuer-memory/src/store/shard.rs#L325) | Local | `impl MemoryShard::admission_step::removed` | — |
+| [340](feuer-memory/src/store/shard.rs#L340) | Local | `impl MemoryShard::insert_admission::id` | — |
+| [341](feuer-memory/src/store/shard.rs#L341) | Local | `impl MemoryShard::insert_admission::candidate_slot` | — |
+| [346](feuer-memory/src/store/shard.rs#L346) | Local | `impl MemoryShard::insert_admission::entry` | — |
+| [354](feuer-memory/src/store/shard.rs#L354) | Local | `impl MemoryShard::insert_admission::entries` | — |
+| [356](feuer-memory/src/store/shard.rs#L356) | Local | `impl MemoryShard::insert_admission::replaced` | — |
+| [361](feuer-memory/src/store/shard.rs#L361) | Local | `impl MemoryShard::insert_compacted::id` | — |
+| [362](feuer-memory/src/store/shard.rs#L362) | Local | `impl MemoryShard::insert_compacted::candidate_slot` | — |
+| [367](feuer-memory/src/store/shard.rs#L367) | Local | `impl MemoryShard::insert_compacted::entry` | — |
+| [374](feuer-memory/src/store/shard.rs#L374) | Local | `impl MemoryShard::insert_compacted::entries` | — |
+| [376](feuer-memory/src/store/shard.rs#L376) | Local | `impl MemoryShard::insert_compacted::replaced` | — |
+| [389](feuer-memory/src/store/shard.rs#L389) | Local | `impl MemoryShard::remove_superseded::mut removal` | — |
+| [391](feuer-memory/src/store/shard.rs#L391) | Local | `impl MemoryShard::remove_superseded::bytes` | — |
+| [401](feuer-memory/src/store/shard.rs#L401) | Local | `impl MemoryShard::remove::Some(bytes)` | — |
+| [416](feuer-memory/src/store/shard.rs#L416) | Local | `impl MemoryShard::detach_entry::(entry, object_is_empty)` | — |
+| [417](feuer-memory/src/store/shard.rs#L417) | Local | `impl MemoryShard::detach_entry::(entry, object_is_empty)::entries` | — |
+| [418](feuer-memory/src/store/shard.rs#L418) | Local | `impl MemoryShard::detach_entry::(entry, object_is_empty)::current` | — |
+| [422](feuer-memory/src/store/shard.rs#L422) | Local | `impl MemoryShard::detach_entry::(entry, object_is_empty)::entry` | — |
+| [427](feuer-memory/src/store/shard.rs#L427) | Local | `impl MemoryShard::detach_entry::(entry, object_is_empty)::object_is_empty` | — |
+| [435](feuer-memory/src/store/shard.rs#L435) | Local | `impl MemoryShard::detach_entry::bytes` | — |
+| [441](feuer-memory/src/store/shard.rs#L441) | Local | `impl MemoryShard::unregister_candidate::moved` | — |
+| [442](feuer-memory/src/store/shard.rs#L442) | Local | `impl MemoryShard::unregister_candidate::Some(moved)` | — |
+| [445](feuer-memory/src/store/shard.rs#L445) | Local | `impl MemoryShard::unregister_candidate::entry` | — |
+| [460](feuer-memory/src/store/shard.rs#L460) | Local | `impl MemoryShard::pressure_candidate::(sample_start, sample_count)` | — |
+| [461](feuer-memory/src/store/shard.rs#L461) | Local | `impl MemoryShard::pressure_candidate::candidate_count` | — |
+| [462](feuer-memory/src/store/shard.rs#L462) | Local | `impl MemoryShard::pressure_candidate::mut selected` | `Option<PressureCandidate>` |
+| [465](feuer-memory/src/store/shard.rs#L465) | Local | `impl MemoryShard::pressure_candidate::candidate` | — |
+| [466](feuer-memory/src/store/shard.rs#L466) | Local | `impl MemoryShard::pressure_candidate::entries` | — |
+| [470](feuer-memory/src/store/shard.rs#L470) | Local | `impl MemoryShard::pressure_candidate::entry` | — |
+| [479](feuer-memory/src/store/shard.rs#L479) | Local | `impl MemoryShard::pressure_candidate::sampled` | — |
+| [498](feuer-memory/src/store/shard.rs#L498) | Local | `impl MemoryShard::compaction_source::entries` | — |
+| [502](feuer-memory/src/store/shard.rs#L502) | Local | `impl MemoryShard::compaction_source::entry` | — |
+| [510](feuer-memory/src/store/shard.rs#L510) | Local | `impl MemoryShard::compaction_source::plan` | — |
+| [523](feuer-memory/src/store/shard.rs#L523) | Local | `impl MemoryShard::publish_compaction::valid` | — |
+| [534](feuer-memory/src/store/shard.rs#L534) | Local | `impl MemoryShard::publish_compaction::removed_bytes` | — |
+| [542](feuer-memory/src/store/shard.rs#L542) | Local | `impl MemoryShard::publish_compaction::mut retained_bytes` | — |
+| [543](feuer-memory/src/store/shard.rs#L543) | Local | `impl MemoryShard::publish_compaction::mut retained_entries` | — |
+| [560](feuer-memory/src/store/shard.rs#L560) | Local | `impl MemoryShard::publish_compaction::reclaimed` | — |
+| [611](feuer-memory/src/store/shard.rs#L611) | Local | `impl Drop for MemoryShard::drop::entries` | — |
 
 </details>
 
@@ -586,9 +619,9 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | [509](feuer-memory/src/store/tests.rs#L509) | Local | `copied_compaction_is_revalidated_before_publication_and_can_fall_back::key` | — |
 | [519](feuer-memory/src/store/tests.rs#L519) | Local | `copied_compaction_is_revalidated_before_publication_and_can_fall_back::incoming` | — |
 | [520](feuer-memory/src/store/tests.rs#L520) | Local | `copied_compaction_is_revalidated_before_publication_and_can_fall_back::incoming_bytes` | — |
-| [521](feuer-memory/src/store/tests.rs#L521) | Local | `copied_compaction_is_revalidated_before_publication_and_can_fall_back::prepared` | — |
-| [522](feuer-memory/src/store/tests.rs#L522) | Local | `copied_compaction_is_revalidated_before_publication_and_can_fall_back::prepared::mut shard` | — |
-| [523](feuer-memory/src/store/tests.rs#L523) | Local | `copied_compaction_is_revalidated_before_publication_and_can_fall_back::prepared::AdmissionStep::Compact(work)` | — |
+| [521](feuer-memory/src/store/tests.rs#L521) | Local | `copied_compaction_is_revalidated_before_publication_and_can_fall_back::replacement` | — |
+| [522](feuer-memory/src/store/tests.rs#L522) | Local | `copied_compaction_is_revalidated_before_publication_and_can_fall_back::replacement::mut shard` | — |
+| [523](feuer-memory/src/store/tests.rs#L523) | Local | `copied_compaction_is_revalidated_before_publication_and_can_fall_back::replacement::AdmissionStep::Compact(source)` | — |
 | [536](feuer-memory/src/store/tests.rs#L536) | Local | `copied_compaction_is_revalidated_before_publication_and_can_fall_back::step` | — |
 | [545](feuer-memory/src/store/tests.rs#L545) | Local | `removing_the_last_cached_range_releases_its_access_history::cache` | — |
 | [546](feuer-memory/src/store/tests.rs#L546) | Local | `removing_the_last_cached_range_releases_its_access_history::key` | — |
@@ -618,7 +651,7 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | [22](feuer-memory/src/store.rs#L22) | Const | `MAX_SHARDS` | `usize` |
 | [41](feuer-memory/src/store.rs#L41) | Struct | `MemoryCache` | — |
 | [43](feuer-memory/src/store.rs#L43) | Field | `MemoryCache::capacity` | `u64` |
-| [45](feuer-memory/src/store.rs#L45) | Field | `MemoryCache::shards` | `Box<[Mutex<Shard>]>` |
+| [45](feuer-memory/src/store.rs#L45) | Field | `MemoryCache::shards` | `Box<[Mutex<MemoryShard>]>` |
 | [48](feuer-memory/src/store.rs#L48) | Impl | `impl fmt::Debug for MemoryCache` | — |
 | [49](feuer-memory/src/store.rs#L49) | Method | `impl fmt::Debug for MemoryCache::fmt` | `fn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result` |
 | [58](feuer-memory/src/store.rs#L58) | Impl | `impl MemoryCache` | — |
@@ -651,7 +684,7 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | [133](feuer-memory/src/store.rs#L133) | Local | `impl MemoryCache::insert_inner::shard_index` | — |
 | [134](feuer-memory/src/store.rs#L134) | Local | `impl MemoryCache::insert_inner::mut allow_compaction` | — |
 | [136](feuer-memory/src/store.rs#L136) | Local | `impl MemoryCache::insert_inner::step` | — |
-| [150](feuer-memory/src/store.rs#L150) | Local | `impl MemoryCache::insert_inner::prepared` | — |
+| [150](feuer-memory/src/store.rs#L150) | Local | `impl MemoryCache::insert_inner::replacement` | — |
 | [167](feuer-memory/src/store.rs#L167) | Local | `impl MemoryCache::record_access::shard_index` | — |
 | [175](feuer-memory/src/store.rs#L175) | Local | `impl MemoryCache::remove::shard_index` | — |
 | [183](feuer-memory/src/store.rs#L183) | Local | `impl MemoryCache::shard_index::mut hasher` | — |
@@ -665,7 +698,7 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
-| [17](benchmarks/memory/src/main.rs#L17) | Const | `FOYER_BASE_REVISION` | `&str` |
+| [17](benchmarks/memory/src/main.rs#L17) | Const | `PINNED_FOYER_REVISION` | `&str` |
 | [18](benchmarks/memory/src/main.rs#L18) | Const | `SOURCE_FIXED_EQUIVALENT_BYTES` | `u64` |
 | [20](benchmarks/memory/src/main.rs#L20) | Const | `FOYER_COST_SAMPLE_SIZE` | `usize` |
 | [21](benchmarks/memory/src/main.rs#L21) | Const | `TRACE_FILE` | `&str` |
@@ -705,242 +738,242 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | [136](benchmarks/memory/src/main.rs#L136) | Field | `Workload::accesses` | `Vec<Access>` |
 | [137](benchmarks/memory/src/main.rs#L137) | Field | `Workload::expanded_downloads` | `Vec<ByteRange>` |
 | [138](benchmarks/memory/src/main.rs#L138) | Field | `Workload::download_config` | `DownloadConfig` |
-| [141](benchmarks/memory/src/main.rs#L141) | Trait | `Engine` | — |
-| [142](benchmarks/memory/src/main.rs#L142) | Method | `Engine::name` | `fn(&self) -> &'static str` |
-| [145](benchmarks/memory/src/main.rs#L145) | Method | `Engine::get` | `fn(&mut self, access: &Access, downloaded: ByteRange) -> bool` |
-| [147](benchmarks/memory/src/main.rs#L147) | Method | `Engine::populate` | `fn(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<(), String>` |
-| [149](benchmarks/memory/src/main.rs#L149) | Method | `Engine::used_payload_bytes` | `fn(&self) -> u64` |
-| [152](benchmarks/memory/src/main.rs#L152) | Struct | `FeuerEngine` | — |
-| [153](benchmarks/memory/src/main.rs#L153) | Field | `FeuerEngine::cache` | `MemoryCache` |
-| [156](benchmarks/memory/src/main.rs#L156) | Impl | `impl FeuerEngine` | — |
-| [157](benchmarks/memory/src/main.rs#L157) | Function | `impl FeuerEngine::new` | `fn(capacity: usize, shards: usize) -> Self` |
-| [164](benchmarks/memory/src/main.rs#L164) | Impl | `impl Engine for FeuerEngine` | — |
-| [165](benchmarks/memory/src/main.rs#L165) | Method | `impl Engine for FeuerEngine::name` | `fn(&self) -> &'static str` |
-| [169](benchmarks/memory/src/main.rs#L169) | Method | `impl Engine for FeuerEngine::get` | `fn(&mut self, access: &Access, _downloaded: ByteRange) -> bool` |
-| [177](benchmarks/memory/src/main.rs#L177) | Method | `impl Engine for FeuerEngine::populate` | `fn(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<(), String>` |
-| [185](benchmarks/memory/src/main.rs#L185) | Method | `impl Engine for FeuerEngine::used_payload_bytes` | `fn(&self) -> u64` |
-| [190](benchmarks/memory/src/main.rs#L190) | TypeAlias | `NativeFoyerKey` | `(ObjectKey, ByteRange)` |
-| [193](benchmarks/memory/src/main.rs#L193) | Struct | `NativeFoyerValue` | — |
-| [194](benchmarks/memory/src/main.rs#L194) | Field | `NativeFoyerValue::downloaded` | `ByteRange` |
-| [195](benchmarks/memory/src/main.rs#L195) | Field | `NativeFoyerValue::payload` | `Bytes` |
-| [199](benchmarks/memory/src/main.rs#L199) | Enum | `NativeFoyerKeyMode` | — |
-| [201](benchmarks/memory/src/main.rs#L201) | Variant | `NativeFoyerKeyMode::ExactRequest` | — |
-| [203](benchmarks/memory/src/main.rs#L203) | Variant | `NativeFoyerKeyMode::ExpandedDownload` | — |
-| [206](benchmarks/memory/src/main.rs#L206) | Impl | `impl NativeFoyerKeyMode` | — |
-| [207](benchmarks/memory/src/main.rs#L207) | Method | `impl NativeFoyerKeyMode::range` | `fn(self, access: &Access, downloaded: ByteRange) -> ByteRange` |
-| [216](benchmarks/memory/src/main.rs#L216) | Enum | `NativeFoyerPolicy` | — |
-| [217](benchmarks/memory/src/main.rs#L217) | Variant | `NativeFoyerPolicy::S3Fifo` | — |
-| [218](benchmarks/memory/src/main.rs#L218) | Variant | `NativeFoyerPolicy::CostAware` | — |
-| [221](benchmarks/memory/src/main.rs#L221) | Impl | `impl NativeFoyerPolicy` | — |
-| [222](benchmarks/memory/src/main.rs#L222) | Method | `impl NativeFoyerPolicy::engine_name` | `fn(self, key_mode: NativeFoyerKeyMode) -> &'static str` |
-| [232](benchmarks/memory/src/main.rs#L232) | Struct | `NativeFoyerEngine` | — |
-| [233](benchmarks/memory/src/main.rs#L233) | Field | `NativeFoyerEngine::cache` | `FoyerCache<NativeFoyerKey, NativeFoyerValue>` |
-| [234](benchmarks/memory/src/main.rs#L234) | Field | `NativeFoyerEngine::key_mode` | `NativeFoyerKeyMode` |
-| [235](benchmarks/memory/src/main.rs#L235) | Field | `NativeFoyerEngine::policy` | `NativeFoyerPolicy` |
-| [238](benchmarks/memory/src/main.rs#L238) | Impl | `impl NativeFoyerEngine` | — |
-| [239](benchmarks/memory/src/main.rs#L239) | Function | `impl NativeFoyerEngine::new` | `fn(capacity: usize, shards: usize, key_mode: NativeFoyerKeyMode, policy: NativeFoyerPolicy) -> Self` |
-| [247](benchmarks/memory/src/main.rs#L247) | Method | `impl NativeFoyerEngine::key` | `fn(&self, access: &Access, downloaded: ByteRange) -> NativeFoyerKey` |
-| [252](benchmarks/memory/src/main.rs#L252) | Impl | `impl Engine for NativeFoyerEngine` | — |
-| [253](benchmarks/memory/src/main.rs#L253) | Method | `impl Engine for NativeFoyerEngine::name` | `fn(&self) -> &'static str` |
-| [257](benchmarks/memory/src/main.rs#L257) | Method | `impl Engine for NativeFoyerEngine::get` | `fn(&mut self, access: &Access, downloaded: ByteRange) -> bool` |
-| [269](benchmarks/memory/src/main.rs#L269) | Method | `impl Engine for NativeFoyerEngine::populate` | `fn(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<(), String>` |
-| [275](benchmarks/memory/src/main.rs#L275) | Method | `impl Engine for NativeFoyerEngine::used_payload_bytes` | `fn(&self) -> u64` |
-| [280](benchmarks/memory/src/main.rs#L280) | Function | `foyer_cache` | `fn( capacity: usize, shards: usize, policy: NativeFoyerPolicy, ) -> FoyerCache<NativeFoyerKey, NativeFoyerValue>` |
-| [300](benchmarks/memory/src/main.rs#L300) | Struct | `Traffic` | — |
-| [301](benchmarks/memory/src/main.rs#L301) | Field | `Traffic::requests` | `u64` |
-| [302](benchmarks/memory/src/main.rs#L302) | Field | `Traffic::requested_bytes` | `u64` |
-| [303](benchmarks/memory/src/main.rs#L303) | Field | `Traffic::hits` | `u64` |
-| [304](benchmarks/memory/src/main.rs#L304) | Field | `Traffic::hit_bytes` | `u64` |
-| [305](benchmarks/memory/src/main.rs#L305) | Field | `Traffic::source_requests` | `u64` |
-| [306](benchmarks/memory/src/main.rs#L306) | Field | `Traffic::source_bytes` | `u64` |
-| [309](benchmarks/memory/src/main.rs#L309) | Struct | `Report` | — |
-| [310](benchmarks/memory/src/main.rs#L310) | Field | `Report::workload` | `&'static str` |
-| [311](benchmarks/memory/src/main.rs#L311) | Field | `Report::downloader` | `&'static str` |
-| [312](benchmarks/memory/src/main.rs#L312) | Field | `Report::shards` | `usize` |
-| [313](benchmarks/memory/src/main.rs#L313) | Field | `Report::capacity` | `usize` |
-| [314](benchmarks/memory/src/main.rs#L314) | Field | `Report::engine` | `&'static str` |
-| [315](benchmarks/memory/src/main.rs#L315) | Field | `Report::traffic` | `Traffic` |
-| [316](benchmarks/memory/src/main.rs#L316) | Field | `Report::used_payload_bytes` | `u64` |
-| [317](benchmarks/memory/src/main.rs#L317) | Field | `Report::elapsed` | `Duration` |
-| [320](benchmarks/memory/src/main.rs#L320) | Impl | `impl Report` | — |
-| [321](benchmarks/memory/src/main.rs#L321) | Method | `impl Report::cache_hit_rate` | `fn(&self) -> f64` |
-| [325](benchmarks/memory/src/main.rs#L325) | Method | `impl Report::byte_hit_rate` | `fn(&self) -> f64` |
-| [329](benchmarks/memory/src/main.rs#L329) | Method | `impl Report::source_cost_hit_rate` | `fn(&self) -> f64` |
-| [340](benchmarks/memory/src/main.rs#L340) | Method | `impl Report::operations_per_second` | `fn(&self) -> f64` |
-| [345](benchmarks/memory/src/main.rs#L345) | Function | `main` | `fn() -> Result<(), String>` |
-| [419](benchmarks/memory/src/main.rs#L419) | Function | `trace_workload` | `fn(args: &Args, download_config: DownloadConfig) -> Result<Workload, String>` |
-| [444](benchmarks/memory/src/main.rs#L444) | Function | `run_engine` | `fn( mut engine: Box<dyn Engine>, workload: &Workload, downloader: DownloadPolicy, shards: usize, capacity: usize, warmup_iterations: usize, source_payload: &Bytes, ) -> Result<Report, String>` |
-| [476](benchmarks/memory/src/main.rs#L476) | Struct | `PendingDownload` | — |
-| [477](benchmarks/memory/src/main.rs#L477) | Field | `PendingDownload::order` | `usize` |
-| [478](benchmarks/memory/src/main.rs#L478) | Field | `PendingDownload::access` | `&'a Access` |
-| [479](benchmarks/memory/src/main.rs#L479) | Field | `PendingDownload::downloaded` | `ByteRange` |
-| [482](benchmarks/memory/src/main.rs#L482) | Struct | `CoalescedDownload` | — |
-| [483](benchmarks/memory/src/main.rs#L483) | Field | `CoalescedDownload::downloaded` | `ByteRange` |
-| [484](benchmarks/memory/src/main.rs#L484) | Field | `CoalescedDownload::accesses` | `Vec<(usize, &'a Access)>` |
-| [487](benchmarks/memory/src/main.rs#L487) | Function | `expanded_download_ranges` | `fn(workload: &[Access], config: DownloadConfig) -> Vec<ByteRange>` |
-| [538](benchmarks/memory/src/main.rs#L538) | Function | `max_download_len` | `fn(workload: &Workload, downloader: DownloadPolicy) -> u64` |
-| [559](benchmarks/memory/src/main.rs#L559) | Function | `execute_pass` | `fn<E: Engine + ?Sized>( engine: &mut E, workload: &Workload, downloader: DownloadPolicy, source_payload: &Bytes, traffic: &mut Traffic, ) -> Result<(), String>` |
-| [585](benchmarks/memory/src/main.rs#L585) | Function | `coalesced_downloads` | `fn( mut pending: Vec<PendingDownload<'_>>, coalescing_distance_bytes: u64, ) -> Vec<CoalescedDownload<'_>>` |
-| [624](benchmarks/memory/src/main.rs#L624) | Function | `record_request` | `fn(traffic: &mut Traffic, access: &Access, hit: bool)` |
-| [633](benchmarks/memory/src/main.rs#L633) | Function | `source_payload_slice` | `fn(source_payload: &Bytes, downloaded: ByteRange) -> Result<Bytes, String>` |
-| [641](benchmarks/memory/src/main.rs#L641) | Function | `requested_payload` | `fn(bytes: &Bytes, downloaded: ByteRange, requested: ByteRange) -> Bytes` |
-| [650](benchmarks/memory/src/main.rs#L650) | Function | `print_human_header` | `fn(args: &Args, workload: &Workload)` |
-| [669](benchmarks/memory/src/main.rs#L669) | Function | `print_human_report` | `fn(report: &Report)` |
-| [684](benchmarks/memory/src/main.rs#L684) | Function | `human_engine_name` | `fn(engine: &str) -> &str` |
-| [695](benchmarks/memory/src/main.rs#L695) | Function | `format_decimal_bytes` | `fn(bytes: u64) -> String` |
-| [707](benchmarks/memory/src/main.rs#L707) | Function | `format_bytes` | `fn(bytes: u64) -> String` |
-| [719](benchmarks/memory/src/main.rs#L719) | Function | `format_rate` | `fn(operations_per_second: f64) -> String` |
-| [729](benchmarks/memory/src/main.rs#L729) | Function | `print_csv_report` | `fn(report: &Report)` |
-| [753](benchmarks/memory/src/main.rs#L753) | Function | `load_trace` | `fn() -> Result<Vec<Access>, String>` |
-| [766](benchmarks/memory/src/main.rs#L766) | Function | `parse_trace_line` | `fn(line: &str) -> Result<Access, String>` |
-| [782](benchmarks/memory/src/main.rs#L782) | Function | `parse_timestamp_millis` | `fn(value: &str) -> Result<u64, String>` |
-| [843](benchmarks/memory/src/main.rs#L843) | Function | `find_json_string` | `fn(line: &str, field: &str) -> Result<String, String>` |
-| [854](benchmarks/memory/src/main.rs#L854) | Function | `find_json_u64` | `fn(line: &str, field: &str) -> Result<u64, String>` |
-| [867](benchmarks/memory/src/main.rs#L867) | Function | `field_value` | `fn<'a>(line: &'a str, field: &str) -> Result<&'a str, String>` |
-| [880](benchmarks/memory/src/main.rs#L880) | Function | `ratio` | `fn(numerator: u64, denominator: u64) -> f64` |
-| [888](benchmarks/memory/src/main.rs#L888) | Function | `byte_count_from_env` | `fn(name: &str, default: u64) -> Result<u64, String>` |
-| [898](benchmarks/memory/src/main.rs#L898) | Function | `parse_bytes` | `fn(value: &str) -> Result<usize, String>` |
-| [903](benchmarks/memory/src/main.rs#L903) | Function | `parse_byte_count` | `fn(value: &str) -> Result<u128, String>` |
-| [928](benchmarks/memory/src/main.rs#L928) | Module | `tests` | — |
-| [931](benchmarks/memory/src/main.rs#L931) | Struct | `tests::WarmupEngine` | — |
-| [932](benchmarks/memory/src/main.rs#L932) | Field | `tests::WarmupEngine::populated` | `bool` |
-| [935](benchmarks/memory/src/main.rs#L935) | Impl | `tests::impl Engine for WarmupEngine` | — |
-| [936](benchmarks/memory/src/main.rs#L936) | Method | `tests::impl Engine for WarmupEngine::name` | `fn(&self) -> &'static str` |
-| [940](benchmarks/memory/src/main.rs#L940) | Method | `tests::impl Engine for WarmupEngine::get` | `fn(&mut self, _access: &Access, _downloaded: ByteRange) -> bool` |
-| [944](benchmarks/memory/src/main.rs#L944) | Method | `tests::impl Engine for WarmupEngine::populate` | `fn(&mut self, _access: &Access, _downloaded: ByteRange, _payload: Bytes) -> Result<(), String>` |
-| [949](benchmarks/memory/src/main.rs#L949) | Method | `tests::impl Engine for WarmupEngine::used_payload_bytes` | `fn(&self) -> u64` |
-| [955](benchmarks/memory/src/main.rs#L955) | Struct | `tests::RangeEngine` | — |
-| [956](benchmarks/memory/src/main.rs#L956) | Field | `tests::RangeEngine::entries` | `Vec<(ObjectKey, ByteRange)>` |
-| [959](benchmarks/memory/src/main.rs#L959) | Impl | `tests::impl Engine for RangeEngine` | — |
-| [960](benchmarks/memory/src/main.rs#L960) | Method | `tests::impl Engine for RangeEngine::name` | `fn(&self) -> &'static str` |
-| [964](benchmarks/memory/src/main.rs#L964) | Method | `tests::impl Engine for RangeEngine::get` | `fn(&mut self, access: &Access, _downloaded: ByteRange) -> bool` |
-| [970](benchmarks/memory/src/main.rs#L970) | Method | `tests::impl Engine for RangeEngine::populate` | `fn(&mut self, access: &Access, downloaded: ByteRange, _payload: Bytes) -> Result<(), String>` |
-| [976](benchmarks/memory/src/main.rs#L976) | Method | `tests::impl Engine for RangeEngine::used_payload_bytes` | `fn(&self) -> u64` |
-| [982](benchmarks/memory/src/main.rs#L982) | Function | `tests::warmup_preserves_cache_state_but_not_reported_traffic` | `fn()` |
-| [1015](benchmarks/memory/src/main.rs#L1015) | Function | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests` | `fn()` |
-| [1045](benchmarks/memory/src/main.rs#L1045) | Function | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members` | `fn()` |
-| [1089](benchmarks/memory/src/main.rs#L1089) | Function | `tests::coalescing_distance_parameter_is_a_strict_upper_bound` | `fn()` |
-| [1123](benchmarks/memory/src/main.rs#L1123) | Function | `tests::source_cost_baseline_uses_requested_bytes_not_downloaded_bytes` | `fn()` |
-| [1145](benchmarks/memory/src/main.rs#L1145) | Function | `tests::parses_the_captured_trace_shape` | `fn()` |
-| [1160](benchmarks/memory/src/main.rs#L1160) | Function | `tests::expanded_downloader_honors_the_whole_split_threshold` | `fn()` |
-| [1193](benchmarks/memory/src/main.rs#L1193) | Function | `tests::timestamp_parser_handles_day_boundaries` | `fn()` |
-| [1205](benchmarks/memory/src/main.rs#L1205) | Function | `tests::environment_byte_counts_accept_documented_units` | `fn()` |
-| [1211](benchmarks/memory/src/main.rs#L1211) | Function | `tests::human_output_is_default_and_csv_is_opt_in` | `fn()` |
+| [142](benchmarks/memory/src/main.rs#L142) | Trait | `ReplayCache` | — |
+| [143](benchmarks/memory/src/main.rs#L143) | Method | `ReplayCache::name` | `fn(&self) -> &'static str` |
+| [146](benchmarks/memory/src/main.rs#L146) | Method | `ReplayCache::get` | `fn(&mut self, access: &Access, downloaded: ByteRange) -> bool` |
+| [148](benchmarks/memory/src/main.rs#L148) | Method | `ReplayCache::populate` | `fn(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<(), String>` |
+| [150](benchmarks/memory/src/main.rs#L150) | Method | `ReplayCache::used_payload_bytes` | `fn(&self) -> u64` |
+| [154](benchmarks/memory/src/main.rs#L154) | Struct | `FeuerReplayCache` | — |
+| [155](benchmarks/memory/src/main.rs#L155) | Field | `FeuerReplayCache::cache` | `MemoryCache` |
+| [158](benchmarks/memory/src/main.rs#L158) | Impl | `impl FeuerReplayCache` | — |
+| [159](benchmarks/memory/src/main.rs#L159) | Function | `impl FeuerReplayCache::new` | `fn(capacity: usize, shards: usize) -> Self` |
+| [166](benchmarks/memory/src/main.rs#L166) | Impl | `impl ReplayCache for FeuerReplayCache` | — |
+| [167](benchmarks/memory/src/main.rs#L167) | Method | `impl ReplayCache for FeuerReplayCache::name` | `fn(&self) -> &'static str` |
+| [171](benchmarks/memory/src/main.rs#L171) | Method | `impl ReplayCache for FeuerReplayCache::get` | `fn(&mut self, access: &Access, _downloaded: ByteRange) -> bool` |
+| [179](benchmarks/memory/src/main.rs#L179) | Method | `impl ReplayCache for FeuerReplayCache::populate` | `fn(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<(), String>` |
+| [187](benchmarks/memory/src/main.rs#L187) | Method | `impl ReplayCache for FeuerReplayCache::used_payload_bytes` | `fn(&self) -> u64` |
+| [192](benchmarks/memory/src/main.rs#L192) | TypeAlias | `NativeFoyerKey` | `(ObjectKey, ByteRange)` |
+| [195](benchmarks/memory/src/main.rs#L195) | Struct | `NativeFoyerValue` | — |
+| [196](benchmarks/memory/src/main.rs#L196) | Field | `NativeFoyerValue::downloaded` | `ByteRange` |
+| [197](benchmarks/memory/src/main.rs#L197) | Field | `NativeFoyerValue::payload` | `Bytes` |
+| [201](benchmarks/memory/src/main.rs#L201) | Enum | `NativeFoyerKeyMode` | — |
+| [203](benchmarks/memory/src/main.rs#L203) | Variant | `NativeFoyerKeyMode::ExactRequest` | — |
+| [205](benchmarks/memory/src/main.rs#L205) | Variant | `NativeFoyerKeyMode::ExpandedDownload` | — |
+| [208](benchmarks/memory/src/main.rs#L208) | Impl | `impl NativeFoyerKeyMode` | — |
+| [209](benchmarks/memory/src/main.rs#L209) | Method | `impl NativeFoyerKeyMode::range` | `fn(self, access: &Access, downloaded: ByteRange) -> ByteRange` |
+| [218](benchmarks/memory/src/main.rs#L218) | Enum | `NativeFoyerPolicy` | — |
+| [219](benchmarks/memory/src/main.rs#L219) | Variant | `NativeFoyerPolicy::S3Fifo` | — |
+| [220](benchmarks/memory/src/main.rs#L220) | Variant | `NativeFoyerPolicy::CostAware` | — |
+| [223](benchmarks/memory/src/main.rs#L223) | Impl | `impl NativeFoyerPolicy` | — |
+| [224](benchmarks/memory/src/main.rs#L224) | Method | `impl NativeFoyerPolicy::engine_name` | `fn(self, key_mode: NativeFoyerKeyMode) -> &'static str` |
+| [235](benchmarks/memory/src/main.rs#L235) | Struct | `FoyerReplayCache` | — |
+| [236](benchmarks/memory/src/main.rs#L236) | Field | `FoyerReplayCache::cache` | `FoyerCache<NativeFoyerKey, NativeFoyerValue>` |
+| [237](benchmarks/memory/src/main.rs#L237) | Field | `FoyerReplayCache::key_mode` | `NativeFoyerKeyMode` |
+| [238](benchmarks/memory/src/main.rs#L238) | Field | `FoyerReplayCache::policy` | `NativeFoyerPolicy` |
+| [241](benchmarks/memory/src/main.rs#L241) | Impl | `impl FoyerReplayCache` | — |
+| [242](benchmarks/memory/src/main.rs#L242) | Function | `impl FoyerReplayCache::new` | `fn(capacity: usize, shards: usize, key_mode: NativeFoyerKeyMode, policy: NativeFoyerPolicy) -> Self` |
+| [250](benchmarks/memory/src/main.rs#L250) | Method | `impl FoyerReplayCache::key` | `fn(&self, access: &Access, downloaded: ByteRange) -> NativeFoyerKey` |
+| [255](benchmarks/memory/src/main.rs#L255) | Impl | `impl ReplayCache for FoyerReplayCache` | — |
+| [256](benchmarks/memory/src/main.rs#L256) | Method | `impl ReplayCache for FoyerReplayCache::name` | `fn(&self) -> &'static str` |
+| [260](benchmarks/memory/src/main.rs#L260) | Method | `impl ReplayCache for FoyerReplayCache::get` | `fn(&mut self, access: &Access, downloaded: ByteRange) -> bool` |
+| [272](benchmarks/memory/src/main.rs#L272) | Method | `impl ReplayCache for FoyerReplayCache::populate` | `fn(&mut self, access: &Access, downloaded: ByteRange, payload: Bytes) -> Result<(), String>` |
+| [278](benchmarks/memory/src/main.rs#L278) | Method | `impl ReplayCache for FoyerReplayCache::used_payload_bytes` | `fn(&self) -> u64` |
+| [283](benchmarks/memory/src/main.rs#L283) | Function | `foyer_cache` | `fn( capacity: usize, shards: usize, policy: NativeFoyerPolicy, ) -> FoyerCache<NativeFoyerKey, NativeFoyerValue>` |
+| [303](benchmarks/memory/src/main.rs#L303) | Struct | `Traffic` | — |
+| [304](benchmarks/memory/src/main.rs#L304) | Field | `Traffic::requests` | `u64` |
+| [305](benchmarks/memory/src/main.rs#L305) | Field | `Traffic::requested_bytes` | `u64` |
+| [306](benchmarks/memory/src/main.rs#L306) | Field | `Traffic::hits` | `u64` |
+| [307](benchmarks/memory/src/main.rs#L307) | Field | `Traffic::hit_bytes` | `u64` |
+| [308](benchmarks/memory/src/main.rs#L308) | Field | `Traffic::source_requests` | `u64` |
+| [309](benchmarks/memory/src/main.rs#L309) | Field | `Traffic::source_bytes` | `u64` |
+| [312](benchmarks/memory/src/main.rs#L312) | Struct | `Report` | — |
+| [313](benchmarks/memory/src/main.rs#L313) | Field | `Report::workload` | `&'static str` |
+| [314](benchmarks/memory/src/main.rs#L314) | Field | `Report::downloader` | `&'static str` |
+| [315](benchmarks/memory/src/main.rs#L315) | Field | `Report::shards` | `usize` |
+| [316](benchmarks/memory/src/main.rs#L316) | Field | `Report::capacity` | `usize` |
+| [317](benchmarks/memory/src/main.rs#L317) | Field | `Report::engine` | `&'static str` |
+| [318](benchmarks/memory/src/main.rs#L318) | Field | `Report::traffic` | `Traffic` |
+| [319](benchmarks/memory/src/main.rs#L319) | Field | `Report::used_payload_bytes` | `u64` |
+| [320](benchmarks/memory/src/main.rs#L320) | Field | `Report::elapsed` | `Duration` |
+| [323](benchmarks/memory/src/main.rs#L323) | Impl | `impl Report` | — |
+| [324](benchmarks/memory/src/main.rs#L324) | Method | `impl Report::cache_hit_rate` | `fn(&self) -> f64` |
+| [328](benchmarks/memory/src/main.rs#L328) | Method | `impl Report::byte_hit_rate` | `fn(&self) -> f64` |
+| [332](benchmarks/memory/src/main.rs#L332) | Method | `impl Report::source_cost_hit_rate` | `fn(&self) -> f64` |
+| [343](benchmarks/memory/src/main.rs#L343) | Method | `impl Report::operations_per_second` | `fn(&self) -> f64` |
+| [348](benchmarks/memory/src/main.rs#L348) | Function | `main` | `fn() -> Result<(), String>` |
+| [422](benchmarks/memory/src/main.rs#L422) | Function | `trace_workload` | `fn(args: &Args, download_config: DownloadConfig) -> Result<Workload, String>` |
+| [447](benchmarks/memory/src/main.rs#L447) | Function | `replay_cache` | `fn( mut cache: Box<dyn ReplayCache>, workload: &Workload, downloader: DownloadPolicy, shards: usize, capacity: usize, warmup_iterations: usize, source_payload: &Bytes, ) -> Result<Report, String>` |
+| [479](benchmarks/memory/src/main.rs#L479) | Struct | `PendingDownload` | — |
+| [480](benchmarks/memory/src/main.rs#L480) | Field | `PendingDownload::order` | `usize` |
+| [481](benchmarks/memory/src/main.rs#L481) | Field | `PendingDownload::access` | `&'a Access` |
+| [482](benchmarks/memory/src/main.rs#L482) | Field | `PendingDownload::downloaded` | `ByteRange` |
+| [485](benchmarks/memory/src/main.rs#L485) | Struct | `CoalescedDownload` | — |
+| [486](benchmarks/memory/src/main.rs#L486) | Field | `CoalescedDownload::downloaded` | `ByteRange` |
+| [487](benchmarks/memory/src/main.rs#L487) | Field | `CoalescedDownload::accesses` | `Vec<(usize, &'a Access)>` |
+| [490](benchmarks/memory/src/main.rs#L490) | Function | `expanded_download_ranges` | `fn(workload: &[Access], config: DownloadConfig) -> Vec<ByteRange>` |
+| [541](benchmarks/memory/src/main.rs#L541) | Function | `max_download_len` | `fn(workload: &Workload, downloader: DownloadPolicy) -> u64` |
+| [562](benchmarks/memory/src/main.rs#L562) | Function | `execute_pass` | `fn<C: ReplayCache + ?Sized>( cache: &mut C, workload: &Workload, downloader: DownloadPolicy, source_payload: &Bytes, traffic: &mut Traffic, ) -> Result<(), String>` |
+| [588](benchmarks/memory/src/main.rs#L588) | Function | `coalesced_downloads` | `fn( mut pending: Vec<PendingDownload<'_>>, coalescing_distance_bytes: u64, ) -> Vec<CoalescedDownload<'_>>` |
+| [627](benchmarks/memory/src/main.rs#L627) | Function | `record_request` | `fn(traffic: &mut Traffic, access: &Access, hit: bool)` |
+| [636](benchmarks/memory/src/main.rs#L636) | Function | `source_payload_slice` | `fn(source_payload: &Bytes, downloaded: ByteRange) -> Result<Bytes, String>` |
+| [644](benchmarks/memory/src/main.rs#L644) | Function | `requested_payload` | `fn(bytes: &Bytes, downloaded: ByteRange, requested: ByteRange) -> Bytes` |
+| [653](benchmarks/memory/src/main.rs#L653) | Function | `print_human_header` | `fn(args: &Args, workload: &Workload)` |
+| [672](benchmarks/memory/src/main.rs#L672) | Function | `print_human_report` | `fn(report: &Report)` |
+| [687](benchmarks/memory/src/main.rs#L687) | Function | `human_engine_name` | `fn(engine: &str) -> &str` |
+| [698](benchmarks/memory/src/main.rs#L698) | Function | `format_decimal_bytes` | `fn(bytes: u64) -> String` |
+| [710](benchmarks/memory/src/main.rs#L710) | Function | `format_bytes` | `fn(bytes: u64) -> String` |
+| [722](benchmarks/memory/src/main.rs#L722) | Function | `format_rate` | `fn(operations_per_second: f64) -> String` |
+| [732](benchmarks/memory/src/main.rs#L732) | Function | `print_csv_report` | `fn(report: &Report)` |
+| [756](benchmarks/memory/src/main.rs#L756) | Function | `load_trace` | `fn() -> Result<Vec<Access>, String>` |
+| [769](benchmarks/memory/src/main.rs#L769) | Function | `parse_trace_line` | `fn(line: &str) -> Result<Access, String>` |
+| [785](benchmarks/memory/src/main.rs#L785) | Function | `parse_timestamp_millis` | `fn(value: &str) -> Result<u64, String>` |
+| [846](benchmarks/memory/src/main.rs#L846) | Function | `find_json_string` | `fn(line: &str, field: &str) -> Result<String, String>` |
+| [857](benchmarks/memory/src/main.rs#L857) | Function | `find_json_u64` | `fn(line: &str, field: &str) -> Result<u64, String>` |
+| [870](benchmarks/memory/src/main.rs#L870) | Function | `field_value` | `fn<'a>(line: &'a str, field: &str) -> Result<&'a str, String>` |
+| [883](benchmarks/memory/src/main.rs#L883) | Function | `ratio` | `fn(numerator: u64, denominator: u64) -> f64` |
+| [891](benchmarks/memory/src/main.rs#L891) | Function | `byte_count_from_env` | `fn(name: &str, default: u64) -> Result<u64, String>` |
+| [901](benchmarks/memory/src/main.rs#L901) | Function | `parse_bytes` | `fn(value: &str) -> Result<usize, String>` |
+| [906](benchmarks/memory/src/main.rs#L906) | Function | `parse_byte_count` | `fn(value: &str) -> Result<u128, String>` |
+| [931](benchmarks/memory/src/main.rs#L931) | Module | `tests` | — |
+| [934](benchmarks/memory/src/main.rs#L934) | Struct | `tests::WarmupTestCache` | — |
+| [935](benchmarks/memory/src/main.rs#L935) | Field | `tests::WarmupTestCache::populated` | `bool` |
+| [938](benchmarks/memory/src/main.rs#L938) | Impl | `tests::impl ReplayCache for WarmupTestCache` | — |
+| [939](benchmarks/memory/src/main.rs#L939) | Method | `tests::impl ReplayCache for WarmupTestCache::name` | `fn(&self) -> &'static str` |
+| [943](benchmarks/memory/src/main.rs#L943) | Method | `tests::impl ReplayCache for WarmupTestCache::get` | `fn(&mut self, _access: &Access, _downloaded: ByteRange) -> bool` |
+| [947](benchmarks/memory/src/main.rs#L947) | Method | `tests::impl ReplayCache for WarmupTestCache::populate` | `fn(&mut self, _access: &Access, _downloaded: ByteRange, _payload: Bytes) -> Result<(), String>` |
+| [952](benchmarks/memory/src/main.rs#L952) | Method | `tests::impl ReplayCache for WarmupTestCache::used_payload_bytes` | `fn(&self) -> u64` |
+| [958](benchmarks/memory/src/main.rs#L958) | Struct | `tests::RangeTestCache` | — |
+| [959](benchmarks/memory/src/main.rs#L959) | Field | `tests::RangeTestCache::entries` | `Vec<(ObjectKey, ByteRange)>` |
+| [962](benchmarks/memory/src/main.rs#L962) | Impl | `tests::impl ReplayCache for RangeTestCache` | — |
+| [963](benchmarks/memory/src/main.rs#L963) | Method | `tests::impl ReplayCache for RangeTestCache::name` | `fn(&self) -> &'static str` |
+| [967](benchmarks/memory/src/main.rs#L967) | Method | `tests::impl ReplayCache for RangeTestCache::get` | `fn(&mut self, access: &Access, _downloaded: ByteRange) -> bool` |
+| [973](benchmarks/memory/src/main.rs#L973) | Method | `tests::impl ReplayCache for RangeTestCache::populate` | `fn(&mut self, access: &Access, downloaded: ByteRange, _payload: Bytes) -> Result<(), String>` |
+| [979](benchmarks/memory/src/main.rs#L979) | Method | `tests::impl ReplayCache for RangeTestCache::used_payload_bytes` | `fn(&self) -> u64` |
+| [985](benchmarks/memory/src/main.rs#L985) | Function | `tests::warmup_preserves_cache_state_but_not_reported_traffic` | `fn()` |
+| [1018](benchmarks/memory/src/main.rs#L1018) | Function | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests` | `fn()` |
+| [1048](benchmarks/memory/src/main.rs#L1048) | Function | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members` | `fn()` |
+| [1092](benchmarks/memory/src/main.rs#L1092) | Function | `tests::coalescing_distance_parameter_is_a_strict_upper_bound` | `fn()` |
+| [1126](benchmarks/memory/src/main.rs#L1126) | Function | `tests::source_cost_baseline_uses_requested_bytes_not_downloaded_bytes` | `fn()` |
+| [1148](benchmarks/memory/src/main.rs#L1148) | Function | `tests::parses_the_captured_trace_shape` | `fn()` |
+| [1163](benchmarks/memory/src/main.rs#L1163) | Function | `tests::expanded_downloader_honors_the_whole_split_threshold` | `fn()` |
+| [1196](benchmarks/memory/src/main.rs#L1196) | Function | `tests::timestamp_parser_handles_day_boundaries` | `fn()` |
+| [1208](benchmarks/memory/src/main.rs#L1208) | Function | `tests::environment_byte_counts_accept_documented_units` | `fn()` |
+| [1214](benchmarks/memory/src/main.rs#L1214) | Function | `tests::human_output_is_default_and_csv_is_opt_in` | `fn()` |
 
 <details>
 <summary>Local bindings (109)</summary>
 
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
-| [170](benchmarks/memory/src/main.rs#L170) | Local | `impl Engine for FeuerEngine::get::Some(bytes)` | — |
-| [178](benchmarks/memory/src/main.rs#L178) | Local | `impl Engine for FeuerEngine::populate::download` | — |
-| [258](benchmarks/memory/src/main.rs#L258) | Local | `impl Engine for NativeFoyerEngine::get::key` | — |
-| [259](benchmarks/memory/src/main.rs#L259) | Local | `impl Engine for NativeFoyerEngine::get::Some(entry)` | — |
-| [262](benchmarks/memory/src/main.rs#L262) | Local | `impl Engine for NativeFoyerEngine::get::value` | — |
-| [264](benchmarks/memory/src/main.rs#L264) | Local | `impl Engine for NativeFoyerEngine::get::result` | — |
-| [270](benchmarks/memory/src/main.rs#L270) | Local | `impl Engine for NativeFoyerEngine::populate::key` | — |
-| [285](benchmarks/memory/src/main.rs#L285) | Local | `foyer_cache::builder` | — |
-| [330](benchmarks/memory/src/main.rs#L330) | Local | `impl Report::source_cost_hit_rate::fixed_cost` | — |
-| [331](benchmarks/memory/src/main.rs#L331) | Local | `impl Report::source_cost_hit_rate::baseline` | — |
-| [332](benchmarks/memory/src/main.rs#L332) | Local | `impl Report::source_cost_hit_rate::actual` | — |
-| [346](benchmarks/memory/src/main.rs#L346) | Local | `main::args` | — |
-| [356](benchmarks/memory/src/main.rs#L356) | Local | `main::download_config` | — |
-| [357](benchmarks/memory/src/main.rs#L357) | Local | `main::workload` | — |
-| [374](benchmarks/memory/src/main.rs#L374) | Local | `main::max_download` | — |
-| [375](benchmarks/memory/src/main.rs#L375) | Local | `main::max_download` | — |
-| [376](benchmarks/memory/src/main.rs#L376) | Local | `main::source_payload` | — |
-| [380](benchmarks/memory/src/main.rs#L380) | Local | `main::mut engines` | `Vec<Box<dyn Engine>>` |
-| [398](benchmarks/memory/src/main.rs#L398) | Local | `main::report` | — |
-| [420](benchmarks/memory/src/main.rs#L420) | Local | `trace_workload::mut accesses` | — |
-| [435](benchmarks/memory/src/main.rs#L435) | Local | `trace_workload::expanded_downloads` | — |
-| [454](benchmarks/memory/src/main.rs#L454) | Local | `run_engine::mut warmup_traffic` | — |
-| [458](benchmarks/memory/src/main.rs#L458) | Local | `run_engine::mut traffic` | — |
-| [459](benchmarks/memory/src/main.rs#L459) | Local | `run_engine::started` | — |
-| [461](benchmarks/memory/src/main.rs#L461) | Local | `run_engine::elapsed` | — |
-| [488](benchmarks/memory/src/main.rs#L488) | Local | `expanded_download_ranges::mut by_object` | `HashMap<(&str, u64), Vec<usize>>` |
-| [496](benchmarks/memory/src/main.rs#L496) | Local | `expanded_download_ranges::base_ranges` | `Vec<_>` |
-| [500](benchmarks/memory/src/main.rs#L500) | Local | `expanded_download_ranges::mut ranges` | — |
-| [504](benchmarks/memory/src/main.rs#L504) | Local | `expanded_download_ranges::mut assigned` | — |
-| [511](benchmarks/memory/src/main.rs#L511) | Local | `expanded_download_ranges::deadline` | — |
-| [514](benchmarks/memory/src/main.rs#L514) | Local | `expanded_download_ranges::pending` | — |
-| [525](benchmarks/memory/src/main.rs#L525) | Local | `expanded_download_ranges::download` | — |
-| [567](benchmarks/memory/src/main.rs#L567) | Local | `execute_pass::downloaded` | — |
-| [571](benchmarks/memory/src/main.rs#L571) | Local | `execute_pass::hit` | — |
-| [577](benchmarks/memory/src/main.rs#L577) | Local | `execute_pass::payload` | — |
-| [598](benchmarks/memory/src/main.rs#L598) | Local | `coalesced_downloads::mut downloads` | `Vec<CoalescedDownload<'_>>` |
-| [600](benchmarks/memory/src/main.rs#L600) | Local | `coalesced_downloads::merge` | — |
-| [601](benchmarks/memory/src/main.rs#L601) | Local | `coalesced_downloads::merge::representative` | — |
-| [602](benchmarks/memory/src/main.rs#L602) | Local | `coalesced_downloads::merge::gap` | — |
-| [634](benchmarks/memory/src/main.rs#L634) | Local | `source_payload_slice::payload_len` | — |
-| [643](benchmarks/memory/src/main.rs#L643) | Local | `requested_payload::start` | — |
-| [645](benchmarks/memory/src/main.rs#L645) | Local | `requested_payload::end` | — |
-| [651](benchmarks/memory/src/main.rs#L651) | Local | `print_human_header::shards` | — |
-| [754](benchmarks/memory/src/main.rs#L754) | Local | `load_trace::path` | — |
-| [755](benchmarks/memory/src/main.rs#L755) | Local | `load_trace::content` | — |
-| [767](benchmarks/memory/src/main.rs#L767) | Local | `parse_trace_line::object_key` | — |
-| [768](benchmarks/memory/src/main.rs#L768) | Local | `parse_trace_line::object_size` | — |
-| [769](benchmarks/memory/src/main.rs#L769) | Local | `parse_trace_line::start` | — |
-| [770](benchmarks/memory/src/main.rs#L770) | Local | `parse_trace_line::end` | — |
-| [771](benchmarks/memory/src/main.rs#L771) | Local | `parse_trace_line::requested` | — |
-| [772](benchmarks/memory/src/main.rs#L772) | Local | `parse_trace_line::timestamp` | — |
-| [773](benchmarks/memory/src/main.rs#L773) | Local | `parse_trace_line::timestamp_millis` | — |
-| [783](benchmarks/memory/src/main.rs#L783) | Local | `parse_timestamp_millis::bytes` | — |
-| [784](benchmarks/memory/src/main.rs#L784) | Local | `parse_timestamp_millis::valid_suffix` | — |
-| [796](benchmarks/memory/src/main.rs#L796) | Local | `parse_timestamp_millis::component` | — |
-| [801](benchmarks/memory/src/main.rs#L801) | Local | `parse_timestamp_millis::year` | — |
-| [802](benchmarks/memory/src/main.rs#L802) | Local | `parse_timestamp_millis::month` | — |
-| [803](benchmarks/memory/src/main.rs#L803) | Local | `parse_timestamp_millis::day` | — |
-| [804](benchmarks/memory/src/main.rs#L804) | Local | `parse_timestamp_millis::hour` | — |
-| [805](benchmarks/memory/src/main.rs#L805) | Local | `parse_timestamp_millis::minute` | — |
-| [806](benchmarks/memory/src/main.rs#L806) | Local | `parse_timestamp_millis::second` | — |
-| [807](benchmarks/memory/src/main.rs#L807) | Local | `parse_timestamp_millis::millis` | — |
-| [816](benchmarks/memory/src/main.rs#L816) | Local | `parse_timestamp_millis::leap_year` | — |
-| [817](benchmarks/memory/src/main.rs#L817) | Local | `parse_timestamp_millis::month_lengths` | — |
-| [831](benchmarks/memory/src/main.rs#L831) | Local | `parse_timestamp_millis::month_index` | — |
-| [836](benchmarks/memory/src/main.rs#L836) | Local | `parse_timestamp_millis::previous_year` | — |
-| [837](benchmarks/memory/src/main.rs#L837) | Local | `parse_timestamp_millis::days_before_year` | — |
-| [838](benchmarks/memory/src/main.rs#L838) | Local | `parse_timestamp_millis::days_before_month` | `u64` |
-| [839](benchmarks/memory/src/main.rs#L839) | Local | `parse_timestamp_millis::days` | — |
-| [844](benchmarks/memory/src/main.rs#L844) | Local | `find_json_string::value` | — |
-| [845](benchmarks/memory/src/main.rs#L845) | Local | `find_json_string::value` | — |
-| [848](benchmarks/memory/src/main.rs#L848) | Local | `find_json_string::end` | — |
-| [855](benchmarks/memory/src/main.rs#L855) | Local | `find_json_u64::value` | — |
-| [856](benchmarks/memory/src/main.rs#L856) | Local | `find_json_u64::end` | — |
-| [868](benchmarks/memory/src/main.rs#L868) | Local | `field_value::needle` | — |
-| [869](benchmarks/memory/src/main.rs#L869) | Local | `field_value::after_field` | — |
-| [873](benchmarks/memory/src/main.rs#L873) | Local | `field_value::after_colon` | — |
-| [889](benchmarks/memory/src/main.rs#L889) | Local | `byte_count_from_env::value` | — |
-| [894](benchmarks/memory/src/main.rs#L894) | Local | `byte_count_from_env::bytes` | — |
-| [899](benchmarks/memory/src/main.rs#L899) | Local | `parse_bytes::bytes` | — |
-| [904](benchmarks/memory/src/main.rs#L904) | Local | `parse_byte_count::value` | — |
-| [905](benchmarks/memory/src/main.rs#L905) | Local | `parse_byte_count::split` | — |
-| [908](benchmarks/memory/src/main.rs#L908) | Local | `parse_byte_count::number` | `u128` |
-| [911](benchmarks/memory/src/main.rs#L911) | Local | `parse_byte_count::suffix` | — |
-| [912](benchmarks/memory/src/main.rs#L912) | Local | `parse_byte_count::multiplier` | — |
-| [983](benchmarks/memory/src/main.rs#L983) | Local | `tests::warmup_preserves_cache_state_but_not_reported_traffic::workload` | — |
-| [997](benchmarks/memory/src/main.rs#L997) | Local | `tests::warmup_preserves_cache_state_but_not_reported_traffic::report` | — |
-| [1016](benchmarks/memory/src/main.rs#L1016) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::access` | — |
-| [1022](benchmarks/memory/src/main.rs#L1022) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::first` | — |
-| [1023](benchmarks/memory/src/main.rs#L1023) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::second` | — |
-| [1024](benchmarks/memory/src/main.rs#L1024) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::expanded` | — |
-| [1026](benchmarks/memory/src/main.rs#L1026) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::mut expanded_key` | — |
-| [1038](benchmarks/memory/src/main.rs#L1038) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::mut exact_key` | — |
-| [1046](benchmarks/memory/src/main.rs#L1046) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::access` | — |
-| [1052](benchmarks/memory/src/main.rs#L1052) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::accesses` | — |
-| [1058](benchmarks/memory/src/main.rs#L1058) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::download_config` | — |
-| [1062](benchmarks/memory/src/main.rs#L1062) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::expanded_downloads` | — |
-| [1063](benchmarks/memory/src/main.rs#L1063) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::workload` | — |
-| [1071](benchmarks/memory/src/main.rs#L1071) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::report` | — |
-| [1090](benchmarks/memory/src/main.rs#L1090) | Local | `tests::coalescing_distance_parameter_is_a_strict_upper_bound::distance` | — |
-| [1091](benchmarks/memory/src/main.rs#L1091) | Local | `tests::coalescing_distance_parameter_is_a_strict_upper_bound::ranges_for_gap` | — |
-| [1092](benchmarks/memory/src/main.rs#L1092) | Local | `tests::coalescing_distance_parameter_is_a_strict_upper_bound::ranges_for_gap::accesses` | — |
-| [1124](benchmarks/memory/src/main.rs#L1124) | Local | `tests::source_cost_baseline_uses_requested_bytes_not_downloaded_bytes::report` | — |
-| [1146](benchmarks/memory/src/main.rs#L1146) | Local | `tests::parses_the_captured_trace_shape::access` | — |
-| [1161](benchmarks/memory/src/main.rs#L1161) | Local | `tests::expanded_downloader_honors_the_whole_split_threshold::config` | — |
-| [1165](benchmarks/memory/src/main.rs#L1165) | Local | `tests::expanded_downloader_honors_the_whole_split_threshold::small_split` | — |
-| [1180](benchmarks/memory/src/main.rs#L1180) | Local | `tests::expanded_downloader_honors_the_whole_split_threshold::threshold_split` | — |
-| [1194](benchmarks/memory/src/main.rs#L1194) | Local | `tests::timestamp_parser_handles_day_boundaries::before` | — |
-| [1195](benchmarks/memory/src/main.rs#L1195) | Local | `tests::timestamp_parser_handles_day_boundaries::after` | — |
+| [172](benchmarks/memory/src/main.rs#L172) | Local | `impl ReplayCache for FeuerReplayCache::get::Some(bytes)` | — |
+| [180](benchmarks/memory/src/main.rs#L180) | Local | `impl ReplayCache for FeuerReplayCache::populate::download` | — |
+| [261](benchmarks/memory/src/main.rs#L261) | Local | `impl ReplayCache for FoyerReplayCache::get::key` | — |
+| [262](benchmarks/memory/src/main.rs#L262) | Local | `impl ReplayCache for FoyerReplayCache::get::Some(entry)` | — |
+| [265](benchmarks/memory/src/main.rs#L265) | Local | `impl ReplayCache for FoyerReplayCache::get::value` | — |
+| [267](benchmarks/memory/src/main.rs#L267) | Local | `impl ReplayCache for FoyerReplayCache::get::result` | — |
+| [273](benchmarks/memory/src/main.rs#L273) | Local | `impl ReplayCache for FoyerReplayCache::populate::key` | — |
+| [288](benchmarks/memory/src/main.rs#L288) | Local | `foyer_cache::builder` | — |
+| [333](benchmarks/memory/src/main.rs#L333) | Local | `impl Report::source_cost_hit_rate::fixed_cost` | — |
+| [334](benchmarks/memory/src/main.rs#L334) | Local | `impl Report::source_cost_hit_rate::baseline` | — |
+| [335](benchmarks/memory/src/main.rs#L335) | Local | `impl Report::source_cost_hit_rate::actual` | — |
+| [349](benchmarks/memory/src/main.rs#L349) | Local | `main::args` | — |
+| [359](benchmarks/memory/src/main.rs#L359) | Local | `main::download_config` | — |
+| [360](benchmarks/memory/src/main.rs#L360) | Local | `main::workload` | — |
+| [377](benchmarks/memory/src/main.rs#L377) | Local | `main::max_download` | — |
+| [378](benchmarks/memory/src/main.rs#L378) | Local | `main::max_download` | — |
+| [379](benchmarks/memory/src/main.rs#L379) | Local | `main::source_payload` | — |
+| [383](benchmarks/memory/src/main.rs#L383) | Local | `main::mut caches` | `Vec<Box<dyn ReplayCache>>` |
+| [401](benchmarks/memory/src/main.rs#L401) | Local | `main::report` | — |
+| [423](benchmarks/memory/src/main.rs#L423) | Local | `trace_workload::mut accesses` | — |
+| [438](benchmarks/memory/src/main.rs#L438) | Local | `trace_workload::expanded_downloads` | — |
+| [457](benchmarks/memory/src/main.rs#L457) | Local | `replay_cache::mut warmup_traffic` | — |
+| [461](benchmarks/memory/src/main.rs#L461) | Local | `replay_cache::mut traffic` | — |
+| [462](benchmarks/memory/src/main.rs#L462) | Local | `replay_cache::started` | — |
+| [464](benchmarks/memory/src/main.rs#L464) | Local | `replay_cache::elapsed` | — |
+| [491](benchmarks/memory/src/main.rs#L491) | Local | `expanded_download_ranges::mut by_object` | `HashMap<(&str, u64), Vec<usize>>` |
+| [499](benchmarks/memory/src/main.rs#L499) | Local | `expanded_download_ranges::base_ranges` | `Vec<_>` |
+| [503](benchmarks/memory/src/main.rs#L503) | Local | `expanded_download_ranges::mut ranges` | — |
+| [507](benchmarks/memory/src/main.rs#L507) | Local | `expanded_download_ranges::mut assigned` | — |
+| [514](benchmarks/memory/src/main.rs#L514) | Local | `expanded_download_ranges::deadline` | — |
+| [517](benchmarks/memory/src/main.rs#L517) | Local | `expanded_download_ranges::pending` | — |
+| [528](benchmarks/memory/src/main.rs#L528) | Local | `expanded_download_ranges::download` | — |
+| [570](benchmarks/memory/src/main.rs#L570) | Local | `execute_pass::downloaded` | — |
+| [574](benchmarks/memory/src/main.rs#L574) | Local | `execute_pass::hit` | — |
+| [580](benchmarks/memory/src/main.rs#L580) | Local | `execute_pass::payload` | — |
+| [601](benchmarks/memory/src/main.rs#L601) | Local | `coalesced_downloads::mut downloads` | `Vec<CoalescedDownload<'_>>` |
+| [603](benchmarks/memory/src/main.rs#L603) | Local | `coalesced_downloads::merge` | — |
+| [604](benchmarks/memory/src/main.rs#L604) | Local | `coalesced_downloads::merge::representative` | — |
+| [605](benchmarks/memory/src/main.rs#L605) | Local | `coalesced_downloads::merge::gap` | — |
+| [637](benchmarks/memory/src/main.rs#L637) | Local | `source_payload_slice::payload_len` | — |
+| [646](benchmarks/memory/src/main.rs#L646) | Local | `requested_payload::start` | — |
+| [648](benchmarks/memory/src/main.rs#L648) | Local | `requested_payload::end` | — |
+| [654](benchmarks/memory/src/main.rs#L654) | Local | `print_human_header::shards` | — |
+| [757](benchmarks/memory/src/main.rs#L757) | Local | `load_trace::path` | — |
+| [758](benchmarks/memory/src/main.rs#L758) | Local | `load_trace::content` | — |
+| [770](benchmarks/memory/src/main.rs#L770) | Local | `parse_trace_line::object_key` | — |
+| [771](benchmarks/memory/src/main.rs#L771) | Local | `parse_trace_line::object_size` | — |
+| [772](benchmarks/memory/src/main.rs#L772) | Local | `parse_trace_line::start` | — |
+| [773](benchmarks/memory/src/main.rs#L773) | Local | `parse_trace_line::end` | — |
+| [774](benchmarks/memory/src/main.rs#L774) | Local | `parse_trace_line::requested` | — |
+| [775](benchmarks/memory/src/main.rs#L775) | Local | `parse_trace_line::timestamp` | — |
+| [776](benchmarks/memory/src/main.rs#L776) | Local | `parse_trace_line::timestamp_millis` | — |
+| [786](benchmarks/memory/src/main.rs#L786) | Local | `parse_timestamp_millis::bytes` | — |
+| [787](benchmarks/memory/src/main.rs#L787) | Local | `parse_timestamp_millis::valid_suffix` | — |
+| [799](benchmarks/memory/src/main.rs#L799) | Local | `parse_timestamp_millis::component` | — |
+| [804](benchmarks/memory/src/main.rs#L804) | Local | `parse_timestamp_millis::year` | — |
+| [805](benchmarks/memory/src/main.rs#L805) | Local | `parse_timestamp_millis::month` | — |
+| [806](benchmarks/memory/src/main.rs#L806) | Local | `parse_timestamp_millis::day` | — |
+| [807](benchmarks/memory/src/main.rs#L807) | Local | `parse_timestamp_millis::hour` | — |
+| [808](benchmarks/memory/src/main.rs#L808) | Local | `parse_timestamp_millis::minute` | — |
+| [809](benchmarks/memory/src/main.rs#L809) | Local | `parse_timestamp_millis::second` | — |
+| [810](benchmarks/memory/src/main.rs#L810) | Local | `parse_timestamp_millis::millis` | — |
+| [819](benchmarks/memory/src/main.rs#L819) | Local | `parse_timestamp_millis::leap_year` | — |
+| [820](benchmarks/memory/src/main.rs#L820) | Local | `parse_timestamp_millis::month_lengths` | — |
+| [834](benchmarks/memory/src/main.rs#L834) | Local | `parse_timestamp_millis::month_index` | — |
+| [839](benchmarks/memory/src/main.rs#L839) | Local | `parse_timestamp_millis::previous_year` | — |
+| [840](benchmarks/memory/src/main.rs#L840) | Local | `parse_timestamp_millis::days_before_year` | — |
+| [841](benchmarks/memory/src/main.rs#L841) | Local | `parse_timestamp_millis::days_before_month` | `u64` |
+| [842](benchmarks/memory/src/main.rs#L842) | Local | `parse_timestamp_millis::days` | — |
+| [847](benchmarks/memory/src/main.rs#L847) | Local | `find_json_string::value` | — |
+| [848](benchmarks/memory/src/main.rs#L848) | Local | `find_json_string::value` | — |
+| [851](benchmarks/memory/src/main.rs#L851) | Local | `find_json_string::end` | — |
+| [858](benchmarks/memory/src/main.rs#L858) | Local | `find_json_u64::value` | — |
+| [859](benchmarks/memory/src/main.rs#L859) | Local | `find_json_u64::end` | — |
+| [871](benchmarks/memory/src/main.rs#L871) | Local | `field_value::needle` | — |
+| [872](benchmarks/memory/src/main.rs#L872) | Local | `field_value::after_field` | — |
+| [876](benchmarks/memory/src/main.rs#L876) | Local | `field_value::after_colon` | — |
+| [892](benchmarks/memory/src/main.rs#L892) | Local | `byte_count_from_env::value` | — |
+| [897](benchmarks/memory/src/main.rs#L897) | Local | `byte_count_from_env::bytes` | — |
+| [902](benchmarks/memory/src/main.rs#L902) | Local | `parse_bytes::bytes` | — |
+| [907](benchmarks/memory/src/main.rs#L907) | Local | `parse_byte_count::value` | — |
+| [908](benchmarks/memory/src/main.rs#L908) | Local | `parse_byte_count::split` | — |
+| [911](benchmarks/memory/src/main.rs#L911) | Local | `parse_byte_count::number` | `u128` |
+| [914](benchmarks/memory/src/main.rs#L914) | Local | `parse_byte_count::suffix` | — |
+| [915](benchmarks/memory/src/main.rs#L915) | Local | `parse_byte_count::multiplier` | — |
+| [986](benchmarks/memory/src/main.rs#L986) | Local | `tests::warmup_preserves_cache_state_but_not_reported_traffic::workload` | — |
+| [1000](benchmarks/memory/src/main.rs#L1000) | Local | `tests::warmup_preserves_cache_state_but_not_reported_traffic::report` | — |
+| [1019](benchmarks/memory/src/main.rs#L1019) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::access` | — |
+| [1025](benchmarks/memory/src/main.rs#L1025) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::first` | — |
+| [1026](benchmarks/memory/src/main.rs#L1026) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::second` | — |
+| [1027](benchmarks/memory/src/main.rs#L1027) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::expanded` | — |
+| [1029](benchmarks/memory/src/main.rs#L1029) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::mut expanded_key` | — |
+| [1041](benchmarks/memory/src/main.rs#L1041) | Local | `tests::foyer_expanded_key_reuses_identical_expansions_for_distinct_requests::mut exact_key` | — |
+| [1049](benchmarks/memory/src/main.rs#L1049) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::access` | — |
+| [1055](benchmarks/memory/src/main.rs#L1055) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::accesses` | — |
+| [1061](benchmarks/memory/src/main.rs#L1061) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::download_config` | — |
+| [1065](benchmarks/memory/src/main.rs#L1065) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::expanded_downloads` | — |
+| [1066](benchmarks/memory/src/main.rs#L1066) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::workload` | — |
+| [1074](benchmarks/memory/src/main.rs#L1074) | Local | `tests::expanded_downloader_assigns_one_coalesced_range_to_all_batch_members::report` | — |
+| [1093](benchmarks/memory/src/main.rs#L1093) | Local | `tests::coalescing_distance_parameter_is_a_strict_upper_bound::distance` | — |
+| [1094](benchmarks/memory/src/main.rs#L1094) | Local | `tests::coalescing_distance_parameter_is_a_strict_upper_bound::ranges_for_gap` | — |
+| [1095](benchmarks/memory/src/main.rs#L1095) | Local | `tests::coalescing_distance_parameter_is_a_strict_upper_bound::ranges_for_gap::accesses` | — |
+| [1127](benchmarks/memory/src/main.rs#L1127) | Local | `tests::source_cost_baseline_uses_requested_bytes_not_downloaded_bytes::report` | — |
+| [1149](benchmarks/memory/src/main.rs#L1149) | Local | `tests::parses_the_captured_trace_shape::access` | — |
+| [1164](benchmarks/memory/src/main.rs#L1164) | Local | `tests::expanded_downloader_honors_the_whole_split_threshold::config` | — |
+| [1168](benchmarks/memory/src/main.rs#L1168) | Local | `tests::expanded_downloader_honors_the_whole_split_threshold::small_split` | — |
+| [1183](benchmarks/memory/src/main.rs#L1183) | Local | `tests::expanded_downloader_honors_the_whole_split_threshold::threshold_split` | — |
+| [1197](benchmarks/memory/src/main.rs#L1197) | Local | `tests::timestamp_parser_handles_day_boundaries::before` | — |
+| [1198](benchmarks/memory/src/main.rs#L1198) | Local | `tests::timestamp_parser_handles_day_boundaries::after` | — |
 
 </details>
 
@@ -953,27 +986,27 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | [13](feuer-storage/examples/direct_io.rs#L13) | Const | `MIB` | `usize` |
 | [14](feuer-storage/examples/direct_io.rs#L14) | Const | `CAPACITY` | `u64` |
 | [15](feuer-storage/examples/direct_io.rs#L15) | Const | `READ_SPACE` | `u64` |
-| [18](feuer-storage/examples/direct_io.rs#L18) | Struct | `Counts` | — |
-| [19](feuer-storage/examples/direct_io.rs#L19) | Field | `Counts::operations` | `u64` |
-| [20](feuer-storage/examples/direct_io.rs#L20) | Field | `Counts::bytes` | `u64` |
-| [21](feuer-storage/examples/direct_io.rs#L21) | Field | `Counts::samples` | `Vec<u64>` |
-| [25](feuer-storage/examples/direct_io.rs#L25) | Function | `main` | `fn() -> Result<(), Box<dyn std::error::Error>>` |
+| [19](feuer-storage/examples/direct_io.rs#L19) | Struct | `IoMeasurements` | — |
+| [20](feuer-storage/examples/direct_io.rs#L20) | Field | `IoMeasurements::operations` | `u64` |
+| [21](feuer-storage/examples/direct_io.rs#L21) | Field | `IoMeasurements::bytes` | `u64` |
+| [22](feuer-storage/examples/direct_io.rs#L22) | Field | `IoMeasurements::latency_samples_micros` | `Vec<u64>` |
+| [26](feuer-storage/examples/direct_io.rs#L26) | Function | `main` | `fn() -> Result<(), Box<dyn std::error::Error>>` |
 | [66](feuer-storage/examples/direct_io.rs#L66) | Function | `run` | `fn(file: &DataFile, size: usize, readers: usize, writers: usize, seconds: u64)` |
-| [138](feuer-storage/examples/direct_io.rs#L138) | Function | `cpu_seconds` | `fn() -> f64` |
+| [145](feuer-storage/examples/direct_io.rs#L145) | Function | `cpu_seconds` | `fn() -> f64` |
 
 <details>
 <summary>Local bindings (35)</summary>
 
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
-| [26](feuer-storage/examples/direct_io.rs#L26) | Local | `main::mut args` | — |
-| [27](feuer-storage/examples/direct_io.rs#L27) | Local | `main::root` | — |
-| [28](feuer-storage/examples/direct_io.rs#L28) | Local | `main::seconds` | `u64` |
-| [30](feuer-storage/examples/direct_io.rs#L30) | Local | `main::write_callers` | `Vec<usize>` |
-| [39](feuer-storage/examples/direct_io.rs#L39) | Local | `main::temp` | — |
-| [42](feuer-storage/examples/direct_io.rs#L42) | Local | `main::registry` | `mixtrics::metrics::BoxedRegistry` |
-| [43](feuer-storage/examples/direct_io.rs#L43) | Local | `main::file` | — |
-| [45](feuer-storage/examples/direct_io.rs#L45) | Local | `main::payload` | — |
+| [27](feuer-storage/examples/direct_io.rs#L27) | Local | `main::mut args` | — |
+| [28](feuer-storage/examples/direct_io.rs#L28) | Local | `main::root` | — |
+| [29](feuer-storage/examples/direct_io.rs#L29) | Local | `main::seconds` | `u64` |
+| [31](feuer-storage/examples/direct_io.rs#L31) | Local | `main::write_callers` | `Vec<usize>` |
+| [40](feuer-storage/examples/direct_io.rs#L40) | Local | `main::temp` | — |
+| [43](feuer-storage/examples/direct_io.rs#L43) | Local | `main::registry` | `mixtrics::metrics::BoxedRegistry` |
+| [44](feuer-storage/examples/direct_io.rs#L44) | Local | `main::file` | — |
+| [46](feuer-storage/examples/direct_io.rs#L46) | Local | `main::payload` | — |
 | [67](feuer-storage/examples/direct_io.rs#L67) | Local | `run::measure_start` | — |
 | [68](feuer-storage/examples/direct_io.rs#L68) | Local | `run::deadline` | — |
 | [69](feuer-storage/examples/direct_io.rs#L69) | Local | `run::mut tasks` | — |
@@ -982,7 +1015,7 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | [75](feuer-storage/examples/direct_io.rs#L75) | Local | `run::payload` | — |
 | [77](feuer-storage/examples/direct_io.rs#L77) | Local | `run::reading` | — |
 | [78](feuer-storage/examples/direct_io.rs#L78) | Local | `run::mut random` | — |
-| [79](feuer-storage/examples/direct_io.rs#L79) | Local | `run::mut counts` | — |
+| [79](feuer-storage/examples/direct_io.rs#L79) | Local | `run::mut measurements` | — |
 | [80](feuer-storage/examples/direct_io.rs#L80) | Local | `run::mut write_offset` | — |
 | [81](feuer-storage/examples/direct_io.rs#L81) | Local | `run::lane_size` | — |
 | [83](feuer-storage/examples/direct_io.rs#L83) | Local | `run::started` | — |
@@ -991,16 +1024,16 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | [89](feuer-storage/examples/direct_io.rs#L89) | Local | `run::bytes::value` | — |
 | [95](feuer-storage/examples/direct_io.rs#L95) | Local | `run::bytes::offset` | — |
 | [100](feuer-storage/examples/direct_io.rs#L100) | Local | `run::finished` | — |
-| [114](feuer-storage/examples/direct_io.rs#L114) | Local | `run::cpu_start` | — |
-| [115](feuer-storage/examples/direct_io.rs#L115) | Local | `run::mut read` | — |
-| [116](feuer-storage/examples/direct_io.rs#L116) | Local | `run::mut write` | — |
-| [118](feuer-storage/examples/direct_io.rs#L118) | Local | `run::(reading, counts)` | — |
-| [119](feuer-storage/examples/direct_io.rs#L119) | Local | `run::total` | — |
-| [124](feuer-storage/examples/direct_io.rs#L124) | Local | `run::cpu` | — |
-| [126](feuer-storage/examples/direct_io.rs#L126) | Local | `run::percentile` | — |
-| [139](feuer-storage/examples/direct_io.rs#L139) | Local | `cpu_seconds::mut usage` | — |
-| [143](feuer-storage/examples/direct_io.rs#L143) | Local | `cpu_seconds::usage` | — |
-| [144](feuer-storage/examples/direct_io.rs#L144) | Local | `cpu_seconds::seconds` | — |
+| [116](feuer-storage/examples/direct_io.rs#L116) | Local | `run::cpu_start` | — |
+| [117](feuer-storage/examples/direct_io.rs#L117) | Local | `run::mut read` | — |
+| [118](feuer-storage/examples/direct_io.rs#L118) | Local | `run::mut write` | — |
+| [120](feuer-storage/examples/direct_io.rs#L120) | Local | `run::(reading, measurements)` | — |
+| [121](feuer-storage/examples/direct_io.rs#L121) | Local | `run::total` | — |
+| [126](feuer-storage/examples/direct_io.rs#L126) | Local | `run::cpu` | — |
+| [128](feuer-storage/examples/direct_io.rs#L128) | Local | `run::percentile` | — |
+| [146](feuer-storage/examples/direct_io.rs#L146) | Local | `cpu_seconds::mut usage` | — |
+| [150](feuer-storage/examples/direct_io.rs#L150) | Local | `cpu_seconds::usage` | — |
+| [151](feuer-storage/examples/direct_io.rs#L151) | Local | `cpu_seconds::seconds` | — |
 
 </details>
 
@@ -1017,52 +1050,50 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | [17](feuer-storage/src/error.rs#L17) | Variant | `IoOperation::ResizeDataFile` | — |
 | [19](feuer-storage/src/error.rs#L19) | Variant | `IoOperation::Read` | — |
 | [21](feuer-storage/src/error.rs#L21) | Variant | `IoOperation::Write` | — |
-| [23](feuer-storage/src/error.rs#L23) | Variant | `IoOperation::SyncData` | — |
-| [25](feuer-storage/src/error.rs#L25) | Variant | `IoOperation::SyncAll` | — |
-| [28](feuer-storage/src/error.rs#L28) | Impl | `impl IoOperation` | — |
-| [30](feuer-storage/src/error.rs#L30) | Method | `impl IoOperation::as_str` | `fn(self) -> &'static str` |
-| [46](feuer-storage/src/error.rs#L46) | Impl | `impl fmt::Display for IoOperation` | — |
-| [47](feuer-storage/src/error.rs#L47) | Method | `impl fmt::Display for IoOperation::fmt` | `fn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result` |
-| [54](feuer-storage/src/error.rs#L54) | Enum | `ErrorKind` | — |
-| [56](feuer-storage/src/error.rs#L56) | Variant | `ErrorKind::InvalidConfiguration` | — |
-| [58](feuer-storage/src/error.rs#L58) | Variant | `ErrorKind::AlreadyOpen` | — |
-| [60](feuer-storage/src/error.rs#L60) | Variant | `ErrorKind::OutOfBounds` | — |
-| [62](feuer-storage/src/error.rs#L62) | Variant | `ErrorKind::Allocation` | — |
-| [64](feuer-storage/src/error.rs#L64) | Variant | `ErrorKind::Io` | — |
-| [66](feuer-storage/src/error.rs#L66) | Variant | `ErrorKind::Task` | — |
-| [69](feuer-storage/src/error.rs#L69) | Impl | `impl ErrorKind` | — |
-| [71](feuer-storage/src/error.rs#L71) | Method | `impl ErrorKind::as_str` | `fn(self) -> &'static str` |
-| [83](feuer-storage/src/error.rs#L83) | Impl | `impl fmt::Display for ErrorKind` | — |
-| [84](feuer-storage/src/error.rs#L84) | Method | `impl fmt::Display for ErrorKind::fmt` | `fn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result` |
-| [92](feuer-storage/src/error.rs#L92) | Enum | `Error` | — |
-| [95](feuer-storage/src/error.rs#L95) | Variant | `Error::InvalidCapacity` | — |
-| [98](feuer-storage/src/error.rs#L98) | Variant | `Error::AlreadyOpen` | — |
-| [100](feuer-storage/src/error.rs#L100) | Field | `Error::AlreadyOpen::directory` | `PathBuf` |
-| [104](feuer-storage/src/error.rs#L104) | Variant | `Error::InvalidDataFile` | — |
-| [106](feuer-storage/src/error.rs#L106) | Field | `Error::InvalidDataFile::path` | `PathBuf` |
-| [110](feuer-storage/src/error.rs#L110) | Variant | `Error::OutOfBounds` | — |
-| [112](feuer-storage/src/error.rs#L112) | Field | `Error::OutOfBounds::operation` | `IoOperation` |
-| [114](feuer-storage/src/error.rs#L114) | Field | `Error::OutOfBounds::offset` | `u64` |
-| [116](feuer-storage/src/error.rs#L116) | Field | `Error::OutOfBounds::length` | `u64` |
-| [118](feuer-storage/src/error.rs#L118) | Field | `Error::OutOfBounds::capacity` | `u64` |
-| [122](feuer-storage/src/error.rs#L122) | Variant | `Error::LengthOverflow` | — |
-| [124](feuer-storage/src/error.rs#L124) | Field | `Error::LengthOverflow::operation` | `IoOperation` |
-| [126](feuer-storage/src/error.rs#L126) | Field | `Error::LengthOverflow::length` | `usize` |
-| [130](feuer-storage/src/error.rs#L130) | Variant | `Error::Allocation` | — |
-| [132](feuer-storage/src/error.rs#L132) | Field | `Error::Allocation::length` | `usize` |
-| [135](feuer-storage/src/error.rs#L135) | Field | `Error::Allocation::source` | `TryReserveError` |
-| [139](feuer-storage/src/error.rs#L139) | Variant | `Error::Io` | — |
-| [141](feuer-storage/src/error.rs#L141) | Field | `Error::Io::operation` | `IoOperation` |
-| [143](feuer-storage/src/error.rs#L143) | Field | `Error::Io::path` | `PathBuf` |
-| [146](feuer-storage/src/error.rs#L146) | Field | `Error::Io::source` | `io::Error` |
-| [150](feuer-storage/src/error.rs#L150) | Variant | `Error::RuntimeUnavailable` | — |
-| [153](feuer-storage/src/error.rs#L153) | Variant | `Error::Task` | — |
-| [155](feuer-storage/src/error.rs#L155) | Field | `Error::Task::operation` | `IoOperation` |
-| [158](feuer-storage/src/error.rs#L158) | Field | `Error::Task::source` | `Box<dyn std::error::Error + Send + Sync>` |
-| [162](feuer-storage/src/error.rs#L162) | Impl | `impl Error` | — |
-| [164](feuer-storage/src/error.rs#L164) | Method | `impl Error::kind` | `fn(&self) -> ErrorKind` |
-| [176](feuer-storage/src/error.rs#L176) | Method | `impl Error::operation` | `fn(&self) -> IoOperation` |
-| [192](feuer-storage/src/error.rs#L192) | TypeAlias | `Result` | `std::result::Result<T, Error>` |
+| [24](feuer-storage/src/error.rs#L24) | Impl | `impl IoOperation` | — |
+| [26](feuer-storage/src/error.rs#L26) | Method | `impl IoOperation::as_str` | `fn(self) -> &'static str` |
+| [40](feuer-storage/src/error.rs#L40) | Impl | `impl fmt::Display for IoOperation` | — |
+| [41](feuer-storage/src/error.rs#L41) | Method | `impl fmt::Display for IoOperation::fmt` | `fn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result` |
+| [48](feuer-storage/src/error.rs#L48) | Enum | `ErrorKind` | — |
+| [50](feuer-storage/src/error.rs#L50) | Variant | `ErrorKind::InvalidConfiguration` | — |
+| [52](feuer-storage/src/error.rs#L52) | Variant | `ErrorKind::AlreadyOpen` | — |
+| [54](feuer-storage/src/error.rs#L54) | Variant | `ErrorKind::OutOfBounds` | — |
+| [56](feuer-storage/src/error.rs#L56) | Variant | `ErrorKind::Allocation` | — |
+| [58](feuer-storage/src/error.rs#L58) | Variant | `ErrorKind::Io` | — |
+| [60](feuer-storage/src/error.rs#L60) | Variant | `ErrorKind::Task` | — |
+| [63](feuer-storage/src/error.rs#L63) | Impl | `impl ErrorKind` | — |
+| [65](feuer-storage/src/error.rs#L65) | Method | `impl ErrorKind::as_str` | `fn(self) -> &'static str` |
+| [77](feuer-storage/src/error.rs#L77) | Impl | `impl fmt::Display for ErrorKind` | — |
+| [78](feuer-storage/src/error.rs#L78) | Method | `impl fmt::Display for ErrorKind::fmt` | `fn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result` |
+| [86](feuer-storage/src/error.rs#L86) | Enum | `Error` | — |
+| [89](feuer-storage/src/error.rs#L89) | Variant | `Error::InvalidCapacity` | — |
+| [92](feuer-storage/src/error.rs#L92) | Variant | `Error::AlreadyOpen` | — |
+| [94](feuer-storage/src/error.rs#L94) | Field | `Error::AlreadyOpen::directory` | `PathBuf` |
+| [98](feuer-storage/src/error.rs#L98) | Variant | `Error::InvalidDataFile` | — |
+| [100](feuer-storage/src/error.rs#L100) | Field | `Error::InvalidDataFile::path` | `PathBuf` |
+| [104](feuer-storage/src/error.rs#L104) | Variant | `Error::OutOfBounds` | — |
+| [106](feuer-storage/src/error.rs#L106) | Field | `Error::OutOfBounds::operation` | `IoOperation` |
+| [108](feuer-storage/src/error.rs#L108) | Field | `Error::OutOfBounds::offset` | `u64` |
+| [110](feuer-storage/src/error.rs#L110) | Field | `Error::OutOfBounds::length` | `u64` |
+| [112](feuer-storage/src/error.rs#L112) | Field | `Error::OutOfBounds::capacity` | `u64` |
+| [116](feuer-storage/src/error.rs#L116) | Variant | `Error::LengthOverflow` | — |
+| [118](feuer-storage/src/error.rs#L118) | Field | `Error::LengthOverflow::operation` | `IoOperation` |
+| [120](feuer-storage/src/error.rs#L120) | Field | `Error::LengthOverflow::length` | `usize` |
+| [124](feuer-storage/src/error.rs#L124) | Variant | `Error::Allocation` | — |
+| [126](feuer-storage/src/error.rs#L126) | Field | `Error::Allocation::length` | `usize` |
+| [129](feuer-storage/src/error.rs#L129) | Field | `Error::Allocation::source` | `TryReserveError` |
+| [133](feuer-storage/src/error.rs#L133) | Variant | `Error::Io` | — |
+| [135](feuer-storage/src/error.rs#L135) | Field | `Error::Io::operation` | `IoOperation` |
+| [137](feuer-storage/src/error.rs#L137) | Field | `Error::Io::path` | `PathBuf` |
+| [140](feuer-storage/src/error.rs#L140) | Field | `Error::Io::source` | `io::Error` |
+| [144](feuer-storage/src/error.rs#L144) | Variant | `Error::RuntimeUnavailable` | — |
+| [147](feuer-storage/src/error.rs#L147) | Variant | `Error::Task` | — |
+| [149](feuer-storage/src/error.rs#L149) | Field | `Error::Task::operation` | `IoOperation` |
+| [152](feuer-storage/src/error.rs#L152) | Field | `Error::Task::source` | `Box<dyn std::error::Error + Send + Sync>` |
+| [156](feuer-storage/src/error.rs#L156) | Impl | `impl Error` | — |
+| [158](feuer-storage/src/error.rs#L158) | Method | `impl Error::kind` | `fn(&self) -> ErrorKind` |
+| [170](feuer-storage/src/error.rs#L170) | Method | `impl Error::operation` | `fn(&self) -> IoOperation` |
+| [186](feuer-storage/src/error.rs#L186) | TypeAlias | `Result` | `std::result::Result<T, Error>` |
 
 ### `feuer-storage/src/file.rs`
 
@@ -1070,112 +1101,110 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | ---: | --- | --- | --- |
 | [18](feuer-storage/src/file.rs#L18) | Const | `DATA_FILE_NAME` | `&str` |
 | [19](feuer-storage/src/file.rs#L19) | Const | `LOCK_FILE_NAME` | `&str` |
-| [21](feuer-storage/src/file.rs#L21) | Struct | `Inner` | — |
-| [22](feuer-storage/src/file.rs#L22) | Field | `Inner::driver` | `uring::Handle` |
-| [23](feuer-storage/src/file.rs#L23) | Field | `Inner::data_path` | `PathBuf` |
-| [24](feuer-storage/src/file.rs#L24) | Field | `Inner::capacity` | `u64` |
-| [44](feuer-storage/src/file.rs#L44) | Struct | `DataFile` | — |
-| [45](feuer-storage/src/file.rs#L45) | Field | `DataFile::inner` | `Arc<Inner>` |
-| [46](feuer-storage/src/file.rs#L46) | Field | `DataFile::metrics` | `Arc<IoMetrics>` |
-| [49](feuer-storage/src/file.rs#L49) | Impl | `impl fmt::Debug for DataFile` | — |
-| [50](feuer-storage/src/file.rs#L50) | Method | `impl fmt::Debug for DataFile::fmt` | `fn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result` |
-| [57](feuer-storage/src/file.rs#L57) | Impl | `impl DataFile` | — |
-| [63](feuer-storage/src/file.rs#L63) | Function | `impl DataFile::open` | `fn(directory: impl AsRef<Path>, capacity: u64, metrics: Arc<IoMetrics>) -> Result<Self>` |
-| [105](feuer-storage/src/file.rs#L105) | Method | `impl DataFile::capacity` | `fn(&self) -> u64` |
-| [111](feuer-storage/src/file.rs#L111) | Method | `impl DataFile::read_at` | `fn(&self, offset: u64, length: usize) -> Result<Bytes>` |
-| [120](feuer-storage/src/file.rs#L120) | Method | `impl DataFile::write_at` | `fn(&self, offset: u64, bytes: &Bytes) -> Result<()>` |
-| [128](feuer-storage/src/file.rs#L128) | Method | `impl DataFile::sync_data` | `fn(&self) -> Result<()>` |
-| [134](feuer-storage/src/file.rs#L134) | Method | `impl DataFile::sync_all` | `fn(&self) -> Result<()>` |
-| [138](feuer-storage/src/file.rs#L138) | Method | `impl DataFile::execute` | `fn(&self, operation: IoOperation, offset: u64, length: usize, payload: &[u8]) -> Result<Bytes>` |
-| [161](feuer-storage/src/file.rs#L161) | Method | `impl DataFile::execute_inner` | `fn(&self, operation: IoOperation, offset: u64, length: usize, payload: &[u8]) -> Result<Bytes>` |
-| [205](feuer-storage/src/file.rs#L205) | Function | `open_inner` | `fn(directory: PathBuf, capacity: u64) -> Result<Inner>` |
-| [271](feuer-storage/src/file.rs#L271) | Function | `check_direct_alignment` | `fn(file: &File) -> io::Result<()>` |
-| [302](feuer-storage/src/file.rs#L302) | Function | `check_range` | `fn(operation: IoOperation, offset: u64, length: u64, capacity: u64) -> Result<()>` |
-| [314](feuer-storage/src/file.rs#L314) | Function | `record_span_outcome` | `fn<T>(span: &Span, elapsed: std::time::Duration, result: &Result<T>)` |
-| [328](feuer-storage/src/file.rs#L328) | Module | `tests` | — |
-| [333](feuer-storage/src/file.rs#L333) | Const | `tests::CAPACITY` | `u64` |
-| [336](feuer-storage/src/file.rs#L336) | Function | `tests::public_io_types_are_send_sync_static` | `fn()` |
-| [337](feuer-storage/src/file.rs#L337) | Function | `tests::public_io_types_are_send_sync_static::assert_send_sync_static` | `fn<T: Send + Sync + 'static>()` |
-| [343](feuer-storage/src/file.rs#L343) | Function | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors` | `fn()` |
-| [372](feuer-storage/src/file.rs#L372) | Function | `tests::rejects_out_of_bounds_and_accepts_empty_ranges` | `fn()` |
-| [391](feuer-storage/src/file.rs#L391) | Function | `tests::fails_short_reads_instead_of_returning_uncertain_bytes` | `fn()` |
-| [407](feuer-storage/src/file.rs#L407) | Function | `tests::holds_exclusive_ownership_and_reopens_after_shutdown` | `fn()` |
-| [430](feuer-storage/src/file.rs#L430) | Function | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates` | `fn()` |
-| [461](feuer-storage/src/file.rs#L461) | Function | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early` | `fn()` |
-| [490](feuer-storage/src/file.rs#L490) | Function | `tests::reports_missing_runtime` | `fn()` |
-| [505](feuer-storage/src/file.rs#L505) | Function | `tests::rejects_unverified_direct_io_instead_of_falling_back` | `fn()` |
-| [521](feuer-storage/src/file.rs#L521) | Function | `tests::validates_capacity_and_omits_paths_from_debug` | `fn()` |
+| [22](feuer-storage/src/file.rs#L22) | Struct | `DataFileState` | — |
+| [23](feuer-storage/src/file.rs#L23) | Field | `DataFileState::queue` | `uring::IoQueueHandle` |
+| [24](feuer-storage/src/file.rs#L24) | Field | `DataFileState::data_path` | `PathBuf` |
+| [25](feuer-storage/src/file.rs#L25) | Field | `DataFileState::capacity` | `u64` |
+| [46](feuer-storage/src/file.rs#L46) | Struct | `DataFile` | — |
+| [47](feuer-storage/src/file.rs#L47) | Field | `DataFile::state` | `Arc<DataFileState>` |
+| [48](feuer-storage/src/file.rs#L48) | Field | `DataFile::metrics` | `Arc<IoMetrics>` |
+| [51](feuer-storage/src/file.rs#L51) | Impl | `impl fmt::Debug for DataFile` | — |
+| [52](feuer-storage/src/file.rs#L52) | Method | `impl fmt::Debug for DataFile::fmt` | `fn(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result` |
+| [59](feuer-storage/src/file.rs#L59) | Impl | `impl DataFile` | — |
+| [65](feuer-storage/src/file.rs#L65) | Function | `impl DataFile::open` | `fn(directory: impl AsRef<Path>, capacity: u64, metrics: Arc<IoMetrics>) -> Result<Self>` |
+| [107](feuer-storage/src/file.rs#L107) | Method | `impl DataFile::capacity` | `fn(&self) -> u64` |
+| [113](feuer-storage/src/file.rs#L113) | Method | `impl DataFile::read_at` | `fn(&self, offset: u64, length: usize) -> Result<Bytes>` |
+| [122](feuer-storage/src/file.rs#L122) | Method | `impl DataFile::write_at` | `fn(&self, offset: u64, bytes: &Bytes) -> Result<()>` |
+| [128](feuer-storage/src/file.rs#L128) | Method | `impl DataFile::execute` | `fn(&self, operation: IoOperation, offset: u64, length: usize, payload: &[u8]) -> Result<Bytes>` |
+| [151](feuer-storage/src/file.rs#L151) | Method | `impl DataFile::execute_inner` | `fn(&self, operation: IoOperation, offset: u64, length: usize, payload: &[u8]) -> Result<Bytes>` |
+| [195](feuer-storage/src/file.rs#L195) | Function | `open_file_state` | `fn(directory: PathBuf, capacity: u64) -> Result<DataFileState>` |
+| [263](feuer-storage/src/file.rs#L263) | Function | `check_direct_alignment` | `fn(file: &File) -> io::Result<()>` |
+| [294](feuer-storage/src/file.rs#L294) | Function | `check_range` | `fn(operation: IoOperation, offset: u64, length: u64, capacity: u64) -> Result<()>` |
+| [306](feuer-storage/src/file.rs#L306) | Function | `record_span_outcome` | `fn<T>(span: &Span, elapsed: std::time::Duration, result: &Result<T>)` |
+| [320](feuer-storage/src/file.rs#L320) | Module | `tests` | — |
+| [325](feuer-storage/src/file.rs#L325) | Const | `tests::CAPACITY` | `u64` |
+| [328](feuer-storage/src/file.rs#L328) | Function | `tests::public_io_types_are_send_sync_static` | `fn()` |
+| [329](feuer-storage/src/file.rs#L329) | Function | `tests::public_io_types_are_send_sync_static::assert_send_sync_static` | `fn<T: Send + Sync + 'static>()` |
+| [335](feuer-storage/src/file.rs#L335) | Function | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors` | `fn()` |
+| [362](feuer-storage/src/file.rs#L362) | Function | `tests::rejects_out_of_bounds_and_accepts_empty_ranges` | `fn()` |
+| [381](feuer-storage/src/file.rs#L381) | Function | `tests::fails_short_reads_instead_of_returning_uncertain_bytes` | `fn()` |
+| [397](feuer-storage/src/file.rs#L397) | Function | `tests::holds_exclusive_ownership_and_reopens_after_shutdown` | `fn()` |
+| [419](feuer-storage/src/file.rs#L419) | Function | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates` | `fn()` |
+| [450](feuer-storage/src/file.rs#L450) | Function | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early` | `fn()` |
+| [479](feuer-storage/src/file.rs#L479) | Function | `tests::reports_missing_runtime` | `fn()` |
+| [494](feuer-storage/src/file.rs#L494) | Function | `tests::rejects_unverified_direct_io_instead_of_falling_back` | `fn()` |
+| [510](feuer-storage/src/file.rs#L510) | Function | `tests::validates_capacity_and_omits_paths_from_debug` | `fn()` |
 
 <details>
 <summary>Local bindings (65)</summary>
 
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
-| [64](feuer-storage/src/file.rs#L64) | Local | `impl DataFile::open::directory` | — |
-| [65](feuer-storage/src/file.rs#L65) | Local | `impl DataFile::open::runtime` | — |
-| [66](feuer-storage/src/file.rs#L66) | Local | `impl DataFile::open::started` | — |
-| [67](feuer-storage/src/file.rs#L67) | Local | `impl DataFile::open::span` | — |
-| [75](feuer-storage/src/file.rs#L75) | Local | `impl DataFile::open::result` | — |
-| [76](feuer-storage/src/file.rs#L76) | Local | `impl DataFile::open::result::inner` | — |
-| [139](feuer-storage/src/file.rs#L139) | Local | `impl DataFile::execute::started` | — |
-| [140](feuer-storage/src/file.rs#L140) | Local | `impl DataFile::execute::observed_bytes` | — |
-| [141](feuer-storage/src/file.rs#L141) | Local | `impl DataFile::execute::span` | — |
-| [151](feuer-storage/src/file.rs#L151) | Local | `impl DataFile::execute::result` | — |
-| [155](feuer-storage/src/file.rs#L155) | Local | `impl DataFile::execute::elapsed` | — |
-| [162](feuer-storage/src/file.rs#L162) | Local | `impl DataFile::execute_inner::length_u64` | — |
-| [164](feuer-storage/src/file.rs#L164) | Local | `impl DataFile::execute_inner::io_error` | — |
-| [172](feuer-storage/src/file.rs#L172) | Local | `impl DataFile::execute_inner::mut result` | — |
-| [178](feuer-storage/src/file.rs#L178) | Local | `impl DataFile::execute_inner::mut completed` | — |
-| [180](feuer-storage/src/file.rs#L180) | Local | `impl DataFile::execute_inner::at` | — |
-| [181](feuer-storage/src/file.rs#L181) | Local | `impl DataFile::execute_inner::chunk` | — |
-| [182](feuer-storage/src/file.rs#L182) | Local | `impl DataFile::execute_inner::input` | — |
-| [187](feuer-storage/src/file.rs#L187) | Local | `impl DataFile::execute_inner::bytes` | — |
-| [214](feuer-storage/src/file.rs#L214) | Local | `open_inner::lock_path` | — |
-| [215](feuer-storage/src/file.rs#L215) | Local | `open_inner::lock_file` | — |
-| [226](feuer-storage/src/file.rs#L226) | Local | `open_inner::locked` | — |
-| [234](feuer-storage/src/file.rs#L234) | Local | `open_inner::data_path` | — |
-| [235](feuer-storage/src/file.rs#L235) | Local | `open_inner::error` | — |
-| [240](feuer-storage/src/file.rs#L240) | Local | `open_inner::file` | — |
-| [257](feuer-storage/src/file.rs#L257) | Local | `open_inner::resize` | — |
-| [260](feuer-storage/src/file.rs#L260) | Local | `open_inner::driver` | — |
-| [272](feuer-storage/src/file.rs#L272) | Local | `check_direct_alignment::mut stat` | — |
-| [274](feuer-storage/src/file.rs#L274) | Local | `check_direct_alignment::result` | — |
-| [287](feuer-storage/src/file.rs#L287) | Local | `check_direct_alignment::stat` | — |
-| [344](feuer-storage/src/file.rs#L344) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::temp` | — |
-| [345](feuer-storage/src/file.rs#L345) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::directory` | — |
-| [346](feuer-storage/src/file.rs#L346) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::file` | — |
-| [347](feuer-storage/src/file.rs#L347) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::original` | — |
-| [349](feuer-storage/src/file.rs#L349) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::payload` | — |
-| [358](feuer-storage/src/file.rs#L358) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::payload` | — |
-| [373](feuer-storage/src/file.rs#L373) | Local | `tests::rejects_out_of_bounds_and_accepts_empty_ranges::temp` | — |
-| [374](feuer-storage/src/file.rs#L374) | Local | `tests::rejects_out_of_bounds_and_accepts_empty_ranges::file` | — |
-| [392](feuer-storage/src/file.rs#L392) | Local | `tests::fails_short_reads_instead_of_returning_uncertain_bytes::temp` | — |
-| [393](feuer-storage/src/file.rs#L393) | Local | `tests::fails_short_reads_instead_of_returning_uncertain_bytes::file` | — |
-| [408](feuer-storage/src/file.rs#L408) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::temp` | — |
-| [409](feuer-storage/src/file.rs#L409) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::file` | — |
-| [410](feuer-storage/src/file.rs#L410) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::clone` | — |
-| [422](feuer-storage/src/file.rs#L422) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::file` | — |
-| [431](feuer-storage/src/file.rs#L431) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::temp` | — |
-| [432](feuer-storage/src/file.rs#L432) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::file` | — |
-| [433](feuer-storage/src/file.rs#L433) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::mut tasks` | — |
-| [437](feuer-storage/src/file.rs#L437) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::file` | — |
-| [439](feuer-storage/src/file.rs#L439) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::value` | — |
-| [442](feuer-storage/src/file.rs#L442) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::value` | — |
-| [443](feuer-storage/src/file.rs#L443) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::offset` | — |
-| [462](feuer-storage/src/file.rs#L462) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::temp` | — |
-| [463](feuer-storage/src/file.rs#L463) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — |
-| [464](feuer-storage/src/file.rs#L464) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::mut tasks` | — |
-| [466](feuer-storage/src/file.rs#L466) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — |
-| [476](feuer-storage/src/file.rs#L476) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::_` | — |
-| [479](feuer-storage/src/file.rs#L479) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — |
-| [495](feuer-storage/src/file.rs#L495) | Local | `tests::reports_missing_runtime::temp` | — |
-| [496](feuer-storage/src/file.rs#L496) | Local | `tests::reports_missing_runtime::mut open` | — |
-| [497](feuer-storage/src/file.rs#L497) | Local | `tests::reports_missing_runtime::mut context` | — |
-| [498](feuer-storage/src/file.rs#L498) | Local | `tests::reports_missing_runtime::Poll::Ready(result)` | — |
-| [510](feuer-storage/src/file.rs#L510) | Local | `tests::rejects_unverified_direct_io_instead_of_falling_back::fd` | — |
-| [513](feuer-storage/src/file.rs#L513) | Local | `tests::rejects_unverified_direct_io_instead_of_falling_back::file` | — |
-| [522](feuer-storage/src/file.rs#L522) | Local | `tests::validates_capacity_and_omits_paths_from_debug::temp` | — |
-| [532](feuer-storage/src/file.rs#L532) | Local | `tests::validates_capacity_and_omits_paths_from_debug::file` | — |
+| [66](feuer-storage/src/file.rs#L66) | Local | `impl DataFile::open::directory` | — |
+| [67](feuer-storage/src/file.rs#L67) | Local | `impl DataFile::open::runtime` | — |
+| [68](feuer-storage/src/file.rs#L68) | Local | `impl DataFile::open::started` | — |
+| [69](feuer-storage/src/file.rs#L69) | Local | `impl DataFile::open::span` | — |
+| [77](feuer-storage/src/file.rs#L77) | Local | `impl DataFile::open::result` | — |
+| [78](feuer-storage/src/file.rs#L78) | Local | `impl DataFile::open::result::state` | — |
+| [129](feuer-storage/src/file.rs#L129) | Local | `impl DataFile::execute::started` | — |
+| [130](feuer-storage/src/file.rs#L130) | Local | `impl DataFile::execute::observed_bytes` | — |
+| [131](feuer-storage/src/file.rs#L131) | Local | `impl DataFile::execute::span` | — |
+| [141](feuer-storage/src/file.rs#L141) | Local | `impl DataFile::execute::result` | — |
+| [145](feuer-storage/src/file.rs#L145) | Local | `impl DataFile::execute::elapsed` | — |
+| [152](feuer-storage/src/file.rs#L152) | Local | `impl DataFile::execute_inner::length_u64` | — |
+| [154](feuer-storage/src/file.rs#L154) | Local | `impl DataFile::execute_inner::io_error` | — |
+| [159](feuer-storage/src/file.rs#L159) | Local | `impl DataFile::execute_inner::mut result` | — |
+| [167](feuer-storage/src/file.rs#L167) | Local | `impl DataFile::execute_inner::mut completed_bytes` | — |
+| [169](feuer-storage/src/file.rs#L169) | Local | `impl DataFile::execute_inner::chunk_offset` | — |
+| [170](feuer-storage/src/file.rs#L170) | Local | `impl DataFile::execute_inner::chunk_length` | — |
+| [172](feuer-storage/src/file.rs#L172) | Local | `impl DataFile::execute_inner::input` | — |
+| [177](feuer-storage/src/file.rs#L177) | Local | `impl DataFile::execute_inner::bytes` | — |
+| [205](feuer-storage/src/file.rs#L205) | Local | `open_file_state::lock_path` | — |
+| [206](feuer-storage/src/file.rs#L206) | Local | `open_file_state::lock_file` | — |
+| [217](feuer-storage/src/file.rs#L217) | Local | `open_file_state::locked` | — |
+| [225](feuer-storage/src/file.rs#L225) | Local | `open_file_state::data_path` | — |
+| [226](feuer-storage/src/file.rs#L226) | Local | `open_file_state::error` | — |
+| [231](feuer-storage/src/file.rs#L231) | Local | `open_file_state::file` | — |
+| [248](feuer-storage/src/file.rs#L248) | Local | `open_file_state::resize_file` | — |
+| [251](feuer-storage/src/file.rs#L251) | Local | `open_file_state::queue` | — |
+| [264](feuer-storage/src/file.rs#L264) | Local | `check_direct_alignment::mut stat` | — |
+| [266](feuer-storage/src/file.rs#L266) | Local | `check_direct_alignment::result` | — |
+| [279](feuer-storage/src/file.rs#L279) | Local | `check_direct_alignment::stat` | — |
+| [336](feuer-storage/src/file.rs#L336) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::temp` | — |
+| [337](feuer-storage/src/file.rs#L337) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::directory` | — |
+| [338](feuer-storage/src/file.rs#L338) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::file` | — |
+| [339](feuer-storage/src/file.rs#L339) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::original` | — |
+| [341](feuer-storage/src/file.rs#L341) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::payload` | — |
+| [350](feuer-storage/src/file.rs#L350) | Local | `tests::reads_exact_unaligned_ranges_and_preserves_neighbors::payload` | — |
+| [363](feuer-storage/src/file.rs#L363) | Local | `tests::rejects_out_of_bounds_and_accepts_empty_ranges::temp` | — |
+| [364](feuer-storage/src/file.rs#L364) | Local | `tests::rejects_out_of_bounds_and_accepts_empty_ranges::file` | — |
+| [382](feuer-storage/src/file.rs#L382) | Local | `tests::fails_short_reads_instead_of_returning_uncertain_bytes::temp` | — |
+| [383](feuer-storage/src/file.rs#L383) | Local | `tests::fails_short_reads_instead_of_returning_uncertain_bytes::file` | — |
+| [398](feuer-storage/src/file.rs#L398) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::temp` | — |
+| [399](feuer-storage/src/file.rs#L399) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::file` | — |
+| [400](feuer-storage/src/file.rs#L400) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::clone` | — |
+| [411](feuer-storage/src/file.rs#L411) | Local | `tests::holds_exclusive_ownership_and_reopens_after_shutdown::file` | — |
+| [420](feuer-storage/src/file.rs#L420) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::temp` | — |
+| [421](feuer-storage/src/file.rs#L421) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::file` | — |
+| [422](feuer-storage/src/file.rs#L422) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::mut tasks` | — |
+| [426](feuer-storage/src/file.rs#L426) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::file` | — |
+| [428](feuer-storage/src/file.rs#L428) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::value` | — |
+| [431](feuer-storage/src/file.rs#L431) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::value` | — |
+| [432](feuer-storage/src/file.rs#L432) | Local | `tests::concurrent_mixed_io_and_same_page_rmw_do_not_lose_updates::offset` | — |
+| [451](feuer-storage/src/file.rs#L451) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::temp` | — |
+| [452](feuer-storage/src/file.rs#L452) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — |
+| [453](feuer-storage/src/file.rs#L453) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::mut tasks` | — |
+| [455](feuer-storage/src/file.rs#L455) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — |
+| [465](feuer-storage/src/file.rs#L465) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::_` | — |
+| [468](feuer-storage/src/file.rs#L468) | Local | `tests::canceled_callers_do_not_release_submitted_buffers_or_lock_early::file` | — |
+| [484](feuer-storage/src/file.rs#L484) | Local | `tests::reports_missing_runtime::temp` | — |
+| [485](feuer-storage/src/file.rs#L485) | Local | `tests::reports_missing_runtime::mut open` | — |
+| [486](feuer-storage/src/file.rs#L486) | Local | `tests::reports_missing_runtime::mut context` | — |
+| [487](feuer-storage/src/file.rs#L487) | Local | `tests::reports_missing_runtime::Poll::Ready(result)` | — |
+| [499](feuer-storage/src/file.rs#L499) | Local | `tests::rejects_unverified_direct_io_instead_of_falling_back::fd` | — |
+| [502](feuer-storage/src/file.rs#L502) | Local | `tests::rejects_unverified_direct_io_instead_of_falling_back::file` | — |
+| [511](feuer-storage/src/file.rs#L511) | Local | `tests::validates_capacity_and_omits_paths_from_debug::temp` | — |
+| [521](feuer-storage/src/file.rs#L521) | Local | `tests::validates_capacity_and_omits_paths_from_debug::file` | — |
 
 </details>
 
@@ -1203,27 +1232,25 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | [27](feuer-storage/src/metrics.rs#L27) | Struct | `IoMetrics` | — |
 | [28](feuer-storage/src/metrics.rs#L28) | Field | `IoMetrics::read` | `OperationMetrics` |
 | [29](feuer-storage/src/metrics.rs#L29) | Field | `IoMetrics::write` | `OperationMetrics` |
-| [30](feuer-storage/src/metrics.rs#L30) | Field | `IoMetrics::sync_data` | `OperationMetrics` |
-| [31](feuer-storage/src/metrics.rs#L31) | Field | `IoMetrics::sync_all` | `OperationMetrics` |
-| [34](feuer-storage/src/metrics.rs#L34) | Impl | `impl IoMetrics` | — |
-| [36](feuer-storage/src/metrics.rs#L36) | Function | `impl IoMetrics::new` | `fn(registry: &BoxedRegistry) -> Arc<Self>` |
-| [70](feuer-storage/src/metrics.rs#L70) | Method | `impl IoMetrics::record` | `fn(&self, operation: IoOperation, bytes: u64, elapsed: Duration, success: bool)` |
-| [90](feuer-storage/src/metrics.rs#L90) | Function | `impl IoMetrics::noop` | `fn() -> Arc<Self>` |
-| [97](feuer-storage/src/metrics.rs#L97) | Module | `tests` | — |
-| [101](feuer-storage/src/metrics.rs#L101) | Function | `tests::registers_with_the_normal_registry_boundary` | `fn()` |
+| [32](feuer-storage/src/metrics.rs#L32) | Impl | `impl IoMetrics` | — |
+| [34](feuer-storage/src/metrics.rs#L34) | Function | `impl IoMetrics::new` | `fn(registry: &BoxedRegistry) -> Arc<Self>` |
+| [66](feuer-storage/src/metrics.rs#L66) | Method | `impl IoMetrics::record` | `fn(&self, operation: IoOperation, bytes: u64, elapsed: Duration, success: bool)` |
+| [84](feuer-storage/src/metrics.rs#L84) | Function | `impl IoMetrics::noop` | `fn() -> Arc<Self>` |
+| [91](feuer-storage/src/metrics.rs#L91) | Module | `tests` | — |
+| [95](feuer-storage/src/metrics.rs#L95) | Function | `tests::registers_with_the_normal_registry_boundary` | `fn()` |
 
 <details>
 <summary>Local bindings (7)</summary>
 
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
-| [37](feuer-storage/src/metrics.rs#L37) | Local | `impl IoMetrics::new::operations` | — |
-| [42](feuer-storage/src/metrics.rs#L42) | Local | `impl IoMetrics::new::bytes` | — |
-| [47](feuer-storage/src/metrics.rs#L47) | Local | `impl IoMetrics::new::duration` | — |
-| [54](feuer-storage/src/metrics.rs#L54) | Local | `impl IoMetrics::new::operation` | — |
-| [71](feuer-storage/src/metrics.rs#L71) | Local | `impl IoMetrics::record::metrics` | — |
-| [91](feuer-storage/src/metrics.rs#L91) | Local | `impl IoMetrics::noop::registry` | `BoxedRegistry` |
-| [102](feuer-storage/src/metrics.rs#L102) | Local | `tests::registers_with_the_normal_registry_boundary::metrics` | — |
+| [35](feuer-storage/src/metrics.rs#L35) | Local | `impl IoMetrics::new::operations` | — |
+| [40](feuer-storage/src/metrics.rs#L40) | Local | `impl IoMetrics::new::bytes` | — |
+| [45](feuer-storage/src/metrics.rs#L45) | Local | `impl IoMetrics::new::duration` | — |
+| [52](feuer-storage/src/metrics.rs#L52) | Local | `impl IoMetrics::new::operation` | — |
+| [67](feuer-storage/src/metrics.rs#L67) | Local | `impl IoMetrics::record::metrics` | — |
+| [85](feuer-storage/src/metrics.rs#L85) | Local | `impl IoMetrics::noop::registry` | `BoxedRegistry` |
+| [96](feuer-storage/src/metrics.rs#L96) | Local | `tests::registers_with_the_normal_registry_boundary::metrics` | — |
 
 </details>
 
@@ -1231,18 +1258,18 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
-| [5](feuer-storage/src/uring/tests.rs#L5) | TypeAlias | `Reply` | `oneshot::Receiver<io::Result<Bytes>>` |
-| [7](feuer-storage/src/uring/tests.rs#L7) | Function | `request` | `fn(driver: &Driver, operation: IoOperation, offset: u64, length: usize) -> (Request, Reply)` |
-| [26](feuer-storage/src/uring/tests.rs#L26) | Function | `driver` | `fn() -> Driver` |
-| [54](feuer-storage/src/uring/tests.rs#L54) | Function | `fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission` | `fn()` |
-| [113](feuer-storage/src/uring/tests.rs#L113) | Function | `complete_one` | `fn(driver: &mut Driver)` |
-| [122](feuer-storage/src/uring/tests.rs#L122) | Function | `write_only_fills_the_ring_but_an_arriving_read_gets_the_next_slot` | `fn()` |
-| [166](feuer-storage/src/uring/tests.rs#L166) | Function | `read_demand_before_admission_throttles_writes_and_cancellation_restores_full_speed` | `fn()` |
-| [188](feuer-storage/src/uring/tests.rs#L188) | Function | `full_write_admission_and_buffers_leave_a_full_read_ring_available` | `fn()` |
-| [220](feuer-storage/src/uring/tests.rs#L220) | Function | `overlap_and_sync_block_only_the_requests_they_must` | `fn()` |
-| [245](feuer-storage/src/uring/tests.rs#L245) | Function | `discarded_queued_requests_never_reach_the_ring` | `fn()` |
-| [264](feuer-storage/src/uring/tests.rs#L264) | Function | `completion_state_handles_short_io_errors_and_rmw` | `fn()` |
-| [291](feuer-storage/src/uring/tests.rs#L291) | Function | `byte_budget_bounds_rmw_requests_and_releases_on_cancel` | `fn()` |
+| [5](feuer-storage/src/uring/tests.rs#L5) | TypeAlias | `IoResultReceiver` | `oneshot::Receiver<io::Result<Bytes>>` |
+| [7](feuer-storage/src/uring/tests.rs#L7) | Function | `request` | `fn(driver: &IoQueue, operation: IoOperation, offset: u64, length: usize) -> (IoRequest, IoResultReceiver)` |
+| [34](feuer-storage/src/uring/tests.rs#L34) | Function | `driver` | `fn() -> IoQueue` |
+| [62](feuer-storage/src/uring/tests.rs#L62) | Function | `fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission` | `fn()` |
+| [129](feuer-storage/src/uring/tests.rs#L129) | Function | `complete_one` | `fn(driver: &mut IoQueue)` |
+| [138](feuer-storage/src/uring/tests.rs#L138) | Function | `write_only_fills_the_ring_but_an_older_queued_read_gets_the_next_slot` | `fn()` |
+| [192](feuer-storage/src/uring/tests.rs#L192) | Function | `active_read_does_not_throttle_rmw_writes` | `fn()` |
+| [227](feuer-storage/src/uring/tests.rs#L227) | Function | `full_write_admission_and_buffers_leave_a_full_read_ring_available` | `fn()` |
+| [259](feuer-storage/src/uring/tests.rs#L259) | Function | `overlap_blocks_only_the_requests_it_must` | `fn()` |
+| [297](feuer-storage/src/uring/tests.rs#L297) | Function | `discarded_queued_requests_never_reach_the_ring` | `fn()` |
+| [316](feuer-storage/src/uring/tests.rs#L316) | Function | `completion_state_handles_short_io_errors_and_rmw` | `fn()` |
+| [343](feuer-storage/src/uring/tests.rs#L343) | Function | `byte_budget_bounds_rmw_requests_and_releases_on_cancel` | `fn()` |
 
 <details>
 <summary>Local bindings (41)</summary>
@@ -1251,45 +1278,45 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 | ---: | --- | --- | --- |
 | [8](feuer-storage/src/uring/tests.rs#L8) | Local | `request::(reply, receive)` | — |
 | [9](feuer-storage/src/uring/tests.rs#L9) | Local | `request::class` | — |
-| [10](feuer-storage/src/uring/tests.rs#L10) | Local | `request::slots` | — |
-| [11](feuer-storage/src/uring/tests.rs#L11) | Local | `request::bytes` | — |
+| [10](feuer-storage/src/uring/tests.rs#L10) | Local | `request::request_permit` | — |
+| [11](feuer-storage/src/uring/tests.rs#L11) | Local | `request::staging_permit` | — |
 | [15](feuer-storage/src/uring/tests.rs#L15) | Local | `request::payload` | — |
-| [27](feuer-storage/src/uring/tests.rs#L27) | Local | `driver::temporary` | — |
-| [28](feuer-storage/src/uring/tests.rs#L28) | Local | `driver::file` | — |
-| [36](feuer-storage/src/uring/tests.rs#L36) | Local | `driver::fd` | — |
-| [39](feuer-storage/src/uring/tests.rs#L39) | Local | `driver::wake` | — |
-| [40](feuer-storage/src/uring/tests.rs#L40) | Local | `driver::(_, receiver)` | — |
-| [55](feuer-storage/src/uring/tests.rs#L55) | Local | `fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission::mut driver` | — |
-| [56](feuer-storage/src/uring/tests.rs#L56) | Local | `fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission::mut replies` | — |
-| [58](feuer-storage/src/uring/tests.rs#L58) | Local | `fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission::operation` | — |
-| [63](feuer-storage/src/uring/tests.rs#L63) | Local | `fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission::(request, reply)` | — |
-| [115](feuer-storage/src/uring/tests.rs#L115) | Local | `complete_one::cqe` | — |
-| [116](feuer-storage/src/uring/tests.rs#L116) | Local | `complete_one::mut request` | — |
-| [123](feuer-storage/src/uring/tests.rs#L123) | Local | `write_only_fills_the_ring_but_an_arriving_read_gets_the_next_slot::mut driver` | — |
-| [124](feuer-storage/src/uring/tests.rs#L124) | Local | `write_only_fills_the_ring_but_an_arriving_read_gets_the_next_slot::mut replies` | — |
-| [126](feuer-storage/src/uring/tests.rs#L126) | Local | `write_only_fills_the_ring_but_an_arriving_read_gets_the_next_slot::(request, reply)` | — |
-| [133](feuer-storage/src/uring/tests.rs#L133) | Local | `write_only_fills_the_ring_but_an_arriving_read_gets_the_next_slot::(read, read_reply)` | — |
-| [144](feuer-storage/src/uring/tests.rs#L144) | Local | `write_only_fills_the_ring_but_an_arriving_read_gets_the_next_slot::(write, reply)` | — |
-| [167](feuer-storage/src/uring/tests.rs#L167) | Local | `read_demand_before_admission_throttles_writes_and_cancellation_restores_full_speed::mut driver` | — |
-| [168](feuer-storage/src/uring/tests.rs#L168) | Local | `read_demand_before_admission_throttles_writes_and_cancellation_restores_full_speed::mut replies` | — |
-| [171](feuer-storage/src/uring/tests.rs#L171) | Local | `read_demand_before_admission_throttles_writes_and_cancellation_restores_full_speed::(request, reply)` | — |
-| [175](feuer-storage/src/uring/tests.rs#L175) | Local | `read_demand_before_admission_throttles_writes_and_cancellation_restores_full_speed::read` | — |
-| [189](feuer-storage/src/uring/tests.rs#L189) | Local | `full_write_admission_and_buffers_leave_a_full_read_ring_available::driver` | — |
-| [190](feuer-storage/src/uring/tests.rs#L190) | Local | `full_write_admission_and_buffers_leave_a_full_read_ring_available::mut writes` | — |
-| [191](feuer-storage/src/uring/tests.rs#L191) | Local | `full_write_admission_and_buffers_leave_a_full_read_ring_available::mut reads` | — |
-| [221](feuer-storage/src/uring/tests.rs#L221) | Local | `overlap_and_sync_block_only_the_requests_they_must::mut driver` | — |
-| [222](feuer-storage/src/uring/tests.rs#L222) | Local | `overlap_and_sync_block_only_the_requests_they_must::mut replies` | — |
-| [231](feuer-storage/src/uring/tests.rs#L231) | Local | `overlap_and_sync_block_only_the_requests_they_must::(request, reply)` | — |
-| [246](feuer-storage/src/uring/tests.rs#L246) | Local | `discarded_queued_requests_never_reach_the_ring::mut driver` | — |
-| [247](feuer-storage/src/uring/tests.rs#L247) | Local | `discarded_queued_requests_never_reach_the_ring::(request, reply)` | — |
-| [265](feuer-storage/src/uring/tests.rs#L265) | Local | `completion_state_handles_short_io_errors_and_rmw::driver` | — |
-| [266](feuer-storage/src/uring/tests.rs#L266) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut read, _reply)` | — |
-| [272](feuer-storage/src/uring/tests.rs#L272) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut read, _reply)` | — |
-| [274](feuer-storage/src/uring/tests.rs#L274) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut write, _reply)` | — |
-| [281](feuer-storage/src/uring/tests.rs#L281) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut rmw, _reply)` | — |
-| [292](feuer-storage/src/uring/tests.rs#L292) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::driver` | — |
-| [293](feuer-storage/src/uring/tests.rs#L293) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::mut requests` | — |
-| [301](feuer-storage/src/uring/tests.rs#L301) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::_read` | — |
+| [35](feuer-storage/src/uring/tests.rs#L35) | Local | `driver::temporary` | — |
+| [36](feuer-storage/src/uring/tests.rs#L36) | Local | `driver::file` | — |
+| [44](feuer-storage/src/uring/tests.rs#L44) | Local | `driver::fd` | — |
+| [47](feuer-storage/src/uring/tests.rs#L47) | Local | `driver::wake` | — |
+| [48](feuer-storage/src/uring/tests.rs#L48) | Local | `driver::(_, receiver)` | — |
+| [63](feuer-storage/src/uring/tests.rs#L63) | Local | `fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission::mut driver` | — |
+| [64](feuer-storage/src/uring/tests.rs#L64) | Local | `fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission::mut replies` | — |
+| [66](feuer-storage/src/uring/tests.rs#L66) | Local | `fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission::operation` | — |
+| [71](feuer-storage/src/uring/tests.rs#L71) | Local | `fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission::(request, reply)` | — |
+| [131](feuer-storage/src/uring/tests.rs#L131) | Local | `complete_one::cqe` | — |
+| [132](feuer-storage/src/uring/tests.rs#L132) | Local | `complete_one::mut request` | — |
+| [139](feuer-storage/src/uring/tests.rs#L139) | Local | `write_only_fills_the_ring_but_an_older_queued_read_gets_the_next_slot::mut driver` | — |
+| [140](feuer-storage/src/uring/tests.rs#L140) | Local | `write_only_fills_the_ring_but_an_older_queued_read_gets_the_next_slot::mut replies` | — |
+| [142](feuer-storage/src/uring/tests.rs#L142) | Local | `write_only_fills_the_ring_but_an_older_queued_read_gets_the_next_slot::(request, reply)` | — |
+| [154](feuer-storage/src/uring/tests.rs#L154) | Local | `write_only_fills_the_ring_but_an_older_queued_read_gets_the_next_slot::(read, read_reply)` | — |
+| [165](feuer-storage/src/uring/tests.rs#L165) | Local | `write_only_fills_the_ring_but_an_older_queued_read_gets_the_next_slot::(write, reply)` | — |
+| [193](feuer-storage/src/uring/tests.rs#L193) | Local | `active_read_does_not_throttle_rmw_writes::mut driver` | — |
+| [194](feuer-storage/src/uring/tests.rs#L194) | Local | `active_read_does_not_throttle_rmw_writes::(read, reply)` | — |
+| [196](feuer-storage/src/uring/tests.rs#L196) | Local | `active_read_does_not_throttle_rmw_writes::mut replies` | — |
+| [199](feuer-storage/src/uring/tests.rs#L199) | Local | `active_read_does_not_throttle_rmw_writes::(request, reply)` | — |
+| [228](feuer-storage/src/uring/tests.rs#L228) | Local | `full_write_admission_and_buffers_leave_a_full_read_ring_available::driver` | — |
+| [229](feuer-storage/src/uring/tests.rs#L229) | Local | `full_write_admission_and_buffers_leave_a_full_read_ring_available::mut writes` | — |
+| [230](feuer-storage/src/uring/tests.rs#L230) | Local | `full_write_admission_and_buffers_leave_a_full_read_ring_available::mut reads` | — |
+| [260](feuer-storage/src/uring/tests.rs#L260) | Local | `overlap_blocks_only_the_requests_it_must::mut driver` | — |
+| [261](feuer-storage/src/uring/tests.rs#L261) | Local | `overlap_blocks_only_the_requests_it_must::mut replies` | — |
+| [281](feuer-storage/src/uring/tests.rs#L281) | Local | `overlap_blocks_only_the_requests_it_must::(request, reply)` | — |
+| [298](feuer-storage/src/uring/tests.rs#L298) | Local | `discarded_queued_requests_never_reach_the_ring::mut driver` | — |
+| [299](feuer-storage/src/uring/tests.rs#L299) | Local | `discarded_queued_requests_never_reach_the_ring::(request, reply)` | — |
+| [317](feuer-storage/src/uring/tests.rs#L317) | Local | `completion_state_handles_short_io_errors_and_rmw::driver` | — |
+| [318](feuer-storage/src/uring/tests.rs#L318) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut read, _reply)` | — |
+| [324](feuer-storage/src/uring/tests.rs#L324) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut read, _reply)` | — |
+| [326](feuer-storage/src/uring/tests.rs#L326) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut write, _reply)` | — |
+| [333](feuer-storage/src/uring/tests.rs#L333) | Local | `completion_state_handles_short_io_errors_and_rmw::(mut rmw, _reply)` | — |
+| [344](feuer-storage/src/uring/tests.rs#L344) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::driver` | — |
+| [345](feuer-storage/src/uring/tests.rs#L345) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::mut requests` | — |
+| [353](feuer-storage/src/uring/tests.rs#L353) | Local | `byte_budget_bounds_rmw_requests_and_releases_on_cancel::_read` | — |
 
 </details>
 
@@ -1297,144 +1324,129 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
-| [26](feuer-storage/src/uring.rs#L26) | Const | `ALIGN` | `usize` |
-| [29](feuer-storage/src/uring.rs#L29) | Const | `MAX_IO_CHUNK_BYTES` | `usize` |
-| [31](feuer-storage/src/uring.rs#L31) | Const | `MAX_IN_FLIGHT_IO` | `usize` |
-| [34](feuer-storage/src/uring.rs#L34) | Const | `WRITES_WITH_READS` | `usize` |
-| [37](feuer-storage/src/uring.rs#L37) | Const | `REQUESTS` | `usize` |
-| [41](feuer-storage/src/uring.rs#L41) | Const | `BUFFER_BYTES` | `usize` |
-| [44](feuer-storage/src/uring.rs#L44) | Module | `tests` | — |
-| [46](feuer-storage/src/uring.rs#L46) | Struct | `Handle` | — |
-| [47](feuer-storage/src/uring.rs#L47) | Field | `Handle::sender` | `Option<mpsc::SyncSender<Request>>` |
-| [48](feuer-storage/src/uring.rs#L48) | Field | `Handle::wake` | `Arc<OwnedFd>` |
-| [49](feuer-storage/src/uring.rs#L49) | Field | `Handle::thread` | `Option<JoinHandle<()>>` |
-| [50](feuer-storage/src/uring.rs#L50) | Field | `Handle::admission` | `Arc<Admission>` |
-| [55](feuer-storage/src/uring.rs#L55) | Struct | `Admission` | — |
-| [56](feuer-storage/src/uring.rs#L56) | Field | `Admission::requests` | `[Arc<Semaphore>; 2]` |
-| [57](feuer-storage/src/uring.rs#L57) | Field | `Admission::buffers` | `[Arc<Semaphore>; 2]` |
-| [58](feuer-storage/src/uring.rs#L58) | Field | `Admission::reads` | `AtomicUsize` |
-| [61](feuer-storage/src/uring.rs#L61) | Impl | `impl Admission` | — |
-| [62](feuer-storage/src/uring.rs#L62) | Function | `impl Admission::new` | `fn() -> Self` |
-| [74](feuer-storage/src/uring.rs#L74) | Struct | `ReadDemandGuard` | — |
-| [75](feuer-storage/src/uring.rs#L75) | Field | `ReadDemandGuard::admission` | `Arc<Admission>` |
-| [76](feuer-storage/src/uring.rs#L76) | Field | `ReadDemandGuard::wake` | `Arc<OwnedFd>` |
-| [79](feuer-storage/src/uring.rs#L79) | Impl | `impl ReadDemandGuard` | — |
-| [80](feuer-storage/src/uring.rs#L80) | Function | `impl ReadDemandGuard::new` | `fn(admission: &Arc<Admission>, wake: &Arc<OwnedFd>) -> Self` |
-| [91](feuer-storage/src/uring.rs#L91) | Impl | `impl Drop for ReadDemandGuard` | — |
-| [92](feuer-storage/src/uring.rs#L92) | Method | `impl Drop for ReadDemandGuard::drop` | `fn(&mut self)` |
-| [99](feuer-storage/src/uring.rs#L99) | Function | `buffer_charge` | `fn(operation: IoOperation, offset: u64, length: usize) -> u32` |
-| [106](feuer-storage/src/uring.rs#L106) | Impl | `impl Handle` | — |
-| [107](feuer-storage/src/uring.rs#L107) | Function | `impl Handle::new` | `fn(file: File, lock: File) -> io::Result<Self>` |
-| [141](feuer-storage/src/uring.rs#L141) | Method | `impl Handle::execute` | `fn( &self, operation: IoOperation, offset: u64, length: usize, payload: &[u8], ) -> io::Result<Bytes>` |
-| [169](feuer-storage/src/uring.rs#L169) | Impl | `impl Drop for Handle` | — |
-| [170](feuer-storage/src/uring.rs#L170) | Method | `impl Drop for Handle::drop` | `fn(&mut self)` |
-| [180](feuer-storage/src/uring.rs#L180) | Function | `stopped` | `fn() -> io::Error` |
-| [184](feuer-storage/src/uring.rs#L184) | Function | `is_sync` | `fn(operation: IoOperation) -> bool` |
-| [188](feuer-storage/src/uring.rs#L188) | Struct | `AlignedBuffer` | — |
-| [189](feuer-storage/src/uring.rs#L189) | Field | `AlignedBuffer::ptr` | `NonNull<u8>` |
-| [190](feuer-storage/src/uring.rs#L190) | Field | `AlignedBuffer::layout` | `Layout` |
-| [193](feuer-storage/src/uring.rs#L193) | Impl | `impl AlignedBuffer` | — |
-| [194](feuer-storage/src/uring.rs#L194) | Function | `impl AlignedBuffer::new` | `fn(length: usize) -> io::Result<Self>` |
-| [202](feuer-storage/src/uring.rs#L202) | Method | `impl AlignedBuffer::bytes` | `fn(&mut self) -> &mut [u8]` |
-| [210](feuer-storage/src/uring.rs#L210) | Impl | `impl Send for AlignedBuffer` | — |
-| [212](feuer-storage/src/uring.rs#L212) | Impl | `impl Drop for AlignedBuffer` | — |
-| [213](feuer-storage/src/uring.rs#L213) | Method | `impl Drop for AlignedBuffer::drop` | `fn(&mut self)` |
-| [219](feuer-storage/src/uring.rs#L219) | Struct | `Request` | — |
-| [220](feuer-storage/src/uring.rs#L220) | Field | `Request::operation` | `IoOperation` |
-| [221](feuer-storage/src/uring.rs#L221) | Field | `Request::offset` | `u64` |
-| [222](feuer-storage/src/uring.rs#L222) | Field | `Request::prefix` | `usize` |
-| [223](feuer-storage/src/uring.rs#L223) | Field | `Request::length` | `usize` |
-| [224](feuer-storage/src/uring.rs#L224) | Field | `Request::aligned_length` | `usize` |
-| [225](feuer-storage/src/uring.rs#L225) | Field | `Request::buffer` | `AlignedBuffer` |
-| [226](feuer-storage/src/uring.rs#L226) | Field | `Request::payload` | `Option<Bytes>` |
-| [227](feuer-storage/src/uring.rs#L227) | Field | `Request::reading` | `bool` |
-| [228](feuer-storage/src/uring.rs#L228) | Field | `Request::completed` | `usize` |
-| [229](feuer-storage/src/uring.rs#L229) | Field | `Request::reply` | `Option<oneshot::Sender<io::Result<Bytes>>>` |
-| [230](feuer-storage/src/uring.rs#L230) | Field | `Request::_slot` | `OwnedSemaphorePermit` |
-| [231](feuer-storage/src/uring.rs#L231) | Field | `Request::_bytes` | `OwnedSemaphorePermit` |
-| [234](feuer-storage/src/uring.rs#L234) | Impl | `impl Request` | — |
-| [235](feuer-storage/src/uring.rs#L235) | Function | `impl Request::new` | `fn( operation: IoOperation, offset: u64, length: usize, payload: &[u8], reply: oneshot::Sender<io::Result<Bytes>>, permits: (OwnedSemaphorePermit, OwnedSemaphorePermit), ) -> io::Result<Self>` |
-| [271](feuer-storage/src/uring.rs#L271) | Method | `impl Request::conflicts` | `fn(&self, other: &Self) -> bool` |
-| [279](feuer-storage/src/uring.rs#L279) | Method | `impl Request::entry` | `fn(&mut self, fd: i32, slot: usize) -> squeue::Entry` |
-| [304](feuer-storage/src/uring.rs#L304) | Method | `impl Request::complete` | `fn(&mut self, result: i32) -> io::Result<bool>` |
-| [335](feuer-storage/src/uring.rs#L335) | Method | `impl Request::short_error` | `fn(&self) -> io::Error` |
-| [346](feuer-storage/src/uring.rs#L346) | Method | `impl Request::finish` | `fn(mut self, result: io::Result<()>)` |
-| [358](feuer-storage/src/uring.rs#L358) | Struct | `Driver` | — |
-| [359](feuer-storage/src/uring.rs#L359) | Field | `Driver::admission` | `Arc<Admission>` |
-| [360](feuer-storage/src/uring.rs#L360) | Field | `Driver::ring` | `IoUring` |
-| [361](feuer-storage/src/uring.rs#L361) | Field | `Driver::file` | `Option<File>` |
-| [362](feuer-storage/src/uring.rs#L362) | Field | `Driver::lock` | `Option<File>` |
-| [363](feuer-storage/src/uring.rs#L363) | Field | `Driver::wake` | `Arc<OwnedFd>` |
-| [364](feuer-storage/src/uring.rs#L364) | Field | `Driver::receiver` | `mpsc::Receiver<Request>` |
-| [365](feuer-storage/src/uring.rs#L365) | Field | `Driver::pending` | `VecDeque<Request>` |
-| [366](feuer-storage/src/uring.rs#L366) | Field | `Driver::active` | `Vec<Option<Request>>` |
-| [369](feuer-storage/src/uring.rs#L369) | Impl | `impl Driver` | — |
-| [370](feuer-storage/src/uring.rs#L370) | Method | `impl Driver::run` | `fn(&mut self) -> io::Result<()>` |
-| [417](feuer-storage/src/uring.rs#L417) | Method | `impl Driver::schedule` | `fn(&mut self)` |
-| [461](feuer-storage/src/uring.rs#L461) | Method | `impl Driver::submit_slot` | `fn(&mut self, slot: usize)` |
-| [476](feuer-storage/src/uring.rs#L476) | Method | `impl Driver::wait` | `fn(&self) -> io::Result<()>` |
-| [514](feuer-storage/src/uring.rs#L514) | Impl | `impl Drop for Driver` | — |
-| [515](feuer-storage/src/uring.rs#L515) | Method | `impl Drop for Driver::drop` | `fn(&mut self)` |
-| [537](feuer-storage/src/uring.rs#L537) | Function | `notify` | `fn(wake: &OwnedFd)` |
+| [22](feuer-storage/src/uring.rs#L22) | Const | `DIRECT_IO_ALIGNMENT_BYTES` | `usize` |
+| [25](feuer-storage/src/uring.rs#L25) | Const | `MAX_IO_CHUNK_BYTES` | `usize` |
+| [27](feuer-storage/src/uring.rs#L27) | Const | `MAX_IN_FLIGHT_IO` | `usize` |
+| [30](feuer-storage/src/uring.rs#L30) | Const | `MAX_ADMITTED_REQUESTS` | `usize` |
+| [34](feuer-storage/src/uring.rs#L34) | Const | `MAX_STAGING_BUFFER_BYTES` | `usize` |
+| [37](feuer-storage/src/uring.rs#L37) | Module | `tests` | — |
+| [40](feuer-storage/src/uring.rs#L40) | Struct | `IoQueueHandle` | — |
+| [42](feuer-storage/src/uring.rs#L42) | Field | `IoQueueHandle::sender` | `Option<mpsc::SyncSender<IoRequest>>` |
+| [44](feuer-storage/src/uring.rs#L44) | Field | `IoQueueHandle::wake` | `Arc<OwnedFd>` |
+| [46](feuer-storage/src/uring.rs#L46) | Field | `IoQueueHandle::thread` | `Option<JoinHandle<()>>` |
+| [48](feuer-storage/src/uring.rs#L48) | Field | `IoQueueHandle::admission` | `Arc<IoAdmissionBudgets>` |
+| [53](feuer-storage/src/uring.rs#L53) | Struct | `IoAdmissionBudgets` | — |
+| [55](feuer-storage/src/uring.rs#L55) | Field | `IoAdmissionBudgets::requests` | `[Arc<Semaphore>; 2]` |
+| [57](feuer-storage/src/uring.rs#L57) | Field | `IoAdmissionBudgets::buffers` | `[Arc<Semaphore>; 2]` |
+| [60](feuer-storage/src/uring.rs#L60) | Impl | `impl IoAdmissionBudgets` | — |
+| [61](feuer-storage/src/uring.rs#L61) | Function | `impl IoAdmissionBudgets::new` | `fn() -> Self` |
+| [71](feuer-storage/src/uring.rs#L71) | Function | `staging_pages_for` | `fn(operation: IoOperation, offset: u64, length: usize) -> u32` |
+| [80](feuer-storage/src/uring.rs#L80) | Impl | `impl IoQueueHandle` | — |
+| [81](feuer-storage/src/uring.rs#L81) | Function | `impl IoQueueHandle::new` | `fn(file: File, lock: File) -> io::Result<Self>` |
+| [115](feuer-storage/src/uring.rs#L115) | Method | `impl IoQueueHandle::execute` | `fn( &self, operation: IoOperation, offset: u64, length: usize, payload: &[u8], ) -> io::Result<Bytes>` |
+| [149](feuer-storage/src/uring.rs#L149) | Impl | `impl Drop for IoQueueHandle` | — |
+| [150](feuer-storage/src/uring.rs#L150) | Method | `impl Drop for IoQueueHandle::drop` | `fn(&mut self)` |
+| [160](feuer-storage/src/uring.rs#L160) | Function | `stopped` | `fn() -> io::Error` |
+| [164](feuer-storage/src/uring.rs#L164) | Struct | `AlignedBuffer` | — |
+| [166](feuer-storage/src/uring.rs#L166) | Field | `AlignedBuffer::ptr` | `NonNull<u8>` |
+| [168](feuer-storage/src/uring.rs#L168) | Field | `AlignedBuffer::layout` | `Layout` |
+| [171](feuer-storage/src/uring.rs#L171) | Impl | `impl AlignedBuffer` | — |
+| [172](feuer-storage/src/uring.rs#L172) | Function | `impl AlignedBuffer::new` | `fn(length: usize) -> io::Result<Self>` |
+| [180](feuer-storage/src/uring.rs#L180) | Method | `impl AlignedBuffer::as_mut_slice` | `fn(&mut self) -> &mut [u8]` |
+| [188](feuer-storage/src/uring.rs#L188) | Impl | `impl Send for AlignedBuffer` | — |
+| [190](feuer-storage/src/uring.rs#L190) | Impl | `impl Drop for AlignedBuffer` | — |
+| [191](feuer-storage/src/uring.rs#L191) | Method | `impl Drop for AlignedBuffer::drop` | `fn(&mut self)` |
+| [198](feuer-storage/src/uring.rs#L198) | Struct | `IoRequest` | — |
+| [200](feuer-storage/src/uring.rs#L200) | Field | `IoRequest::operation` | `IoOperation` |
+| [202](feuer-storage/src/uring.rs#L202) | Field | `IoRequest::aligned_offset` | `u64` |
+| [204](feuer-storage/src/uring.rs#L204) | Field | `IoRequest::data_offset_in_buffer` | `usize` |
+| [206](feuer-storage/src/uring.rs#L206) | Field | `IoRequest::length` | `usize` |
+| [208](feuer-storage/src/uring.rs#L208) | Field | `IoRequest::aligned_length` | `usize` |
+| [210](feuer-storage/src/uring.rs#L210) | Field | `IoRequest::io_buffer` | `AlignedBuffer` |
+| [212](feuer-storage/src/uring.rs#L212) | Field | `IoRequest::read_modify_write_payload` | `Option<Bytes>` |
+| [214](feuer-storage/src/uring.rs#L214) | Field | `IoRequest::reading` | `bool` |
+| [216](feuer-storage/src/uring.rs#L216) | Field | `IoRequest::completed_bytes` | `usize` |
+| [218](feuer-storage/src/uring.rs#L218) | Field | `IoRequest::reply` | `Option<oneshot::Sender<io::Result<Bytes>>>` |
+| [220](feuer-storage/src/uring.rs#L220) | Field | `IoRequest::_request_permit` | `OwnedSemaphorePermit` |
+| [222](feuer-storage/src/uring.rs#L222) | Field | `IoRequest::_staging_permit` | `OwnedSemaphorePermit` |
+| [225](feuer-storage/src/uring.rs#L225) | Impl | `impl IoRequest` | — |
+| [226](feuer-storage/src/uring.rs#L226) | Function | `impl IoRequest::new` | `fn( operation: IoOperation, offset: u64, length: usize, payload: &[u8], reply: oneshot::Sender<io::Result<Bytes>>, permits: (OwnedSemaphorePermit, OwnedSemaphorePermit), ) -> io::Result<Self>` |
+| [263](feuer-storage/src/uring.rs#L263) | Method | `impl IoRequest::conflicts` | `fn(&self, other: &Self) -> bool` |
+| [269](feuer-storage/src/uring.rs#L269) | Method | `impl IoRequest::submission_entry` | `fn(&mut self, fd: i32, slot: usize) -> squeue::Entry` |
+| [285](feuer-storage/src/uring.rs#L285) | Method | `impl IoRequest::complete` | `fn(&mut self, result: i32) -> io::Result<bool>` |
+| [314](feuer-storage/src/uring.rs#L314) | Method | `impl IoRequest::short_error` | `fn(&self) -> io::Error` |
+| [325](feuer-storage/src/uring.rs#L325) | Method | `impl IoRequest::finish` | `fn(mut self, result: io::Result<()>)` |
+| [340](feuer-storage/src/uring.rs#L340) | Struct | `IoQueue` | — |
+| [342](feuer-storage/src/uring.rs#L342) | Field | `IoQueue::admission` | `Arc<IoAdmissionBudgets>` |
+| [344](feuer-storage/src/uring.rs#L344) | Field | `IoQueue::ring` | `IoUring` |
+| [346](feuer-storage/src/uring.rs#L346) | Field | `IoQueue::file` | `Option<File>` |
+| [348](feuer-storage/src/uring.rs#L348) | Field | `IoQueue::lock` | `Option<File>` |
+| [350](feuer-storage/src/uring.rs#L350) | Field | `IoQueue::wake` | `Arc<OwnedFd>` |
+| [352](feuer-storage/src/uring.rs#L352) | Field | `IoQueue::receiver` | `mpsc::Receiver<IoRequest>` |
+| [354](feuer-storage/src/uring.rs#L354) | Field | `IoQueue::pending` | `VecDeque<IoRequest>` |
+| [356](feuer-storage/src/uring.rs#L356) | Field | `IoQueue::active` | `Vec<Option<IoRequest>>` |
+| [359](feuer-storage/src/uring.rs#L359) | Impl | `impl IoQueue` | — |
+| [360](feuer-storage/src/uring.rs#L360) | Method | `impl IoQueue::run` | `fn(&mut self) -> io::Result<()>` |
+| [407](feuer-storage/src/uring.rs#L407) | Method | `impl IoQueue::schedule` | `fn(&mut self)` |
+| [431](feuer-storage/src/uring.rs#L431) | Method | `impl IoQueue::submit_slot` | `fn(&mut self, slot: usize)` |
+| [446](feuer-storage/src/uring.rs#L446) | Method | `impl IoQueue::wait` | `fn(&self) -> io::Result<()>` |
+| [484](feuer-storage/src/uring.rs#L484) | Impl | `impl Drop for IoQueue` | — |
+| [485](feuer-storage/src/uring.rs#L485) | Method | `impl Drop for IoQueue::drop` | `fn(&mut self)` |
+| [507](feuer-storage/src/uring.rs#L507) | Function | `notify` | `fn(wake: &OwnedFd)` |
 
 <details>
-<summary>Local bindings (53)</summary>
+<summary>Local bindings (48)</summary>
 
 | Line | Kind | Name / source parent | Signature or type |
 | ---: | --- | --- | --- |
-| [100](feuer-storage/src/uring.rs#L100) | Local | `buffer_charge::prefix` | — |
-| [101](feuer-storage/src/uring.rs#L101) | Local | `buffer_charge::aligned_length` | — |
-| [102](feuer-storage/src/uring.rs#L102) | Local | `buffer_charge::rmw` | — |
-| [108](feuer-storage/src/uring.rs#L108) | Local | `impl Handle::new::ring` | — |
-| [110](feuer-storage/src/uring.rs#L110) | Local | `impl Handle::new::fd` | — |
-| [115](feuer-storage/src/uring.rs#L115) | Local | `impl Handle::new::wake` | — |
-| [116](feuer-storage/src/uring.rs#L116) | Local | `impl Handle::new::(sender, receiver)` | — |
-| [117](feuer-storage/src/uring.rs#L117) | Local | `impl Handle::new::admission` | — |
-| [118](feuer-storage/src/uring.rs#L118) | Local | `impl Handle::new::mut driver` | — |
-| [128](feuer-storage/src/uring.rs#L128) | Local | `impl Handle::new::thread` | — |
-| [148](feuer-storage/src/uring.rs#L148) | Local | `impl Handle::execute::_read` | — |
-| [149](feuer-storage/src/uring.rs#L149) | Local | `impl Handle::execute::class` | — |
-| [150](feuer-storage/src/uring.rs#L150) | Local | `impl Handle::execute::slot` | — |
-| [155](feuer-storage/src/uring.rs#L155) | Local | `impl Handle::execute::bytes` | — |
-| [160](feuer-storage/src/uring.rs#L160) | Local | `impl Handle::execute::(reply, receive)` | — |
-| [161](feuer-storage/src/uring.rs#L161) | Local | `impl Handle::execute::request` | — |
-| [175](feuer-storage/src/uring.rs#L175) | Local | `impl Drop for Handle::drop::_` | — |
-| [195](feuer-storage/src/uring.rs#L195) | Local | `impl AlignedBuffer::new::layout` | — |
-| [197](feuer-storage/src/uring.rs#L197) | Local | `impl AlignedBuffer::new::ptr` | — |
-| [243](feuer-storage/src/uring.rs#L243) | Local | `impl Request::new::prefix` | — |
-| [244](feuer-storage/src/uring.rs#L244) | Local | `impl Request::new::aligned_length` | — |
-| [245](feuer-storage/src/uring.rs#L245) | Local | `impl Request::new::mut buffer` | — |
-| [246](feuer-storage/src/uring.rs#L246) | Local | `impl Request::new::rmw` | — |
-| [247](feuer-storage/src/uring.rs#L247) | Local | `impl Request::new::payload` | — |
-| [280](feuer-storage/src/uring.rs#L280) | Local | `impl Request::entry::fd` | — |
-| [281](feuer-storage/src/uring.rs#L281) | Local | `impl Request::entry::entry` | — |
-| [282](feuer-storage/src/uring.rs#L282) | Local | `impl Request::entry::entry::flags` | — |
-| [291](feuer-storage/src/uring.rs#L291) | Local | `impl Request::entry::entry::ptr` | — |
-| [292](feuer-storage/src/uring.rs#L292) | Local | `impl Request::entry::entry::length` | — |
-| [293](feuer-storage/src/uring.rs#L293) | Local | `impl Request::entry::entry::offset` | — |
-| [314](feuer-storage/src/uring.rs#L314) | Local | `impl Request::complete::count` | — |
-| [347](feuer-storage/src/uring.rs#L347) | Local | `impl Request::finish::result` | — |
-| [354](feuer-storage/src/uring.rs#L354) | Local | `impl Request::finish::_` | — |
-| [371](feuer-storage/src/uring.rs#L371) | Local | `impl Driver::run::mut disconnected` | — |
-| [373](feuer-storage/src/uring.rs#L373) | Local | `impl Driver::run::completions` | `Vec<_>` |
-| [379](feuer-storage/src/uring.rs#L379) | Local | `impl Driver::run::slot` | — |
-| [380](feuer-storage/src/uring.rs#L380) | Local | `impl Driver::run::request` | — |
-| [397](feuer-storage/src/uring.rs#L397) | Local | `impl Driver::run::active` | — |
-| [420](feuer-storage/src/uring.rs#L420) | Local | `impl Driver::schedule::has_pending_or_active_reads` | — |
-| [422](feuer-storage/src/uring.rs#L422) | Local | `impl Driver::schedule::mut writes` | — |
-| [432](feuer-storage/src/uring.rs#L432) | Local | `impl Driver::schedule::mut index` | — |
-| [434](feuer-storage/src/uring.rs#L434) | Local | `impl Driver::schedule::Some(slot)` | — |
-| [438](feuer-storage/src/uring.rs#L438) | Local | `impl Driver::schedule::write_limit` | — |
-| [446](feuer-storage/src/uring.rs#L446) | Local | `impl Driver::schedule::request` | — |
-| [447](feuer-storage/src/uring.rs#L447) | Local | `impl Driver::schedule::blocked` | — |
-| [462](feuer-storage/src/uring.rs#L462) | Local | `impl Driver::submit_slot::entry` | — |
-| [477](feuer-storage/src/uring.rs#L477) | Local | `impl Driver::wait::mut fds` | — |
-| [490](feuer-storage/src/uring.rs#L490) | Local | `impl Driver::wait::result` | — |
-| [492](feuer-storage/src/uring.rs#L492) | Local | `impl Driver::wait::error` | — |
-| [506](feuer-storage/src/uring.rs#L506) | Local | `impl Driver::wait::mut value` | — |
-| [527](feuer-storage/src/uring.rs#L527) | Local | `impl Drop for Driver::drop::_` | — |
-| [538](feuer-storage/src/uring.rs#L538) | Local | `notify::value` | — |
-| [541](feuer-storage/src/uring.rs#L541) | Local | `notify::result` | — |
+| [72](feuer-storage/src/uring.rs#L72) | Local | `staging_pages_for::data_offset_in_buffer` | — |
+| [73](feuer-storage/src/uring.rs#L73) | Local | `staging_pages_for::aligned_length` | — |
+| [74](feuer-storage/src/uring.rs#L74) | Local | `staging_pages_for::needs_read_modify_write` | — |
+| [82](feuer-storage/src/uring.rs#L82) | Local | `impl IoQueueHandle::new::ring` | — |
+| [84](feuer-storage/src/uring.rs#L84) | Local | `impl IoQueueHandle::new::fd` | — |
+| [89](feuer-storage/src/uring.rs#L89) | Local | `impl IoQueueHandle::new::wake` | — |
+| [90](feuer-storage/src/uring.rs#L90) | Local | `impl IoQueueHandle::new::(sender, receiver)` | — |
+| [91](feuer-storage/src/uring.rs#L91) | Local | `impl IoQueueHandle::new::admission` | — |
+| [92](feuer-storage/src/uring.rs#L92) | Local | `impl IoQueueHandle::new::mut queue` | — |
+| [102](feuer-storage/src/uring.rs#L102) | Local | `impl IoQueueHandle::new::thread` | — |
+| [122](feuer-storage/src/uring.rs#L122) | Local | `impl IoQueueHandle::execute::class` | — |
+| [123](feuer-storage/src/uring.rs#L123) | Local | `impl IoQueueHandle::execute::request_permit` | — |
+| [128](feuer-storage/src/uring.rs#L128) | Local | `impl IoQueueHandle::execute::staging_permit` | — |
+| [133](feuer-storage/src/uring.rs#L133) | Local | `impl IoQueueHandle::execute::(reply, receive)` | — |
+| [134](feuer-storage/src/uring.rs#L134) | Local | `impl IoQueueHandle::execute::request` | — |
+| [155](feuer-storage/src/uring.rs#L155) | Local | `impl Drop for IoQueueHandle::drop::_` | — |
+| [173](feuer-storage/src/uring.rs#L173) | Local | `impl AlignedBuffer::new::layout` | — |
+| [175](feuer-storage/src/uring.rs#L175) | Local | `impl AlignedBuffer::new::ptr` | — |
+| [234](feuer-storage/src/uring.rs#L234) | Local | `impl IoRequest::new::data_offset_in_buffer` | — |
+| [235](feuer-storage/src/uring.rs#L235) | Local | `impl IoRequest::new::aligned_length` | — |
+| [236](feuer-storage/src/uring.rs#L236) | Local | `impl IoRequest::new::mut io_buffer` | — |
+| [237](feuer-storage/src/uring.rs#L237) | Local | `impl IoRequest::new::needs_read_modify_write` | — |
+| [239](feuer-storage/src/uring.rs#L239) | Local | `impl IoRequest::new::payload` | — |
+| [270](feuer-storage/src/uring.rs#L270) | Local | `impl IoRequest::submission_entry::fd` | — |
+| [273](feuer-storage/src/uring.rs#L273) | Local | `impl IoRequest::submission_entry::ptr` | — |
+| [274](feuer-storage/src/uring.rs#L274) | Local | `impl IoRequest::submission_entry::length` | — |
+| [275](feuer-storage/src/uring.rs#L275) | Local | `impl IoRequest::submission_entry::offset` | — |
+| [276](feuer-storage/src/uring.rs#L276) | Local | `impl IoRequest::submission_entry::entry` | — |
+| [292](feuer-storage/src/uring.rs#L292) | Local | `impl IoRequest::complete::count` | — |
+| [326](feuer-storage/src/uring.rs#L326) | Local | `impl IoRequest::finish::result` | — |
+| [336](feuer-storage/src/uring.rs#L336) | Local | `impl IoRequest::finish::_` | — |
+| [361](feuer-storage/src/uring.rs#L361) | Local | `impl IoQueue::run::mut disconnected` | — |
+| [363](feuer-storage/src/uring.rs#L363) | Local | `impl IoQueue::run::completions` | `Vec<_>` |
+| [369](feuer-storage/src/uring.rs#L369) | Local | `impl IoQueue::run::slot` | — |
+| [370](feuer-storage/src/uring.rs#L370) | Local | `impl IoQueue::run::request` | — |
+| [387](feuer-storage/src/uring.rs#L387) | Local | `impl IoQueue::run::active` | — |
+| [414](feuer-storage/src/uring.rs#L414) | Local | `impl IoQueue::schedule::mut index` | — |
+| [416](feuer-storage/src/uring.rs#L416) | Local | `impl IoQueue::schedule::Some(slot)` | — |
+| [419](feuer-storage/src/uring.rs#L419) | Local | `impl IoQueue::schedule::request` | — |
+| [420](feuer-storage/src/uring.rs#L420) | Local | `impl IoQueue::schedule::blocked` | — |
+| [432](feuer-storage/src/uring.rs#L432) | Local | `impl IoQueue::submit_slot::entry` | — |
+| [447](feuer-storage/src/uring.rs#L447) | Local | `impl IoQueue::wait::mut fds` | — |
+| [460](feuer-storage/src/uring.rs#L460) | Local | `impl IoQueue::wait::result` | — |
+| [462](feuer-storage/src/uring.rs#L462) | Local | `impl IoQueue::wait::error` | — |
+| [476](feuer-storage/src/uring.rs#L476) | Local | `impl IoQueue::wait::mut value` | — |
+| [497](feuer-storage/src/uring.rs#L497) | Local | `impl Drop for IoQueue::drop::_` | — |
+| [508](feuer-storage/src/uring.rs#L508) | Local | `notify::value` | — |
+| [511](feuer-storage/src/uring.rs#L511) | Local | `notify::result` | — |
 
 </details>
 
@@ -1442,7 +1454,7 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 
 ### `feuer-tokio/src/lib.rs`
 
-No source symbols reported (for example, a re-export-only module).
+No symbols reported by rust-analyzer.
 
 ## feuer-types
 

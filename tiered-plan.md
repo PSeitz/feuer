@@ -82,8 +82,8 @@ instead of retaining it or scheduling another disk write. The lookup can still r
 the callback result.
 
 A partially overlapping download may be retained in full. Storing only the physical difference is deferred as
-a coupled optimization with multi-extent reads. The product contract neither requires nor prohibits
-satisfying a lookup by assembling several cached extents.
+a coupled optimization with multi-range reads. The product contract neither requires nor prohibits
+satisfying a lookup by assembling several cached ranges.
 
 ## 4. Lookup results and accessed ranges
 
@@ -100,11 +100,11 @@ disk storage, allocation guards, or file mappings.
 
 Every successful lookup appends its exact requested range once to the accessed ranges for its complete cache
 key. Accessed ranges are independent of the downloaded or cached range that happened to satisfy the lookup;
-policy and compaction may project them onto currently cached extents. Download insertion, replacement, and
+policy and compaction may project them onto currently cached ranges. Download insertion, replacement, and
 redundant-population suppression create no accesses.
 
 When application callbacks share one source download, every successful waiter still contributes its own
-accessed range, while Feuer caches at most the downloaded extents selected by its ordinary containment rules.
+accessed range, while Feuer caches at most the downloaded ranges selected by its ordinary containment rules.
 
 ## 5. Target workload and retention objective
 
@@ -155,8 +155,8 @@ increase retention value, stale evidence must eventually expire, and only the ex
 observed-access credit.
 
 Every admission gets a short, deterministic shard-local grace before compaction. Policy keeps no separate
-prefetch-promotion state: bounded exact request evidence drives both retention and compaction. Grace never pins
-an extent against pressure eviction.
+prefetch-promotion state: bounded exact request evidence drives both retention and compaction. Grace never protects
+a cached range from pressure eviction.
 
 Prefetch remains bounded in both tiers, and compaction grace never blocks admission or pressure eviction.
 
@@ -191,7 +191,7 @@ In-memory compaction remains an MVP feature. Feuer observes exact accessed range
 can replace a cached larger download with smaller cached payloads biased toward observed requests, releasing
 unrequested cache memory.
 
-Compaction is pressure-driven. Policy samples at most 64 extents and selects the one with the lowest recent
+Compaction is pressure-driven. Policy samples at most 64 cached ranges and selects the one with the lowest recent
 retrieval value per retained byte. Exact events are bounded to 64 per object and currently expire after 32,768
 later successful same-shard accesses. Once its grace of 64 successful same-shard accesses expires, that same
 victim is trimmed when its observed requests can release at least one quarter of its payload; otherwise it is
@@ -222,7 +222,7 @@ not assign fixed weights to those states.
 `flush` waits for disk writes already queued or running. It does not retry writes that were skipped or
 canceled and does not provide per-entry durability.
 
-Disk capacity is fixed at open time and must be respected. Internal allocation, indexing, extent layout,
+Disk capacity is fixed at open time and must be respected. Internal allocation, indexing, disk-region layout,
 partial retention, rewriting, checksums, metadata persistence, and submission engines are implementation
 details. Any bytes made lookup-visible on disk must still be attributable to an exact object identity and
 known downloaded object bytes.
@@ -231,7 +231,7 @@ Physical I/O alignment must not become a minimum allocation charge for every ret
 than the required I/O alignment must be physically packable so the target population of small ranges can use
 disk efficiently. The allocator must handle the full size distribution, reclaim fragmented capacity with
 bounded work and rewrite traffic, remain practical at 1-TiB-plus capacities, and avoid a cache-wide hot lock.
-Size classes, slabs, regions, extents, free-space structures, relocation, and cleaning algorithms remain
+Size classes, slabs, disk regions, free-space structures, relocation, and cleaning algorithms remain
 private, benchmark-selected mechanisms.
 
 ## 8. Payload I/O modes
@@ -348,7 +348,7 @@ The MVP is complete when tests demonstrate that:
 - streaming callback output;
 - more than one `Download` returned by one callback;
 - physical difference-only storage for partially overlapping downloads;
-- guaranteed multi-extent assembly;
+- guaranteed assembly from multiple cached ranges;
 - public policy plug-ins or online disk-versus-network cost measurement;
 - hard process-RSS guarantees, including callback and caller-held memory;
 - online disk-capacity resize;

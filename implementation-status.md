@@ -48,13 +48,13 @@ This slice introduces no fill context, pre-fetch reservation, internal miss sing
 
 - Replaced each unbounded per-key access sequence with at most 64 exact, repeated events. Each event contributes
   the target source request's 10,000,000 equivalent bytes plus its requested bytes, while removing a key's last
-  extent releases its metadata.
+  cached range releases its metadata.
 - Retain each event for at most 32,768 later successful same-shard accesses. This remains a provisional logical
   lifetime pending wall-clock aging based on object lifecycle.
 - Replaced arbitrary `HashMap` victim selection with deterministic retrieval-value-per-retained-byte ordering.
-  Only an extent that covers an exact requested event receives credit; repetition increases retention and stale
+  Only a cached range that covers an exact requested event receives credit; repetition increases retention and stale
   evidence eventually expires.
-- Added a pure compaction planner that projects active exact requests onto one downloaded extent, merges only
+- Added a pure compaction planner that projects active exact requests onto one downloaded range, merges only
   overlapping or adjacent intervals, and requires a private minimum saving before copying.
 - Compaction runs opportunistically on a shard-local access cadence and before pressure eviction. Replacement
   copies produce independent `Bytes`, preserve surviving exact coverage and containment invariants, update
@@ -147,17 +147,17 @@ memory-only. Buffered mode remains future work; disk storage and CI now target L
 - Keep arbitrary requested and downloaded ranges independent of internal alignment.
 - Support packing retained values below the physical I/O alignment rather than charging every small value one
   complete alignment unit.
-- Select allocation, extent, overlap, rewrite, and multi-extent strategies behind private boundaries.
+- Select allocation, disk-region layout, overlap, rewrite, and multi-range read strategies behind private boundaries.
 - Keep fragmentation reclamation, rewrite traffic, allocator latency, the disk-write queue, and physical
   capacity bounded at 1-TiB-plus sizes.
 
 The allocator mechanism is deliberately unsettled. Non-authoritative candidates include size-segregated slabs
-with larger extents, append-packed storage with cleaning, and a Foyer-style block baseline. Use trace-driven
+with larger disk regions, append-packed storage with cleaning, and a Foyer-style block baseline. Use trace-driven
 simulation and focused prototypes to compare useful utilization, fragmentation, metadata, allocation latency,
 and cleaning or relocation traffic before selecting one. No slab size, size class, region, alignment quantum,
 or cleaning algorithm belongs in the product contract.
 
-The MVP need not guarantee multi-extent assembly or physical difference-only storage for partially overlapping downloads, but the design must not make either a permanent public impossibility.
+The MVP need not guarantee assembly from multiple cached ranges or physical difference-only storage for partially overlapping downloads, but the design must not make either a permanent public impossibility.
 
 ### 6. Integrity and recovery
 
@@ -205,7 +205,7 @@ Until the remaining work lands:
 - callback batching and source work remain application-owned;
 - every successful lookup records one requested-range event;
 - compaction considers only the selected sampled victim after 64 successful same-shard accesses;
-- memory pressure may evict any extent and never waits for disk throughput;
+- memory pressure may evict any cached range and never waits for disk throughput;
 - disk population remains bounded and best-effort;
 - physical I/O alignment does not force one full allocation unit per small retained value;
 - never-requested prefetch consumes bounded disk capacity;

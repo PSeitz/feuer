@@ -15,7 +15,7 @@ use bytes::Bytes;
 use feuer_types::{ByteRange, Download, ObjectKey};
 use parking_lot::Mutex;
 
-use self::shard::{AdmissionStep, Shard};
+use self::shard::{AdmissionStep, MemoryShard};
 use crate::MemoryMetrics;
 
 /// Caps lock partitioning to avoid excessive per-cache metadata.
@@ -42,7 +42,7 @@ pub struct MemoryCache {
     /// Total soft target divided among the shards.
     capacity: u64,
     /// Independently locked partitions selected by complete object identity.
-    shards: Box<[Mutex<Shard>]>,
+    shards: Box<[Mutex<MemoryShard>]>,
 }
 
 impl fmt::Debug for MemoryCache {
@@ -77,7 +77,7 @@ impl MemoryCache {
         assert!(shard_count > 0, "memory cache requires at least one shard");
         let shards = (0..shard_count)
             .map(|index| {
-                Mutex::new(Shard::new(
+                Mutex::new(MemoryShard::new(
                     shard_capacity_for(capacity, shard_count, index),
                     metrics.clone(),
                 ))
@@ -143,12 +143,12 @@ impl MemoryCache {
             match step {
                 AdmissionStep::Complete => return,
                 AdmissionStep::Retry => continue,
-                AdmissionStep::Compact(work) => {
+                AdmissionStep::Compact(source) => {
                     // Payload copying is deliberately outside the shard lock.
                     // Publication revalidates both the source and its object's
                     // access/structure generation before changing the index.
-                    let prepared = work.copy_payload();
-                    if !self.shards[shard_index].lock().publish_compaction(prepared) {
+                    let replacement = source.copy_payload();
+                    if !self.shards[shard_index].lock().publish_compaction(replacement) {
                         // A hot source can invalidate every copy. Fall back to
                         // bounded eviction for this admission so it cannot
                         // starve while concurrent lookups keep succeeding.
