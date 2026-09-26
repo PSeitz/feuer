@@ -61,7 +61,8 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
 - Reads accept arbitrary byte ranges; write offsets and lengths must be multiples of 4 KiB, enforced by
   assertions. The driver performs no read-modify-write or overlap checks: the upper layer must supply
   complete aligned blocks and prevent conflicting access across physical byte ranges rounded outward
-  to 4 KiB.
+  to 4 KiB. `DataFile` rounds read requests outward and slices the results; the io_uring driver accepts
+  only nonempty aligned requests and returns complete aligned read buffers.
 - Multi-chunk operations are not atomic. Completion permits subsequent reads but does not guarantee crash
   durability; there are no global scheduling barriers.
 - Caller cancellation does not cancel submitted kernel writes. The task owning a write's `DiskRegion` must

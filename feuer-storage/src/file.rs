@@ -127,7 +127,7 @@ impl DataFile {
     }
 
     /// Reads exactly the requested bytes with at most two partial alignment pages
-    /// of overhead. The result owns a compact allocation, not an I/O buffer.
+    /// of overhead. The result may retain alignment padding in its backing allocation.
     /// Callers must prevent writes to the aligned byte range while this read
     /// depends on its contents; see [`DataFile`]'s concurrency contract.
     pub async fn read_at(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
@@ -207,8 +207,11 @@ impl DataFile {
         let mut completed_bytes = 0;
         while completed_bytes < length {
             let chunk_offset = offset + completed_bytes as u64;
-            let chunk_length = (length - completed_bytes)
-                .min(uring::MAX_IO_CHUNK_BYTES - chunk_offset as usize % uring::DIRECT_IO_ALIGNMENT_BYTES);
+            let data_offset_in_buffer = chunk_offset as usize % uring::DIRECT_IO_ALIGNMENT_BYTES;
+            let chunk_length = (length - completed_bytes).min(uring::MAX_IO_CHUNK_BYTES - data_offset_in_buffer);
+            let aligned_offset = chunk_offset - data_offset_in_buffer as u64;
+            let aligned_length =
+                (data_offset_in_buffer + chunk_length).next_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES);
             let chunk_payload = if operation == IoOperation::Write {
                 &payload[completed_bytes..completed_bytes + chunk_length]
             } else {
@@ -217,10 +220,11 @@ impl DataFile {
             let bytes = self
                 .state
                 .queue
-                .execute(operation, chunk_offset, chunk_length, chunk_payload)
+                .execute(operation, aligned_offset, aligned_length, chunk_payload)
                 .await
                 .map_err(io_error)?;
             if operation == IoOperation::Read {
+                let bytes = bytes.slice(data_offset_in_buffer..data_offset_in_buffer + chunk_length);
                 if chunk_length == length {
                     return Ok(bytes);
                 }
@@ -386,7 +390,11 @@ mod tests {
         assert_eq!(file.read_at(4096, 16).await.unwrap(), original.slice(..16));
         // Exercise multi-chunk writes, unaligned reads across a chunk boundary,
         // and the final physical page.
-        let payload = Bytes::from(vec![0x99; uring::MAX_IO_CHUNK_BYTES + 4096]);
+        let payload = Bytes::from(
+            (0..uring::MAX_IO_CHUNK_BYTES + 4096)
+                .map(|index| (index % 251) as u8)
+                .collect::<Vec<_>>(),
+        );
         file.write_at(4096, &payload).await.unwrap();
         assert_eq!(
             file.read_at(4099, payload.len() - 6).await.unwrap(),

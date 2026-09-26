@@ -1,5 +1,5 @@
 //! A single-owner ring. Only this module hands buffer pointers to the kernel.
-//! Writes require offsets and lengths aligned to DIRECT_IO_ALIGNMENT_BYTES.
+//! Requests must be nonempty, with offsets and lengths aligned to DIRECT_IO_ALIGNMENT_BYTES.
 
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
@@ -69,12 +69,6 @@ impl IoAdmissionBudgets {
     }
 }
 
-fn staging_pages_for(offset: u64, length: usize) -> u32 {
-    let data_offset_in_buffer = offset as usize % DIRECT_IO_ALIGNMENT_BYTES;
-    let aligned_length = (data_offset_in_buffer + length).next_multiple_of(DIRECT_IO_ALIGNMENT_BYTES);
-    (aligned_length.max(DIRECT_IO_ALIGNMENT_BYTES) / DIRECT_IO_ALIGNMENT_BYTES) as u32
-}
-
 impl IoQueueHandle {
     pub(crate) fn new(file: File, directory_lock: File) -> io::Result<Self> {
         let ring = IoUring::new(MAX_IN_FLIGHT_IO as u32)?;
@@ -125,7 +119,7 @@ impl IoQueueHandle {
             .map_err(|_| queue_stopped_error())?;
         let staging_pages_permit = self.admission.staging_pages[class]
             .clone()
-            .acquire_many_owned(staging_pages_for(offset, length))
+            .acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
             .await
             .map_err(|_| queue_stopped_error())?;
         let (reply, receive) = oneshot::channel();
@@ -172,7 +166,7 @@ struct AlignedIoBuffer {
 
 impl AlignedIoBuffer {
     fn new(length: usize) -> io::Result<Self> {
-        let layout = Layout::from_size_align(length.max(DIRECT_IO_ALIGNMENT_BYTES), DIRECT_IO_ALIGNMENT_BYTES).unwrap();
+        let layout = Layout::from_size_align(length, DIRECT_IO_ALIGNMENT_BYTES).unwrap();
         // SAFETY: layout is non-zero with a valid power-of-two alignment.
         let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
             .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "direct I/O buffer allocation failed"))?;
@@ -201,11 +195,7 @@ struct IoRequest {
     // I/O direction, unchanged through short-I/O continuations.
     operation: IoOperation,
     // Aligned physical start, used for kernel offsets.
-    aligned_offset: u64,
-    // Requested data starts at this byte offset in `io_buffer`.
-    data_offset_in_buffer: usize,
-    // Logical byte count, excluding alignment padding from read results.
-    length: usize,
+    offset: u64,
     // Aligned memory for disk reads/writes; kept alive until I/O completes.
     io_buffer: AlignedIoBuffer,
     // Bytes completed, allowing aligned short-I/O continuations.
@@ -227,21 +217,16 @@ impl IoRequest {
         reply: oneshot::Sender<io::Result<Bytes>>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
     ) -> io::Result<Self> {
+        assert!(offset.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES as u64));
+        assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
+        assert!(length > 0);
+        let mut io_buffer = AlignedIoBuffer::new(length)?;
         if operation == IoOperation::Write {
-            assert!(offset.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES as u64));
-            assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
-        }
-        let data_offset_in_buffer = offset as usize % DIRECT_IO_ALIGNMENT_BYTES;
-        let aligned_length = (data_offset_in_buffer + length).next_multiple_of(DIRECT_IO_ALIGNMENT_BYTES);
-        let mut io_buffer = AlignedIoBuffer::new(aligned_length)?;
-        if operation == IoOperation::Write {
-            io_buffer.as_mut_slice()[..length].copy_from_slice(payload);
+            io_buffer.as_mut_slice().copy_from_slice(payload);
         }
         Ok(Self {
             operation,
-            aligned_offset: offset - data_offset_in_buffer as u64,
-            data_offset_in_buffer,
-            length,
+            offset,
             io_buffer,
             completed_bytes: 0,
             reply: Some(reply),
@@ -250,17 +235,13 @@ impl IoRequest {
         })
     }
 
-    fn aligned_length(&self) -> usize {
-        (self.data_offset_in_buffer + self.length).next_multiple_of(DIRECT_IO_ALIGNMENT_BYTES)
-    }
-
     fn submission_entry(&mut self, fd: i32, slot: usize) -> squeue::Entry {
         let fd = types::Fd(fd);
         // SAFETY: completed_bytes is within io_buffer. The request owns this memory
         // in its active slot until the completion is consumed.
         let ptr = unsafe { self.io_buffer.ptr.as_ptr().add(self.completed_bytes) };
-        let length = (self.aligned_length() - self.completed_bytes) as u32;
-        let offset = self.aligned_offset + self.completed_bytes as u64;
+        let length = (self.io_buffer.layout.size() - self.completed_bytes) as u32;
+        let offset = self.offset + self.completed_bytes as u64;
         let entry = if self.operation == IoOperation::Read {
             opcode::Read::new(fd, ptr, length).offset(offset).build()
         } else {
@@ -278,11 +259,11 @@ impl IoRequest {
             return Err(io::Error::from_raw_os_error(-result));
         }
         let count = result as usize;
-        if count == 0 || count > self.aligned_length() - self.completed_bytes {
+        if count == 0 || count > self.io_buffer.layout.size() - self.completed_bytes {
             return Err(self.incomplete_io_error());
         }
         self.completed_bytes += count;
-        if self.completed_bytes != self.aligned_length() {
+        if self.completed_bytes != self.io_buffer.layout.size() {
             // An unaligned remainder cannot be resubmitted with O_DIRECT.
             if !self.completed_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
                 return Err(self.incomplete_io_error());
@@ -306,10 +287,7 @@ impl IoRequest {
     fn finish(mut self, result: io::Result<()>) {
         let result = result.map(|()| {
             if self.operation == IoOperation::Read {
-                Bytes::copy_from_slice(
-                    &self.io_buffer.as_mut_slice()
-                        [self.data_offset_in_buffer..self.data_offset_in_buffer + self.length],
-                )
+                Bytes::copy_from_slice(self.io_buffer.as_mut_slice())
             } else {
                 Bytes::new()
             }

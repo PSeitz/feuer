@@ -13,7 +13,7 @@ fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) 
         .unwrap();
     let staging_pages_permit = queue.admission.staging_pages[class]
         .clone()
-        .try_acquire_many_owned(staging_pages_for(offset, length))
+        .try_acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
         .unwrap();
     let payload = if operation == IoOperation::Write {
         vec![0x99; length]
@@ -102,7 +102,7 @@ fn fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission() {
         MAX_IN_FLIGHT_IO / 2
     );
     for (index, request) in queue.active.iter().flatten().enumerate() {
-        assert_eq!(request.aligned_offset, (index * DIRECT_IO_ALIGNMENT_BYTES) as u64);
+        assert_eq!(request.offset, (index * DIRECT_IO_ALIGNMENT_BYTES) as u64);
     }
     assert_eq!(queue.pending.len(), MAX_ADMITTED_REQUESTS - MAX_IN_FLIGHT_IO);
     assert_eq!(queue.ring.submission().len(), MAX_IN_FLIGHT_IO);
@@ -336,6 +336,24 @@ fn completion_state_handles_short_io_and_errors() {
     assert!(write.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
     assert_eq!(write.completed_bytes, DIRECT_IO_ALIGNMENT_BYTES);
     assert!(!write.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "offset.is_multiple_of")]
+fn rejects_unaligned_read_offset() {
+    request(&queue(), IoOperation::Read, 1, DIRECT_IO_ALIGNMENT_BYTES);
+}
+
+#[test]
+#[should_panic(expected = "length.is_multiple_of")]
+fn rejects_unaligned_read_length() {
+    request(&queue(), IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES - 1);
+}
+
+#[test]
+#[should_panic(expected = "length > 0")]
+fn rejects_empty_request() {
+    request(&queue(), IoOperation::Read, 0, 0);
 }
 
 #[test]
