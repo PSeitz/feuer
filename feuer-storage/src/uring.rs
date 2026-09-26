@@ -27,7 +27,7 @@ pub(crate) const MAX_IO_CHUNK_BYTES: usize = 1024 * 1024;
 // Maximum admitted and in-flight operations per queue. Reads and writes each have their own ring.
 const MAX_IN_FLIGHT_IO: usize = 64;
 // Per-queue staging budget: MAX_IN_FLIGHT_IO full-size aligned buffers.
-// Caller inputs and read-result allocations are outside this budget.
+// Caller inputs and buffers transferred to completed read results are outside this budget.
 const MAX_STAGING_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 
 #[cfg(test)]
@@ -177,6 +177,14 @@ impl AlignedIoBuffer {
     }
 }
 
+impl AsRef<[u8]> for AlignedIoBuffer {
+    fn as_ref(&self) -> &[u8] {
+        // SAFETY: the allocation is initialized and remains owned by self.
+        // Called only after I/O completes, when the kernel no longer accesses it.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.layout.size()) }
+    }
+}
+
 // SAFETY: AlignedIoBuffer uniquely owns its allocation; moving it does not move the allocation.
 unsafe impl Send for AlignedIoBuffer {}
 
@@ -284,7 +292,7 @@ impl IoRequest {
     fn finish(mut self, result: io::Result<()>) {
         let result = result.map(|()| {
             if self.operation == IoOperation::Read {
-                Bytes::copy_from_slice(self.io_buffer.as_mut_slice())
+                Bytes::from_owner(self.io_buffer)
             } else {
                 Bytes::new()
             }

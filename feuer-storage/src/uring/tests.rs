@@ -247,6 +247,31 @@ fn discarded_queued_requests_never_reach_the_ring() {
 }
 
 #[test]
+fn finished_read_transfers_buffer_ownership() {
+    let queue = queue();
+    let (mut read, mut reply) = request(&queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    read.io_buffer.as_mut_slice().fill(0x99);
+    let ptr = read.io_buffer.ptr.as_ptr().cast_const();
+    assert!(!read.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+    read.finish(Ok(()));
+
+    let bytes = reply.try_recv().unwrap().unwrap();
+    assert_eq!(bytes.as_ptr(), ptr);
+    assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
+    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
+    assert_eq!(
+        queue.admission.staging_pages.available_permits(),
+        MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
+    );
+
+    let slice = bytes.slice(1..);
+    drop(bytes);
+    drop(queue);
+    assert_eq!(slice.as_ptr(), ptr.wrapping_add(1));
+    assert_eq!(&slice[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES - 1]);
+}
+
+#[test]
 fn completion_state_handles_short_io_and_errors() {
     let queue = queue();
     let (mut read, _reply) = request(&queue, IoOperation::Read, 0, 2 * DIRECT_IO_ALIGNMENT_BYTES);
