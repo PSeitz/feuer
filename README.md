@@ -37,9 +37,9 @@ request and appended once to the key's accessed ranges, independently of downloa
 The internal `feuer-storage` crate currently provides an exclusively owned,
 fixed-capacity O_DIRECT file and a bounded io_uring driver (one thread, QD64),
 with simultaneous reads/writes, arbitrary byte ranges, and serialized overlapping
-read-modify-write envelopes. Writes can fill the ring when reads are absent; while
-reads are present, new writes get at most four slots. Read admission is protected
-from write backlogs. Raw file capacity must be a positive multiple of
+read-modify-write envelopes. Nonconflicting requests are scheduled in arrival
+order without a read-triggered write throttle. Separate read/write admission
+budgets protect read admission from write backlogs. Raw file capacity must be a positive multiple of
 4 KiB. Buffered mode and the recoverable range engine remain to be implemented. `feuer-memory` provides a
 sharded soft-capacity covering-range index with bounded ageable request evidence,
 sampled retrieval-value-per-byte eviction, a short compaction grace, and

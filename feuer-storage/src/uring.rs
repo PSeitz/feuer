@@ -7,11 +7,7 @@ use std::{
     io,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     ptr::NonNull,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-        mpsc,
-    },
+    sync::{Arc, mpsc},
     thread::{self, JoinHandle},
 };
 
@@ -23,96 +19,65 @@ use crate::IoOperation;
 
 // Buffer addresses, physical offsets, and I/O lengths use this alignment.
 // Opening verifies that the filesystem's direct-I/O requirements divide it.
-pub(crate) const ALIGN: usize = 4096;
+pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = 4096;
 // Maximum physical bytes per chunk, including alignment padding. DataFile
 // reduces the logical chunk size when its starting offset is unaligned.
 pub(crate) const MAX_IO_CHUNK_BYTES: usize = 1024 * 1024;
 // Maximum outstanding ring operations, shared by reads and writes.
 const MAX_IN_FLIGHT_IO: usize = 64;
-// Under read demand, allow only this many outstanding writes (including RMW).
-// With no reads, writes may use all MAX_IN_FLIGHT_IO slots. Initial policy, not an optimum.
-const WRITES_WITH_READS: usize = 4;
 // Separate admission pools: MAX_IN_FLIGHT_IO reads and MAX_IN_FLIGHT_IO writes.
 // Writes cannot consume read permits; each class can independently fill the ring.
-const REQUESTS: usize = 2 * MAX_IN_FLIGHT_IO;
+const MAX_ADMITTED_REQUESTS: usize = 2 * MAX_IN_FLIGHT_IO;
 // Staging budget split equally between reads and writes. Each half can
 // hold MAX_IN_FLIGHT_IO full-size aligned buffers. RMW also charges its staging payload;
 // caller inputs and read-result allocations are outside this budget.
-const BUFFER_BYTES: usize = 128 * 1024 * 1024;
+const MAX_STAGING_BUFFER_BYTES: usize = 128 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests;
 
-pub(crate) struct IoQueueAccess {
+/// A handle that submits I/O requests and owns the queue thread's lifetime.
+pub(crate) struct IoQueueHandle {
     // Sends admitted requests; taken on drop to signal shutdown before joining.
-    sender: Option<mpsc::SyncSender<Request>>,
-    // Shared eventfd wakes the queue for new work, demand changes, or shutdown.
+    sender: Option<mpsc::SyncSender<IoRequest>>,
+    // Shared eventfd wakes the queue for new work or shutdown.
     wake: Arc<OwnedFd>,
     // Queue thread; taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
-    // Shared budgets and read demand, enforced before allocating or queueing work.
-    admission: Arc<Admission>,
+    // Shared budgets, enforced before allocating or queueing work.
+    admission: Arc<IoAdmissionBudgets>,
 }
 
-// Index 0 is demand reads; index 1 is writes. Separate pools avoid
-// priority inversion in semaphore wait queues before requests reach the driver.
-struct Admission {
+// Index 0 is reads; index 1 is writes. Separate pools keep writes from
+// consuming read admission or staging capacity.
+struct IoAdmissionBudgets {
     // Per-class limits covering preparing, queued, and active requests.
     requests: [Arc<Semaphore>; 2],
-    // Per-class staging budgets in ALIGN-sized units; acquired before allocation.
+    // Per-class staging budgets in alignment-sized units; acquired before allocation.
     buffers: [Arc<Semaphore>; 2],
-    // Live read futures, including admission waiters, so writes yield early.
-    reads: AtomicUsize,
 }
 
-impl Admission {
+impl IoAdmissionBudgets {
     fn new() -> Self {
         Self {
             requests: std::array::from_fn(|_| Arc::new(Semaphore::new(MAX_IN_FLIGHT_IO))),
-            buffers: std::array::from_fn(|_| Arc::new(Semaphore::new(BUFFER_BYTES / 2 / ALIGN))),
-            reads: AtomicUsize::new(0),
+            buffers: std::array::from_fn(|_| {
+                Arc::new(Semaphore::new(MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES))
+            }),
         }
     }
 }
 
-// Count reads BEFORE admission, not just after buffer allocation. Cancellation
-// removes their demand, waking an otherwise idle driver when full-speed writes
-// can resume. Submitted reads remain visible through the driver's active slots.
-struct ReadDemandGuard {
-    // Owns one read-demand count, removed on completion or cancellation.
-    admission: Arc<Admission>,
-    // Wakes the driver when demand starts or ends to update the write allowance.
-    wake: Arc<OwnedFd>,
+fn staging_pages_for(operation: IoOperation, offset: u64, length: usize) -> u32 {
+    let data_offset_in_buffer = offset as usize % DIRECT_IO_ALIGNMENT_BYTES;
+    let aligned_length = (data_offset_in_buffer + length).next_multiple_of(DIRECT_IO_ALIGNMENT_BYTES);
+    let needs_read_modify_write =
+        operation == IoOperation::Write && (data_offset_in_buffer != 0 || length != aligned_length);
+    (aligned_length.max(DIRECT_IO_ALIGNMENT_BYTES) / DIRECT_IO_ALIGNMENT_BYTES
+        * if needs_read_modify_write { 2 } else { 1 }) as u32
 }
 
-impl ReadDemandGuard {
-    fn new(admission: &Arc<Admission>, wake: &Arc<OwnedFd>) -> Self {
-        if admission.reads.fetch_add(1, Ordering::AcqRel) == 0 {
-            notify(wake);
-        }
-        Self {
-            admission: admission.clone(),
-            wake: wake.clone(),
-        }
-    }
-}
-
-impl Drop for ReadDemandGuard {
-    fn drop(&mut self) {
-        if self.admission.reads.fetch_sub(1, Ordering::AcqRel) == 1 {
-            notify(&self.wake);
-        }
-    }
-}
-
-fn buffer_charge(operation: IoOperation, offset: u64, length: usize) -> u32 {
-    let data_offset_in_buffer = offset as usize % ALIGN;
-    let aligned_length = (data_offset_in_buffer + length).next_multiple_of(ALIGN);
-    let rmw = operation == IoOperation::Write && (data_offset_in_buffer != 0 || length != aligned_length);
-    (aligned_length.max(ALIGN) / ALIGN * if rmw { 2 } else { 1 }) as u32
-}
-
-impl IoQueueAccess {
+impl IoQueueHandle {
     pub(crate) fn new(file: File, lock: File) -> io::Result<Self> {
         let ring = IoUring::new(MAX_IN_FLIGHT_IO as u32)?;
         // SAFETY: eventfd has no pointer arguments and returns a new owned fd.
@@ -122,8 +87,8 @@ impl IoQueueAccess {
         }
         // SAFETY: fd was just created and has no other owner.
         let wake = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
-        let (sender, receiver) = mpsc::sync_channel(REQUESTS);
-        let admission = Arc::new(Admission::new());
+        let (sender, receiver) = mpsc::sync_channel(MAX_ADMITTED_REQUESTS);
+        let admission = Arc::new(IoAdmissionBudgets::new());
         let mut queue = IoQueue {
             admission: admission.clone(),
             ring,
@@ -154,20 +119,26 @@ impl IoQueueAccess {
         length: usize,
         payload: &[u8],
     ) -> io::Result<Bytes> {
-        let _read = (operation == IoOperation::Read).then(|| ReadDemandGuard::new(&self.admission, &self.wake));
         let class = usize::from(operation != IoOperation::Read);
-        let slot = self.admission.requests[class]
+        let request_permit = self.admission.requests[class]
             .clone()
             .acquire_owned()
             .await
             .map_err(|_| stopped())?;
-        let bytes = self.admission.buffers[class]
+        let staging_permit = self.admission.buffers[class]
             .clone()
-            .acquire_many_owned(buffer_charge(operation, offset, length))
+            .acquire_many_owned(staging_pages_for(operation, offset, length))
             .await
             .map_err(|_| stopped())?;
         let (reply, receive) = oneshot::channel();
-        let request = Request::new(operation, offset, length, payload, reply, (slot, bytes))?;
+        let request = IoRequest::new(
+            operation,
+            offset,
+            length,
+            payload,
+            reply,
+            (request_permit, staging_permit),
+        )?;
         // All queued + active requests hold a permit, so this cannot wait for space.
         self.sender.as_ref().unwrap().try_send(request).map_err(|_| stopped())?;
         notify(&self.wake);
@@ -175,7 +146,7 @@ impl IoQueueAccess {
     }
 }
 
-impl Drop for IoQueueAccess {
+impl Drop for IoQueueHandle {
     fn drop(&mut self) {
         self.sender.take();
         notify(&self.wake);
@@ -199,14 +170,14 @@ struct AlignedBuffer {
 
 impl AlignedBuffer {
     fn new(length: usize) -> io::Result<Self> {
-        let layout = Layout::from_size_align(length.max(ALIGN), ALIGN).unwrap();
+        let layout = Layout::from_size_align(length.max(DIRECT_IO_ALIGNMENT_BYTES), DIRECT_IO_ALIGNMENT_BYTES).unwrap();
         // SAFETY: layout is non-zero with a valid power-of-two alignment.
         let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
             .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "direct I/O buffer allocation failed"))?;
         Ok(Self { ptr, layout })
     }
 
-    fn bytes(&mut self) -> &mut [u8] {
+    fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: this allocation is initialized and exclusively accessed by its owner.
         // Called only before submission or after the corresponding CQE has been consumed.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.layout.size()) }
@@ -223,11 +194,12 @@ impl Drop for AlignedBuffer {
     }
 }
 
-struct Request {
+/// One admitted I/O request, owning its buffers and permits through completion.
+struct IoRequest {
     // Caller operation; an RMW stays classified as a write during its read phase.
     operation: IoOperation,
     // Aligned physical start, used for kernel offsets and overlap checks.
-    offset: u64,
+    aligned_offset: u64,
     // Requested data starts at this byte offset in `io_buffer`.
     data_offset_in_buffer: usize,
     // Logical byte count, excluding alignment padding from results and RMW updates.
@@ -237,20 +209,20 @@ struct Request {
     // Aligned memory for disk reads/writes; kept alive until I/O completes.
     io_buffer: AlignedBuffer,
     // RMW input preserved during the initial read, then merged into `io_buffer`.
-    payload: Option<Bytes>,
+    read_modify_write_payload: Option<Bytes>,
     // Current I/O direction; flips from read to write after an RMW read completes.
     reading: bool,
     // Bytes completed in this phase, allowing aligned short-I/O continuations.
-    completed: usize,
+    completed_bytes: usize,
     // Caller result channel; taken on finish/failure, also detects cancellation.
     reply: Option<oneshot::Sender<io::Result<Bytes>>>,
     // Holds request admission until this request is dropped.
-    _slot: OwnedSemaphorePermit,
+    _request_permit: OwnedSemaphorePermit,
     // Holds the staging-buffer charge until this request is dropped.
-    _bytes: OwnedSemaphorePermit,
+    _staging_permit: OwnedSemaphorePermit,
 }
 
-impl Request {
+impl IoRequest {
     fn new(
         operation: IoOperation,
         offset: u64,
@@ -259,47 +231,48 @@ impl Request {
         reply: oneshot::Sender<io::Result<Bytes>>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
     ) -> io::Result<Self> {
-        let data_offset_in_buffer = offset as usize % ALIGN;
-        let aligned_length = (data_offset_in_buffer + length).next_multiple_of(ALIGN);
+        let data_offset_in_buffer = offset as usize % DIRECT_IO_ALIGNMENT_BYTES;
+        let aligned_length = (data_offset_in_buffer + length).next_multiple_of(DIRECT_IO_ALIGNMENT_BYTES);
         let mut io_buffer = AlignedBuffer::new(aligned_length)?;
-        let rmw = operation == IoOperation::Write && (data_offset_in_buffer != 0 || length != aligned_length);
-        let payload = if rmw {
+        let needs_read_modify_write =
+            operation == IoOperation::Write && (data_offset_in_buffer != 0 || length != aligned_length);
+        let payload = if needs_read_modify_write {
             Some(Bytes::copy_from_slice(payload))
         } else {
             if operation == IoOperation::Write {
-                io_buffer.bytes()[..length].copy_from_slice(payload);
+                io_buffer.as_mut_slice()[..length].copy_from_slice(payload);
             }
             None
         };
         Ok(Self {
             operation,
-            offset: offset - data_offset_in_buffer as u64,
+            aligned_offset: offset - data_offset_in_buffer as u64,
             data_offset_in_buffer,
             length,
             aligned_length,
             io_buffer,
-            payload,
-            reading: operation == IoOperation::Read || rmw,
-            completed: 0,
+            read_modify_write_payload: payload,
+            reading: operation == IoOperation::Read || needs_read_modify_write,
+            completed_bytes: 0,
             reply: Some(reply),
-            _slot: permits.0,
-            _bytes: permits.1,
+            _request_permit: permits.0,
+            _staging_permit: permits.1,
         })
     }
 
     fn conflicts(&self, other: &Self) -> bool {
         (self.operation == IoOperation::Write || other.operation == IoOperation::Write)
-            && self.offset < other.offset + other.aligned_length as u64
-            && other.offset < self.offset + self.aligned_length as u64
+            && self.aligned_offset < other.aligned_offset + other.aligned_length as u64
+            && other.aligned_offset < self.aligned_offset + self.aligned_length as u64
     }
 
-    fn entry(&mut self, fd: i32, slot: usize) -> squeue::Entry {
+    fn submission_entry(&mut self, fd: i32, slot: usize) -> squeue::Entry {
         let fd = types::Fd(fd);
-        // SAFETY: completed is within io_buffer. The request owns this memory
+        // SAFETY: completed_bytes is within io_buffer. The request owns this memory
         // in its active slot until the completion is consumed.
-        let ptr = unsafe { self.io_buffer.ptr.as_ptr().add(self.completed) };
-        let length = (self.aligned_length - self.completed) as u32;
-        let offset = self.offset + self.completed as u64;
+        let ptr = unsafe { self.io_buffer.ptr.as_ptr().add(self.completed_bytes) };
+        let length = (self.aligned_length - self.completed_bytes) as u32;
+        let offset = self.aligned_offset + self.completed_bytes as u64;
         let entry = if self.reading {
             opcode::Read::new(fd, ptr, length).offset(offset).build()
         } else {
@@ -317,22 +290,22 @@ impl Request {
             return Err(io::Error::from_raw_os_error(-result));
         }
         let count = result as usize;
-        if count == 0 || count > self.aligned_length - self.completed {
+        if count == 0 || count > self.aligned_length - self.completed_bytes {
             return Err(self.short_error());
         }
-        self.completed += count;
-        if self.completed != self.aligned_length {
+        self.completed_bytes += count;
+        if self.completed_bytes != self.aligned_length {
             // An unaligned remainder cannot be resubmitted with O_DIRECT.
-            if !self.completed.is_multiple_of(ALIGN) {
+            if !self.completed_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
                 return Err(self.short_error());
             }
             return Ok(true);
         }
-        if let Some(payload) = self.payload.take() {
-            self.io_buffer.bytes()[self.data_offset_in_buffer..self.data_offset_in_buffer + self.length]
+        if let Some(payload) = self.read_modify_write_payload.take() {
+            self.io_buffer.as_mut_slice()[self.data_offset_in_buffer..self.data_offset_in_buffer + self.length]
                 .copy_from_slice(&payload);
             self.reading = false;
-            self.completed = 0;
+            self.completed_bytes = 0;
             return Ok(true);
         }
         Ok(false)
@@ -353,7 +326,8 @@ impl Request {
         let result = result.map(|()| {
             if self.operation == IoOperation::Read {
                 Bytes::copy_from_slice(
-                    &self.io_buffer.bytes()[self.data_offset_in_buffer..self.data_offset_in_buffer + self.length],
+                    &self.io_buffer.as_mut_slice()
+                        [self.data_offset_in_buffer..self.data_offset_in_buffer + self.length],
                 )
             } else {
                 Bytes::new()
@@ -364,8 +338,8 @@ impl Request {
 }
 
 struct IoQueue {
-    // Reads caller demand for scheduling; closes budgets on exit to release waiters.
-    admission: Arc<Admission>,
+    // Closes budgets on exit to release admission waiters.
+    admission: Arc<IoAdmissionBudgets>,
     // Thread-owned kernel submission/completion queues; no cross-thread ring access.
     ring: IoUring,
     // Direct-I/O payload file; taken to retain ownership on abnormal exit.
@@ -375,11 +349,11 @@ struct IoQueue {
     // Eventfd polled alongside the ring so new work need not wait for completion.
     wake: Arc<OwnedFd>,
     // Incoming admitted requests; disconnection starts draining shutdown.
-    receiver: mpsc::Receiver<Request>,
+    receiver: mpsc::Receiver<IoRequest>,
     // Unsubmitted requests in arrival order, preserving overlap ordering.
-    pending: VecDeque<Request>,
+    pending: VecDeque<IoRequest>,
     // Owns in-flight requests through completion; CQEs identify their slot indices.
-    active: Vec<Option<Request>>,
+    active: Vec<Option<IoRequest>>,
 }
 
 impl IoQueue {
@@ -433,44 +407,24 @@ impl IoQueue {
     fn schedule(&mut self) {
         self.pending
             .retain(|request| !request.reply.as_ref().unwrap().is_closed());
-        let has_pending_or_active_reads = self.pending.iter().any(|r| r.operation == IoOperation::Read)
-            || self.active.iter().flatten().any(|r| r.operation == IoOperation::Read);
-        let mut writes = self
-            .active
-            .iter()
-            .flatten()
-            .filter(|r| r.operation != IoOperation::Read)
-            .count();
-        // First admit the small write allowance, so continuous reads cannot starve
-        // writes. Reads then get every remaining slot; with no writes they get all
-        // MAX_IN_FLIGHT_IO. Never preempt active writes or reorder conflicting I/O.
-        for reading in [false, true] {
-            let mut index = 0;
-            while index < self.pending.len() {
-                let Some(slot) = self.active.iter().position(Option::is_none) else {
-                    return;
-                };
-                // Recheck pre-admission demand while filling a write-only batch.
-                let write_limit = if has_pending_or_active_reads || self.admission.reads.load(Ordering::Acquire) != 0 {
-                    WRITES_WITH_READS
-                } else {
-                    MAX_IN_FLIGHT_IO
-                };
-                if !reading && writes >= write_limit {
-                    break;
-                }
-                let request = &self.pending[index];
-                let blocked = (request.operation == IoOperation::Read) != reading
-                    || self.active.iter().flatten().any(|other| request.conflicts(other))
-                    || self.pending.iter().take(index).any(|other| request.conflicts(other));
-                if blocked {
-                    index += 1;
-                    continue;
-                }
-                self.active[slot] = self.pending.remove(index);
-                self.submit_slot(slot);
-                writes += usize::from(!reading);
+        // SSD benchmarks (benchmarks/ssd/ssd-concurrent-read-write.md) suggest a
+        // future write throttle for small-read-heavy workloads. Mixed-size reads
+        // tolerate moderate concurrent writes, so leave writes unthrottled for now.
+        // Fill slots in arrival order, skipping only conflicting requests.
+        let mut index = 0;
+        while index < self.pending.len() {
+            let Some(slot) = self.active.iter().position(Option::is_none) else {
+                return;
+            };
+            let request = &self.pending[index];
+            let blocked = self.active.iter().flatten().any(|other| request.conflicts(other))
+                || self.pending.iter().take(index).any(|other| request.conflicts(other));
+            if blocked {
+                index += 1;
+                continue;
             }
+            self.active[slot] = self.pending.remove(index);
+            self.submit_slot(slot);
         }
     }
 
@@ -478,7 +432,7 @@ impl IoQueue {
         let entry = self.active[slot]
             .as_mut()
             .unwrap()
-            .entry(self.file.as_ref().unwrap().as_raw_fd(), slot);
+            .submission_entry(self.file.as_ref().unwrap().as_raw_fd(), slot);
         // SAFETY: all referenced resources are owned by the active slot through completion.
         // At most MAX_IN_FLIGHT_IO slots exist, each with at most one submitted or queued SQE.
         unsafe {

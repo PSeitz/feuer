@@ -2,15 +2,15 @@ use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
 
 use super::*;
 
-type Reply = oneshot::Receiver<io::Result<Bytes>>;
+type IoResultReceiver = oneshot::Receiver<io::Result<Bytes>>;
 
-fn request(driver: &IoQueue, operation: IoOperation, offset: u64, length: usize) -> (Request, Reply) {
+fn request(driver: &IoQueue, operation: IoOperation, offset: u64, length: usize) -> (IoRequest, IoResultReceiver) {
     let (reply, receive) = oneshot::channel();
     let class = usize::from(operation != IoOperation::Read);
-    let slots = driver.admission.requests[class].clone().try_acquire_owned().unwrap();
-    let bytes = driver.admission.buffers[class]
+    let request_permit = driver.admission.requests[class].clone().try_acquire_owned().unwrap();
+    let staging_permit = driver.admission.buffers[class]
         .clone()
-        .try_acquire_many_owned(buffer_charge(operation, offset, length))
+        .try_acquire_many_owned(staging_pages_for(operation, offset, length))
         .unwrap();
     let payload = if operation == IoOperation::Write {
         vec![0x99; length]
@@ -18,7 +18,15 @@ fn request(driver: &IoQueue, operation: IoOperation, offset: u64, length: usize)
         vec![]
     };
     (
-        Request::new(operation, offset, length, &payload, reply, (slots, bytes)).unwrap(),
+        IoRequest::new(
+            operation,
+            offset,
+            length,
+            &payload,
+            reply,
+            (request_permit, staging_permit),
+        )
+        .unwrap(),
         receive,
     )
 }
@@ -37,9 +45,9 @@ fn driver() -> IoQueue {
     assert!(fd >= 0);
     // SAFETY: fd was just created and has no other owner.
     let wake = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
-    let (_, receiver) = mpsc::sync_channel(REQUESTS); // disconnected: run() will drain and exit
+    let (_, receiver) = mpsc::sync_channel(MAX_ADMITTED_REQUESTS); // disconnected: run() will drain and exit
     IoQueue {
-        admission: Arc::new(Admission::new()),
+        admission: Arc::new(IoAdmissionBudgets::new()),
         ring: IoUring::new(MAX_IN_FLIGHT_IO as u32).unwrap(),
         file: Some(file),
         lock: Some(tempfile::tempfile().unwrap()),
@@ -54,13 +62,18 @@ fn driver() -> IoQueue {
 fn fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission() {
     let mut driver = driver();
     let mut replies = Vec::new();
-    for i in 0..REQUESTS {
+    for i in 0..MAX_ADMITTED_REQUESTS {
         let operation = if i % 2 == 0 {
             IoOperation::Read
         } else {
             IoOperation::Write
         };
-        let (request, reply) = request(&driver, operation, (i * ALIGN) as u64, ALIGN);
+        let (request, reply) = request(
+            &driver,
+            operation,
+            (i * DIRECT_IO_ALIGNMENT_BYTES) as u64,
+            DIRECT_IO_ALIGNMENT_BYTES,
+        );
         driver.pending.push_back(request);
         replies.push(reply);
     }
@@ -74,7 +87,7 @@ fn fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission() {
             .flatten()
             .filter(|r| r.operation == IoOperation::Read)
             .count(),
-        MAX_IN_FLIGHT_IO - WRITES_WITH_READS
+        MAX_IN_FLIGHT_IO / 2
     );
     assert_eq!(
         driver
@@ -83,9 +96,12 @@ fn fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission() {
             .flatten()
             .filter(|r| r.operation == IoOperation::Write)
             .count(),
-        WRITES_WITH_READS
+        MAX_IN_FLIGHT_IO / 2
     );
-    assert_eq!(driver.pending.len(), REQUESTS - MAX_IN_FLIGHT_IO);
+    for (index, request) in driver.active.iter().flatten().enumerate() {
+        assert_eq!(request.aligned_offset, (index * DIRECT_IO_ALIGNMENT_BYTES) as u64);
+    }
+    assert_eq!(driver.pending.len(), MAX_ADMITTED_REQUESTS - MAX_IN_FLIGHT_IO);
     assert_eq!(driver.ring.submission().len(), MAX_IN_FLIGHT_IO);
     driver.run().unwrap();
     for mut reply in replies {
@@ -104,7 +120,7 @@ fn fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission() {
             .admission
             .buffers
             .iter()
-            .all(|s| s.available_permits() == BUFFER_BYTES / 2 / ALIGN)
+            .all(|s| s.available_permits() == MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES)
     );
 }
 
@@ -119,11 +135,16 @@ fn complete_one(driver: &mut IoQueue) {
 }
 
 #[test]
-fn write_only_fills_the_ring_but_an_arriving_read_gets_the_next_slot() {
+fn write_only_fills_the_ring_but_an_older_queued_read_gets_the_next_slot() {
     let mut driver = driver();
     let mut replies = Vec::new();
     for i in 0..MAX_IN_FLIGHT_IO {
-        let (request, reply) = request(&driver, IoOperation::Write, (i * ALIGN) as u64, ALIGN);
+        let (request, reply) = request(
+            &driver,
+            IoOperation::Write,
+            (i * DIRECT_IO_ALIGNMENT_BYTES) as u64,
+            DIRECT_IO_ALIGNMENT_BYTES,
+        );
         driver.pending.push_back(request);
         replies.push(reply);
     }
@@ -133,15 +154,20 @@ fn write_only_fills_the_ring_but_an_arriving_read_gets_the_next_slot() {
     let (read, read_reply) = request(
         &driver,
         IoOperation::Read,
-        MAX_IO_CHUNK_BYTES as u64 - ALIGN as u64,
-        ALIGN,
+        MAX_IO_CHUNK_BYTES as u64 - DIRECT_IO_ALIGNMENT_BYTES as u64,
+        DIRECT_IO_ALIGNMENT_BYTES,
     );
     driver.pending.push_back(read);
     replies.push(read_reply);
     driver.schedule();
     assert_eq!(driver.pending.len(), 1); // active writes cannot be preempted
     complete_one(&mut driver);
-    let (write, reply) = request(&driver, IoOperation::Write, (MAX_IN_FLIGHT_IO * ALIGN) as u64, ALIGN);
+    let (write, reply) = request(
+        &driver,
+        IoOperation::Write,
+        (MAX_IN_FLIGHT_IO * DIRECT_IO_ALIGNMENT_BYTES) as u64,
+        DIRECT_IO_ALIGNMENT_BYTES,
+    );
     driver.pending.push_back(write);
     replies.push(reply);
     driver.schedule();
@@ -154,7 +180,7 @@ fn write_only_fills_the_ring_but_an_arriving_read_gets_the_next_slot() {
             .count(),
         1
     );
-    assert_eq!(driver.pending.len(), 1); // no replacement write while above the limit
+    assert_eq!(driver.pending.len(), 1); // the read was queued before the replacement write
     assert_eq!(driver.pending[0].operation, IoOperation::Write);
     driver.run().unwrap();
     for mut reply in replies {
@@ -163,21 +189,34 @@ fn write_only_fills_the_ring_but_an_arriving_read_gets_the_next_slot() {
 }
 
 #[test]
-fn read_demand_before_admission_throttles_writes_and_cancellation_restores_full_speed() {
+fn active_read_does_not_throttle_rmw_writes() {
     let mut driver = driver();
-    let mut replies = Vec::new();
-    for i in 0..MAX_IN_FLIGHT_IO {
-        // RMW's initial read still counts as a WRITE for scheduling purposes.
-        let (request, reply) = request(&driver, IoOperation::Write, (i * ALIGN + 1) as u64, 1);
+    let (read, reply) = request(&driver, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    driver.pending.push_back(read);
+    let mut replies = vec![reply];
+    driver.schedule();
+    for i in 1..=MAX_IN_FLIGHT_IO {
+        let (request, reply) = request(
+            &driver,
+            IoOperation::Write,
+            (i * DIRECT_IO_ALIGNMENT_BYTES + 1) as u64,
+            1,
+        );
         driver.pending.push_back(request);
         replies.push(reply);
     }
-    let read = ReadDemandGuard::new(&driver.admission, &driver.wake);
-    driver.schedule();
-    assert_eq!(driver.active.iter().flatten().count(), WRITES_WITH_READS);
-    drop(read); // canceled before it even acquired admission / allocated a buffer
     driver.schedule();
     assert_eq!(driver.active.iter().flatten().count(), MAX_IN_FLIGHT_IO);
+    assert_eq!(
+        driver
+            .active
+            .iter()
+            .flatten()
+            .filter(|r| r.operation == IoOperation::Write)
+            .count(),
+        MAX_IN_FLIGHT_IO - 1
+    );
+    assert_eq!(driver.pending.len(), 1);
     driver.run().unwrap();
     for mut reply in replies {
         reply.try_recv().unwrap().unwrap();
@@ -212,7 +251,7 @@ fn full_write_admission_and_buffers_leave_a_full_read_ring_available() {
             .admission
             .buffers
             .iter()
-            .all(|s| s.available_permits() == BUFFER_BYTES / 2 / ALIGN)
+            .all(|s| s.available_permits() == MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES)
     );
 }
 
@@ -223,9 +262,21 @@ fn overlap_blocks_only_the_requests_it_must() {
     for (operation, offset, length) in [
         (IoOperation::Write, 1, 1), // RMW holds the entire first page
         (IoOperation::Read, 2, 1),  // blocked despite disjoint logical bytes
-        (IoOperation::Write, ALIGN as u64, ALIGN),
-        (IoOperation::Read, 2 * ALIGN as u64, ALIGN),
-        (IoOperation::Write, 3 * ALIGN as u64, ALIGN), // independent writes can pass the blocked read
+        (
+            IoOperation::Write,
+            DIRECT_IO_ALIGNMENT_BYTES as u64,
+            DIRECT_IO_ALIGNMENT_BYTES,
+        ),
+        (
+            IoOperation::Read,
+            2 * DIRECT_IO_ALIGNMENT_BYTES as u64,
+            DIRECT_IO_ALIGNMENT_BYTES,
+        ),
+        (
+            IoOperation::Write,
+            3 * DIRECT_IO_ALIGNMENT_BYTES as u64,
+            DIRECT_IO_ALIGNMENT_BYTES,
+        ), // independent writes can pass the blocked read
     ] {
         let (request, reply) = request(&driver, operation, offset, length);
         driver.pending.push_back(request);
@@ -235,7 +286,7 @@ fn overlap_blocks_only_the_requests_it_must() {
     assert_eq!(driver.active.iter().flatten().count(), 4);
     assert_eq!(driver.pending.len(), 1);
     assert_eq!(driver.pending[0].operation, IoOperation::Read);
-    assert_eq!(driver.pending[0].offset, 0);
+    assert_eq!(driver.pending[0].aligned_offset, 0);
     driver.run().unwrap();
     for mut reply in replies {
         reply.try_recv().unwrap().unwrap();
@@ -245,7 +296,7 @@ fn overlap_blocks_only_the_requests_it_must() {
 #[test]
 fn discarded_queued_requests_never_reach_the_ring() {
     let mut driver = driver();
-    let (request, reply) = request(&driver, IoOperation::Write, 0, ALIGN);
+    let (request, reply) = request(&driver, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
     driver.pending.push_back(request);
     drop(reply);
     driver.schedule();
@@ -264,15 +315,15 @@ fn discarded_queued_requests_never_reach_the_ring() {
 #[test]
 fn completion_state_handles_short_io_errors_and_rmw() {
     let driver = driver();
-    let (mut read, _reply) = request(&driver, IoOperation::Read, 0, 2 * ALIGN);
+    let (mut read, _reply) = request(&driver, IoOperation::Read, 0, 2 * DIRECT_IO_ALIGNMENT_BYTES);
     assert!(read.complete(-libc::EINTR).unwrap());
-    assert_eq!(read.completed, 0);
-    assert!(read.complete(ALIGN as i32).unwrap());
-    assert!(!read.complete(ALIGN as i32).unwrap());
+    assert_eq!(read.completed_bytes, 0);
+    assert!(read.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+    assert!(!read.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
 
-    let (mut read, _reply) = request(&driver, IoOperation::Read, 0, ALIGN);
+    let (mut read, _reply) = request(&driver, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
     assert_eq!(read.complete(17).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
-    let (mut write, _reply) = request(&driver, IoOperation::Write, 0, ALIGN);
+    let (mut write, _reply) = request(&driver, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
     assert_eq!(write.complete(0).unwrap_err().kind(), io::ErrorKind::WriteZero);
     assert_eq!(
         write.complete(-libc::ENOSPC).unwrap_err().raw_os_error(),
@@ -280,19 +331,19 @@ fn completion_state_handles_short_io_errors_and_rmw() {
     );
 
     let (mut rmw, _reply) = request(&driver, IoOperation::Write, 1, 3);
-    rmw.io_buffer.bytes().fill(0x55);
-    assert!(rmw.complete(ALIGN as i32).unwrap());
+    rmw.io_buffer.as_mut_slice().fill(0x55);
+    assert!(rmw.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
     assert!(!rmw.reading);
-    assert_eq!(rmw.completed, 0);
-    assert_eq!(&rmw.io_buffer.bytes()[..5], &[0x55, 0x99, 0x99, 0x99, 0x55]);
-    assert!(!rmw.complete(ALIGN as i32).unwrap());
+    assert_eq!(rmw.completed_bytes, 0);
+    assert_eq!(&rmw.io_buffer.as_mut_slice()[..5], &[0x55, 0x99, 0x99, 0x99, 0x55]);
+    assert!(!rmw.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
 }
 
 #[test]
 fn byte_budget_bounds_rmw_requests_and_releases_on_cancel() {
     let driver = driver();
     let mut requests = Vec::new();
-    for _ in 0..BUFFER_BYTES / 2 / (2 * MAX_IO_CHUNK_BYTES) {
+    for _ in 0..MAX_STAGING_BUFFER_BYTES / 2 / (2 * MAX_IO_CHUNK_BYTES) {
         requests.push(request(&driver, IoOperation::Write, 1, MAX_IO_CHUNK_BYTES - 1));
     }
     assert_eq!(driver.admission.buffers[1].available_permits(), 0);
@@ -303,7 +354,7 @@ fn byte_budget_bounds_rmw_requests_and_releases_on_cancel() {
     drop(requests);
     assert_eq!(
         driver.admission.buffers[1].available_permits(),
-        BUFFER_BYTES / 2 / ALIGN
+        MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES
     );
     assert_eq!(driver.admission.requests[1].available_permits(), MAX_IN_FLIGHT_IO);
 }

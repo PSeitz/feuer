@@ -14,11 +14,12 @@ const MIB: usize = 1024 * 1024;
 const CAPACITY: u64 = 8 * 1024 * MIB as u64;
 const READ_SPACE: u64 = CAPACITY * 3 / 4;
 
+/// Completed I/O counts and sampled latencies for one measurement interval.
 #[derive(Default)]
-struct Counts {
+struct IoMeasurements {
     operations: u64,
     bytes: u64,
-    samples: Vec<u64>,
+    latency_samples_micros: Vec<u64>,
 }
 
 #[tokio::main(worker_threads = 4)]
@@ -75,7 +76,7 @@ async fn run(file: &DataFile, size: usize, readers: usize, writers: usize, secon
         tasks.push(tokio::spawn(async move {
             let reading = id < readers;
             let mut random = id as u64 + 1;
-            let mut counts = Counts::default();
+            let mut measurements = IoMeasurements::default();
             let mut write_offset = 0;
             let lane_size = (CAPACITY - READ_SPACE) / MIB as u64 / writers.max(1) as u64 * MIB as u64;
             while Instant::now() < deadline {
@@ -98,31 +99,38 @@ async fn run(file: &DataFile, size: usize, readers: usize, writers: usize, secon
                 };
                 let finished = Instant::now();
                 if started >= measure_start && finished <= deadline {
-                    counts.operations += 1;
-                    counts.bytes += bytes as u64;
+                    measurements.operations += 1;
+                    measurements.bytes += bytes as u64;
                     // Sample API latency (including queueing) at 1/32 to bound harness overhead.
-                    if reading && counts.operations.is_multiple_of(32) {
-                        counts.samples.push(finished.duration_since(started).as_micros() as u64);
+                    if reading && measurements.operations.is_multiple_of(32) {
+                        measurements
+                            .latency_samples_micros
+                            .push(finished.duration_since(started).as_micros() as u64);
                     }
                 }
             }
-            (reading, counts)
+            (reading, measurements)
         }));
     }
     tokio::time::sleep_until(measure_start.into()).await;
     let cpu_start = cpu_seconds();
-    let mut read = Counts::default();
-    let mut write = Counts::default();
+    let mut read = IoMeasurements::default();
+    let mut write = IoMeasurements::default();
     for task in tasks {
-        let (reading, counts) = task.await.unwrap();
+        let (reading, measurements) = task.await.unwrap();
         let total = if reading { &mut read } else { &mut write };
-        total.operations += counts.operations;
-        total.bytes += counts.bytes;
-        total.samples.extend(counts.samples);
+        total.operations += measurements.operations;
+        total.bytes += measurements.bytes;
+        total.latency_samples_micros.extend(measurements.latency_samples_micros);
     }
     let cpu = (cpu_seconds() - cpu_start) / measure_start.elapsed().as_secs_f64() * 100.0;
-    read.samples.sort_unstable();
-    let percentile = |p: usize| read.samples.get(read.samples.len() * p / 100).copied().unwrap_or(0);
+    read.latency_samples_micros.sort_unstable();
+    let percentile = |p: usize| {
+        read.latency_samples_micros
+            .get(read.latency_samples_micros.len() * p / 100)
+            .copied()
+            .unwrap_or(0)
+    };
     println!(
         "{size},{readers},{writers},{seconds},{:.1},{:.1},{:.0},{},{},{:.1}",
         read.bytes as f64 / seconds as f64 / 1e6,

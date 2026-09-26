@@ -98,15 +98,14 @@ This slice adds no disk lifecycle, public policy setting, or wall-clock timer.
 
 ### Direct-I/O foundation
 
-- One dedicated thread/ring overlaps up to 64 independent reads and writes. With no read demand, writes
-  may fill the ring; under read demand, the scheduler allows four outstanding writes and gives remaining
-  slots to reads. Existing writes cannot be preempted and must drain before this limit takes effect.
+- One dedicated thread/ring overlaps up to 64 independent reads and writes. Nonconflicting requests
+  are scheduled in arrival order without a read-triggered write throttle; either class can fill the ring.
 - Admission independently reserves 64 requests and 64 MiB of staging buffers for each of reads and
-  writes, so a write backlog cannot block read admission. Reads signal demand before admission;
-  cancellation removes that demand. Chunks are at most 1 MiB; RMW also charges its staging payload.
-  Caller inputs and read-result allocations are outside the 128-MiB total staging budget.
-- Four write slots is an initial policy, not a proven performance optimum. Overlapping envelopes retain
-  ordering even when that makes a read wait for an earlier write.
+  writes, so a write backlog cannot block read admission. Chunks are at most 1 MiB; RMW also charges
+  its staging payload. Caller inputs and read-result allocations are outside the 128-MiB total staging budget.
+- Small-read-heavy workloads may warrant future write throttling; the
+  [SSD benchmarks](benchmarks/ssd/ssd-concurrent-read-write.md) show mixed-size reads can tolerate moderate
+  concurrent writes. Overlapping envelopes retain ordering even when a read must wait for an earlier write.
 - The driver wakes for new requests while earlier I/O is outstanding, without polling or registered buffers.
 - Unaligned writes use read-modify-write; intersecting physical envelopes serialize, including readers.
 - No durability-flush operations or global scheduling barriers. Multi-chunk calls are not atomic;

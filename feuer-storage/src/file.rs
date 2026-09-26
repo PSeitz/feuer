@@ -18,17 +18,18 @@ use crate::{Error, IoMetrics, IoOperation, Result, uring};
 const DATA_FILE_NAME: &str = "data";
 const LOCK_FILE_NAME: &str = ".feuer.lock";
 
-struct Inner {
-    queue_access: uring::IoQueueAccess,
+/// Queue, path, and capacity state shared by cloned data-file handles.
+struct DataFileState {
+    queue: uring::IoQueueHandle,
     data_path: PathBuf,
     capacity: u64,
 }
 
 /// One exclusively owned, fixed-capacity Linux direct-I/O payload file.
 ///
-/// A dedicated io_uring thread overlaps up to 64 operations. Writes can fill the
-/// ring when there are no reads; under read demand, new writes are limited to
-/// four outstanding slots. Already-submitted writes must drain, not preempt.
+/// A dedicated io_uring thread overlaps up to 64 operations, scheduling requests
+/// in arrival order unless they conflict with earlier I/O. Reads do not throttle
+/// writes; either class can fill the ring.
 /// Admission reserves 64 requests and 64 MiB of staging buffers for each of
 /// reads and writes. Caller inputs and read-result allocations are outside
 /// this staging-buffer budget.
@@ -43,14 +44,14 @@ struct Inner {
 /// which can block. Returned Bytes never retain the file or queue.
 #[derive(Clone)]
 pub struct DataFile {
-    inner: Arc<Inner>,
+    state: Arc<DataFileState>,
     metrics: Arc<IoMetrics>,
 }
 
 impl fmt::Debug for DataFile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DataFile")
-            .field("capacity", &self.inner.capacity)
+            .field("capacity", &self.state.capacity)
             .finish_non_exhaustive()
     }
 }
@@ -74,25 +75,25 @@ impl DataFile {
             duration_seconds = field::Empty,
         );
         let result = async {
-            let inner = runtime
-                .spawn_blocking(move || open_inner(directory, capacity))
+            let state = runtime
+                .spawn_blocking(move || open_file_state(directory, capacity))
                 .await
                 .map_err(|source| Error::Task {
                     operation: IoOperation::OpenDataFile,
                     source: Box::new(source),
                 })??;
             // Exercise an actual aligned direct read before claiming open succeeded.
-            inner
-                .queue_access
-                .execute(IoOperation::Read, 0, uring::ALIGN, &[])
+            state
+                .queue
+                .execute(IoOperation::Read, 0, uring::DIRECT_IO_ALIGNMENT_BYTES, &[])
                 .await
                 .map_err(|source| Error::Io {
                     operation: IoOperation::OpenDataFile,
-                    path: inner.data_path.clone(),
+                    path: state.data_path.clone(),
                     source,
                 })?;
             Ok(Self {
-                inner: Arc::new(inner),
+                state: Arc::new(state),
                 metrics,
             })
         }
@@ -104,7 +105,7 @@ impl DataFile {
 
     /// Returns the fixed physical capacity in bytes.
     pub fn capacity(&self) -> u64 {
-        self.inner.capacity
+        self.state.capacity
     }
 
     /// Reads exactly the requested bytes with at most two partial alignment pages
@@ -149,47 +150,51 @@ impl DataFile {
 
     async fn execute_inner(&self, operation: IoOperation, offset: u64, length: usize, payload: &[u8]) -> Result<Bytes> {
         let length_u64 = u64::try_from(length).map_err(|_| Error::LengthOverflow { operation, length })?;
-        check_range(operation, offset, length_u64, self.inner.capacity)?;
+        check_range(operation, offset, length_u64, self.state.capacity)?;
         let io_error = |source| Error::Io {
             operation,
-            path: self.inner.data_path.clone(),
+            path: self.state.data_path.clone(),
             source,
         };
         let mut result = Vec::new();
-        if operation == IoOperation::Read && length > uring::MAX_IO_CHUNK_BYTES - offset as usize % uring::ALIGN {
+        if operation == IoOperation::Read
+            && length > uring::MAX_IO_CHUNK_BYTES - offset as usize % uring::DIRECT_IO_ALIGNMENT_BYTES
+        {
             result
                 .try_reserve_exact(length)
                 .map_err(|source| Error::Allocation { length, source })?;
         }
-        let mut completed = 0;
-        while completed < length {
-            let at = offset + completed as u64;
-            let chunk = (length - completed).min(uring::MAX_IO_CHUNK_BYTES - at as usize % uring::ALIGN);
+        let mut completed_bytes = 0;
+        while completed_bytes < length {
+            let chunk_offset = offset + completed_bytes as u64;
+            let chunk_length = (length - completed_bytes)
+                .min(uring::MAX_IO_CHUNK_BYTES - chunk_offset as usize % uring::DIRECT_IO_ALIGNMENT_BYTES);
             let input = if operation == IoOperation::Write {
-                &payload[completed..completed + chunk]
+                &payload[completed_bytes..completed_bytes + chunk_length]
             } else {
                 &[]
             };
             let bytes = self
-                .inner
-                .queue_access
-                .execute(operation, at, chunk, input)
+                .state
+                .queue
+                .execute(operation, chunk_offset, chunk_length, input)
                 .await
                 .map_err(io_error)?;
             if operation == IoOperation::Read {
-                if chunk == length {
+                if chunk_length == length {
                     return Ok(bytes);
                 }
                 result.extend_from_slice(&bytes);
             }
-            completed += chunk;
+            completed_bytes += chunk_length;
         }
         Ok(Bytes::from(result))
     }
 }
 
-fn open_inner(directory: PathBuf, capacity: u64) -> Result<Inner> {
-    if capacity == 0 || capacity > i64::MAX as u64 || !capacity.is_multiple_of(uring::ALIGN as u64) {
+fn open_file_state(directory: PathBuf, capacity: u64) -> Result<DataFileState> {
+    if capacity == 0 || capacity > i64::MAX as u64 || !capacity.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64)
+    {
         return Err(Error::InvalidCapacity);
     }
     create_dir_all(&directory).map_err(|source| Error::Io {
@@ -240,16 +245,16 @@ fn open_inner(directory: PathBuf, capacity: u64) -> Result<Inner> {
     }
     check_direct_alignment(&file).map_err(|source| error(IoOperation::InspectDataFile, source))?;
     // Construct the ring before resizing, so an unavailable io_uring does not resize an existing cache.
-    let resize = file
+    let resize_file = file
         .try_clone()
         .map_err(|source| error(IoOperation::OpenDataFile, source))?;
-    let queue_access =
-        uring::IoQueueAccess::new(file, lock_file).map_err(|source| error(IoOperation::OpenDataFile, source))?;
-    resize
+    let queue =
+        uring::IoQueueHandle::new(file, lock_file).map_err(|source| error(IoOperation::OpenDataFile, source))?;
+    resize_file
         .set_len(capacity)
         .map_err(|source| error(IoOperation::ResizeDataFile, source))?;
-    Ok(Inner {
-        queue_access,
+    Ok(DataFileState {
+        queue,
         data_path,
         capacity,
     })
@@ -275,8 +280,8 @@ fn check_direct_alignment(file: &File) -> io::Result<()> {
     if stat.stx_mask & libc::STATX_DIOALIGN == 0
         || stat.stx_dio_mem_align == 0
         || stat.stx_dio_offset_align == 0
-        || !uring::ALIGN.is_multiple_of(stat.stx_dio_mem_align as usize)
-        || !uring::ALIGN.is_multiple_of(stat.stx_dio_offset_align as usize)
+        || !uring::DIRECT_IO_ALIGNMENT_BYTES.is_multiple_of(stat.stx_dio_mem_align as usize)
+        || !uring::DIRECT_IO_ALIGNMENT_BYTES.is_multiple_of(stat.stx_dio_offset_align as usize)
     {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
