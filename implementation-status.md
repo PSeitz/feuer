@@ -11,7 +11,7 @@
 | `feuer-memory` | Sharded soft-capacity covering-range index, bounded ageable exact evidence, sampled retrieval-value-density retention, short compaction grace, pressure trimming of the selected victim, payload accounting, and metrics | Wall-clock evidence aging, later tier-aware disk-state inputs, and further trace-independent policy tuning |
 | Memory/disk orchestration | Public callback-to-memory path, including independent misses and redundant-population suppression | Best-effort bounded disk scheduling, cancellation on memory eviction, active-write generations, disk publication, and queue flushing |
 | `feuer-storage` | Exclusively locked fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, arbitrary-range I/O, tracing, and metrics | Buffered mode, range lookup, allocation, integrity validation, persistent metadata, and recovery |
-| Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, repository metadata, and a documented [memory-only comparison gate](benchmarks/memory/results.md) against pinned native Foyer | End-to-end acceptance tests, crash tests, examples, and disk/concurrent benchmarks |
+| Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, repository metadata, and a documented [memory-only comparison gate](benchmarks/memory/results.md) against native Foyer S3FIFO and a local exact-key cost-aware Foyer policy | End-to-end acceptance tests, crash tests, examples, and disk/concurrent benchmarks |
 
 The public cache currently constructs the in-memory path only; it does not open or modify the configured disk directory before the disk lifecycle exists.
 
@@ -66,9 +66,12 @@ This slice introduces no fill context, pre-fetch reservation, internal miss sing
   coalesces same-object ranges whose gaps are below the 10,000,000-byte source-cost break-even distance.
   Downloads default to whole splits below 8 MiB and exact ranges otherwise; environment variables can change
   the whole-split threshold and coalescing distance.
-- Ran the gate at 256, 512, 1,024, 2,048, 4,096, 8,192, 16,384, and 32,768 MiB with 16 shards against pinned
-  native Foyer. The [configuration and results](benchmarks/memory/results.md) report cache-hit and source-cost
-  hit rates, end-of-run used-memory accounting, and throughput, exposing further policy and compaction tuning
+- Ran the gate at 256, 512, 1,024, 2,048, 4,096, 8,192, 16,384, and 32,768 MiB with 16 shards against native
+  Foyer S3FIFO, then reran the exact-key slice against a local Foyer cost-aware policy based on the same revision.
+  The exact-key policy uses an online residence-time access-rate estimate rather than inheriting Feuer's
+  provisional 32,768-access evidence lifetime. The [configuration and results](benchmarks/memory/results.md)
+  report cache-hit and source-cost hit rates,
+  end-of-run used-memory accounting, and throughput, exposing further policy and compaction tuning
   opportunities.
 
 This slice adds no disk queue, storage lifecycle, or public policy configuration.

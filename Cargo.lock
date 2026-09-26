@@ -385,7 +385,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 [[package]]
 name = "foyer-common"
 version = "0.23.0-dev"
-source = "git+https://github.com/foyer-rs/foyer?rev=165cde3d4e638aaf2680384c02f57222b40be128#165cde3d4e638aaf2680384c02f57222b40be128"
+source = "git+https://github.com/PSeitz/foyer?rev=14c2d88b9d7dd2135bfc723d0967debb59532b4b#14c2d88b9d7dd2135bfc723d0967debb59532b4b"
 dependencies = [
  "anyhow",
  "bytes",
@@ -409,7 +409,7 @@ dependencies = [
 [[package]]
 name = "foyer-memory"
 version = "0.23.0-dev"
-source = "git+https://github.com/foyer-rs/foyer?rev=165cde3d4e638aaf2680384c02f57222b40be128#165cde3d4e638aaf2680384c02f57222b40be128"
+source = "git+https://github.com/PSeitz/foyer?rev=14c2d88b9d7dd2135bfc723d0967debb59532b4b#14c2d88b9d7dd2135bfc723d0967debb59532b4b"
 dependencies = [
  "anyhow",
  "bitflags",
@@ -433,7 +433,7 @@ dependencies = [
 [[package]]
 name = "foyer-tokio"
 version = "0.23.0-dev"
-source = "git+https://github.com/foyer-rs/foyer?rev=165cde3d4e638aaf2680384c02f57222b40be128#165cde3d4e638aaf2680384c02f57222b40be128"
+source = "git+https://github.com/PSeitz/foyer?rev=14c2d88b9d7dd2135bfc723d0967debb59532b4b#14c2d88b9d7dd2135bfc723d0967debb59532b4b"
 dependencies = [
  "tokio",
 ]

@@ -1,8 +1,10 @@
 # Feuer memory benchmark
 
-This package compares the current `feuer-memory` cache with Foyer revision
-`165cde3d4e638aaf2680384c02f57222b40be128` in a single-threaded,
-memory-only replay. The checked-in gate run is documented in
+This package compares the current `feuer-memory` cache with the
+[`PSeitz/foyer`](https://github.com/PSeitz/foyer) fork, pinned to revision
+`14c2d88b9d7dd2135bfc723d0967debb59532b4b`, in a single-threaded,
+memory-only replay. The fork includes the exact-key cost-aware policy used by
+this benchmark; no local Foyer checkout is required. The checked-in gate run is documented in
 [`results.md`](results.md).
 
 ## Input
@@ -37,9 +39,19 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
   application expands before lookup and uses that exact expanded range as the
   native Foyer key. Distinct requests therefore hit when they expand to exactly
   the same bytes; unlike Feuer, a merely containing cached range is not enough.
+- `foyer-cost-aware-exact-key` and `foyer-cost-aware-expanded-key`: use the same
+  native exact keys as the two Foyer baselines, but replace S3FIFO with the
+  fork's `CostAwareConfig`. The policy estimates an exact key's access rate as
+  its successful access count divided by its shard-clock residence time, then
+  weights that rate by `10,000,000 + entry weight`. At pressure, it evicts the
+  lowest estimated retrieval cost saved per retained byte from a rotating
+  sample of 64 entries. The estimator uses only a count and admission clock per
+  entry; idle value decays continuously instead of crossing a fixed lifetime
+  threshold. It has no containment lookup, range evidence, or compaction.
 
 All use payload length as the capacity weight. Each run gives every engine the
-same requested shard count; Foyer uses default `S3FifoConfig`. Every engine starts empty. By
+same requested shard count; the native Foyer baselines use default
+`S3FifoConfig`. Every engine starts empty. By
 default it executes one measured trace pass; `--warmup-iterations N` first
 executes `N` untimed passes against that same cache, preserving the resulting
 cache and policy state for the measured pass.
@@ -58,7 +70,14 @@ cargo run --release -p feuer-memory-bench -- \
 ```
 
 The default output is a human-readable table. Add `--csv` for machine-readable
-output.
+output. To isolate the no-range, exact-key comparison:
+
+```bash
+cargo run --release -p feuer-memory-bench -- \
+  --capacity 256MiB,512MiB,1GiB,2GiB,4GiB,8GiB,16GiB,32GiB \
+  --shards 16 \
+  --downloader exact
+```
 
 `COALESCING_DISTANCE_BYTES` and `WHOLE_SPLIT_THRESHOLD_BYTES` override the
 default 10-MB coalescing distance and 8-MiB whole-split threshold. Both accept
@@ -104,7 +123,7 @@ negative source-cost savings when its extra transfer costs exceed the cache's
 savings. Payload values share one immutable benchmark source allocation, so
 `used_payload_bytes` is cache accounting rather than a process-RSS
 measurement. Foyer's internal record and allocator metadata is not exposed by
-the pinned API and is excluded.
+the benchmarked API and is excluded.
 
 This is a policy replay, not an end-to-end latency benchmark. It simulates
 coalescing deterministically but does not measure real scheduling, concurrent

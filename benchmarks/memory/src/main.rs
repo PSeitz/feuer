@@ -1,4 +1,4 @@
-//! Controlled memory-tier replay against Feuer and a pinned Foyer revision.
+//! Controlled memory-tier replay against Feuer and a pinned Foyer fork.
 
 use std::{
     collections::HashMap,
@@ -12,10 +12,12 @@ use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use feuer_memory::MemoryCache;
 use feuer_types::{ByteRange, Download, ObjectKey};
-use foyer_memory::{Cache as FoyerCache, CacheBuilder, S3FifoConfig};
+use foyer_memory::{Cache as FoyerCache, CacheBuilder, CostAwareConfig, S3FifoConfig};
 
-const PINNED_FOYER_REVISION: &str = "165cde3d4e638aaf2680384c02f57222b40be128";
+const PINNED_FOYER_REVISION: &str = "14c2d88b9d7dd2135bfc723d0967debb59532b4b";
 const SOURCE_FIXED_EQUIVALENT_BYTES: u64 = 10_000_000;
+/// Per-eviction comparison budget, matched to Feuer's candidate sample.
+const FOYER_COST_SAMPLE_SIZE: usize = 64;
 const TRACE_FILE: &str = "access_pattern.ndjson";
 const COALESCING_DISTANCE_ENV: &str = "COALESCING_DISTANCE_BYTES";
 const WHOLE_SPLIT_THRESHOLD_ENV: &str = "WHOLE_SPLIT_THRESHOLD_BYTES";
@@ -25,7 +27,7 @@ const COALESCING_WINDOW_MILLIS: u64 = 5;
 const CSV_HEADER: &str = "workload,downloader,shards,capacity_bytes,engine,requests,requested_bytes,cache_hits,hit_bytes,cache_hit_pct,byte_hit_pct,source_cost_hit_pct,source_gets,source_bytes,used_payload_bytes,used_vs_target_pct,elapsed_ms,operations_per_second";
 
 #[derive(Debug, Parser)]
-#[command(about = "Replay the captured trace against Feuer and pinned Foyer")]
+#[command(about = "Replay the captured trace against Feuer and a pinned Foyer fork")]
 struct Args {
     /// Soft payload capacities. Repeat the flag or separate values with commas.
     #[arg(
@@ -136,7 +138,8 @@ struct Workload {
     download_config: DownloadConfig,
 }
 
-trait Engine {
+/// A cache populated and queried while replaying a workload.
+trait ReplayCache {
     fn name(&self) -> &'static str;
 
     /// Looks up an access using the range this downloader would fetch on a miss.
@@ -147,11 +150,12 @@ trait Engine {
     fn used_payload_bytes(&self) -> u64;
 }
 
-struct FeuerEngine {
+/// Feuer's memory cache used for workload replay.
+struct FeuerReplayCache {
     cache: MemoryCache,
 }
 
-impl FeuerEngine {
+impl FeuerReplayCache {
     fn new(capacity: usize, shards: usize) -> Self {
         Self {
             cache: MemoryCache::with_shards_for_benchmark(capacity as u64, shards),
@@ -159,7 +163,7 @@ impl FeuerEngine {
     }
 }
 
-impl Engine for FeuerEngine {
+impl ReplayCache for FeuerReplayCache {
     fn name(&self) -> &'static str {
         "feuer-value-density"
     }
@@ -202,13 +206,6 @@ enum NativeFoyerKeyMode {
 }
 
 impl NativeFoyerKeyMode {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::ExactRequest => "foyer-native-exact-key",
-            Self::ExpandedDownload => "foyer-native-expanded-key",
-        }
-    }
-
     const fn range(self, access: &Access, downloaded: ByteRange) -> ByteRange {
         match self {
             Self::ExactRequest => access.requested,
@@ -217,16 +214,36 @@ impl NativeFoyerKeyMode {
     }
 }
 
-struct NativeFoyerEngine {
-    cache: FoyerCache<NativeFoyerKey, NativeFoyerValue>,
-    key_mode: NativeFoyerKeyMode,
+#[derive(Clone, Copy)]
+enum NativeFoyerPolicy {
+    S3Fifo,
+    CostAware,
 }
 
-impl NativeFoyerEngine {
-    fn new(capacity: usize, shards: usize, key_mode: NativeFoyerKeyMode) -> Self {
+impl NativeFoyerPolicy {
+    const fn engine_name(self, key_mode: NativeFoyerKeyMode) -> &'static str {
+        match (self, key_mode) {
+            (Self::S3Fifo, NativeFoyerKeyMode::ExactRequest) => "foyer-native-exact-key",
+            (Self::S3Fifo, NativeFoyerKeyMode::ExpandedDownload) => "foyer-native-expanded-key",
+            (Self::CostAware, NativeFoyerKeyMode::ExactRequest) => "foyer-cost-aware-exact-key",
+            (Self::CostAware, NativeFoyerKeyMode::ExpandedDownload) => "foyer-cost-aware-expanded-key",
+        }
+    }
+}
+
+/// Foyer's native key-value cache used for workload replay.
+struct FoyerReplayCache {
+    cache: FoyerCache<NativeFoyerKey, NativeFoyerValue>,
+    key_mode: NativeFoyerKeyMode,
+    policy: NativeFoyerPolicy,
+}
+
+impl FoyerReplayCache {
+    fn new(capacity: usize, shards: usize, key_mode: NativeFoyerKeyMode, policy: NativeFoyerPolicy) -> Self {
         Self {
-            cache: foyer_cache(capacity, shards),
+            cache: foyer_cache(capacity, shards, policy),
             key_mode,
+            policy,
         }
     }
 
@@ -235,9 +252,9 @@ impl NativeFoyerEngine {
     }
 }
 
-impl Engine for NativeFoyerEngine {
+impl ReplayCache for FoyerReplayCache {
     fn name(&self) -> &'static str {
-        self.key_mode.name()
+        self.policy.engine_name(self.key_mode)
     }
 
     fn get(&mut self, access: &Access, downloaded: ByteRange) -> bool {
@@ -263,12 +280,23 @@ impl Engine for NativeFoyerEngine {
     }
 }
 
-fn foyer_cache(capacity: usize, shards: usize) -> FoyerCache<NativeFoyerKey, NativeFoyerValue> {
-    CacheBuilder::new(capacity)
+fn foyer_cache(
+    capacity: usize,
+    shards: usize,
+    policy: NativeFoyerPolicy,
+) -> FoyerCache<NativeFoyerKey, NativeFoyerValue> {
+    let builder = CacheBuilder::new(capacity)
         .with_shards(shards)
-        .with_eviction_config(S3FifoConfig::default())
-        .with_weighter(|_key: &NativeFoyerKey, value: &NativeFoyerValue| value.payload.len())
-        .build()
+        .with_weighter(|_key: &NativeFoyerKey, value: &NativeFoyerValue| value.payload.len());
+    match policy {
+        NativeFoyerPolicy::S3Fifo => builder.with_eviction_config(S3FifoConfig::default()).build(),
+        NativeFoyerPolicy::CostAware => builder
+            .with_eviction_config(CostAwareConfig {
+                fixed_retrieval_cost: SOURCE_FIXED_EQUIVALENT_BYTES,
+                sample_size: FOYER_COST_SAMPLE_SIZE,
+            })
+            .build(),
+    }
 }
 
 #[derive(Default)]
@@ -333,7 +361,7 @@ fn main() -> Result<(), String> {
 
     if args.csv {
         eprintln!(
-            "foyer_revision={PINNED_FOYER_REVISION} trace={TRACE_FILE} shards={:?} downloaders={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
+            "foyer_revision={PINNED_FOYER_REVISION} foyer_source=https://github.com/PSeitz/foyer foyer_cost_estimator=residence_access_rate foyer_cost_fixed_retrieval={SOURCE_FIXED_EQUIVALENT_BYTES} foyer_cost_sample_size={FOYER_COST_SAMPLE_SIZE} trace={TRACE_FILE} shards={:?} downloaders={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
             args.shards,
             args.downloaders,
             args.warmup_iterations,
@@ -352,22 +380,26 @@ fn main() -> Result<(), String> {
 
         for &shards in &args.shards {
             for &capacity in &args.capacities {
-                let mut engines: Vec<Box<dyn Engine>> = vec![Box::new(FeuerEngine::new(capacity, shards))];
-                engines.push(Box::new(NativeFoyerEngine::new(
-                    capacity,
-                    shards,
-                    NativeFoyerKeyMode::ExactRequest,
-                )));
-                if matches!(downloader, DownloadPolicy::Expanded) {
-                    engines.push(Box::new(NativeFoyerEngine::new(
+                let mut caches: Vec<Box<dyn ReplayCache>> = vec![Box::new(FeuerReplayCache::new(capacity, shards))];
+                for policy in [NativeFoyerPolicy::S3Fifo, NativeFoyerPolicy::CostAware] {
+                    caches.push(Box::new(FoyerReplayCache::new(
                         capacity,
                         shards,
-                        NativeFoyerKeyMode::ExpandedDownload,
+                        NativeFoyerKeyMode::ExactRequest,
+                        policy,
                     )));
+                    if matches!(downloader, DownloadPolicy::Expanded) {
+                        caches.push(Box::new(FoyerReplayCache::new(
+                            capacity,
+                            shards,
+                            NativeFoyerKeyMode::ExpandedDownload,
+                            policy,
+                        )));
+                    }
                 }
-                for engine in engines {
-                    let report = run_engine(
-                        engine,
+                for cache in caches {
+                    let report = replay_cache(
+                        cache,
                         &workload,
                         downloader,
                         shards,
@@ -412,8 +444,8 @@ fn trace_workload(args: &Args, download_config: DownloadConfig) -> Result<Worklo
     })
 }
 
-fn run_engine(
-    mut engine: Box<dyn Engine>,
+fn replay_cache(
+    mut cache: Box<dyn ReplayCache>,
     workload: &Workload,
     downloader: DownloadPolicy,
     shards: usize,
@@ -423,12 +455,12 @@ fn run_engine(
 ) -> Result<Report, String> {
     for _ in 0..warmup_iterations {
         let mut warmup_traffic = Traffic::default();
-        execute_pass(&mut *engine, workload, downloader, source_payload, &mut warmup_traffic)?;
+        execute_pass(&mut *cache, workload, downloader, source_payload, &mut warmup_traffic)?;
     }
 
     let mut traffic = Traffic::default();
     let started = Instant::now();
-    execute_pass(&mut *engine, workload, downloader, source_payload, &mut traffic)?;
+    execute_pass(&mut *cache, workload, downloader, source_payload, &mut traffic)?;
     let elapsed = started.elapsed();
 
     Ok(Report {
@@ -436,9 +468,9 @@ fn run_engine(
         downloader: downloader.name(),
         shards,
         capacity,
-        engine: engine.name(),
+        engine: cache.name(),
         traffic,
-        used_payload_bytes: engine.used_payload_bytes(),
+        used_payload_bytes: cache.used_payload_bytes(),
         elapsed,
     })
 }
@@ -527,8 +559,8 @@ fn max_download_len(workload: &Workload, downloader: DownloadPolicy) -> u64 {
     }
 }
 
-fn execute_pass<E: Engine + ?Sized>(
-    engine: &mut E,
+fn execute_pass<C: ReplayCache + ?Sized>(
+    cache: &mut C,
     workload: &Workload,
     downloader: DownloadPolicy,
     source_payload: &Bytes,
@@ -539,14 +571,14 @@ fn execute_pass<E: Engine + ?Sized>(
             DownloadPolicy::Expanded => workload.expanded_downloads[index],
             DownloadPolicy::Exact => access.downloaded_range(DownloadPolicy::Exact, workload.download_config),
         };
-        let hit = engine.get(access, downloaded);
+        let hit = cache.get(access, downloaded);
         record_request(traffic, access, hit);
         if hit {
             continue;
         }
 
         let payload = source_payload_slice(source_payload, downloaded)?;
-        engine.populate(access, downloaded, payload)?;
+        cache.populate(access, downloaded, payload)?;
         traffic.source_requests += 1;
         traffic.source_bytes += downloaded.len();
     }
@@ -629,7 +661,7 @@ fn print_human_header(args: &Args, workload: &Workload) {
         format_bytes(workload.download_config.whole_split_threshold_bytes),
     );
     println!("Source model: 125 ms per GET + transfer at 80 MB/s");
-    println!("Foyer revision: {PINNED_FOYER_REVISION}");
+    println!("Foyer fork revision: {PINNED_FOYER_REVISION}");
     println!();
     println!(
         "Capacity   Downloader Engine                   Request hit Source-cost hit Source GETs Source bytes         Used   Throughput"
@@ -655,8 +687,10 @@ fn print_human_report(report: &Report) {
 fn human_engine_name(engine: &str) -> &str {
     match engine {
         "feuer-value-density" => "Feuer",
-        "foyer-native-exact-key" => "Foyer",
-        "foyer-native-expanded-key" => "Foyer (expanded key)",
+        "foyer-native-exact-key" => "Foyer S3FIFO",
+        "foyer-native-expanded-key" => "Foyer S3FIFO (expanded)",
+        "foyer-cost-aware-exact-key" => "Foyer cost-aware",
+        "foyer-cost-aware-expanded-key" => "Foyer cost-aware (expanded)",
         other => other,
     }
 }
@@ -897,11 +931,11 @@ fn parse_byte_count(value: &str) -> Result<u128, String> {
 mod tests {
     use super::*;
 
-    struct WarmupEngine {
+    struct WarmupTestCache {
         populated: bool,
     }
 
-    impl Engine for WarmupEngine {
+    impl ReplayCache for WarmupTestCache {
         fn name(&self) -> &'static str {
             "warmup-test"
         }
@@ -921,11 +955,11 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct RangeEngine {
+    struct RangeTestCache {
         entries: Vec<(ObjectKey, ByteRange)>,
     }
 
-    impl Engine for RangeEngine {
+    impl ReplayCache for RangeTestCache {
         fn name(&self) -> &'static str {
             "range-test"
         }
@@ -963,8 +997,8 @@ mod tests {
                 whole_split_threshold_bytes: DEFAULT_WHOLE_SPLIT_THRESHOLD_BYTES,
             },
         };
-        let report = run_engine(
-            Box::new(WarmupEngine { populated: false }),
+        let report = replay_cache(
+            Box::new(WarmupTestCache { populated: false }),
             &workload,
             DownloadPolicy::Exact,
             1,
@@ -992,14 +1026,20 @@ mod tests {
         let second = access(12, 14);
         let expanded = ByteRange::new(0, 20).unwrap();
 
-        let mut expanded_key = NativeFoyerEngine::new(1 << 20, 1, NativeFoyerKeyMode::ExpandedDownload);
+        let mut expanded_key = FoyerReplayCache::new(
+            1 << 20,
+            1,
+            NativeFoyerKeyMode::ExpandedDownload,
+            NativeFoyerPolicy::S3Fifo,
+        );
         assert!(!expanded_key.get(&first, expanded));
         expanded_key
             .populate(&first, expanded, Bytes::from(vec![0; 20]))
             .unwrap();
         assert!(expanded_key.get(&second, expanded));
 
-        let mut exact_key = NativeFoyerEngine::new(1 << 20, 1, NativeFoyerKeyMode::ExactRequest);
+        let mut exact_key =
+            FoyerReplayCache::new(1 << 20, 1, NativeFoyerKeyMode::ExactRequest, NativeFoyerPolicy::S3Fifo);
         exact_key.populate(&first, expanded, Bytes::from(vec![0; 20])).unwrap();
         assert!(!exact_key.get(&second, expanded));
     }
@@ -1031,8 +1071,8 @@ mod tests {
         };
         assert_eq!(&workload.expanded_downloads[..3], &[ByteRange::new(0, 30).unwrap(); 3]);
 
-        let report = run_engine(
-            Box::new(RangeEngine::default()),
+        let report = replay_cache(
+            Box::new(RangeTestCache::default()),
             &workload,
             DownloadPolicy::Expanded,
             1,
