@@ -3,7 +3,7 @@ use feuer_types::ByteRange;
 /// Copy only when the plan releases at least one quarter of its source.
 const MIN_RECLAIM_DIVISOR: u64 = 4;
 
-/// A pure replacement plan for one retained downloaded extent.
+/// A pure replacement plan for one cached downloaded range.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CompactionPlan {
     source: ByteRange,
@@ -25,7 +25,7 @@ impl CompactionPlan {
     }
 }
 
-/// Projects exact requested ranges onto one downloaded extent without mutation.
+/// Projects exact requested ranges onto one downloaded range without mutation.
 ///
 /// Only requests fully covered by `source` can give it retention value.
 /// Overlapping and adjacent requests are grouped, but gaps remain unretained.

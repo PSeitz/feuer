@@ -5,7 +5,7 @@ use feuer_types::{ByteRange, Download, ObjectKey};
 
 use super::{
     MemoryCache,
-    evidence::{EVIDENCE_LIFETIME_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY},
+    access_history::{MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY},
     shard::{AdmissionStep, COMPACTION_GRACE_ACCESSES},
     shard_capacity_for,
 };
@@ -33,8 +33,8 @@ fn accessed_ranges(cache: &MemoryCache, key: &ObjectKey) -> Vec<ByteRange> {
     cache.shards[cache.shard_index(key)].lock().accessed_ranges(key)
 }
 
-fn access_evidence_len(cache: &MemoryCache, key: &ObjectKey) -> usize {
-    cache.shards[cache.shard_index(key)].lock().access_evidence_len(key)
+fn access_history_len(cache: &MemoryCache, key: &ObjectKey) -> usize {
+    cache.shards[cache.shard_index(key)].lock().access_history_len(key)
 }
 
 fn candidate_count(cache: &MemoryCache) -> usize {
@@ -258,7 +258,7 @@ fn accessed_ranges_survive_downloaded_range_replacement() {
 }
 
 #[test]
-fn access_evidence_survives_same_object_eviction_during_replacement() {
+fn access_history_survives_same_object_eviction_during_replacement() {
     let cache = cache(10);
     let key = ObjectKey::from("object");
     populate(&cache, key.clone(), download(range(0, 4), Bytes::from_static(b"abcd")));
@@ -285,7 +285,7 @@ fn access_evidence_survives_same_object_eviction_during_replacement() {
 }
 
 #[test]
-fn access_evidence_is_bounded_and_preserves_repeated_exact_requests() {
+fn access_history_is_bounded_and_preserves_repeated_exact_requests() {
     let cache = cache(1);
     let key = ObjectKey::from("object");
     populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
@@ -294,7 +294,7 @@ fn access_evidence_is_bounded_and_preserves_repeated_exact_requests() {
         cache.record_access(&key, range(0, 1));
     }
 
-    assert_eq!(access_evidence_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
+    assert_eq!(access_history_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
     assert_eq!(
         accessed_ranges(&cache, &key),
         vec![range(0, 1); MAX_ACCESS_EVENTS_PER_KEY]
@@ -380,7 +380,7 @@ fn stale_frequency_eventually_expires() {
     for _ in 0..8 {
         cache.record_access(&stale, range(0, 1));
     }
-    for _ in 0..=EVIDENCE_LIFETIME_ACCESSES {
+    for _ in 0..=MAX_ACCESS_AGE_ACCESSES {
         cache.record_access(&clock, range(0, 1));
     }
     cache.record_access(&fresh, range(0, 1));
@@ -431,7 +431,7 @@ fn compaction_respects_grace_then_releases_unrequested_payload() {
     assert_eq!(retained, Bytes::from_static(b"cd"));
     assert_ne!(retained.as_ptr(), original.slice(2..).as_ptr());
     assert!(cache.get(&key, range(0, 1)).is_none());
-    assert_eq!(access_evidence_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
+    assert_eq!(access_history_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
     assert!(accessed_ranges(&cache, &key).iter().all(|seen| *seen == range(2, 4)));
 }
 
@@ -475,7 +475,7 @@ fn compaction_waits_for_pressure_and_adds_no_access() {
     }
 
     assert_eq!(cache.used_bytes(), 16);
-    assert_eq!(access_evidence_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
+    assert_eq!(access_history_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
     populate(
         &cache,
         ObjectKey::from("pressure"),
@@ -483,7 +483,7 @@ fn compaction_waits_for_pressure_and_adds_no_access() {
     );
 
     assert_eq!(cache.used_bytes(), 5);
-    assert_eq!(access_evidence_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
+    assert_eq!(access_history_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
     assert_eq!(returned, Bytes::from_static(b"efgh"));
     let retained = cache.get(&key, range(4, 8)).unwrap();
     assert_eq!(retained, returned);
@@ -522,7 +522,7 @@ fn copied_compaction_is_revalidated_before_publication_and_can_fall_back() {
         let mut shard = cache.shards[0].lock();
         let AdmissionStep::Compact(work) = shard.admission_step(&incoming, range(0, 2), &incoming_bytes, None, true)
         else {
-            panic!("pressure should select the cold compactable extent");
+            panic!("pressure should select the cold compactable cached range");
         };
         drop(shard);
         work.copy_payload()
@@ -541,15 +541,15 @@ fn copied_compaction_is_revalidated_before_publication_and_can_fall_back() {
 }
 
 #[test]
-fn removing_the_last_extent_releases_its_access_metadata() {
+fn removing_the_last_cached_range_releases_its_access_history() {
     let cache = cache(1);
     let key = ObjectKey::from("object");
     populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
     cache.record_access(&key, range(0, 1));
 
-    assert_eq!(access_evidence_len(&cache, &key), 1);
+    assert_eq!(access_history_len(&cache, &key), 1);
     assert!(cache.remove(&key, range(0, 1)));
-    assert_eq!(access_evidence_len(&cache, &key), 0);
+    assert_eq!(access_history_len(&cache, &key), 0);
 }
 
 #[test]

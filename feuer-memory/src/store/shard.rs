@@ -5,12 +5,12 @@ use feuer_types::{ByteRange, ObjectKey};
 use rustc_hash::FxHashMap;
 
 use super::{
+    access_history::AccessHistory,
     compaction::{CompactionPlan, plan_compaction},
-    evidence::AccessEvidence,
 };
 use crate::MemoryMetrics;
 
-/// Successful shard-local accesses allowed before an extent can be trimmed.
+/// Successful shard-local accesses allowed before a cached range can be trimmed.
 pub(super) const COMPACTION_GRACE_ACCESSES: u64 = 64;
 /// Maximum entries inspected for one pressure decision.
 const POLICY_SAMPLE_SIZE: usize = 64;
@@ -49,8 +49,8 @@ impl Entry {
 struct CachedRanges {
     /// Entries ordered by exact start for predecessor-based covering lookup.
     by_start: BTreeMap<u64, Entry>,
-    /// Exact access evidence shared by this object's retained extents.
-    accesses: AccessEvidence,
+    /// Exact access history shared by this object's cached ranges.
+    accesses: AccessHistory,
     /// Structural and access generation used by copy-outside-lock compaction.
     generation: u64,
 }
@@ -213,7 +213,7 @@ pub(super) enum AdmissionStep {
     Compact(CompactionWork),
 }
 
-/// Independently locked range indexes, access evidence, and payload accounting.
+/// Independently locked range indexes, access history, and payload accounting.
 pub(super) struct Shard {
     capacity: u64,
     used_bytes: u64,
@@ -569,7 +569,7 @@ impl Shard {
     }
 
     #[cfg(test)]
-    pub(super) fn access_evidence_len(&self, object_key: &ObjectKey) -> usize {
+    pub(super) fn access_history_len(&self, object_key: &ObjectKey) -> usize {
         self.ranges.get(object_key).map_or(0, |entries| entries.accesses.len())
     }
 

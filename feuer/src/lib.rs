@@ -2,7 +2,7 @@
 //!
 //! The current public boundary provides exact requested byte ranges, opaque
 //! object identities, one soft-capacity memory tier, and per-call asynchronous
-//! download callbacks. The memory tier uses bounded ageable request evidence
+//! download callbacks. The memory tier uses bounded age-limited access history
 //! and compaction; best-effort disk population and recovery remain in progress.
 
 mod cache;

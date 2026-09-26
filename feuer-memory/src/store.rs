@@ -1,5 +1,5 @@
+mod access_history;
 mod compaction;
-mod evidence;
 mod shard;
 #[cfg(test)]
 mod tests;
@@ -28,7 +28,7 @@ const MAX_SHARDS: usize = 64;
 /// from disjoint ranges. A lookup succeeds only when one retained range covers
 /// the exact request and returns a [`Bytes`] slice containing only those
 /// requested bytes. The result can share the retained allocation and never
-/// holds an entry guard. Bounded, ageable exact access evidence is recorded
+/// holds an entry guard. A bounded, age-limited history of exact accesses is recorded
 /// separately from downloaded-range population.
 ///
 /// The configured capacity is divided among independently locked shards. Each
@@ -161,7 +161,7 @@ impl MemoryCache {
 
     /// Records one successful lookup's exact requested range.
     ///
-    /// This event is independent of the downloaded extent that satisfied the
+    /// This event is independent of the downloaded range that satisfied the
     /// lookup. Callers must invoke it exactly once for each successful lookup.
     pub fn record_access(&self, object_key: &ObjectKey, requested_range: ByteRange) {
         let shard_index = self.shard_index(object_key);
