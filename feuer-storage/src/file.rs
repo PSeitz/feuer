@@ -13,7 +13,7 @@ use fs4::fs_std::FileExt as LockFileExt;
 use tokio::runtime::Handle;
 use tracing::{Instrument, Span, field};
 
-use crate::{Error, IoMetrics, IoOperation, Result, uring};
+use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, uring};
 
 const DATA_FILE_NAME: &str = "data";
 const LOCK_FILE_NAME: &str = ".feuer.lock";
@@ -61,10 +61,10 @@ impl DataFile {
     ///
     /// Requires Linux with io_uring and filesystem STATX_DIOALIGN support. The
     /// directory is created if needed and the file is set to exactly `capacity`.
-    /// A second concurrent open fails with [`crate::ErrorKind::AlreadyOpen`].
-    pub async fn open(directory: impl AsRef<Path>, capacity: u64, metrics: Arc<IoMetrics>) -> Result<Self> {
+    /// A second concurrent open fails with [`crate::DataFileErrorKind::AlreadyOpen`].
+    pub async fn open(directory: impl AsRef<Path>, capacity: u64, metrics: Arc<IoMetrics>) -> DataFileResult<Self> {
         let directory = directory.as_ref().to_path_buf();
-        let runtime = Handle::try_current().map_err(|_| Error::RuntimeUnavailable)?;
+        let runtime = Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
         let started = Instant::now();
         let span = tracing::info_span!(
             target: "feuer::storage::io",
@@ -78,7 +78,7 @@ impl DataFile {
             let state = runtime
                 .spawn_blocking(move || open_file_state(directory, capacity))
                 .await
-                .map_err(|source| Error::Task {
+                .map_err(|source| DataFileError::Task {
                     operation: IoOperation::OpenDataFile,
                     source: Box::new(source),
                 })??;
@@ -87,7 +87,7 @@ impl DataFile {
                 .queue
                 .execute(IoOperation::Read, 0, uring::DIRECT_IO_ALIGNMENT_BYTES, &[])
                 .await
-                .map_err(|source| Error::Io {
+                .map_err(|source| DataFileError::Io {
                     operation: IoOperation::OpenDataFile,
                     path: state.data_path.clone(),
                     source,
@@ -110,8 +110,8 @@ impl DataFile {
 
     /// Reads exactly the requested bytes with at most two partial alignment pages
     /// of overhead. The result owns a compact allocation, not an I/O buffer.
-    pub async fn read_at(&self, offset: u64, length: usize) -> Result<Bytes> {
-        self.execute(IoOperation::Read, offset, length, &[]).await
+    pub async fn read_at(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
+        self.execute_measured(IoOperation::Read, offset, length, &[]).await
     }
 
     /// Writes arbitrary bytes without modifying neighboring bytes in their pages.
@@ -119,13 +119,19 @@ impl DataFile {
     /// Internally copies bounded chunks into aligned buffers. Cancellation may
     /// leave a partial write, but submitted chunks retain their buffers through
     /// completion. A storage engine must publish a cached byte range only after success.
-    pub async fn write_at(&self, offset: u64, bytes: &Bytes) -> Result<()> {
-        self.execute(IoOperation::Write, offset, bytes.len(), bytes)
+    pub async fn write_at(&self, offset: u64, bytes: &Bytes) -> DataFileResult<()> {
+        self.execute_measured(IoOperation::Write, offset, bytes.len(), bytes)
             .await
             .map(|_| ())
     }
 
-    async fn execute(&self, operation: IoOperation, offset: u64, length: usize, payload: &[u8]) -> Result<Bytes> {
+    async fn execute_measured(
+        &self,
+        operation: IoOperation,
+        offset: u64,
+        length: usize,
+        payload: &[u8],
+    ) -> DataFileResult<Bytes> {
         let started = Instant::now();
         let observed_bytes = u64::try_from(length).unwrap_or(u64::MAX);
         let span = tracing::trace_span!(
@@ -139,7 +145,7 @@ impl DataFile {
             duration_seconds = field::Empty,
         );
         let result = self
-            .execute_inner(operation, offset, length, payload)
+            .execute_chunks(operation, offset, length, payload)
             .instrument(span.clone())
             .await;
         let elapsed = started.elapsed();
@@ -148,28 +154,34 @@ impl DataFile {
         result
     }
 
-    async fn execute_inner(&self, operation: IoOperation, offset: u64, length: usize, payload: &[u8]) -> Result<Bytes> {
-        let length_u64 = u64::try_from(length).map_err(|_| Error::LengthOverflow { operation, length })?;
+    async fn execute_chunks(
+        &self,
+        operation: IoOperation,
+        offset: u64,
+        length: usize,
+        payload: &[u8],
+    ) -> DataFileResult<Bytes> {
+        let length_u64 = u64::try_from(length).map_err(|_| DataFileError::LengthOverflow { operation, length })?;
         check_range(operation, offset, length_u64, self.state.capacity)?;
-        let io_error = |source| Error::Io {
+        let io_error = |source| DataFileError::Io {
             operation,
             path: self.state.data_path.clone(),
             source,
         };
-        let mut result = Vec::new();
+        let mut read_bytes = Vec::new();
         if operation == IoOperation::Read
             && length > uring::MAX_IO_CHUNK_BYTES - offset as usize % uring::DIRECT_IO_ALIGNMENT_BYTES
         {
-            result
+            read_bytes
                 .try_reserve_exact(length)
-                .map_err(|source| Error::Allocation { length, source })?;
+                .map_err(|source| DataFileError::Allocation { length, source })?;
         }
         let mut completed_bytes = 0;
         while completed_bytes < length {
             let chunk_offset = offset + completed_bytes as u64;
             let chunk_length = (length - completed_bytes)
                 .min(uring::MAX_IO_CHUNK_BYTES - chunk_offset as usize % uring::DIRECT_IO_ALIGNMENT_BYTES);
-            let input = if operation == IoOperation::Write {
+            let chunk_payload = if operation == IoOperation::Write {
                 &payload[completed_bytes..completed_bytes + chunk_length]
             } else {
                 &[]
@@ -177,27 +189,27 @@ impl DataFile {
             let bytes = self
                 .state
                 .queue
-                .execute(operation, chunk_offset, chunk_length, input)
+                .execute(operation, chunk_offset, chunk_length, chunk_payload)
                 .await
                 .map_err(io_error)?;
             if operation == IoOperation::Read {
                 if chunk_length == length {
                     return Ok(bytes);
                 }
-                result.extend_from_slice(&bytes);
+                read_bytes.extend_from_slice(&bytes);
             }
             completed_bytes += chunk_length;
         }
-        Ok(Bytes::from(result))
+        Ok(Bytes::from(read_bytes))
     }
 }
 
-fn open_file_state(directory: PathBuf, capacity: u64) -> Result<DataFileState> {
+fn open_file_state(directory: PathBuf, capacity: u64) -> DataFileResult<DataFileState> {
     if capacity == 0 || capacity > i64::MAX as u64 || !capacity.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64)
     {
-        return Err(Error::InvalidCapacity);
+        return Err(DataFileError::InvalidCapacity);
     }
-    create_dir_all(&directory).map_err(|source| Error::Io {
+    create_dir_all(&directory).map_err(|source| DataFileError::Io {
         operation: IoOperation::CreateDirectory,
         path: directory.clone(),
         source,
@@ -209,21 +221,21 @@ fn open_file_state(directory: PathBuf, capacity: u64) -> Result<DataFileState> {
         .write(true)
         .truncate(false)
         .open(&lock_path)
-        .map_err(|source| Error::Io {
+        .map_err(|source| DataFileError::Io {
             operation: IoOperation::OpenLockFile,
             path: lock_path.clone(),
             source,
         })?;
-    let locked = LockFileExt::try_lock_exclusive(&lock_file).map_err(|source| Error::Io {
+    let locked = LockFileExt::try_lock_exclusive(&lock_file).map_err(|source| DataFileError::Io {
         operation: IoOperation::LockDirectory,
         path: lock_path,
         source,
     })?;
     if !locked {
-        return Err(Error::AlreadyOpen { directory });
+        return Err(DataFileError::AlreadyOpen { directory });
     }
     let data_path = directory.join(DATA_FILE_NAME);
-    let error = |operation, source| Error::Io {
+    let error = |operation, source| DataFileError::Io {
         operation,
         path: data_path.clone(),
         source,
@@ -241,9 +253,9 @@ fn open_file_state(directory: PathBuf, capacity: u64) -> Result<DataFileState> {
         .map_err(|source| error(IoOperation::InspectDataFile, source))?
         .is_file()
     {
-        return Err(Error::InvalidDataFile { path: data_path });
+        return Err(DataFileError::InvalidDataFile { path: data_path });
     }
-    check_direct_alignment(&file).map_err(|source| error(IoOperation::InspectDataFile, source))?;
+    check_direct_io_alignment(&file).map_err(|source| error(IoOperation::InspectDataFile, source))?;
     // Construct the ring before resizing, so an unavailable io_uring does not resize an existing cache.
     let resize_file = file
         .try_clone()
@@ -260,7 +272,7 @@ fn open_file_state(directory: PathBuf, capacity: u64) -> Result<DataFileState> {
     })
 }
 
-fn check_direct_alignment(file: &File) -> io::Result<()> {
+fn check_direct_io_alignment(file: &File) -> io::Result<()> {
     let mut stat = std::mem::MaybeUninit::<libc::statx>::zeroed();
     // SAFETY: the fd is owned, the empty path is NUL-terminated, and stat is writable.
     let result = unsafe {
@@ -291,9 +303,9 @@ fn check_direct_alignment(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn check_range(operation: IoOperation, offset: u64, length: u64, capacity: u64) -> Result<()> {
+fn check_range(operation: IoOperation, offset: u64, length: u64, capacity: u64) -> DataFileResult<()> {
     if offset.checked_add(length).is_none_or(|end| end > capacity) {
-        return Err(Error::OutOfBounds {
+        return Err(DataFileError::OutOfBounds {
             operation,
             offset,
             length,
@@ -303,7 +315,7 @@ fn check_range(operation: IoOperation, offset: u64, length: u64, capacity: u64) 
     Ok(())
 }
 
-fn record_span_outcome<T>(span: &Span, elapsed: std::time::Duration, result: &Result<T>) {
+fn record_span_outcome<T>(span: &Span, elapsed: std::time::Duration, result: &DataFileResult<T>) {
     span.record("duration_seconds", elapsed.as_secs_f64());
     match result {
         Ok(_) => {
@@ -319,7 +331,7 @@ fn record_span_outcome<T>(span: &Span, elapsed: std::time::Duration, result: &Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ErrorKind;
+    use crate::DataFileErrorKind;
     use tempfile::tempdir;
 
     const CAPACITY: u64 = 4 * uring::MAX_IO_CHUNK_BYTES as u64;
@@ -328,7 +340,7 @@ mod tests {
     fn public_io_types_are_send_sync_static() {
         fn assert_send_sync_static<T: Send + Sync + 'static>() {}
         assert_send_sync_static::<DataFile>();
-        assert_send_sync_static::<Error>();
+        assert_send_sync_static::<DataFileError>();
     }
 
     #[tokio::test]
@@ -364,14 +376,14 @@ mod tests {
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
         assert_eq!(
             file.read_at(CAPACITY - 1, 2).await.unwrap_err().kind(),
-            ErrorKind::OutOfBounds
+            DataFileErrorKind::OutOfBounds
         );
         assert_eq!(
             file.write_at(u64::MAX, &Bytes::from_static(b"ab"))
                 .await
                 .unwrap_err()
                 .kind(),
-            ErrorKind::OutOfBounds
+            DataFileErrorKind::OutOfBounds
         );
         assert!(file.read_at(CAPACITY, 0).await.unwrap().is_empty());
         file.write_at(CAPACITY, &Bytes::new()).await.unwrap();
@@ -388,7 +400,7 @@ mod tests {
             .set_len(4)
             .unwrap();
         match file.read_at(0, 8).await.unwrap_err() {
-            Error::Io { source, .. } => assert_eq!(source.kind(), io::ErrorKind::UnexpectedEof),
+            DataFileError::Io { source, .. } => assert_eq!(source.kind(), io::ErrorKind::UnexpectedEof),
             error => panic!("unexpected error: {error:?}"),
         }
     }
@@ -404,7 +416,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .kind(),
-            ErrorKind::AlreadyOpen
+            DataFileErrorKind::AlreadyOpen
         );
         clone.write_at(17, &Bytes::from_static(b"persistent")).await.unwrap();
         drop(clone);
@@ -487,7 +499,7 @@ mod tests {
         let Poll::Ready(result) = open.as_mut().poll(&mut context) else {
             panic!("unexpectedly pending");
         };
-        assert_eq!(result.unwrap_err().kind(), ErrorKind::Task);
+        assert_eq!(result.unwrap_err().kind(), DataFileErrorKind::Task);
     }
 
     #[test]
@@ -501,7 +513,7 @@ mod tests {
         // SAFETY: fd was just created and has no other owner.
         let file = unsafe { File::from_raw_fd(fd) };
         assert_eq!(
-            check_direct_alignment(&file).unwrap_err().kind(),
+            check_direct_io_alignment(&file).unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
     }
@@ -515,7 +527,7 @@ mod tests {
                     .await
                     .unwrap_err()
                     .kind(),
-                ErrorKind::InvalidConfiguration
+                DataFileErrorKind::InvalidConfiguration
             );
         }
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();

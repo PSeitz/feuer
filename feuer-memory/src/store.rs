@@ -1,5 +1,5 @@
 mod access_history;
-mod compaction;
+mod range_trim;
 mod shard;
 #[cfg(test)]
 mod tests;
@@ -15,7 +15,7 @@ use bytes::Bytes;
 use feuer_types::{ByteRange, Download, ObjectKey};
 use parking_lot::Mutex;
 
-use self::shard::{AdmissionStep, MemoryShard};
+use self::shard::{AdmissionProgress, MemoryCacheShard};
 use crate::MemoryMetrics;
 
 /// Caps lock partitioning to avoid excessive per-cache metadata.
@@ -42,7 +42,7 @@ pub struct MemoryCache {
     /// Total soft target divided among the shards.
     capacity: u64,
     /// Independently locked partitions selected by complete object identity.
-    shards: Box<[Mutex<MemoryShard>]>,
+    shards: Box<[Mutex<MemoryCacheShard>]>,
 }
 
 impl fmt::Debug for MemoryCache {
@@ -77,7 +77,7 @@ impl MemoryCache {
         assert!(shard_count > 0, "memory cache requires at least one shard");
         let shards = (0..shard_count)
             .map(|index| {
-                Mutex::new(MemoryShard::new(
+                Mutex::new(MemoryCacheShard::new(
                     shard_capacity_for(capacity, shard_count, index),
                     metrics.clone(),
                 ))
@@ -109,7 +109,7 @@ impl MemoryCache {
     /// partial overlaps coexist.
     pub fn insert(&self, object_key: ObjectKey, download: Download) {
         let (downloaded_range, bytes) = download.into_parts();
-        self.insert_inner(object_key, downloaded_range, bytes, None);
+        self.admit_download(object_key, downloaded_range, bytes, None);
     }
 
     /// Caches one callback download and records its successful request atomically.
@@ -120,10 +120,10 @@ impl MemoryCache {
     pub fn insert_and_record(&self, object_key: ObjectKey, download: Download, requested_range: ByteRange) {
         let (downloaded_range, bytes) = download.into_parts();
         debug_assert!(downloaded_range.contains(requested_range));
-        self.insert_inner(object_key, downloaded_range, bytes, Some(requested_range));
+        self.admit_download(object_key, downloaded_range, bytes, Some(requested_range));
     }
 
-    fn insert_inner(
+    fn admit_download(
         &self,
         object_key: ObjectKey,
         downloaded_range: ByteRange,
@@ -131,28 +131,28 @@ impl MemoryCache {
         requested_range: Option<ByteRange>,
     ) {
         let shard_index = self.shard_index(&object_key);
-        let mut allow_compaction = true;
+        let mut allow_range_trim = true;
         loop {
-            let step = self.shards[shard_index].lock().admission_step(
+            let step = self.shards[shard_index].lock().advance_admission(
                 &object_key,
                 downloaded_range,
                 &bytes,
                 requested_range,
-                allow_compaction,
+                allow_range_trim,
             );
             match step {
-                AdmissionStep::Complete => return,
-                AdmissionStep::Retry => continue,
-                AdmissionStep::Compact(source) => {
+                AdmissionProgress::Complete => return,
+                AdmissionProgress::Retry => continue,
+                AdmissionProgress::Trim(source) => {
                     // Payload copying is deliberately outside the shard lock.
                     // Publication revalidates both the source and its object's
                     // access/structure generation before changing the index.
                     let replacement = source.copy_payload();
-                    if !self.shards[shard_index].lock().publish_compaction(replacement) {
+                    if !self.shards[shard_index].lock().publish_range_trim(replacement) {
                         // A hot source can invalidate every copy. Fall back to
                         // bounded eviction for this admission so it cannot
                         // starve while concurrent lookups keep succeeding.
-                        allow_compaction = false;
+                        allow_range_trim = false;
                     }
                 }
             }

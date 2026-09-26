@@ -9,7 +9,7 @@ mod download;
 mod range;
 
 pub use download::{Download, DownloadError};
-pub use range::{ByteRange, InvalidRange};
+pub use range::{ByteRange, InvalidByteRange};
 
 /// The complete UTF-8 identity of one immutable object.
 pub type ObjectKey = String;

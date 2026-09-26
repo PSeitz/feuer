@@ -12,7 +12,7 @@ use feuer_storage::{DataFile, IoMetrics};
 
 const MIB: usize = 1024 * 1024;
 const CAPACITY: u64 = 8 * 1024 * MIB as u64;
-const READ_SPACE: u64 = CAPACITY * 3 / 4;
+const READ_SPACE_BYTES: u64 = CAPACITY * 3 / 4;
 
 /// Completed I/O counts and sampled latencies for one measurement interval.
 #[derive(Default)]
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(
         write_callers
             .iter()
-            .all(|&count| count <= ((CAPACITY - READ_SPACE) / MIB as u64) as usize)
+            .all(|&count| count <= ((CAPACITY - READ_SPACE_BYTES) / MIB as u64) as usize)
     );
     let temp = tempfile::Builder::new()
         .prefix("feuer-direct-bench-")
@@ -50,20 +50,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "read_bytes,read_callers,write_callers,seconds,read_MB_s,write_MB_s,read_iops,read_p50_us,read_p99_us,cpu_percent"
     );
-    for size in [4096, 65536, MIB] {
+    for read_size in [4096, 65536, MIB] {
         for readers in [1, 32, 64, 128] {
             for &writers in &write_callers {
-                run(&file, size, readers, writers, seconds).await;
+                run_case(&file, read_size, readers, writers, seconds).await;
             }
         }
     }
     // Verify that read protection does not permanently cap write-only throughput.
-    run(&file, MIB, 0, 64, seconds).await;
+    run_case(&file, MIB, 0, 64, seconds).await;
     drop(file); // drain and unlock before removing only the temporary benchmark directory
     Ok(())
 }
 
-async fn run(file: &DataFile, size: usize, readers: usize, writers: usize, seconds: u64) {
+async fn run_case(file: &DataFile, read_size: usize, readers: usize, writers: usize, seconds: u64) {
     let measure_start = Instant::now() + Duration::from_secs(2);
     let deadline = measure_start + Duration::from_secs(seconds);
     let mut tasks = Vec::new();
@@ -78,21 +78,21 @@ async fn run(file: &DataFile, size: usize, readers: usize, writers: usize, secon
             let mut random = id as u64 + 1;
             let mut measurements = IoMeasurements::default();
             let mut write_offset = 0;
-            let lane_size = (CAPACITY - READ_SPACE) / MIB as u64 / writers.max(1) as u64 * MIB as u64;
+            let lane_size = (CAPACITY - READ_SPACE_BYTES) / MIB as u64 / writers.max(1) as u64 * MIB as u64;
             while Instant::now() < deadline {
                 let started = Instant::now();
                 let bytes = if reading {
                     random ^= random << 13;
                     random ^= random >> 7;
                     random ^= random << 17;
-                    let offset = (random % (READ_SPACE / size as u64)) * size as u64;
-                    let value = file.read_at(offset, size).await.unwrap();
-                    assert_eq!(value.len(), size);
+                    let offset = (random % (READ_SPACE_BYTES / read_size as u64)) * read_size as u64;
+                    let value = file.read_at(offset, read_size).await.unwrap();
+                    assert_eq!(value.len(), read_size);
                     assert_eq!(value[0], 0x5a);
-                    assert_eq!(value[size - 1], 0x5a);
-                    size
+                    assert_eq!(value[read_size - 1], 0x5a);
+                    read_size
                 } else {
-                    let offset = READ_SPACE + (id - readers) as u64 * lane_size + write_offset;
+                    let offset = READ_SPACE_BYTES + (id - readers) as u64 * lane_size + write_offset;
                     file.write_at(offset, &payload).await.unwrap();
                     write_offset = (write_offset + MIB as u64) % lane_size;
                     MIB
@@ -123,7 +123,7 @@ async fn run(file: &DataFile, size: usize, readers: usize, writers: usize, secon
         total.bytes += measurements.bytes;
         total.latency_samples_micros.extend(measurements.latency_samples_micros);
     }
-    let cpu = (cpu_seconds() - cpu_start) / measure_start.elapsed().as_secs_f64() * 100.0;
+    let cpu_percent = (cpu_seconds() - cpu_start) / measure_start.elapsed().as_secs_f64() * 100.0;
     read.latency_samples_micros.sort_unstable();
     let percentile = |p: usize| {
         read.latency_samples_micros
@@ -132,13 +132,13 @@ async fn run(file: &DataFile, size: usize, readers: usize, writers: usize, secon
             .unwrap_or(0)
     };
     println!(
-        "{size},{readers},{writers},{seconds},{:.1},{:.1},{:.0},{},{},{:.1}",
+        "{read_size},{readers},{writers},{seconds},{:.1},{:.1},{:.0},{},{},{:.1}",
         read.bytes as f64 / seconds as f64 / 1e6,
         write.bytes as f64 / seconds as f64 / 1e6,
         read.operations as f64 / seconds as f64,
         percentile(50),
         percentile(99),
-        cpu
+        cpu_percent
     );
 }
 

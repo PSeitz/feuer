@@ -5,11 +5,11 @@ use feuer_memory::MemoryCache;
 use feuer_types::{ByteRange, Download, ObjectKey};
 use thiserror::Error;
 
-use crate::Config;
+use crate::CacheConfig;
 
 /// Configuration and memory-cache state shared by cloned cache handles.
 struct CacheState {
-    config: Config,
+    config: CacheConfig,
     memory: MemoryCache,
 }
 
@@ -35,7 +35,7 @@ impl fmt::Debug for Cache {
 
 impl Cache {
     /// Creates a cache handle from a validated configuration.
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: CacheConfig) -> Self {
         let memory = MemoryCache::new(config.memory_capacity());
         Self {
             state: Arc::new(CacheState { config, memory }),
@@ -43,7 +43,7 @@ impl Cache {
     }
 
     /// Returns this cache's configuration.
-    pub fn config(&self) -> &Config {
+    pub fn config(&self) -> &CacheConfig {
         &self.state.config
     }
 
@@ -135,7 +135,7 @@ mod tests {
     }
 
     fn cache(memory_capacity: u64) -> Cache {
-        Cache::new(Config::new("unused", 1024, memory_capacity).unwrap())
+        Cache::new(CacheConfig::new("unused", 1024, memory_capacity).unwrap())
     }
 
     #[test]

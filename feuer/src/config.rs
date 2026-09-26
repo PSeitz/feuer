@@ -9,20 +9,24 @@ use thiserror::Error;
 /// soft eviction target divided among the in-memory shards; oversized entries
 /// can make retained usage exceed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Config {
+pub struct CacheConfig {
     directory: PathBuf,
     disk_capacity: u64,
     memory_capacity: u64,
 }
 
-impl Config {
+impl CacheConfig {
     /// Creates a cache configuration with no implicit capacity defaults.
-    pub fn new(directory: impl Into<PathBuf>, disk_capacity: u64, memory_capacity: u64) -> Result<Self, ConfigError> {
+    pub fn new(
+        directory: impl Into<PathBuf>,
+        disk_capacity: u64,
+        memory_capacity: u64,
+    ) -> Result<Self, CacheConfigError> {
         if disk_capacity == 0 {
-            return Err(ConfigError::InvalidDiskCapacity);
+            return Err(CacheConfigError::InvalidDiskCapacity);
         }
         if memory_capacity == 0 {
-            return Err(ConfigError::InvalidMemoryCapacity);
+            return Err(CacheConfigError::InvalidMemoryCapacity);
         }
 
         Ok(Self {
@@ -50,7 +54,7 @@ impl Config {
 
 /// An invalid Feuer configuration.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-pub enum ConfigError {
+pub enum CacheConfigError {
     /// A fixed data file cannot have zero capacity.
     #[error("disk capacity must be greater than zero")]
     InvalidDiskCapacity,
@@ -65,7 +69,7 @@ mod tests {
 
     #[test]
     fn requires_both_capacity_roles_to_be_explicit() {
-        let config = Config::new("cache", 1 << 40, 256 << 20).unwrap();
+        let config = CacheConfig::new("cache", 1 << 40, 256 << 20).unwrap();
 
         assert_eq!(config.directory(), Path::new("cache"));
         assert_eq!(config.disk_capacity(), 1 << 40);
@@ -75,7 +79,7 @@ mod tests {
     #[test]
     fn represents_tib_scale_capacity() {
         let capacity = 4 * (1_u64 << 40);
-        let config = Config::new("cache", capacity, 1).unwrap();
+        let config = CacheConfig::new("cache", capacity, 1).unwrap();
 
         assert_eq!(config.disk_capacity(), capacity);
         assert_eq!(config.memory_capacity(), 1);
@@ -84,12 +88,12 @@ mod tests {
     #[test]
     fn rejects_zero_capacities() {
         assert_eq!(
-            Config::new("cache", 0, 1).unwrap_err(),
-            ConfigError::InvalidDiskCapacity
+            CacheConfig::new("cache", 0, 1).unwrap_err(),
+            CacheConfigError::InvalidDiskCapacity
         );
         assert_eq!(
-            Config::new("cache", 1, 0).unwrap_err(),
-            ConfigError::InvalidMemoryCapacity
+            CacheConfig::new("cache", 1, 0).unwrap_err(),
+            CacheConfigError::InvalidMemoryCapacity
         );
     }
 }

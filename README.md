@@ -29,7 +29,7 @@ work are tracked in [`implementation-status.md`](implementation-status.md).
 ## Current workspace
 
 The public boundary contains `ObjectKey`, `ByteRange`, a keyless validated
-`Download`, one soft memory payload target, and a cloneable `Cache`. Each
+`Download`, explicit capacities in `CacheConfig`, and a cloneable `Cache`. Each
 `get_or_fetch` checks for a covering memory range before independently invoking
 that call's asynchronous callback. Successful results are sliced to the exact
 request and appended once to the key's accessed ranges, independently of downloaded-range population.
@@ -42,7 +42,7 @@ order without a read-triggered write throttle. Separate read/write admission
 budgets protect read admission from write backlogs. Raw file capacity must be a positive multiple of
 4 KiB. Buffered mode and the recoverable range engine remain to be implemented. `feuer-memory` provides a
 sharded soft-capacity covering-range index with bounded ageable request evidence,
-sampled retrieval-value-per-byte eviction, a short compaction grace, and
+sampled retrieval-cost-per-byte eviction, a short range-trimming grace, and
 pressure-driven trimming of the selected victim toward observed requests. Its [memory-only comparison](benchmarks/memory/results.md)
 records the current policy baseline. `feuer-types` holds shared range
 foundations, while `feuer-tokio` remains the Tokio/madsim runtime switch. None of these internal

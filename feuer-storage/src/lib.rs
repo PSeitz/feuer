@@ -13,7 +13,7 @@ mod metrics;
 #[cfg(target_os = "linux")]
 mod uring;
 
-pub use error::{Error, ErrorKind, IoOperation, Result};
+pub use error::{DataFileError, DataFileErrorKind, DataFileResult, IoOperation};
 #[cfg(target_os = "linux")]
 pub use file::DataFile;
 pub use metrics::IoMetrics;

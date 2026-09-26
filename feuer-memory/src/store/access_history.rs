@@ -11,9 +11,9 @@ pub(super) const MAX_ACCESS_AGE_ACCESSES: u64 = 32_768;
 
 /// One exact requested interval and its shard-local observation clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AccessEvent {
+struct RangeAccess {
     range: ByteRange,
-    observed_at: u64,
+    observed_at_access: u64,
 }
 
 /// Bounded history of requested byte ranges for one complete object key.
@@ -21,19 +21,19 @@ struct AccessEvent {
 /// Events are deliberately not coalesced: repeated requests remain separate
 /// records until they expire or are displaced by the per-key bound.
 #[derive(Default)]
-pub(super) struct AccessHistory {
-    events: VecDeque<AccessEvent>,
+pub(super) struct RangeAccessHistory {
+    events: VecDeque<RangeAccess>,
 }
 
-impl AccessHistory {
+impl RangeAccessHistory {
     pub(super) fn record(&mut self, range: ByteRange, access_clock: u64) {
         self.expire(access_clock);
         if self.events.len() == MAX_ACCESS_EVENTS_PER_KEY {
             self.events.pop_front();
         }
-        self.events.push_back(AccessEvent {
+        self.events.push_back(RangeAccess {
             range,
-            observed_at: access_clock,
+            observed_at_access: access_clock,
         });
     }
 
@@ -46,7 +46,7 @@ impl AccessHistory {
     }
 
     /// Sums modeled source retrieval cost for active requests covered by a cached range.
-    pub(super) fn retention_value(&self, cached_range: ByteRange, access_clock: u64) -> u64 {
+    pub(super) fn covered_retrieval_cost(&self, cached_range: ByteRange, access_clock: u64) -> u64 {
         self.events
             .iter()
             .filter(|event| is_active(**event, access_clock) && cached_range.contains(event.range))
@@ -75,8 +75,8 @@ impl AccessHistory {
     }
 }
 
-fn is_active(event: AccessEvent, access_clock: u64) -> bool {
-    access_clock.saturating_sub(event.observed_at) <= MAX_ACCESS_AGE_ACCESSES
+fn is_active(event: RangeAccess, access_clock: u64) -> bool {
+    access_clock.saturating_sub(event.observed_at_access) <= MAX_ACCESS_AGE_ACCESSES
 }
 
 #[cfg(test)]
@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn bounds_events_without_coalescing_repeated_ranges() {
         let repeated = range(10, 20);
-        let mut history = AccessHistory::default();
+        let mut history = RangeAccessHistory::default();
         for index in 0..MAX_ACCESS_EVENTS_PER_KEY + 3 {
             let requested = if index >= MAX_ACCESS_EVENTS_PER_KEY {
                 repeated
@@ -109,14 +109,20 @@ mod tests {
     fn retains_full_retrieval_value_until_expiration() {
         let requested = range(2, 4);
         let cached_range = range(0, 8);
-        let mut history = AccessHistory::default();
+        let mut history = RangeAccessHistory::default();
         history.record(requested, 0);
         history.record(requested, 0);
 
         let expected = 2 * (FIXED_RETRIEVAL_EQUIVALENT_BYTES + requested.len());
-        assert_eq!(history.retention_value(cached_range, 0), expected);
-        assert_eq!(history.retention_value(cached_range, MAX_ACCESS_AGE_ACCESSES), expected);
-        assert_eq!(history.retention_value(cached_range, MAX_ACCESS_AGE_ACCESSES + 1), 0);
+        assert_eq!(history.covered_retrieval_cost(cached_range, 0), expected);
+        assert_eq!(
+            history.covered_retrieval_cost(cached_range, MAX_ACCESS_AGE_ACCESSES),
+            expected
+        );
+        assert_eq!(
+            history.covered_retrieval_cost(cached_range, MAX_ACCESS_AGE_ACCESSES + 1),
+            0
+        );
 
         history.record(range(6, 7), MAX_ACCESS_AGE_ACCESSES + 1);
         assert_eq!(history.ranges(), vec![range(6, 7)]);
@@ -124,14 +130,14 @@ mod tests {
 
     #[test]
     fn credits_only_cached_ranges_covering_the_exact_request() {
-        let mut history = AccessHistory::default();
+        let mut history = RangeAccessHistory::default();
         history.record(range(3, 7), 0);
 
         assert_eq!(
-            history.retention_value(range(0, 8), 0),
+            history.covered_retrieval_cost(range(0, 8), 0),
             FIXED_RETRIEVAL_EQUIVALENT_BYTES + 4
         );
-        assert_eq!(history.retention_value(range(3, 5), 0), 0);
-        assert_eq!(history.retention_value(range(5, 8), 0), 0);
+        assert_eq!(history.covered_retrieval_cost(range(3, 5), 0), 0);
+        assert_eq!(history.covered_retrieval_cost(range(5, 8), 0), 0);
     }
 }

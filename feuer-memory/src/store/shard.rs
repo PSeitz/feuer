@@ -5,15 +5,15 @@ use feuer_types::{ByteRange, ObjectKey};
 use rustc_hash::FxHashMap;
 
 use super::{
-    access_history::AccessHistory,
-    compaction::{CompactionPlan, plan_compaction},
+    access_history::RangeAccessHistory,
+    range_trim::{RangeTrimPlan, plan_range_trim},
 };
 use crate::MemoryMetrics;
 
 /// Successful shard-local accesses allowed before a cached range can be trimmed.
-pub(super) const COMPACTION_GRACE_ACCESSES: u64 = 64;
+pub(super) const RANGE_TRIM_GRACE_ACCESSES: u64 = 64;
 /// Maximum entries inspected for one pressure decision.
-const PRESSURE_SAMPLE_SIZE: usize = 64;
+const RECLAIM_SAMPLE_SIZE: usize = 64;
 
 /// One retained downloaded range.
 struct CachedRange {
@@ -26,7 +26,7 @@ struct CachedRange {
     /// Slot in the bounded-work policy candidate ring.
     candidate_slot: usize,
     /// Successful-access clock at admission.
-    admitted_at: u64,
+    admitted_at_access: u64,
 }
 
 impl CachedRange {
@@ -50,9 +50,9 @@ struct ObjectCachedRanges {
     /// Entries ordered by exact start for predecessor-based covering lookup.
     by_start: BTreeMap<u64, CachedRange>,
     /// Exact access history shared by this object's cached ranges.
-    accesses: AccessHistory,
-    /// Structural and access generation used by copy-outside-lock compaction.
-    generation: u64,
+    accesses: RangeAccessHistory,
+    /// Structural and access generation used by copy-outside-lock range trimming.
+    object_generation: u64,
 }
 
 impl ObjectCachedRanges {
@@ -61,7 +61,7 @@ impl ObjectCachedRanges {
         entry.range.contains(range).then_some(entry)
     }
 
-    fn observe_covering<R>(
+    fn record_covering_access<R>(
         &mut self,
         requested: ByteRange,
         access_clock: u64,
@@ -74,7 +74,7 @@ impl ObjectCachedRanges {
             }
             project(entry)
         };
-        self.generation = self.generation.saturating_add(1);
+        self.object_generation = self.object_generation.saturating_add(1);
         self.accesses.record(requested, access_clock);
         Some(projected)
     }
@@ -84,7 +84,7 @@ impl ObjectCachedRanges {
         for (_, entry) in self.by_start.range(range.start()..range.end()) {
             if range.contains(entry.range) {
                 superseded.ranges.push(entry.range);
-                superseded.bytes += entry.bytes.len() as u64;
+                superseded.payload_bytes += entry.bytes.len() as u64;
             }
         }
         superseded
@@ -95,14 +95,14 @@ impl ObjectCachedRanges {
 #[derive(Default)]
 struct SupersededRanges {
     ranges: Vec<ByteRange>,
-    bytes: u64,
+    payload_bytes: u64,
 }
 
 /// Usage removed while admitting one download.
 #[derive(Default)]
-struct RemovedUsage {
-    bytes: u64,
-    entries: u64,
+struct RemovedCacheUsage {
+    payload_bytes: u64,
+    entry_count: u64,
 }
 
 /// An object's cached range identity: object key, start offset, and entry ID.
@@ -113,14 +113,14 @@ struct CachedRangeIdentity {
     id: u64,
 }
 
-/// Dense ring of memory-pressure candidates with O(1) registration/removal and rotating samples.
+/// Rotating ring of cached-range candidates for reclaiming memory by trimming or eviction.
 #[derive(Default)]
-struct PressureCandidates {
+struct ReclaimCandidateRing {
     entries: Vec<CachedRangeIdentity>,
     cursor: usize,
 }
 
-impl PressureCandidates {
+impl ReclaimCandidateRing {
     fn register(&mut self, candidate: CachedRangeIdentity) -> usize {
         let slot = self.entries.len();
         self.entries.push(candidate);
@@ -142,7 +142,7 @@ impl PressureCandidates {
     }
 
     fn sample(&mut self) -> (usize, usize) {
-        let count = self.entries.len().min(PRESSURE_SAMPLE_SIZE);
+        let count = self.entries.len().min(RECLAIM_SAMPLE_SIZE);
         if count == 0 {
             return (0, 0);
         }
@@ -152,80 +152,80 @@ impl PressureCandidates {
     }
 }
 
-/// One cached range selected for compaction or eviction under memory pressure.
-struct PressureCandidate {
+/// A cached range considered for reclaiming memory, with its retrieval cost and retained size.
+struct ReclaimCandidate {
     object_key: ObjectKey,
     range: ByteRange,
     id: u64,
     retained_bytes: u64,
-    retrieval_value: u64,
+    retrieval_cost: u64,
 }
 
-/// A compaction source cloned under the metadata lock for copying afterward.
-pub(super) struct CompactionSource {
+/// Source payload, plan, and identity for trimming a cached range outside the shard lock.
+pub(super) struct RangeTrimSource {
     object_key: ObjectKey,
     start: u64,
     id: u64,
-    generation: u64,
-    plan: CompactionPlan,
+    object_generation: u64,
+    plan: RangeTrimPlan,
     source_bytes: Bytes,
 }
 
-impl CompactionSource {
+impl RangeTrimSource {
     /// Copies retained payload while no shard metadata lock is held.
-    pub(super) fn copy_payload(self) -> CompactionReplacement {
-        let retained = self
+    pub(super) fn copy_payload(self) -> RangeTrimReplacement {
+        let retained_payloads = self
             .plan
-            .retained()
+            .retained_ranges()
             .iter()
             .map(|range| {
-                let start = usize::try_from(range.start() - self.plan.source().start())
+                let start = usize::try_from(range.start() - self.plan.source_range().start())
                     .expect("a planned source offset must fit in usize");
-                let end = usize::try_from(range.end() - self.plan.source().start())
+                let end = usize::try_from(range.end() - self.plan.source_range().start())
                     .expect("a planned source offset must fit in usize");
                 (*range, Bytes::copy_from_slice(&self.source_bytes[start..end]))
             })
             .collect();
-        CompactionReplacement {
+        RangeTrimReplacement {
             object_key: self.object_key,
             start: self.start,
             id: self.id,
-            generation: self.generation,
+            object_generation: self.object_generation,
             plan: self.plan,
-            retained,
+            retained_payloads,
         }
     }
 }
 
-/// Copied compaction replacement payload waiting for generation-checked publication.
-pub(super) struct CompactionReplacement {
+/// Replacement payloads from trimming a cached range, awaiting identity/generation checks.
+pub(super) struct RangeTrimReplacement {
     object_key: ObjectKey,
     start: u64,
     id: u64,
-    generation: u64,
-    plan: CompactionPlan,
-    retained: Vec<(ByteRange, Bytes)>,
+    object_generation: u64,
+    plan: RangeTrimPlan,
+    retained_payloads: Vec<(ByteRange, Bytes)>,
 }
 
-/// One bounded admission action. Callers repeat until `Complete`.
-pub(super) enum AdmissionStep {
+/// Progress after a bounded admission attempt: complete, retry, or trim before retrying.
+pub(super) enum AdmissionProgress {
     Complete,
     Retry,
-    Compact(CompactionSource),
+    Trim(RangeTrimSource),
 }
 
 /// One memory-cache shard's range indexes, access history, and payload accounting.
-pub(super) struct MemoryShard {
+pub(super) struct MemoryCacheShard {
     capacity: u64,
     used_bytes: u64,
     ranges: FxHashMap<ObjectKey, ObjectCachedRanges>,
     access_clock: u64,
     next_entry_id: u64,
-    candidates: PressureCandidates,
+    candidates: ReclaimCandidateRing,
     metrics: Arc<MemoryMetrics>,
 }
 
-impl MemoryShard {
+impl MemoryCacheShard {
     pub(super) fn new(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self {
         Self {
             capacity,
@@ -233,7 +233,7 @@ impl MemoryShard {
             ranges: FxHashMap::default(),
             access_clock: 0,
             next_entry_id: 0,
-            candidates: PressureCandidates::default(),
+            candidates: ReclaimCandidateRing::default(),
             metrics,
         }
     }
@@ -245,7 +245,7 @@ impl MemoryShard {
     pub(super) fn get(&mut self, object_key: &ObjectKey, requested_range: ByteRange) -> Option<Bytes> {
         let access_clock = self.access_clock.saturating_add(1);
         let accessed = self.ranges.get_mut(object_key).and_then(|entries| {
-            entries.observe_covering(requested_range, access_clock, |entry| {
+            entries.record_covering_access(requested_range, access_clock, |entry| {
                 entry.requested_bytes(requested_range)
             })
         });
@@ -268,58 +268,58 @@ impl MemoryShard {
         self.access_clock = self.access_clock.saturating_add(1);
         self.ranges
             .get_mut(object_key)
-            .and_then(|entries| entries.observe_covering(requested_range, self.access_clock, |_| ()));
+            .and_then(|entries| entries.record_covering_access(requested_range, self.access_clock, |_| ()));
         self.metrics.record_access();
     }
 
     /// Advances one bounded admission action while holding the shard lock.
-    pub(super) fn admission_step(
+    pub(super) fn advance_admission(
         &mut self,
         object_key: &ObjectKey,
         range: ByteRange,
         bytes: &Bytes,
         requested_range: Option<ByteRange>,
-        allow_compaction: bool,
-    ) -> AdmissionStep {
+        allow_range_trim: bool,
+    ) -> AdmissionProgress {
         let superseded = match self.ranges.get(object_key) {
             Some(entries) if entries.covering(range).is_some() => {
                 self.metrics.record_redundant();
                 if let Some(requested_range) = requested_range {
                     self.record_successful_access(object_key, requested_range);
                 }
-                return AdmissionStep::Complete;
+                return AdmissionProgress::Complete;
             }
             Some(entries) => entries.superseded_by(range),
             None => SupersededRanges::default(),
         };
         let added_bytes = bytes.len() as u64;
-        let effective_used = self.used_bytes - superseded.bytes;
-        let target = self.capacity.saturating_sub(added_bytes);
+        let used_bytes_without_superseded = self.used_bytes - superseded.payload_bytes;
+        let max_existing_bytes = self.capacity.saturating_sub(added_bytes);
 
-        if effective_used <= target {
+        if used_bytes_without_superseded <= max_existing_bytes {
             let removal = self.remove_superseded(object_key, &superseded.ranges);
-            debug_assert_eq!(removal.bytes, superseded.bytes);
+            debug_assert_eq!(removal.payload_bytes, superseded.payload_bytes);
             self.insert_admission(object_key.clone(), range, bytes.clone());
 
-            if removal.entries != 0 {
-                self.metrics.decrease_usage(removal.bytes, removal.entries);
+            if removal.entry_count != 0 {
+                self.metrics.decrease_usage(removal.payload_bytes, removal.entry_count);
             }
             self.metrics.increase_usage(added_bytes, 1);
-            self.metrics.record_insert(removal.entries != 0);
+            self.metrics.record_insert(removal.entry_count != 0);
             if let Some(requested_range) = requested_range {
                 self.record_successful_access(object_key, requested_range);
             }
-            return AdmissionStep::Complete;
+            return AdmissionProgress::Complete;
         }
 
-        let Some(candidate) = self.pressure_candidate(object_key, range) else {
+        let Some(candidate) = self.select_reclaim_candidate(object_key, range) else {
             // A rotating bounded sample can temporarily consist entirely of
             // entries superseded by this admission. Advancing its cursor and
             // retrying gives amortized full coverage without one long scan.
-            return AdmissionStep::Retry;
+            return AdmissionProgress::Retry;
         };
-        if allow_compaction && let Some(source) = self.compaction_source(&candidate) {
-            return AdmissionStep::Compact(source);
+        if allow_range_trim && let Some(source) = self.range_trim_source(&candidate) {
+            return AdmissionProgress::Trim(source);
         }
 
         let removed = self
@@ -332,7 +332,7 @@ impl MemoryShard {
             .expect("a sampled pressure candidate cannot disappear while its shard is locked");
         self.metrics.decrease_usage(removed, 1);
         self.metrics.record_evictions(1);
-        AdmissionStep::Retry
+        AdmissionProgress::Retry
     }
 
     fn insert_admission(&mut self, object_key: ObjectKey, range: ByteRange, bytes: Bytes) {
@@ -348,16 +348,16 @@ impl MemoryShard {
             range,
             bytes,
             candidate_slot,
-            admitted_at: self.access_clock,
+            admitted_at_access: self.access_clock,
         };
 
         let entries = self.ranges.entry(object_key).or_default();
-        entries.generation = entries.generation.saturating_add(1);
+        entries.object_generation = entries.object_generation.saturating_add(1);
         let replaced = entries.by_start.insert(range.start(), entry);
         debug_assert!(replaced.is_none());
     }
 
-    fn insert_compacted(&mut self, object_key: &ObjectKey, range: ByteRange, bytes: Bytes) {
+    fn insert_trimmed(&mut self, object_key: &ObjectKey, range: ByteRange, bytes: Bytes) {
         let id = self.allocate_entry_id();
         let candidate_slot = self.candidates.register(CachedRangeIdentity {
             object_key: object_key.clone(),
@@ -369,10 +369,10 @@ impl MemoryShard {
             range,
             bytes,
             candidate_slot,
-            admitted_at: self.access_clock,
+            admitted_at_access: self.access_clock,
         };
         let entries = self.ranges.entry(object_key.clone()).or_default();
-        entries.generation = entries.generation.saturating_add(1);
+        entries.object_generation = entries.object_generation.saturating_add(1);
         let replaced = entries.by_start.insert(range.start(), entry);
         debug_assert!(replaced.is_none());
     }
@@ -385,14 +385,14 @@ impl MemoryShard {
         self.next_entry_id
     }
 
-    fn remove_superseded(&mut self, object_key: &ObjectKey, ranges: &[ByteRange]) -> RemovedUsage {
-        let mut removal = RemovedUsage::default();
+    fn remove_superseded(&mut self, object_key: &ObjectKey, ranges: &[ByteRange]) -> RemovedCacheUsage {
+        let mut removal = RemovedCacheUsage::default();
         for &range in ranges {
             let bytes = self
                 .detach_entry(object_key, range, None, true)
                 .expect("the superseded entry was just found");
-            removal.bytes += bytes;
-            removal.entries += 1;
+            removal.payload_bytes += bytes;
+            removal.entry_count += 1;
         }
         removal
     }
@@ -411,7 +411,7 @@ impl MemoryShard {
         object_key: &ObjectKey,
         range: ByteRange,
         expected_id: Option<u64>,
-        preserve_access: bool,
+        preserve_access_history: bool,
     ) -> Option<u64> {
         let (entry, object_is_empty) = {
             let entries = self.ranges.get_mut(object_key)?;
@@ -423,13 +423,13 @@ impl MemoryShard {
                 .by_start
                 .remove(&range.start())
                 .expect("the exact entry was checked immediately before removal");
-            entries.generation = entries.generation.saturating_add(1);
+            entries.object_generation = entries.object_generation.saturating_add(1);
             let object_is_empty = entries.by_start.is_empty();
             (entry, object_is_empty)
         };
 
         self.unregister_candidate(entry.candidate_slot, entry.id);
-        if object_is_empty && !preserve_access {
+        if object_is_empty && !preserve_access_history {
             self.ranges.remove(object_key);
         }
         let bytes = entry.bytes.len() as u64;
@@ -452,14 +452,14 @@ impl MemoryShard {
     }
 
     /// Selects the lowest recent retrieval value per retained byte in a bounded sample.
-    fn pressure_candidate(
+    fn select_reclaim_candidate(
         &mut self,
         admitting_key: &ObjectKey,
         admitting_range: ByteRange,
-    ) -> Option<PressureCandidate> {
+    ) -> Option<ReclaimCandidate> {
         let (sample_start, sample_count) = self.candidates.sample();
         let candidate_count = self.candidates.entries.len();
-        let mut selected: Option<PressureCandidate> = None;
+        let mut selected: Option<ReclaimCandidate> = None;
 
         for offset in 0..sample_count {
             let candidate = &self.candidates.entries[(sample_start + offset) % candidate_count];
@@ -476,16 +476,16 @@ impl MemoryShard {
                 continue;
             }
 
-            let sampled = PressureCandidate {
+            let sampled = ReclaimCandidate {
                 object_key: candidate.object_key.clone(),
                 range: entry.range,
                 id: entry.id,
                 retained_bytes: entry.bytes.len() as u64,
-                retrieval_value: entries.accesses.retention_value(entry.range, self.access_clock),
+                retrieval_cost: entries.accesses.covered_retrieval_cost(entry.range, self.access_clock),
             };
             if selected
                 .as_ref()
-                .is_none_or(|current| compare_retention(&sampled, current).is_lt())
+                .is_none_or(|current| compare_retrieval_cost_per_byte(&sampled, current).is_lt())
             {
                 selected = Some(sampled);
             }
@@ -493,8 +493,8 @@ impl MemoryShard {
         selected
     }
 
-    /// Plans compaction only for the selected candidate, after its grace expires.
-    fn compaction_source(&self, candidate: &PressureCandidate) -> Option<CompactionSource> {
+    /// Plans range trimming only for the selected candidate, after its grace expires.
+    fn range_trim_source(&self, candidate: &ReclaimCandidate) -> Option<RangeTrimSource> {
         let entries = self
             .ranges
             .get(&candidate.object_key)
@@ -504,28 +504,28 @@ impl MemoryShard {
             .get(&candidate.range.start())
             .filter(|entry| entry.id == candidate.id)
             .expect("a selected pressure candidate must identify a live entry");
-        if self.access_clock.saturating_sub(entry.admitted_at) < COMPACTION_GRACE_ACCESSES {
+        if self.access_clock.saturating_sub(entry.admitted_at_access) < RANGE_TRIM_GRACE_ACCESSES {
             return None;
         }
-        let plan = plan_compaction(entry.range, entries.accesses.active_ranges(self.access_clock))?;
-        Some(CompactionSource {
+        let plan = plan_range_trim(entry.range, entries.accesses.active_ranges(self.access_clock))?;
+        Some(RangeTrimSource {
             object_key: candidate.object_key.clone(),
             start: candidate.range.start(),
             id: candidate.id,
-            generation: entries.generation,
+            object_generation: entries.object_generation,
             plan,
             source_bytes: entry.bytes.clone(),
         })
     }
 
-    /// Publishes copied compaction output only if source metadata is unchanged.
-    pub(super) fn publish_compaction(&mut self, replacement: CompactionReplacement) -> bool {
+    /// Publishes copied range trimming output only if source metadata is unchanged.
+    pub(super) fn publish_range_trim(&mut self, replacement: RangeTrimReplacement) -> bool {
         let valid = self.ranges.get(&replacement.object_key).is_some_and(|entries| {
-            entries.generation == replacement.generation
+            entries.object_generation == replacement.object_generation
                 && entries
                     .by_start
                     .get(&replacement.start)
-                    .is_some_and(|entry| entry.id == replacement.id && entry.range == replacement.plan.source())
+                    .is_some_and(|entry| entry.id == replacement.id && entry.range == replacement.plan.source_range())
         });
         if !valid {
             return false;
@@ -534,7 +534,7 @@ impl MemoryShard {
         let removed_bytes = self
             .detach_entry(
                 &replacement.object_key,
-                replacement.plan.source(),
+                replacement.plan.source_range(),
                 Some(replacement.id),
                 true,
             )
@@ -542,7 +542,7 @@ impl MemoryShard {
         let mut retained_bytes = 0_u64;
         let mut retained_entries = 0_u64;
 
-        for (retained_range, bytes) in replacement.retained {
+        for (retained_range, bytes) in replacement.retained_payloads {
             if self
                 .ranges
                 .get(&replacement.object_key)
@@ -554,7 +554,7 @@ impl MemoryShard {
             retained_bytes += bytes.len() as u64;
             retained_entries += 1;
             self.used_bytes += bytes.len() as u64;
-            self.insert_compacted(&replacement.object_key, retained_range, bytes);
+            self.insert_trimmed(&replacement.object_key, retained_range, bytes);
         }
 
         let reclaimed = removed_bytes - retained_bytes;
@@ -563,7 +563,7 @@ impl MemoryShard {
         if retained_entries != 0 {
             self.metrics.increase_usage(retained_bytes, retained_entries);
         }
-        self.metrics.record_compaction(reclaimed);
+        self.metrics.record_range_trim(reclaimed);
         true
     }
 
@@ -590,11 +590,11 @@ impl MemoryShard {
 }
 
 /// Lower retrieval-value density, then the older entry wins victim selection.
-fn compare_retention(left: &PressureCandidate, right: &PressureCandidate) -> Ordering {
-    compare_value_density(
-        left.retrieval_value,
+fn compare_retrieval_cost_per_byte(left: &ReclaimCandidate, right: &ReclaimCandidate) -> Ordering {
+    compare_cost_per_byte(
+        left.retrieval_cost,
         left.retained_bytes,
-        right.retrieval_value,
+        right.retrieval_cost,
         right.retained_bytes,
     )
     .then_with(|| left.id.cmp(&right.id))
@@ -602,11 +602,11 @@ fn compare_retention(left: &PressureCandidate, right: &PressureCandidate) -> Ord
     .then_with(|| left.range.cmp(&right.range))
 }
 
-fn compare_value_density(left: u64, left_bytes: u64, right: u64, right_bytes: u64) -> Ordering {
-    (u128::from(left) * u128::from(right_bytes)).cmp(&(u128::from(right) * u128::from(left_bytes)))
+fn compare_cost_per_byte(left_cost: u64, left_bytes: u64, right_cost: u64, right_bytes: u64) -> Ordering {
+    (u128::from(left_cost) * u128::from(right_bytes)).cmp(&(u128::from(right_cost) * u128::from(left_bytes)))
 }
 
-impl Drop for MemoryShard {
+impl Drop for MemoryCacheShard {
     fn drop(&mut self) {
         let entries = self.entry_count() as u64;
         if entries != 0 {

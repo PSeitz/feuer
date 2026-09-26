@@ -6,7 +6,7 @@ use feuer_types::{ByteRange, Download, ObjectKey};
 use super::{
     MemoryCache,
     access_history::{MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY},
-    shard::{AdmissionStep, COMPACTION_GRACE_ACCESSES},
+    shard::{AdmissionProgress, RANGE_TRIM_GRACE_ACCESSES},
     shard_capacity_for,
 };
 use crate::MemoryMetrics;
@@ -395,7 +395,7 @@ fn stale_frequency_eventually_expires() {
 }
 
 #[test]
-fn compaction_respects_grace_then_releases_unrequested_payload() {
+fn range_trim_respects_grace_then_releases_unrequested_payload() {
     let early_pressure = cache(10);
     let early_key = ObjectKey::from("early-download");
     early_pressure.insert_and_record(
@@ -419,7 +419,7 @@ fn compaction_respects_grace_then_releases_unrequested_payload() {
     let returned = cache.get(&key, range(2, 4)).unwrap();
     assert_eq!(returned, Bytes::from_static(b"cd"));
     assert_eq!(returned.as_ptr(), original.slice(2..).as_ptr());
-    for _ in 1..COMPACTION_GRACE_ACCESSES {
+    for _ in 1..RANGE_TRIM_GRACE_ACCESSES {
         cache.record_access(&key, range(2, 4));
     }
     populate(&cache, incoming, download(range(0, 2), Bytes::from_static(b"xy")));
@@ -436,7 +436,7 @@ fn compaction_respects_grace_then_releases_unrequested_payload() {
 }
 
 #[test]
-fn compaction_preserves_disjoint_requested_coverage_without_filling_gaps() {
+fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
     let cache = cache(10);
     let key = ObjectKey::from("download");
     populate(
@@ -446,7 +446,7 @@ fn compaction_preserves_disjoint_requested_coverage_without_filling_gaps() {
     );
     cache.record_access(&key, range(1, 3));
     cache.record_access(&key, range(7, 9));
-    for _ in 2..COMPACTION_GRACE_ACCESSES {
+    for _ in 2..RANGE_TRIM_GRACE_ACCESSES {
         cache.record_access(&key, range(1, 3));
     }
 
@@ -463,14 +463,14 @@ fn compaction_preserves_disjoint_requested_coverage_without_filling_gaps() {
 }
 
 #[test]
-fn compaction_waits_for_pressure_and_adds_no_access() {
+fn range_trim_waits_for_pressure_and_adds_no_access() {
     let cache = cache(16);
     let key = ObjectKey::from("download");
     let original = Bytes::from_static(b"abcdefghijklmnop");
     populate(&cache, key.clone(), download(range(0, 16), original.clone()));
 
     let returned = cache.get(&key, range(4, 8)).unwrap();
-    for _ in 1..COMPACTION_GRACE_ACCESSES {
+    for _ in 1..RANGE_TRIM_GRACE_ACCESSES {
         cache.record_access(&key, range(4, 8));
     }
 
@@ -504,7 +504,7 @@ fn candidate_state_tracks_entries_during_oversized_churn() {
 }
 
 #[test]
-fn copied_compaction_is_revalidated_before_publication_and_can_fall_back() {
+fn copied_range_trim_is_revalidated_before_publication_and_can_fall_back() {
     let cache = cache(10);
     let key = ObjectKey::from("download");
     cache.insert_and_record(
@@ -512,7 +512,7 @@ fn copied_compaction_is_revalidated_before_publication_and_can_fall_back() {
         download(range(0, 10), Bytes::from_static(b"abcdefghij")),
         range(2, 4),
     );
-    for _ in 1..COMPACTION_GRACE_ACCESSES {
+    for _ in 1..RANGE_TRIM_GRACE_ACCESSES {
         cache.record_access(&key, range(2, 4));
     }
 
@@ -520,7 +520,8 @@ fn copied_compaction_is_revalidated_before_publication_and_can_fall_back() {
     let incoming_bytes = Bytes::from_static(b"xy");
     let replacement = {
         let mut shard = cache.shards[0].lock();
-        let AdmissionStep::Compact(source) = shard.admission_step(&incoming, range(0, 2), &incoming_bytes, None, true)
+        let AdmissionProgress::Trim(source) =
+            shard.advance_admission(&incoming, range(0, 2), &incoming_bytes, None, true)
         else {
             panic!("pressure should select the cold compactable cached range");
         };
@@ -529,14 +530,14 @@ fn copied_compaction_is_revalidated_before_publication_and_can_fall_back() {
     };
 
     cache.record_access(&key, range(6, 8));
-    assert!(!cache.shards[0].lock().publish_compaction(replacement));
+    assert!(!cache.shards[0].lock().publish_range_trim(replacement));
     assert_eq!(cache.used_bytes(), 10);
     assert!(cache.get(&key, range(6, 8)).is_some());
 
     let step = cache.shards[0]
         .lock()
-        .admission_step(&incoming, range(0, 2), &incoming_bytes, None, false);
-    assert!(matches!(step, AdmissionStep::Retry));
+        .advance_admission(&incoming, range(0, 2), &incoming_bytes, None, false);
+    assert!(matches!(step, AdmissionProgress::Retry));
     assert_eq!(cache.used_bytes(), 0, "fallback pressure may evict but cannot starve");
 }
 

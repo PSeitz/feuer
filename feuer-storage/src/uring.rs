@@ -41,7 +41,7 @@ pub(crate) struct IoQueueHandle {
     // Sends admitted requests; taken on drop to signal shutdown before joining.
     sender: Option<mpsc::SyncSender<IoRequest>>,
     // Shared eventfd wakes the queue for new work or shutdown.
-    wake: Arc<OwnedFd>,
+    wake_fd: Arc<OwnedFd>,
     // Queue thread; taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
     // Shared budgets, enforced before allocating or queueing work.
@@ -52,16 +52,16 @@ pub(crate) struct IoQueueHandle {
 // consuming read admission or staging capacity.
 struct IoAdmissionBudgets {
     // Per-class limits covering preparing, queued, and active requests.
-    requests: [Arc<Semaphore>; 2],
+    request_slots: [Arc<Semaphore>; 2],
     // Per-class staging budgets in alignment-sized units; acquired before allocation.
-    buffers: [Arc<Semaphore>; 2],
+    staging_pages: [Arc<Semaphore>; 2],
 }
 
 impl IoAdmissionBudgets {
     fn new() -> Self {
         Self {
-            requests: std::array::from_fn(|_| Arc::new(Semaphore::new(MAX_IN_FLIGHT_IO))),
-            buffers: std::array::from_fn(|_| {
+            request_slots: std::array::from_fn(|_| Arc::new(Semaphore::new(MAX_IN_FLIGHT_IO))),
+            staging_pages: std::array::from_fn(|_| {
                 Arc::new(Semaphore::new(MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES))
             }),
         }
@@ -78,7 +78,7 @@ fn staging_pages_for(operation: IoOperation, offset: u64, length: usize) -> u32 
 }
 
 impl IoQueueHandle {
-    pub(crate) fn new(file: File, lock: File) -> io::Result<Self> {
+    pub(crate) fn new(file: File, directory_lock: File) -> io::Result<Self> {
         let ring = IoUring::new(MAX_IN_FLIGHT_IO as u32)?;
         // SAFETY: eventfd has no pointer arguments and returns a new owned fd.
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
@@ -86,15 +86,15 @@ impl IoQueueHandle {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: fd was just created and has no other owner.
-        let wake = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
+        let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
         let (sender, receiver) = mpsc::sync_channel(MAX_ADMITTED_REQUESTS);
         let admission = Arc::new(IoAdmissionBudgets::new());
         let mut queue = IoQueue {
             admission: admission.clone(),
             ring,
             file: Some(file),
-            lock: Some(lock),
-            wake: wake.clone(),
+            directory_lock: Some(directory_lock),
+            wake_fd: wake_fd.clone(),
             receiver,
             pending: VecDeque::new(),
             active: (0..MAX_IN_FLIGHT_IO).map(|_| None).collect(),
@@ -106,7 +106,7 @@ impl IoQueueHandle {
         })?;
         Ok(Self {
             sender: Some(sender),
-            wake,
+            wake_fd,
             thread: Some(thread),
             admission,
         })
@@ -120,16 +120,16 @@ impl IoQueueHandle {
         payload: &[u8],
     ) -> io::Result<Bytes> {
         let class = usize::from(operation != IoOperation::Read);
-        let request_permit = self.admission.requests[class]
+        let request_permit = self.admission.request_slots[class]
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| stopped())?;
-        let staging_permit = self.admission.buffers[class]
+            .map_err(|_| queue_stopped_error())?;
+        let staging_pages_permit = self.admission.staging_pages[class]
             .clone()
             .acquire_many_owned(staging_pages_for(operation, offset, length))
             .await
-            .map_err(|_| stopped())?;
+            .map_err(|_| queue_stopped_error())?;
         let (reply, receive) = oneshot::channel();
         let request = IoRequest::new(
             operation,
@@ -137,19 +137,23 @@ impl IoQueueHandle {
             length,
             payload,
             reply,
-            (request_permit, staging_permit),
+            (request_permit, staging_pages_permit),
         )?;
         // All queued + active requests hold a permit, so this cannot wait for space.
-        self.sender.as_ref().unwrap().try_send(request).map_err(|_| stopped())?;
-        notify(&self.wake);
-        receive.await.map_err(|_| stopped())?
+        self.sender
+            .as_ref()
+            .unwrap()
+            .try_send(request)
+            .map_err(|_| queue_stopped_error())?;
+        notify(&self.wake_fd);
+        receive.await.map_err(|_| queue_stopped_error())?
     }
 }
 
 impl Drop for IoQueueHandle {
     fn drop(&mut self) {
         self.sender.take();
-        notify(&self.wake);
+        notify(&self.wake_fd);
         // The queue drains submitted I/O before releasing buffers and the directory lock.
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -157,18 +161,18 @@ impl Drop for IoQueueHandle {
     }
 }
 
-fn stopped() -> io::Error {
+fn queue_stopped_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "io_uring queue stopped")
 }
 
-struct AlignedBuffer {
+struct AlignedIoBuffer {
     // Owned, aligned allocation whose address stays stable while the kernel uses it.
     ptr: NonNull<u8>,
     // Allocation size/alignment for slice bounds and matching deallocation.
     layout: Layout,
 }
 
-impl AlignedBuffer {
+impl AlignedIoBuffer {
     fn new(length: usize) -> io::Result<Self> {
         let layout = Layout::from_size_align(length.max(DIRECT_IO_ALIGNMENT_BYTES), DIRECT_IO_ALIGNMENT_BYTES).unwrap();
         // SAFETY: layout is non-zero with a valid power-of-two alignment.
@@ -184,10 +188,10 @@ impl AlignedBuffer {
     }
 }
 
-// SAFETY: AlignedBuffer uniquely owns its allocation; moving it does not move the allocation.
-unsafe impl Send for AlignedBuffer {}
+// SAFETY: AlignedIoBuffer uniquely owns its allocation; moving it does not move the allocation.
+unsafe impl Send for AlignedIoBuffer {}
 
-impl Drop for AlignedBuffer {
+impl Drop for AlignedIoBuffer {
     fn drop(&mut self) {
         // SAFETY: the matching allocation remains owned, and no kernel operation references it.
         unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
@@ -207,11 +211,11 @@ struct IoRequest {
     // Physical byte count including padding, for I/O and overlap serialization.
     aligned_length: usize,
     // Aligned memory for disk reads/writes; kept alive until I/O completes.
-    io_buffer: AlignedBuffer,
+    io_buffer: AlignedIoBuffer,
     // RMW input preserved during the initial read, then merged into `io_buffer`.
     read_modify_write_payload: Option<Bytes>,
     // Current I/O direction; flips from read to write after an RMW read completes.
-    reading: bool,
+    reading_phase: bool,
     // Bytes completed in this phase, allowing aligned short-I/O continuations.
     completed_bytes: usize,
     // Caller result channel; taken on finish/failure, also detects cancellation.
@@ -219,7 +223,7 @@ struct IoRequest {
     // Holds request admission until this request is dropped.
     _request_permit: OwnedSemaphorePermit,
     // Holds the staging-buffer charge until this request is dropped.
-    _staging_permit: OwnedSemaphorePermit,
+    _staging_pages_permit: OwnedSemaphorePermit,
 }
 
 impl IoRequest {
@@ -233,7 +237,7 @@ impl IoRequest {
     ) -> io::Result<Self> {
         let data_offset_in_buffer = offset as usize % DIRECT_IO_ALIGNMENT_BYTES;
         let aligned_length = (data_offset_in_buffer + length).next_multiple_of(DIRECT_IO_ALIGNMENT_BYTES);
-        let mut io_buffer = AlignedBuffer::new(aligned_length)?;
+        let mut io_buffer = AlignedIoBuffer::new(aligned_length)?;
         let needs_read_modify_write =
             operation == IoOperation::Write && (data_offset_in_buffer != 0 || length != aligned_length);
         let payload = if needs_read_modify_write {
@@ -252,11 +256,11 @@ impl IoRequest {
             aligned_length,
             io_buffer,
             read_modify_write_payload: payload,
-            reading: operation == IoOperation::Read || needs_read_modify_write,
+            reading_phase: operation == IoOperation::Read || needs_read_modify_write,
             completed_bytes: 0,
             reply: Some(reply),
             _request_permit: permits.0,
-            _staging_permit: permits.1,
+            _staging_pages_permit: permits.1,
         })
     }
 
@@ -273,7 +277,7 @@ impl IoRequest {
         let ptr = unsafe { self.io_buffer.ptr.as_ptr().add(self.completed_bytes) };
         let length = (self.aligned_length - self.completed_bytes) as u32;
         let offset = self.aligned_offset + self.completed_bytes as u64;
-        let entry = if self.reading {
+        let entry = if self.reading_phase {
             opcode::Read::new(fd, ptr, length).offset(offset).build()
         } else {
             opcode::Write::new(fd, ptr, length).offset(offset).build()
@@ -291,29 +295,29 @@ impl IoRequest {
         }
         let count = result as usize;
         if count == 0 || count > self.aligned_length - self.completed_bytes {
-            return Err(self.short_error());
+            return Err(self.incomplete_io_error());
         }
         self.completed_bytes += count;
         if self.completed_bytes != self.aligned_length {
             // An unaligned remainder cannot be resubmitted with O_DIRECT.
             if !self.completed_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
-                return Err(self.short_error());
+                return Err(self.incomplete_io_error());
             }
             return Ok(true);
         }
         if let Some(payload) = self.read_modify_write_payload.take() {
             self.io_buffer.as_mut_slice()[self.data_offset_in_buffer..self.data_offset_in_buffer + self.length]
                 .copy_from_slice(&payload);
-            self.reading = false;
+            self.reading_phase = false;
             self.completed_bytes = 0;
             return Ok(true);
         }
         Ok(false)
     }
 
-    fn short_error(&self) -> io::Error {
+    fn incomplete_io_error(&self) -> io::Error {
         io::Error::new(
-            if self.reading {
+            if self.reading_phase {
                 io::ErrorKind::UnexpectedEof
             } else {
                 io::ErrorKind::WriteZero
@@ -345,9 +349,9 @@ struct IoQueue {
     // Direct-I/O payload file; taken to retain ownership on abnormal exit.
     file: Option<File>,
     // Exclusive directory lock, retained if kernel I/O may still be active.
-    lock: Option<File>,
+    directory_lock: Option<File>,
     // Eventfd polled alongside the ring so new work need not wait for completion.
-    wake: Arc<OwnedFd>,
+    wake_fd: Arc<OwnedFd>,
     // Incoming admitted requests; disconnection starts draining shutdown.
     receiver: mpsc::Receiver<IoRequest>,
     // Unsubmitted requests in arrival order, preserving overlap ordering.
@@ -451,7 +455,7 @@ impl IoQueue {
                 revents: 0,
             },
             libc::pollfd {
-                fd: self.wake.as_raw_fd(),
+                fd: self.wake_fd.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -470,12 +474,12 @@ impl IoQueue {
             .iter()
             .any(|fd| fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0)
         {
-            return Err(stopped());
+            return Err(queue_stopped_error());
         }
         if fds[1].revents & libc::POLLIN != 0 {
             let mut value = 0u64;
             // SAFETY: value is writable for the required eight bytes; eventfd is nonblocking.
-            unsafe { libc::read(self.wake.as_raw_fd(), (&mut value as *mut u64).cast(), 8) };
+            unsafe { libc::read(self.wake_fd.as_raw_fd(), (&mut value as *mut u64).cast(), 8) };
         }
         Ok(())
     }
@@ -483,7 +487,7 @@ impl IoQueue {
 
 impl Drop for IoQueue {
     fn drop(&mut self) {
-        for semaphore in self.admission.requests.iter().chain(&self.admission.buffers) {
+        for semaphore in self.admission.request_slots.iter().chain(&self.admission.staging_pages) {
             semaphore.close();
         }
         if self.active.iter().any(Option::is_some) {
@@ -494,21 +498,21 @@ impl Drop for IoQueue {
             tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
             for mut request in self.active.iter_mut().filter_map(Option::take) {
                 if let Some(reply) = request.reply.take() {
-                    let _ = reply.send(Err(stopped()));
+                    let _ = reply.send(Err(queue_stopped_error()));
                 }
                 std::mem::forget(request);
             }
             std::mem::forget(self.file.take());
-            std::mem::forget(self.lock.take());
+            std::mem::forget(self.directory_lock.take());
         }
     }
 }
 
-fn notify(wake: &OwnedFd) {
+fn notify(wake_fd: &OwnedFd) {
     let value = 1u64;
     loop {
         // SAFETY: value is readable for eight bytes and wake is an owned eventfd.
-        let result = unsafe { libc::write(wake.as_raw_fd(), (&value as *const u64).cast(), 8) };
+        let result = unsafe { libc::write(wake_fd.as_raw_fd(), (&value as *const u64).cast(), 8) };
         if result >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
             // EAGAIN means a notification is already pending (eventfd counter full).
             return;

@@ -43,9 +43,9 @@ impl fmt::Display for IoOperation {
     }
 }
 
-/// A stable category for a range-storage error.
+/// The kind of data-file error used for bounded diagnostic labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ErrorKind {
+pub enum DataFileErrorKind {
     /// The fixed-file configuration is invalid.
     InvalidConfiguration,
     /// Another cache instance owns the cache directory.
@@ -60,7 +60,7 @@ pub enum ErrorKind {
     Task,
 }
 
-impl ErrorKind {
+impl DataFileErrorKind {
     /// Returns the stable bounded label used by traces and metrics.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -74,7 +74,7 @@ impl ErrorKind {
     }
 }
 
-impl fmt::Display for ErrorKind {
+impl fmt::Display for DataFileErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -83,7 +83,7 @@ impl fmt::Display for ErrorKind {
 /// An error from the fixed-capacity positional data file.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum Error {
+pub enum DataFileError {
     /// Capacity is zero, not 4096-byte aligned, or exceeds Linux's file-offset limit.
     #[error("data-file capacity must be a positive multiple of 4096 and at most i64::MAX")]
     InvalidCapacity,
@@ -153,16 +153,16 @@ pub enum Error {
     },
 }
 
-impl Error {
+impl DataFileError {
     /// Returns the stable category of this error.
-    pub const fn kind(&self) -> ErrorKind {
+    pub const fn kind(&self) -> DataFileErrorKind {
         match self {
-            Self::InvalidCapacity | Self::InvalidDataFile { .. } => ErrorKind::InvalidConfiguration,
-            Self::AlreadyOpen { .. } => ErrorKind::AlreadyOpen,
-            Self::OutOfBounds { .. } | Self::LengthOverflow { .. } => ErrorKind::OutOfBounds,
-            Self::Allocation { .. } => ErrorKind::Allocation,
-            Self::Io { .. } => ErrorKind::Io,
-            Self::RuntimeUnavailable | Self::Task { .. } => ErrorKind::Task,
+            Self::InvalidCapacity | Self::InvalidDataFile { .. } => DataFileErrorKind::InvalidConfiguration,
+            Self::AlreadyOpen { .. } => DataFileErrorKind::AlreadyOpen,
+            Self::OutOfBounds { .. } | Self::LengthOverflow { .. } => DataFileErrorKind::OutOfBounds,
+            Self::Allocation { .. } => DataFileErrorKind::Allocation,
+            Self::Io { .. } => DataFileErrorKind::Io,
+            Self::RuntimeUnavailable | Self::Task { .. } => DataFileErrorKind::Task,
         }
     }
 
@@ -182,5 +182,5 @@ impl Error {
     }
 }
 
-/// A result returned by range-storage operations.
-pub type Result<T> = std::result::Result<T, Error>;
+/// A data-file operation result using the data-file error type.
+pub type DataFileResult<T> = std::result::Result<T, DataFileError>;

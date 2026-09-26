@@ -15,8 +15,8 @@ pub struct MemoryMetrics {
     miss: BoxedCounter,
     remove: BoxedCounter,
     evict: BoxedCounter,
-    compact: BoxedCounter,
-    compacted_payload_bytes: BoxedCounter,
+    trim: BoxedCounter,
+    trimmed_payload_bytes: BoxedCounter,
     payload_bytes: BoxedGauge,
     entries: BoxedGauge,
 }
@@ -35,7 +35,7 @@ impl MemoryMetrics {
             "Operations completed by Feuer's in-memory range tier".into(),
             &["operation"],
         );
-        let compacted_payload_bytes = registry.register_counter_vec(
+        let trimmed_payload_bytes = registry.register_counter_vec(
             "feuer_memory_compacted_payload_bytes_total".into(),
             "Downloaded payload bytes released by in-memory compaction".into(),
             &[],
@@ -61,8 +61,8 @@ impl MemoryMetrics {
             miss: operation("miss"),
             remove: operation("remove"),
             evict: operation("evict"),
-            compact: operation("compact"),
-            compacted_payload_bytes: compacted_payload_bytes.counter(&[]),
+            trim: operation("compact"),
+            trimmed_payload_bytes: trimmed_payload_bytes.counter(&[]),
             payload_bytes: payload_bytes.gauge(&[]),
             entries: entries.gauge(&[]),
         })
@@ -100,9 +100,9 @@ impl MemoryMetrics {
         self.evict.increase(count);
     }
 
-    pub(crate) fn record_compaction(&self, reclaimed_bytes: u64) {
-        self.compact.increase(1);
-        self.compacted_payload_bytes.increase(reclaimed_bytes);
+    pub(crate) fn record_range_trim(&self, reclaimed_bytes: u64) {
+        self.trim.increase(1);
+        self.trimmed_payload_bytes.increase(reclaimed_bytes);
     }
 
     pub(crate) fn increase_usage(&self, bytes: u64, entries: u64) {
@@ -135,7 +135,7 @@ mod tests {
         metrics.record_lookup(true);
         metrics.increase_usage(17, 1);
         metrics.record_evictions(1);
-        metrics.record_compaction(3);
+        metrics.record_range_trim(3);
         metrics.decrease_usage(17, 1);
     }
 }

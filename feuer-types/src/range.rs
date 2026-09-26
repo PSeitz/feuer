@@ -13,9 +13,9 @@ pub struct ByteRange {
 
 impl ByteRange {
     /// Creates the exact range `start..end`.
-    pub const fn new(start: u64, end: u64) -> Result<Self, InvalidRange> {
+    pub const fn new(start: u64, end: u64) -> Result<Self, InvalidByteRange> {
         if start >= end {
-            return Err(InvalidRange { start, end });
+            return Err(InvalidByteRange { start, end });
         }
         Ok(Self { start, end })
     }
@@ -52,7 +52,7 @@ impl ByteRange {
 }
 
 impl TryFrom<Range<u64>> for ByteRange {
-    type Error = InvalidRange;
+    type Error = InvalidByteRange;
 
     fn try_from(range: Range<u64>) -> Result<Self, Self::Error> {
         Self::new(range.start, range.end)
@@ -68,12 +68,12 @@ impl From<ByteRange> for Range<u64> {
 /// The error returned for an empty or reversed byte range.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 #[error("byte range must be non-empty and ordered, got {start}..{end}")]
-pub struct InvalidRange {
+pub struct InvalidByteRange {
     start: u64,
     end: u64,
 }
 
-impl InvalidRange {
+impl InvalidByteRange {
     /// Returns the rejected start offset.
     pub const fn start(self) -> u64 {
         self.start
@@ -100,8 +100,8 @@ mod tests {
 
     #[test]
     fn rejects_empty_and_reversed_ranges() {
-        assert_eq!(ByteRange::new(7, 7).unwrap_err(), InvalidRange { start: 7, end: 7 });
-        assert_eq!(ByteRange::new(8, 7).unwrap_err(), InvalidRange { start: 8, end: 7 });
+        assert_eq!(ByteRange::new(7, 7).unwrap_err(), InvalidByteRange { start: 7, end: 7 });
+        assert_eq!(ByteRange::new(8, 7).unwrap_err(), InvalidByteRange { start: 8, end: 7 });
     }
 
     #[test]

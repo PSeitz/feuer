@@ -4,7 +4,7 @@ use mixtrics::metrics::{BoxedCounter, BoxedHistogram, BoxedRegistry, Buckets};
 
 use crate::IoOperation;
 
-struct OperationMetrics {
+struct IoOperationMetrics {
     success: BoxedCounter,
     error: BoxedCounter,
     bytes: BoxedCounter,
@@ -12,9 +12,9 @@ struct OperationMetrics {
     error_duration: BoxedHistogram,
 }
 
-impl fmt::Debug for OperationMetrics {
+impl fmt::Debug for IoOperationMetrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OperationMetrics").finish_non_exhaustive()
+        f.debug_struct("IoOperationMetrics").finish_non_exhaustive()
     }
 }
 
@@ -25,8 +25,8 @@ impl fmt::Debug for OperationMetrics {
 /// `mixtrics` registry using only bounded operation and outcome labels.
 #[derive(Debug)]
 pub struct IoMetrics {
-    read: OperationMetrics,
-    write: OperationMetrics,
+    read: IoOperationMetrics,
+    write: IoOperationMetrics,
 }
 
 impl IoMetrics {
@@ -49,7 +49,7 @@ impl IoMetrics {
             Buckets::exponential(0.000_001, 2.0, 25),
         );
 
-        let operation = |label: &'static str| OperationMetrics {
+        let operation = |label: &'static str| IoOperationMetrics {
             success: operations.counter(&[label.into(), "success".into()]),
             error: operations.counter(&[label.into(), "error".into()]),
             bytes: bytes.counter(&[label.into()]),
