@@ -6,12 +6,10 @@ type IoResultReceiver = oneshot::Receiver<io::Result<Bytes>>;
 
 fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) -> (IoRequest, IoResultReceiver) {
     let (reply, receive) = oneshot::channel();
-    let class = usize::from(operation != IoOperation::Read);
-    let request_permit = queue.admission.request_slots[class]
-        .clone()
-        .try_acquire_owned()
-        .unwrap();
-    let staging_pages_permit = queue.admission.staging_pages[class]
+    let request_permit = queue.admission.request_slots.clone().try_acquire_owned().unwrap();
+    let staging_pages_permit = queue
+        .admission
+        .staging_pages
         .clone()
         .try_acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
         .unwrap();
@@ -48,12 +46,12 @@ fn queue() -> IoQueue {
     assert!(fd >= 0);
     // SAFETY: fd was just created and has no other owner.
     let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
-    let (_, receiver) = mpsc::sync_channel(MAX_ADMITTED_REQUESTS); // disconnected: run() will drain and exit
+    let (_, receiver) = mpsc::sync_channel(MAX_IN_FLIGHT_IO); // disconnected: run() will drain and exit
     IoQueue {
         admission: Arc::new(IoAdmissionBudgets::new()),
         ring: IoUring::new(MAX_IN_FLIGHT_IO as u32).unwrap(),
-        file: Some(file),
-        directory_lock: Some(tempfile::tempfile().unwrap()),
+        file: Some(Arc::new(file)),
+        directory_lock: Some(Arc::new(tempfile::tempfile().unwrap())),
         wake_fd,
         receiver,
         pending: VecDeque::new(),
@@ -62,200 +60,140 @@ fn queue() -> IoQueue {
 }
 
 #[test]
-fn fills_qd64_with_simultaneous_reads_and_writes_and_bounds_admission() {
-    let mut queue = queue();
-    let mut replies = Vec::new();
-    for i in 0..MAX_ADMITTED_REQUESTS {
-        let operation = if i % 2 == 0 {
-            IoOperation::Read
-        } else {
+fn full_ring_does_not_block_the_other_direction() {
+    for operation in [IoOperation::Read, IoOperation::Write] {
+        let other_operation = if operation == IoOperation::Read {
             IoOperation::Write
+        } else {
+            IoOperation::Read
         };
-        let (request, reply) = request(
-            &queue,
-            operation,
-            (i * DIRECT_IO_ALIGNMENT_BYTES) as u64,
-            DIRECT_IO_ALIGNMENT_BYTES,
-        );
-        queue.pending.push_back(request);
-        replies.push(reply);
-    }
-    assert!(queue.admission.request_slots.iter().all(|s| s.available_permits() == 0));
-    queue.schedule();
-    assert_eq!(queue.active.iter().flatten().count(), MAX_IN_FLIGHT_IO);
-    assert_eq!(
-        queue
-            .active
-            .iter()
-            .flatten()
-            .filter(|r| r.operation == IoOperation::Read)
-            .count(),
-        MAX_IN_FLIGHT_IO / 2
-    );
-    assert_eq!(
-        queue
-            .active
-            .iter()
-            .flatten()
-            .filter(|r| r.operation == IoOperation::Write)
-            .count(),
-        MAX_IN_FLIGHT_IO / 2
-    );
-    for (index, request) in queue.active.iter().flatten().enumerate() {
-        assert_eq!(request.offset, (index * DIRECT_IO_ALIGNMENT_BYTES) as u64);
-    }
-    assert_eq!(queue.pending.len(), MAX_ADMITTED_REQUESTS - MAX_IN_FLIGHT_IO);
-    assert_eq!(queue.ring.submission().len(), MAX_IN_FLIGHT_IO);
-    queue.run().unwrap();
-    for mut reply in replies {
-        reply.try_recv().unwrap().unwrap();
-    }
-    assert!(queue.active.iter().all(Option::is_none));
-    assert!(
-        queue
-            .admission
-            .request_slots
-            .iter()
-            .all(|s| s.available_permits() == MAX_IN_FLIGHT_IO)
-    );
-    assert!(
-        queue
-            .admission
-            .staging_pages
-            .iter()
-            .all(|s| s.available_permits() == MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES)
-    );
-}
+        let mut full_queue = queue();
+        let mut other_queue = queue();
+        other_queue.file = full_queue.file.clone();
+        other_queue.directory_lock = full_queue.directory_lock.clone();
+        let mut full_replies = Vec::new();
+        let mut other_replies = Vec::new();
+        for i in 0..MAX_IN_FLIGHT_IO {
+            let (request, reply) = request(
+                &full_queue,
+                operation,
+                (i * DIRECT_IO_ALIGNMENT_BYTES) as u64,
+                DIRECT_IO_ALIGNMENT_BYTES,
+            );
+            full_queue.pending.push_back(request);
+            full_replies.push(reply);
+        }
+        full_queue.schedule();
+        full_queue.ring.submit().unwrap();
+        assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_IO);
+        assert_eq!(full_queue.admission.request_slots.available_permits(), 0);
+        assert!(full_queue.admission.request_slots.clone().try_acquire_owned().is_err());
 
-// Consume just one real completion without running the scheduler. This lets
-// tests inspect the exact next-slot decision even if the whole batch completed.
-fn complete_one(queue: &mut IoQueue) {
-    queue.ring.submit_and_wait(1).unwrap();
-    let cqe = queue.ring.completion().next().unwrap();
-    let mut request = queue.active[cqe.user_data() as usize].take().unwrap();
-    assert!(!request.complete(cqe.result()).unwrap());
-    request.finish(Ok(()));
-}
-
-#[test]
-fn write_only_fills_the_ring_but_an_older_queued_read_gets_the_next_slot() {
-    let mut queue = queue();
-    let mut replies = Vec::new();
-    for i in 0..MAX_IN_FLIGHT_IO {
-        let (request, reply) = request(
-            &queue,
-            IoOperation::Write,
-            (i * DIRECT_IO_ALIGNMENT_BYTES) as u64,
-            DIRECT_IO_ALIGNMENT_BYTES,
-        );
-        queue.pending.push_back(request);
-        replies.push(reply);
-    }
-    queue.schedule();
-    assert_eq!(queue.active.iter().flatten().count(), MAX_IN_FLIGHT_IO);
-    // Read admission is still available even with all write permits occupied.
-    let (read, read_reply) = request(
-        &queue,
-        IoOperation::Read,
-        MAX_IO_CHUNK_BYTES as u64 - DIRECT_IO_ALIGNMENT_BYTES as u64,
-        DIRECT_IO_ALIGNMENT_BYTES,
-    );
-    queue.pending.push_back(read);
-    replies.push(read_reply);
-    queue.schedule();
-    assert_eq!(queue.pending.len(), 1); // active writes cannot be preempted
-    complete_one(&mut queue);
-    let (write, reply) = request(
-        &queue,
-        IoOperation::Write,
-        (MAX_IN_FLIGHT_IO * DIRECT_IO_ALIGNMENT_BYTES) as u64,
-        DIRECT_IO_ALIGNMENT_BYTES,
-    );
-    queue.pending.push_back(write);
-    replies.push(reply);
-    queue.schedule();
-    assert_eq!(
-        queue
-            .active
-            .iter()
-            .flatten()
-            .filter(|r| r.operation == IoOperation::Read)
-            .count(),
-        1
-    );
-    assert_eq!(queue.pending.len(), 1); // the read was queued before the replacement write
-    assert_eq!(queue.pending[0].operation, IoOperation::Write);
-    queue.run().unwrap();
-    for mut reply in replies {
-        reply.try_recv().unwrap().unwrap();
+        for i in 0..MAX_IN_FLIGHT_IO {
+            // Use disjoint physical pages on the same backing file.
+            let (request, reply) = request(
+                &other_queue,
+                other_operation,
+                ((MAX_IN_FLIGHT_IO + i) * DIRECT_IO_ALIGNMENT_BYTES) as u64,
+                DIRECT_IO_ALIGNMENT_BYTES,
+            );
+            other_queue.pending.push_back(request);
+            other_replies.push(reply);
+        }
+        other_queue.schedule();
+        assert_eq!(other_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_IO);
+        assert_eq!(other_queue.ring.submission().len(), MAX_IN_FLIGHT_IO);
+        assert!(other_queue.pending.is_empty());
+        // Complete an entire ring without processing any completions on the full queue.
+        other_queue.run().unwrap();
+        for mut reply in other_replies {
+            reply.try_recv().unwrap().unwrap();
+        }
+        assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_IO);
+        full_queue.run().unwrap();
+        for mut reply in full_replies {
+            reply.try_recv().unwrap().unwrap();
+        }
+        for queue in [&full_queue, &other_queue] {
+            assert!(queue.active.iter().all(Option::is_none));
+            assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
+            assert_eq!(
+                queue.admission.staging_pages.available_permits(),
+                MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
+            );
+        }
     }
 }
 
 #[test]
-fn active_read_does_not_throttle_writes() {
-    let mut queue = queue();
-    let (read, reply) = request(&queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
-    queue.pending.push_back(read);
-    let mut replies = vec![reply];
-    queue.schedule();
-    for i in 1..=MAX_IN_FLIGHT_IO {
-        let (request, reply) = request(
-            &queue,
-            IoOperation::Write,
-            (i * DIRECT_IO_ALIGNMENT_BYTES) as u64,
-            DIRECT_IO_ALIGNMENT_BYTES,
-        );
-        queue.pending.push_back(request);
-        replies.push(reply);
-    }
-    queue.schedule();
-    assert_eq!(queue.active.iter().flatten().count(), MAX_IN_FLIGHT_IO);
-    assert_eq!(
-        queue
-            .active
-            .iter()
-            .flatten()
-            .filter(|r| r.operation == IoOperation::Write)
-            .count(),
-        MAX_IN_FLIGHT_IO - 1
-    );
-    assert_eq!(queue.pending.len(), 1);
-    queue.run().unwrap();
-    for mut reply in replies {
-        reply.try_recv().unwrap().unwrap();
-    }
-}
-
-#[test]
-fn full_write_admission_and_buffers_leave_a_full_read_ring_available() {
-    let queue = queue();
+fn full_write_admission_and_buffers_leave_full_read_capacity() {
+    let write_queue = queue();
+    let read_queue = queue();
     let mut writes = Vec::new();
     let mut reads = Vec::new();
     for _ in 0..MAX_IN_FLIGHT_IO {
-        writes.push(request(&queue, IoOperation::Write, 0, MAX_IO_CHUNK_BYTES));
+        writes.push(request(&write_queue, IoOperation::Write, 0, MAX_IO_CHUNK_BYTES));
     }
-    assert_eq!(queue.admission.request_slots[1].available_permits(), 0);
-    assert_eq!(queue.admission.staging_pages[1].available_permits(), 0);
+    assert_eq!(write_queue.admission.request_slots.available_permits(), 0);
+    assert_eq!(write_queue.admission.staging_pages.available_permits(), 0);
     for _ in 0..MAX_IN_FLIGHT_IO {
-        reads.push(request(&queue, IoOperation::Read, 0, MAX_IO_CHUNK_BYTES));
+        reads.push(request(&read_queue, IoOperation::Read, 0, MAX_IO_CHUNK_BYTES));
     }
-    assert_eq!(queue.admission.request_slots[0].available_permits(), 0);
-    assert_eq!(queue.admission.staging_pages[0].available_permits(), 0);
+    assert_eq!(read_queue.admission.request_slots.available_permits(), 0);
+    assert_eq!(read_queue.admission.staging_pages.available_permits(), 0);
     drop((reads, writes));
-    assert!(
-        queue
-            .admission
-            .request_slots
-            .iter()
-            .all(|s| s.available_permits() == MAX_IN_FLIGHT_IO)
-    );
-    assert!(
-        queue
-            .admission
-            .staging_pages
-            .iter()
-            .all(|s| s.available_permits() == MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES)
-    );
+    for queue in [&read_queue, &write_queue] {
+        assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
+        assert_eq!(
+            queue.admission.staging_pages.available_permits(),
+            MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
+        );
+    }
+}
+
+#[tokio::test]
+async fn read_worker_progresses_with_write_admission_exhausted_and_after_write_shutdown() {
+    let queue = queue();
+    let file = queue.file.as_ref().unwrap();
+    let lock = queue.directory_lock.as_ref().unwrap();
+    let read_queue = IoQueueHandle::new(file.clone(), lock.clone(), IoOperation::Read).unwrap();
+    let write_queue = IoQueueHandle::new(file.clone(), lock.clone(), IoOperation::Write).unwrap();
+    write_queue
+        .execute(0, DIRECT_IO_ALIGNMENT_BYTES, &[0x99; DIRECT_IO_ALIGNMENT_BYTES])
+        .await
+        .unwrap();
+    let _requests = write_queue
+        .admission
+        .request_slots
+        .clone()
+        .acquire_many_owned(MAX_IN_FLIGHT_IO as u32)
+        .await
+        .unwrap();
+    let _pages = write_queue
+        .admission
+        .staging_pages
+        .clone()
+        .acquire_many_owned((MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES) as u32)
+        .await
+        .unwrap();
+    let bytes = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        read_queue.execute(0, DIRECT_IO_ALIGNMENT_BYTES, &[]),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
+
+    // The read queue must also keep the shared file and directory lock alive.
+    let lock = Arc::downgrade(lock);
+    drop(queue);
+    drop(write_queue);
+    assert!(lock.upgrade().is_some());
+    let bytes = read_queue.execute(0, DIRECT_IO_ALIGNMENT_BYTES, &[]).await.unwrap();
+    assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
+    drop(read_queue);
+    assert!(lock.upgrade().is_none());
 }
 
 #[test]
@@ -269,26 +207,26 @@ fn canceled_submitted_write_retains_resources() {
     drop(reply);
     queue.schedule();
     assert!(queue.active[0].is_some());
+    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO - 1);
     assert_eq!(
-        queue.admission.request_slots[1].available_permits(),
-        MAX_IN_FLIGHT_IO - 1
-    );
-    assert_eq!(
-        queue.admission.staging_pages[1].available_permits(),
-        MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES - 1
+        queue.admission.staging_pages.available_permits(),
+        MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES - 1
     );
     queue.run().unwrap();
     assert!(queue.active.iter().all(Option::is_none));
-    assert_eq!(queue.admission.request_slots[1].available_permits(), MAX_IN_FLIGHT_IO);
+    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
     assert_eq!(
-        queue.admission.staging_pages[1].available_permits(),
-        MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES
+        queue.admission.staging_pages.available_permits(),
+        MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
     );
 
     // Only read/reuse the region after completion, not after dropping the receiver.
-    let (read, mut reply) = request(&queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
-    queue.pending.push_back(read);
-    queue.run().unwrap();
+    let mut read_queue = self::queue();
+    read_queue.file = queue.file.clone();
+    read_queue.directory_lock = queue.directory_lock.clone();
+    let (read, mut reply) = request(&read_queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    read_queue.pending.push_back(read);
+    read_queue.run().unwrap();
     assert_eq!(
         &reply.try_recv().unwrap().unwrap()[..],
         &[0x99; DIRECT_IO_ALIGNMENT_BYTES]
@@ -305,13 +243,7 @@ fn discarded_queued_requests_never_reach_the_ring() {
     assert!(queue.pending.is_empty());
     assert!(queue.active.iter().all(Option::is_none));
     assert!(queue.ring.submission().is_empty());
-    assert!(
-        queue
-            .admission
-            .request_slots
-            .iter()
-            .all(|s| s.available_permits() == MAX_IN_FLIGHT_IO)
-    );
+    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
 }
 
 #[test]

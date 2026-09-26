@@ -1,4 +1,4 @@
-//! A single-owner ring. Only this module hands buffer pointers to the kernel.
+//! Separate single-owner rings for reads and writes. Only this module hands buffer pointers to the kernel.
 //! Requests must be nonempty, with offsets and lengths aligned to DIRECT_IO_ALIGNMENT_BYTES.
 
 use std::{
@@ -24,53 +24,52 @@ pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = 4096;
 // Maximum physical bytes per chunk, including alignment padding. DataFile
 // reduces the logical chunk size when its starting offset is unaligned.
 pub(crate) const MAX_IO_CHUNK_BYTES: usize = 1024 * 1024;
-// Maximum outstanding ring operations, shared by reads and writes.
+// Maximum admitted and in-flight operations per queue. Reads and writes each have their own ring.
 const MAX_IN_FLIGHT_IO: usize = 64;
-// Separate admission pools: MAX_IN_FLIGHT_IO reads and MAX_IN_FLIGHT_IO writes.
-// Writes cannot consume read permits; each class can independently fill the ring.
-const MAX_ADMITTED_REQUESTS: usize = 2 * MAX_IN_FLIGHT_IO;
-// Staging budget split equally between reads and writes. Each half can
-// hold MAX_IN_FLIGHT_IO full-size aligned buffers. Caller inputs and read-result
-// allocations are outside this budget.
-const MAX_STAGING_BUFFER_BYTES: usize = 128 * 1024 * 1024;
+// Per-queue staging budget: MAX_IN_FLIGHT_IO full-size aligned buffers.
+// Caller inputs and read-result allocations are outside this budget.
+const MAX_STAGING_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests;
 
 /// A handle that submits I/O requests and owns the queue thread's lifetime.
 pub(crate) struct IoQueueHandle {
+    // Every request on this queue has this direction.
+    operation: IoOperation,
     // Sends admitted requests; taken on drop to signal shutdown before joining.
     sender: Option<mpsc::SyncSender<IoRequest>>,
     // Shared eventfd wakes the queue for new work or shutdown.
     wake_fd: Arc<OwnedFd>,
     // Queue thread; taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
-    // Shared budgets, enforced before allocating or queueing work.
+    // Queue-local budgets, enforced before allocating or queueing work.
     admission: Arc<IoAdmissionBudgets>,
 }
 
-// Index 0 is reads; index 1 is writes. Separate pools keep writes from
-// consuming read admission or staging capacity.
 struct IoAdmissionBudgets {
-    // Per-class limits covering preparing, queued, and active requests.
-    request_slots: [Arc<Semaphore>; 2],
-    // Per-class staging budgets in alignment-sized units; acquired before allocation.
-    staging_pages: [Arc<Semaphore>; 2],
+    // Limit covering preparing, queued, and active requests.
+    request_slots: Arc<Semaphore>,
+    // Staging budget in alignment-sized units; acquired before allocation.
+    staging_pages: Arc<Semaphore>,
 }
 
 impl IoAdmissionBudgets {
     fn new() -> Self {
         Self {
-            request_slots: std::array::from_fn(|_| Arc::new(Semaphore::new(MAX_IN_FLIGHT_IO))),
-            staging_pages: std::array::from_fn(|_| {
-                Arc::new(Semaphore::new(MAX_STAGING_BUFFER_BYTES / 2 / DIRECT_IO_ALIGNMENT_BYTES))
-            }),
+            request_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_IO)),
+            staging_pages: Arc::new(Semaphore::new(MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES)),
         }
     }
 }
 
 impl IoQueueHandle {
-    pub(crate) fn new(file: File, directory_lock: File) -> io::Result<Self> {
+    pub(crate) fn new(file: Arc<File>, directory_lock: Arc<File>, operation: IoOperation) -> io::Result<Self> {
+        let thread_name = match operation {
+            IoOperation::Read => "feuer-read-io",
+            IoOperation::Write => "feuer-write-io",
+            _ => unreachable!("queue only supports reads and writes"),
+        };
         let ring = IoUring::new(MAX_IN_FLIGHT_IO as u32)?;
         // SAFETY: eventfd has no pointer arguments and returns a new owned fd.
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
@@ -79,7 +78,7 @@ impl IoQueueHandle {
         }
         // SAFETY: fd was just created and has no other owner.
         let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
-        let (sender, receiver) = mpsc::sync_channel(MAX_ADMITTED_REQUESTS);
+        let (sender, receiver) = mpsc::sync_channel(MAX_IN_FLIGHT_IO);
         let admission = Arc::new(IoAdmissionBudgets::new());
         let mut queue = IoQueue {
             admission: admission.clone(),
@@ -91,12 +90,13 @@ impl IoQueueHandle {
             pending: VecDeque::new(),
             active: (0..MAX_IN_FLIGHT_IO).map(|_| None).collect(),
         };
-        let thread = thread::Builder::new().name("feuer-io".into()).spawn(move || {
+        let thread = thread::Builder::new().name(thread_name.into()).spawn(move || {
             if let Err(error) = queue.run() {
-                tracing::error!(target: "feuer::storage::io", %error, "io_uring queue stopped");
+                tracing::error!(target: "feuer::storage::io", operation = operation.as_str(), %error, "io_uring queue stopped");
             }
         })?;
         Ok(Self {
+            operation,
             sender: Some(sender),
             wake_fd,
             thread: Some(thread),
@@ -104,27 +104,24 @@ impl IoQueueHandle {
         })
     }
 
-    pub(crate) async fn execute(
-        &self,
-        operation: IoOperation,
-        offset: u64,
-        length: usize,
-        payload: &[u8],
-    ) -> io::Result<Bytes> {
-        let class = usize::from(operation != IoOperation::Read);
-        let request_permit = self.admission.request_slots[class]
+    pub(crate) async fn execute(&self, offset: u64, length: usize, payload: &[u8]) -> io::Result<Bytes> {
+        let request_permit = self
+            .admission
+            .request_slots
             .clone()
             .acquire_owned()
             .await
             .map_err(|_| queue_stopped_error())?;
-        let staging_pages_permit = self.admission.staging_pages[class]
+        let staging_pages_permit = self
+            .admission
+            .staging_pages
             .clone()
             .acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
             .await
             .map_err(|_| queue_stopped_error())?;
         let (reply, receive) = oneshot::channel();
         let request = IoRequest::new(
-            operation,
+            self.operation,
             offset,
             length,
             payload,
@@ -302,9 +299,9 @@ struct IoQueue {
     // Thread-owned kernel submission/completion queues; no cross-thread ring access.
     ring: IoUring,
     // Direct-I/O payload file; taken to retain ownership on abnormal exit.
-    file: Option<File>,
-    // Exclusive directory lock, retained if kernel I/O may still be active.
-    directory_lock: Option<File>,
+    file: Option<Arc<File>>,
+    // Shared directory lock; both queues must drain before it can be released.
+    directory_lock: Option<Arc<File>>,
     // Eventfd polled alongside the ring so new work need not wait for completion.
     wake_fd: Arc<OwnedFd>,
     // Incoming admitted requests; disconnection starts draining shutdown.
@@ -366,9 +363,6 @@ impl IoQueue {
     fn schedule(&mut self) {
         self.pending
             .retain(|request| !request.reply.as_ref().unwrap().is_closed());
-        // SSD benchmarks (benchmarks/ssd/ssd-concurrent-read-write.md) suggest a
-        // future write throttle for small-read-heavy workloads. Mixed-size reads
-        // tolerate moderate concurrent writes, so leave writes unthrottled for now.
         // Callers own conflict prevention and disk-region lifetime through completion.
         // Cancellation discards pending requests, but never releases active requests.
         for slot in 0..self.active.len() {
@@ -438,9 +432,8 @@ impl IoQueue {
 
 impl Drop for IoQueue {
     fn drop(&mut self) {
-        for semaphore in self.admission.request_slots.iter().chain(&self.admission.staging_pages) {
-            semaphore.close();
-        }
+        self.admission.request_slots.close();
+        self.admission.staging_pages.close();
         if self.active.iter().any(Option::is_some) {
             // An abnormal queue exit cannot prove the kernel has stopped using pointers.
             // Closing a ring may tear it down asynchronously. Leak only the bounded active

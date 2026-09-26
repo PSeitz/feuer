@@ -54,8 +54,9 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
 
 ### Raw direct I/O
 
-- One dedicated thread/ring overlaps up to 64 reads and writes in arrival order. It wakes for new requests
-  while I/O is outstanding, without polling or registered buffers.
+- Reads and writes have separate request channels, pending queues, active slots, rings, and worker threads.
+  Each queue overlaps up to 64 operations in arrival order and wakes for new requests while I/O is outstanding,
+  without busy polling or registered buffers.
 - Read and write admission each reserve up to 64 requests and 64 MiB of staging buffers. Chunks are at most
   1 MiB. Caller inputs and read-result allocations are outside the combined 128-MiB staging budget.
 - Reads accept arbitrary byte ranges; write offsets and lengths must be multiples of 4 KiB, enforced by
@@ -84,8 +85,8 @@ This is a raw I/O layer, not a disk cache or population queue. Disk storage and 
 - [Memory results](benchmarks/memory/results.md) cover configured targets from 256 MiB through 32 GiB and
   report request/source-cost hit rates, actual retained memory, throughput, and shard-count sensitivity.
   These results do not establish general or tiered superiority over Foyer.
-- Storage tests cover mixed concurrency, caller-serialized shared pages, bounds, short I/O, cancellation,
-  and reopening.
+- Storage tests cover independent read/write queue capacity and progress, mixed concurrency,
+  caller-serialized shared pages, bounds, short I/O, cancellation, and reopening.
 - The [direct-I/O smoke benchmark](benchmarks/storage/README.md) measures the driver on the local SSD, not
   an end-to-end cache or matched backend comparison. Separate [SSD measurements](benchmarks/ssd/ssd-concurrent-read-write.md)
   explore mixed reads and writes; small-read-heavy workloads may still warrant write throttling.

@@ -18,18 +18,19 @@ use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, uring};
 const DATA_FILE_NAME: &str = "data";
 const LOCK_FILE_NAME: &str = ".feuer.lock";
 
-/// Queue, path, and capacity state shared by cloned data-file handles.
+/// Queues, path, and capacity state shared by cloned data-file handles.
 struct DataFileState {
-    queue: uring::IoQueueHandle,
+    read_queue: uring::IoQueueHandle,
+    write_queue: uring::IoQueueHandle,
     data_path: PathBuf,
     capacity: u64,
 }
 
 /// One exclusively owned, fixed-capacity Linux direct-I/O payload file.
 ///
-/// A dedicated io_uring thread overlaps up to 64 operations, scheduling requests
-/// in arrival order without checking for conflicts. Submission order does not
-/// guarantee completion order. Reads do not throttle writes; either class can fill the ring.
+/// Reads and writes have separate io_uring rings and worker threads, each allowing
+/// up to 64 operations. Each queue schedules in arrival order without checking for
+/// conflicts. Submission order does not guarantee completion order.
 /// Admission reserves 64 requests and 64 MiB of staging buffers for each of
 /// reads and writes. Caller inputs and read-result allocations are outside
 /// this staging-buffer budget.
@@ -58,7 +59,7 @@ struct DataFileState {
 ///
 /// Capacity must be a positive multiple of 4096, at most i64::MAX. Opening fails
 /// if io_uring or verified O_DIRECT alignment is unavailable; there is no fallback.
-/// Dropping the last handle drains submitted I/O and joins the queue thread,
+/// Dropping the last handle drains submitted I/O and joins both queue threads,
 /// which can block. Returned Bytes never retain the file or queue.
 #[derive(Clone)]
 pub struct DataFile {
@@ -102,8 +103,8 @@ impl DataFile {
                 })??;
             // Exercise an actual aligned direct read before claiming open succeeded.
             state
-                .queue
-                .execute(IoOperation::Read, 0, uring::DIRECT_IO_ALIGNMENT_BYTES, &[])
+                .read_queue
+                .execute(0, uring::DIRECT_IO_ALIGNMENT_BYTES, &[])
                 .await
                 .map_err(|source| DataFileError::Io {
                     operation: IoOperation::OpenDataFile,
@@ -217,10 +218,13 @@ impl DataFile {
             } else {
                 &[]
             };
-            let bytes = self
-                .state
-                .queue
-                .execute(operation, aligned_offset, aligned_length, chunk_payload)
+            let queue = if operation == IoOperation::Read {
+                &self.state.read_queue
+            } else {
+                &self.state.write_queue
+            };
+            let bytes = queue
+                .execute(aligned_offset, aligned_length, chunk_payload)
                 .await
                 .map_err(io_error)?;
             if operation == IoOperation::Read {
@@ -288,17 +292,18 @@ fn open_file_state(directory: PathBuf, capacity: u64) -> DataFileResult<DataFile
         return Err(DataFileError::InvalidDataFile { path: data_path });
     }
     check_direct_io_alignment(&file).map_err(|source| error(IoOperation::InspectDataFile, source))?;
-    // Construct the ring before resizing, so an unavailable io_uring does not resize an existing cache.
-    let resize_file = file
-        .try_clone()
+    // Construct both rings before resizing, so unavailable io_uring does not resize an existing cache.
+    let file = Arc::new(file);
+    let lock_file = Arc::new(lock_file);
+    let read_queue = uring::IoQueueHandle::new(file.clone(), lock_file.clone(), IoOperation::Read)
         .map_err(|source| error(IoOperation::OpenDataFile, source))?;
-    let queue =
-        uring::IoQueueHandle::new(file, lock_file).map_err(|source| error(IoOperation::OpenDataFile, source))?;
-    resize_file
-        .set_len(capacity)
+    let write_queue = uring::IoQueueHandle::new(file.clone(), lock_file, IoOperation::Write)
+        .map_err(|source| error(IoOperation::OpenDataFile, source))?;
+    file.set_len(capacity)
         .map_err(|source| error(IoOperation::ResizeDataFile, source))?;
     Ok(DataFileState {
-        queue,
+        read_queue,
+        write_queue,
         data_path,
         capacity,
     })

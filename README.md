@@ -35,9 +35,9 @@ that call's asynchronous callback. Successful results are sliced to the exact
 request and appended once to the key's accessed ranges, independently of downloaded-range population.
 
 The internal `feuer-storage` crate currently provides an exclusively owned,
-fixed-capacity O_DIRECT file and a bounded io_uring driver (one thread, QD64),
-with simultaneous reads/writes, arbitrary-range reads, and 4-KiB-aligned write
-offsets and lengths. Requests are scheduled in arrival order without overlap
+fixed-capacity O_DIRECT file and separate read/write io_uring queues (each with
+its own thread and QD64), with arbitrary-range reads and 4-KiB-aligned write
+offsets and lengths. Each queue schedules requests in arrival order without overlap
 checks or a read-triggered write throttle.
 Callers must prevent conflicting access to aligned byte ranges and retain a
 submitted write's disk region until completion, even after cancellation.
