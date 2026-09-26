@@ -21,8 +21,8 @@ Four is an initial write allowance, not a measured optimum. Four 1-MiB writes ar
 
 ## Comparison, 2026-09-25
 
-These measurements and their validation predate removal of durability-flush operations. Recorded runs
-flushed initialization writes; the current example only waits for their completion. Overlap protection remains.
+These measurements and their validation used an older driver that synchronized initialization writes to
+disk; the current example only waits for write completion. Overlap protection remains.
 
 Same host/mount and methodology as the [initial benchmark](README.md): `m8g-32cpu-local-ssd`, Linux
 6.17/aarch64, ext4 on local NVMe, release build, four Tokio workers, driver QD64, fully initialized 8-GiB

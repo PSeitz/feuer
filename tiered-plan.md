@@ -223,8 +223,7 @@ Disk population is bounded and best-effort, not mandatory.
 The policy may consider pending-write and disk-residency state when choosing victims, but the contract does
 not assign fixed weights to those states.
 
-`flush` waits for disk writes already queued or running. It does not retry writes that were skipped or
-canceled and does not provide per-entry durability.
+There is no flush API; disk population and persistence are best-effort.
 
 Disk capacity is fixed at open time and must be respected. Internal allocation, indexing, disk-region layout,
 partial retention, rewriting, checksums, metadata persistence, and submission engines are implementation
