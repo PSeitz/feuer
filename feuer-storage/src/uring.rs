@@ -323,13 +323,10 @@ struct IoQueue {
 impl IoQueue {
     fn run(&mut self) -> io::Result<()> {
         let mut disconnected = false;
+        let mut completions = Vec::with_capacity(MAX_IN_FLIGHT_IO);
         loop {
-            let completions: Vec<_> = self
-                .ring
-                .completion()
-                .map(|cqe| (cqe.user_data(), cqe.result()))
-                .collect();
-            for (slot, result) in completions {
+            completions.extend(self.ring.completion().map(|cqe| (cqe.user_data(), cqe.result())));
+            for (slot, result) in completions.drain(..) {
                 let slot = slot as usize;
                 let request = self.active[slot].as_mut().expect("completion for inactive slot");
                 match request.complete(result) {
