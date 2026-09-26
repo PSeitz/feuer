@@ -17,7 +17,7 @@ capacities of at least 1 TiB.
 - Feuer imposes no source alignment or public cache block size. Its memory target is soft: an oversized download empties its shard and remains cached;
   returned `Bytes` may share a larger heap allocation.
 - Disk population uses a bounded best-effort queue. Queue pressure or memory eviction may skip a write without failing the lookup.
-- Cache open selects buffered or direct payload I/O. Direct mode is required on Linux and macOS and never silently falls back.
+- Disk storage targets Linux with usable io_uring. Direct payload I/O never silently falls back to buffered I/O.
 - Successful lookups append the exact requested range to the key's accessed ranges; downloaded-range population is separate and creates no access.
 - Recovery may lose recent entries, but uncertain or corrupt bytes always miss.
   Persistence, checksums, allocation, and recovery formats remain internal.
@@ -35,8 +35,12 @@ that call's asynchronous callback. Successful results are sliced to the exact
 request and appended once to the key's accessed ranges, independently of downloaded-range population.
 
 The internal `feuer-storage` crate currently provides an exclusively owned,
-fixed-capacity file and checked buffered positional I/O. Direct I/O and the
-recoverable range engine remain to be implemented. `feuer-memory` provides a
+fixed-capacity O_DIRECT file and a bounded io_uring driver (one thread, QD64),
+with simultaneous reads/writes, arbitrary byte ranges, and serialized overlapping
+read-modify-write envelopes. Writes can fill the ring when reads are absent; while
+reads are present, new writes get at most four slots. Read admission is protected
+from write backlogs. Raw file capacity must be a positive multiple of
+4 KiB. Buffered mode and the recoverable range engine remain to be implemented. `feuer-memory` provides a
 sharded soft-capacity covering-range index with bounded ageable request evidence,
 sampled retrieval-value-per-byte eviction, a short compaction grace, and
 pressure-driven trimming of the selected victim toward observed requests. Its [memory-only comparison](benchmarks/memory/results.md)
@@ -45,6 +49,12 @@ foundations, while `feuer-tokio` remains the Tokio/madsim runtime switch. None o
 package boundaries is a public compatibility commitment.
 
 ## Development
+
+Storage builds and tests require Linux, enabled io_uring, and a filesystem that
+reports compatible direct-I/O alignment through `statx` (for example, ext4 on a
+recent kernel). Unsupported environments fail explicitly; tests do not silently
+skip real I/O. On other platforms, memory-only packages can still be tested with
+`cargo test -p feuer -p feuer-memory -p feuer-types`.
 
 ```console
 cargo test --workspace

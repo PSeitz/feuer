@@ -10,7 +10,7 @@
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, and keyless `Download { downloaded_start, bytes }` with a derived range | No work remaining for the current public type boundary |
 | `feuer-memory` | Sharded soft-capacity covering-range index, bounded ageable exact evidence, sampled retrieval-value-density retention, short compaction grace, pressure trimming of the selected victim, payload accounting, and metrics | Wall-clock evidence aging, later tier-aware disk-state inputs, and further trace-independent policy tuning |
 | Memory/disk orchestration | Public callback-to-memory path, including independent misses and redundant-population suppression | Best-effort bounded disk scheduling, cancellation on memory eviction, active-write generations, disk publication, and queue flushing |
-| `feuer-storage` | Exclusively locked fixed-capacity file, buffered positional I/O, synchronization, tracing, and metrics | Linux/macOS direct mode, range lookup, allocation, integrity validation, persistent metadata, and recovery |
+| `feuer-storage` | Exclusively locked fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, arbitrary-range I/O, synchronization, tracing, and metrics | Buffered mode, range lookup, allocation, integrity validation, persistent metadata, and recovery |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, repository metadata, and a documented [memory-only comparison gate](benchmarks/memory/results.md) against pinned native Foyer | End-to-end acceptance tests, crash tests, examples, and disk/concurrent benchmarks |
 
 The public cache currently constructs the in-memory path only; it does not open or modify the configured disk directory before the disk lifecycle exists.
@@ -96,6 +96,33 @@ This slice adds no disk queue, storage lifecycle, or public policy configuration
 
 This slice adds no disk lifecycle, public policy setting, or wall-clock timer.
 
+### Direct-I/O foundation
+
+- One dedicated thread/ring overlaps up to 64 independent reads and writes. With no read demand, writes
+  may fill the ring; under read demand, the scheduler allows four outstanding writes and gives remaining
+  slots to reads. Existing writes cannot be preempted and must drain before this limit takes effect.
+- Admission independently reserves 64 requests and 64 MiB of staging buffers for each of reads and
+  writes/syncs, so a write backlog cannot block read admission. Reads signal demand before admission;
+  cancellation removes that demand. Chunks are at most 1 MiB; RMW also charges its staging payload.
+  Caller inputs and read-result allocations are outside the 128-MiB total staging budget.
+- Four write slots is an initial policy, not a proven performance optimum. Sync barriers and overlapping
+  envelopes retain ordering even when that makes a read wait for an earlier write.
+- The driver wakes for new requests while earlier I/O is outstanding, without polling or registered buffers.
+- Unaligned writes use read-modify-write; intersecting physical envelopes serialize, including readers.
+- Sync requests act as barriers for earlier submitted chunks. Multi-chunk calls are not atomic; await writes
+  before syncing. Cancellation may leave partial writes, so publication still belongs to the range engine.
+- Submitted buffers survive caller cancellation. Last-handle drop drains the driver and joins its thread.
+  An abnormal driver failure retains uncertain active buffers and the directory lock until process exit
+  rather than risking use-after-free or physical reuse.
+- Raw capacity must be positive, 4-KiB-aligned, and representable as a Linux signed file offset.
+  Opening requires usable io_uring and compatible `STATX_DIOALIGN`; there is no backend or buffered fallback.
+- Tests exercise mixed concurrency, overlapping envelopes, bounds, short I/O, cancellation, sync, and reopening.
+- A [direct-I/O smoke benchmark](benchmarks/storage/README.md) measures the actual driver on the local SSD;
+  this is not yet an end-to-end cache benchmark or a matched backend comparison.
+
+This is the raw I/O layer, not the best-effort population queue or disk range engine. The public cache is still
+memory-only. Buffered mode remains future work; disk storage and CI now target Linux only.
+
 ## Next coherent implementation slice
 
 ### 4. Best-effort disk scheduling
@@ -113,7 +140,7 @@ This slice adds no disk lifecycle, public policy setting, or wall-clock timer.
 
 - Add covering range lookup and request-sized positional reads with bounded integrity/alignment overhead.
 - Add `PayloadIoMode::Buffered` and `PayloadIoMode::Direct`.
-- Implement direct mode on Linux and macOS and reject it when the platform or filesystem cannot honor it.
+- Integrate the existing Linux direct-I/O driver and add buffered mode without backend fallback.
 - Keep arbitrary requested and downloaded ranges independent of internal alignment.
 - Support packing retained values below the physical I/O alignment rather than charging every small value one
   complete alignment unit.

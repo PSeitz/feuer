@@ -90,8 +90,8 @@ impl fmt::Display for ErrorKind {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// A zero-capacity data file was requested.
-    #[error("data-file capacity must be greater than zero")]
+    /// Capacity is zero, not 4096-byte aligned, or exceeds Linux's file-offset limit.
+    #[error("data-file capacity must be a positive multiple of 4096 and at most i64::MAX")]
     InvalidCapacity,
     /// Another process or cache instance holds the directory lock.
     #[error("cache directory is already open: {}", .directory.display())]

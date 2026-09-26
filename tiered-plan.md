@@ -241,8 +241,9 @@ At open time, deployments choose one payload I/O mode:
 - `PayloadIoMode::Buffered`, using normal buffered file I/O; or
 - `PayloadIoMode::Direct`, requesting platform direct or uncached file I/O.
 
-Direct mode is required on Linux and macOS. Feuer must fail open when the requested mode cannot be honored by
-the platform or filesystem rather than silently using buffered I/O.
+Disk storage is supported on Linux only and requires usable io_uring. Feuer must fail open when io_uring is
+unavailable or the requested mode cannot be honored by the filesystem rather than silently changing backends
+or using buffered I/O. Direct mode is required on Linux.
 
 Alignment, envelope buffers, and platform-specific APIs remain internal. Both modes produce identical lookup
 results. Direct mode does not imply synchronization or durability.
@@ -331,7 +332,7 @@ The MVP is complete when tests demonstrate that:
 - allocator stress tests report useful utilization, fragmentation, allocation latency, and rewrite traffic
   across the target size distribution;
 - buffered and direct modes return identical requested bytes, and requested direct mode never silently falls back;
-- Linux and macOS support direct mode on a capable filesystem;
+- Linux supports direct mode on a capable filesystem, with simultaneous reads and writes through bounded io_uring submission;
 - disk subrange hits avoid reading a complete larger download;
 - corrupted or uncertain disk bytes always miss and are never returned;
 - restart recovers a safe useful subset after injected crashes;
@@ -354,6 +355,6 @@ The MVP is complete when tests demonstrate that:
 - native multi-volume placement;
 - mutable objects, invalidation, and tombstones;
 - multi-process access;
-- direct mode on platforms other than Linux and macOS;
+- disk storage on platforms other than Linux;
 - stable on-disk compatibility across arbitrary future releases; and
 - authoritative-storage or per-entry durability guarantees.
