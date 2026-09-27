@@ -7,9 +7,9 @@ type IoResultReceiver = oneshot::Receiver<io::Result<Bytes>>;
 fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) -> (IoRequest, IoResultReceiver) {
     let (reply, receive) = oneshot::channel();
     let request_permit = queue.admission.request_slots.clone().try_acquire_owned().unwrap();
-    let staging_pages_permit = queue
+    let buffer_memory_permit = queue
         .admission
-        .staging_pages
+        .buffer_memory
         .clone()
         .try_acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
         .unwrap();
@@ -25,7 +25,7 @@ fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) 
             length,
             &payload,
             reply,
-            (request_permit, staging_pages_permit),
+            (request_permit, buffer_memory_permit),
         )
         .unwrap(),
         receive,
@@ -118,8 +118,8 @@ fn full_ring_does_not_block_the_other_direction() {
             assert!(queue.active.iter().all(Option::is_none));
             assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
             assert_eq!(
-                queue.admission.staging_pages.available_permits(),
-                MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
+                queue.admission.buffer_memory.available_permits(),
+                MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
             );
         }
     }
@@ -135,18 +135,18 @@ fn full_write_admission_and_buffers_leave_full_read_capacity() {
         writes.push(request(&write_queue, IoOperation::Write, 0, MAX_IO_CHUNK_BYTES));
     }
     assert_eq!(write_queue.admission.request_slots.available_permits(), 0);
-    assert_eq!(write_queue.admission.staging_pages.available_permits(), 0);
+    assert_eq!(write_queue.admission.buffer_memory.available_permits(), 0);
     for _ in 0..MAX_IN_FLIGHT_IO {
         reads.push(request(&read_queue, IoOperation::Read, 0, MAX_IO_CHUNK_BYTES));
     }
     assert_eq!(read_queue.admission.request_slots.available_permits(), 0);
-    assert_eq!(read_queue.admission.staging_pages.available_permits(), 0);
+    assert_eq!(read_queue.admission.buffer_memory.available_permits(), 0);
     drop((reads, writes));
     for queue in [&read_queue, &write_queue] {
         assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
         assert_eq!(
-            queue.admission.staging_pages.available_permits(),
-            MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
+            queue.admission.buffer_memory.available_permits(),
+            MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
         );
     }
 }
@@ -169,11 +169,11 @@ async fn read_worker_progresses_with_write_admission_exhausted_and_after_write_s
         .acquire_many_owned(MAX_IN_FLIGHT_IO as u32)
         .await
         .unwrap();
-    let _pages = write_queue
+    let _buffer_memory = write_queue
         .admission
-        .staging_pages
+        .buffer_memory
         .clone()
-        .acquire_many_owned((MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES) as u32)
+        .acquire_many_owned((MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES) as u32)
         .await
         .unwrap();
     let bytes = tokio::time::timeout(
@@ -209,15 +209,15 @@ fn canceled_submitted_write_retains_resources() {
     assert!(queue.active[0].is_some());
     assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO - 1);
     assert_eq!(
-        queue.admission.staging_pages.available_permits(),
-        MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES - 1
+        queue.admission.buffer_memory.available_permits(),
+        MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES - 1
     );
     queue.run().unwrap();
     assert!(queue.active.iter().all(Option::is_none));
     assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
     assert_eq!(
-        queue.admission.staging_pages.available_permits(),
-        MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
+        queue.admission.buffer_memory.available_permits(),
+        MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
     );
 
     // Only read/reuse the region after completion, not after dropping the receiver.
@@ -260,8 +260,8 @@ fn finished_read_transfers_buffer_ownership() {
     assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
     assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
     assert_eq!(
-        queue.admission.staging_pages.available_permits(),
-        MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
+        queue.admission.buffer_memory.available_permits(),
+        MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
     );
 
     let slice = bytes.slice(1..);

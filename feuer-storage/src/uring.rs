@@ -26,9 +26,9 @@ pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = 4096;
 pub(crate) const MAX_IO_CHUNK_BYTES: usize = 1024 * 1024;
 // Maximum admitted and in-flight operations per queue. Reads and writes each have their own ring.
 const MAX_IN_FLIGHT_IO: usize = 64;
-// Per-queue staging budget: MAX_IN_FLIGHT_IO full-size aligned buffers.
+// Per-queue I/O buffer memory budget: MAX_IN_FLIGHT_IO full-size aligned buffers.
 // Caller inputs and buffers transferred to completed read results are outside this budget.
-const MAX_STAGING_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+const MAX_IO_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 
 #[cfg(test)]
 mod tests;
@@ -50,15 +50,16 @@ pub(crate) struct IoQueueHandle {
 struct IoAdmissionBudgets {
     // Limit covering preparing, queued, and active requests.
     request_slots: Arc<Semaphore>,
-    // Staging budget in alignment-sized units; acquired before allocation.
-    staging_pages: Arc<Semaphore>,
+    // Aligned I/O buffer memory budget: each permit covers 4 KiB.
+    // Acquired before allocating the buffer.
+    buffer_memory: Arc<Semaphore>,
 }
 
 impl IoAdmissionBudgets {
     fn new() -> Self {
         Self {
             request_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_IO)),
-            staging_pages: Arc::new(Semaphore::new(MAX_STAGING_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES)),
+            buffer_memory: Arc::new(Semaphore::new(MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES)),
         }
     }
 }
@@ -112,9 +113,9 @@ impl IoQueueHandle {
             .acquire_owned()
             .await
             .map_err(|_| queue_stopped_error())?;
-        let staging_pages_permit = self
+        let buffer_memory_permit = self
             .admission
-            .staging_pages
+            .buffer_memory
             .clone()
             .acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
             .await
@@ -126,7 +127,7 @@ impl IoQueueHandle {
             length,
             payload,
             reply,
-            (request_permit, staging_pages_permit),
+            (request_permit, buffer_memory_permit),
         )?;
         // All queued + active requests hold a permit, so this cannot wait for space.
         self.sender
@@ -209,8 +210,8 @@ struct IoRequest {
     reply: Option<oneshot::Sender<io::Result<Bytes>>>,
     // Holds request admission until this request is dropped.
     _request_permit: OwnedSemaphorePermit,
-    // Holds the staging-buffer charge until this request is dropped.
-    _staging_pages_permit: OwnedSemaphorePermit,
+    // Holds the I/O buffer memory charge until this request is dropped.
+    _buffer_memory_permit: OwnedSemaphorePermit,
 }
 
 impl IoRequest {
@@ -236,7 +237,7 @@ impl IoRequest {
             completed_bytes: 0,
             reply: Some(reply),
             _request_permit: permits.0,
-            _staging_pages_permit: permits.1,
+            _buffer_memory_permit: permits.1,
         })
     }
 
@@ -438,7 +439,7 @@ impl IoQueue {
 impl Drop for IoQueue {
     fn drop(&mut self) {
         self.admission.request_slots.close();
-        self.admission.staging_pages.close();
+        self.admission.buffer_memory.close();
         if self.active.iter().any(Option::is_some) {
             // An abnormal queue exit cannot prove the kernel has stopped using pointers.
             // Closing a ring may tear it down asynchronously. Leak only the bounded active

@@ -31,7 +31,7 @@ struct DataFileState {
 /// Reads and writes have separate io_uring rings and worker threads, each allowing
 /// up to 64 operations. Each queue schedules in arrival order without checking for
 /// conflicts. Submission order does not guarantee completion order.
-/// Admission reserves 64 requests and 64 MiB of staging buffers for each of
+/// Admission reserves 64 requests and 64 MiB of aligned I/O buffers for each of
 /// reads and writes. 
 ///
 /// # Caller-owned concurrency and cancellation
