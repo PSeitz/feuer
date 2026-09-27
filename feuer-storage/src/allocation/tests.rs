@@ -1,5 +1,35 @@
 use super::*;
+use crate::test_metrics::{registry, value};
 use std::sync::Barrier;
+
+#[test]
+fn capacity_metrics_follow_whole_chunk_ownership_quarantine_and_allocator_drop() {
+    let (registry, backend) = registry();
+    let metrics = DiskMetrics::new(&backend);
+    let allocator = DiskAllocator::with_metrics(0..2 * CHUNK_BYTES, metrics.clone()).unwrap();
+    let other = DiskAllocator::with_metrics(2 * CHUNK_BYTES..3 * CHUNK_BYTES, metrics).unwrap();
+    let chunks = |state| value(&registry, "feuer_disk_chunks", &[("state", state)]);
+    assert_eq!(chunks("free"), 3.0);
+    let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
+    assert_eq!(chunks("reserved"), 1.0);
+    let reader = chunk.read_guard();
+    drop(chunk);
+    assert_eq!(chunks("free"), 2.0);
+    drop(reader);
+    assert_eq!(chunks("free"), 3.0);
+    assert_eq!(chunks("reserved"), 0.0);
+    let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
+    let same_chunk = chunk.slice(chunk.range());
+    chunk.quarantine();
+    same_chunk.quarantine();
+    assert_eq!(chunks("quarantined"), 1.0);
+    assert_eq!(chunks("reserved"), 0.0);
+    drop(allocator);
+    assert_eq!(chunks("quarantined"), 0.0);
+    assert_eq!(chunks("free"), 1.0);
+    drop(other);
+    assert_eq!(chunks("free"), 0.0);
+}
 
 fn assert_empty(allocator: &DiskAllocator, capacity: u64) {
     let free = allocator.free.lock().unwrap();

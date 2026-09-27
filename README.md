@@ -68,6 +68,14 @@ package boundaries is a public compatibility commitment. The memory and disk pol
 per-object access evidence and payload-value scoring through `feuer-types::retention`; evidence survives
 memory eviction while disk entries retain it.
 
+## Metrics
+
+`TieredMemoryDiskCache::open_with_metrics(config, &registry).await` accepts a
+`mixtrics::metrics::BoxedRegistry` and enables lookup, callback, memory, disk I/O,
+population, capacity and packing metrics. `open(config)` retains no-op metrics.
+Labels are bounded and contain no object identities. The application owns metric
+export. See [the metric inventory and accounting semantics](metrics.md).
+
 ## Development
 
 Storage builds and tests require Linux, enabled io_uring, and a filesystem that

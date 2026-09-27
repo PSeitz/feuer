@@ -172,6 +172,18 @@ added in this slice. Workspace Clippy passed with warnings denied; formatting ch
 files, and whitespace checks passed.
 The isolated validation checkout is `/mnt/local-ssd/feuer-tiered.iB2JNA`.
 
+## Implemented: cache metrics
+
+- `open_with_metrics` wires a `mixtrics` registry through public lookups, callbacks, both cache tiers and
+  disk population; `open` remains no-op. Labels contain only fixed operation/outcome/source values.
+- Added lookup latency/outcomes and served bytes, callback counts/latency/download bytes, disk read-error
+  and integrity outcomes, population admission/skip/terminal outcomes, queue pressure/wait time,
+  chunk capacity states, indexed payload/entries, pressure eviction and byte-weighted batch packing.
+- Queue and capacity gauges follow ownership, including canceled work, detached writes, read guards,
+  quarantine and cache shutdown. See [`metrics.md`](metrics.md) for exact accounting semantics.
+- Validation on macOS: portable Feuer/memory/types tests pass; Linux workspace all-target checks and Clippy
+  pass. New Linux metric integration tests are compile-checked but have not been executed on this host.
+
 ## Remaining implementation
 
 ### Disk range engine and I/O modes

@@ -9,15 +9,20 @@ compile_error!("feuer-storage requires Linux with io_uring and O_DIRECT support"
 
 #[cfg(target_os = "linux")]
 mod allocation;
+mod disk_metrics;
 mod error;
 #[cfg(target_os = "linux")]
 mod file;
 mod metrics;
 #[cfg(target_os = "linux")]
 mod range_cache;
+#[cfg(test)]
+#[path = "../../test_support/metrics.rs"]
+mod test_metrics;
 #[cfg(target_os = "linux")]
 mod uring;
 
+pub use disk_metrics::DiskMetrics;
 pub use error::{DataFileError, DataFileErrorKind, DataFileResult, IoOperation};
 #[cfg(target_os = "linux")]
 pub use file::DataFile;

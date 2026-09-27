@@ -1,5 +1,7 @@
 //! Experimental immutable batch writes, live range lookup and whole-entry validation.
 
+#[cfg(test)]
+mod metrics_tests;
 mod page_format;
 #[cfg(test)]
 mod tests;
@@ -10,6 +12,7 @@ use std::{
     hash::{Hash, Hasher},
     path::Path,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use bytes::Bytes;
@@ -19,8 +22,9 @@ use feuer_types::{
 };
 
 use crate::{
-    DataFile, DataFileError, DataFileResult, IoMetrics,
+    DataFile, DataFileError, DataFileResult, DiskMetrics, IoMetrics,
     allocation::{CHUNK_BYTES, DiskAllocator, DiskRegion, DiskRegionReadGuard},
+    disk_metrics::{DiskLookupOutcome, PopulationAttempt, PopulationOutcome},
 };
 use page_format::{METADATA_PAGE_BYTES, PAGE_CONTENT_BYTES};
 
@@ -50,6 +54,7 @@ struct DiskRangeCacheInner {
     file: DataFile,
     arenas: Box<[Shard]>,
     access_histories: Arc<ObjectAccessHistories>,
+    metrics: Arc<DiskMetrics>,
 }
 
 /// An independently allocated disk-cache shard with live range lookup.
@@ -59,12 +64,12 @@ struct Shard {
 }
 
 /// Disk entries indexed by object key and range start, with dense rotating eviction candidates.
-#[derive(Default)]
 struct DiskEntryIndex {
     ranges_by_key: HashMap<ObjectKey, BTreeMap<u64, ObjectRangeDiskStorage>>,
     eviction_candidates: Vec<(ObjectKey, u64)>,
     next_candidate: usize,
     next_publication_id: u64,
+    metrics: Arc<DiskMetrics>,
 }
 
 /// One reserved chunk being assembled in memory before its only write.
@@ -174,21 +179,33 @@ impl DiskRangeCache {
         metrics: Arc<IoMetrics>,
         access_histories: Arc<ObjectAccessHistories>,
     ) -> Result<Self, DiskRangeCacheError> {
+        Self::open_with_metrics(directory, capacity, metrics, access_histories, DiskMetrics::noop()).await
+    }
+
+    /// Opens a disk tier with registered file-I/O and range-cache metrics.
+    pub async fn open_with_metrics(
+        directory: impl AsRef<Path>,
+        capacity: u64,
+        io_metrics: Arc<IoMetrics>,
+        access_histories: Arc<ObjectAccessHistories>,
+        metrics: Arc<DiskMetrics>,
+    ) -> Result<Self, DiskRangeCacheError> {
         if capacity == 0 || capacity > i64::MAX as u64 || !capacity.is_multiple_of(CHUNK_BYTES) {
             return Err(DiskRangeCacheError::InvalidCapacity);
         }
-        let file = DataFile::open(directory, capacity, metrics).await?;
+        let file = DataFile::open(directory, capacity, io_metrics).await?;
         tracing::warn!(target: "feuer::storage", "disk range cache prototype starts empty; recovery is not implemented");
         let arena_count = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
         let chunk_count = capacity / CHUNK_BYTES;
         let arenas = (0..arena_count)
             .map(|arena_index| Shard {
-                allocator: DiskAllocator::for_disk_range(
+                allocator: DiskAllocator::with_metrics(
                     (chunk_count * arena_index / arena_count) * CHUNK_BYTES
                         ..(chunk_count * (arena_index + 1) / arena_count) * CHUNK_BYTES,
+                    metrics.clone(),
                 )
                 .unwrap(),
-                entry_index: Mutex::new(DiskEntryIndex::default()),
+                entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
             })
             .collect();
         Ok(Self {
@@ -196,6 +213,7 @@ impl DiskRangeCache {
                 file,
                 arenas,
                 access_histories,
+                metrics,
             }),
         })
     }
@@ -241,21 +259,25 @@ impl DiskRangeCache {
         F: Fn(&T, &mut dyn FnMut()) + Send + 'static,
     {
         let disk = self.disk.clone();
+        let downloads: Vec<_> = downloads
+            .into_iter()
+            .map(|(key, download, token)| (key, download, token, PopulationAttempt::new(disk.metrics.clone())))
+            .collect();
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
         runtime
             .spawn(async move {
                 let mut by_arena: Vec<Vec<_>> = (0..disk.arenas.len()).map(|_| Vec::new()).collect();
-                for (key, download, token) in downloads {
-                    by_arena[disk.arena_index_for_key(&key)].push((key, download, token));
+                for (key, download, token, attempt) in downloads {
+                    by_arena[disk.arena_index_for_key(&key)].push((key, download, token, attempt));
                 }
                 let mut published = 0;
                 for (arena, mut downloads) in disk.arenas.iter().zip(by_arena) {
-                    downloads.sort_by_key(|(_, download, _)| download.bytes().len());
+                    downloads.sort_by_key(|(_, download, _, _)| download.bytes().len());
                     let mut batch = UnwrittenBatch::default();
                     let mut publication_tokens = Vec::new();
                     let mut attempts_left = MAX_EVICTION_ATTEMPTS;
                     let mut regions_left = MAX_EVICTION_REGIONS;
-                    for (key, download, token) in downloads {
+                    for (key, download, token, mut attempt) in downloads {
                         if arena
                             .entry_index
                             .lock()
@@ -275,24 +297,39 @@ impl DiskRangeCache {
                                 }
                             }
                             if batch.entries.len() != previous_entries {
-                                publication_tokens.push(token);
+                                publication_tokens.push((token, attempt));
+                            } else {
+                                attempt.finish(PopulationOutcome::NoCapacity);
                             }
+                        } else {
+                            attempt.finish(PopulationOutcome::AlreadyCovered);
                         }
                     }
-                    let entries = batch.write(&disk.file).await?;
+                    let entries = match batch.write(&disk.file, &disk.metrics).await {
+                        Ok(entries) => entries,
+                        Err(error) => {
+                            for (_, attempt) in &mut publication_tokens {
+                                attempt.finish(PopulationOutcome::Failed);
+                            }
+                            return Err(error);
+                        }
+                    };
                     let mut index = arena.entry_index.lock().unwrap();
                     // Publish larger entries first so contained batch members need not publish at all.
-                    for ((key, storage), token) in entries.into_iter().zip(publication_tokens).rev() {
+                    for ((key, storage), (token, mut attempt)) in entries.into_iter().zip(publication_tokens).rev() {
                         let object_range = storage.object_range;
                         // Another writer or an earlier entry in this batch may already cover this range.
                         if index.covering_range(&key, object_range).is_some() {
+                            attempt.finish(PopulationOutcome::AlreadyCovered);
                             continue;
                         }
+                        attempt.finish(PopulationOutcome::Stale);
                         let mut entry = Some((key, storage));
                         with_current(&token, &mut || {
                             if let Some((key, storage)) = entry.take() {
                                 index.insert(key, storage);
                                 published += 1;
+                                attempt.finish(PopulationOutcome::Published);
                             }
                         });
                     }
@@ -316,10 +353,15 @@ impl DiskRangeCache {
     /// Returns exactly requested bytes from one covering entry, or a miss on any I/O/integrity uncertainty.
     /// Reads and hashes the whole entry, not neighboring entries or metadata. Results retain no disk ownership.
     pub async fn get(&self, key: &ObjectKey, requested: ByteRange) -> Option<Bytes> {
+        let started = Instant::now();
+        let metrics = &self.disk.metrics;
         let arena = &self.disk.arenas[self.disk.arena_index_for_key(key)];
         let guarded_read = {
             let index = arena.entry_index.lock().unwrap();
-            let storage = index.covering_range(key, requested)?;
+            let Some(storage) = index.covering_range(key, requested) else {
+                metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
+                return None;
+            };
             GuardedObjectRangeRead {
                 object_range: storage.object_range,
                 payload_checksum: storage.payload_checksum,
@@ -327,15 +369,23 @@ impl DiskRangeCache {
             }
         };
         match guarded_read.read(&self.disk.file, requested).await {
-            Ok(Some(bytes)) => Some(bytes),
+            Ok(Some(bytes)) => {
+                metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
+                Some(bytes)
+            }
             result => {
-                match result {
+                let outcome = match result {
                     Err(error) => {
-                        tracing::warn!(target: "feuer::storage", %error, "disk read failed; entry invalidated")
+                        tracing::warn!(target: "feuer::storage", %error, "disk read failed; entry invalidated");
+                        DiskLookupOutcome::IoError
                     }
-                    _ => tracing::warn!(target: "feuer::storage", "disk integrity check failed; entry invalidated"),
-                }
+                    _ => {
+                        tracing::warn!(target: "feuer::storage", "disk integrity check failed; entry invalidated");
+                        DiskLookupOutcome::IntegrityFailure
+                    }
+                };
                 arena.entry_index.lock().unwrap().invalidate(key, &guarded_read);
+                metrics.record_lookup(outcome, started.elapsed());
                 None
             }
         }
@@ -377,6 +427,7 @@ impl Shard {
             let (key, start) = index.eviction_candidates[position].clone();
             *regions_left -= index.ranges_by_key[&key][&start].region_count();
             index.remove(&key, start);
+            index.metrics.evictions.increase(1);
         }
         true
     }
@@ -398,6 +449,16 @@ impl ObjectRangeDiskStorage {
 }
 
 impl DiskEntryIndex {
+    fn new(metrics: Arc<DiskMetrics>) -> Self {
+        Self {
+            ranges_by_key: HashMap::new(),
+            eviction_candidates: Vec::new(),
+            next_candidate: 0,
+            next_publication_id: 0,
+            metrics,
+        }
+    }
+
     fn insert(&mut self, key: ObjectKey, mut storage: ObjectRangeDiskStorage) {
         let object_range = storage.object_range;
         if let Some(entries) = self.ranges_by_key.get(&key) {
@@ -415,6 +476,8 @@ impl DiskEntryIndex {
             .expect("disk entry identities exhausted");
         storage.publication_id = self.next_publication_id;
         storage.eviction_position = self.eviction_candidates.len();
+        self.metrics.entries.increase(1);
+        self.metrics.payload_bytes.increase(object_range.len());
         self.eviction_candidates.push((key.clone(), object_range.start()));
         self.ranges_by_key
             .entry(key)
@@ -425,6 +488,8 @@ impl DiskEntryIndex {
     fn remove(&mut self, key: &str, start: u64) -> Option<ObjectRangeDiskStorage> {
         let entries = self.ranges_by_key.get_mut(key)?;
         let storage = entries.remove(&start)?;
+        self.metrics.entries.decrease(1);
+        self.metrics.payload_bytes.decrease(storage.object_range.len());
         if entries.is_empty() {
             self.ranges_by_key.remove(key);
         }
@@ -457,6 +522,19 @@ impl DiskEntryIndex {
         // Retained ranges never contain one another, so their ends increase with their starts.
         let (_, storage) = self.ranges_by_key.get(key)?.range(..=requested.start()).next_back()?;
         storage.object_range.contains(requested).then_some(storage)
+    }
+}
+
+impl Drop for DiskEntryIndex {
+    fn drop(&mut self) {
+        self.metrics.entries.decrease(self.eviction_candidates.len() as u64);
+        self.metrics.payload_bytes.decrease(
+            self.ranges_by_key
+                .values()
+                .flat_map(|entries| entries.values())
+                .map(|entry| entry.object_range.len())
+                .sum(),
+        );
     }
 }
 
@@ -599,7 +677,11 @@ impl UnwrittenBatch {
         (regions, first_chunk)
     }
 
-    async fn write(mut self, file: &DataFile) -> Result<Vec<(ObjectKey, ObjectRangeDiskStorage)>, DiskRangeCacheError> {
+    async fn write(
+        mut self,
+        file: &DataFile,
+        metrics: &DiskMetrics,
+    ) -> Result<Vec<(ObjectKey, ObjectRangeDiskStorage)>, DiskRangeCacheError> {
         let mut unfinished = UnfinishedChunkWrites(
             self.chunks
                 .iter()
@@ -626,6 +708,13 @@ impl UnwrittenBatch {
             }
         }
         unfinished.0.clear();
+        metrics.written_entries.increase(self.entries.len() as u64);
+        metrics
+            .packed_payload_bytes
+            .increase(self.entries.iter().map(|(_, entry)| entry.object_range.len()).sum());
+        metrics
+            .packed_chunk_bytes
+            .increase(self.chunks.len() as u64 * CHUNK_BYTES);
         Ok(self.entries)
     }
 }

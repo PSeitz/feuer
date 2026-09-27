@@ -1193,7 +1193,7 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
         payload_regions: Vec::new(),
     };
     for replacement in [b"old", b"new"] {
-        let mut index = DiskEntryIndex::default();
+        let mut index = DiskEntryIndex::new(DiskMetrics::noop());
         index.insert(
             "object".to_owned(),
             ObjectRangeDiskStorage {

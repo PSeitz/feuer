@@ -29,6 +29,7 @@ feuer-types = { version = "0.23.0-dev", path = "feuer-types" }
 fs4 = { version = "0.13", default-features = false }
 mixtrics = "0.2"
 parking_lot = "0.12"
+prometheus = { version = "0.14", default-features = false }
 # Enable all features by default to make it possible to opt out of the madsim dependency.
 # See why we need this at https://github.com/rust-lang/cargo/issues/10801
 runtime-madsim-tokio = { package = "madsim-tokio", version = "0.2", features = [

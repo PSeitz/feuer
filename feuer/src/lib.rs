@@ -7,8 +7,12 @@
 
 mod cache;
 mod config;
+mod metrics;
 #[cfg(target_os = "linux")]
 mod population;
+#[cfg(test)]
+#[path = "../../test_support/metrics.rs"]
+mod test_metrics;
 
 pub use cache::{GetOrFetchError, TieredMemoryDiskCache};
 pub use config::{CacheConfig, CacheConfigError};

@@ -1,6 +1,76 @@
 use super::*;
+use crate::test_metrics::{registry, value};
 use bytes::Bytes;
 use feuer_storage::IoMetrics;
+
+#[test]
+fn queue_metrics_cover_admission_pressure_dequeue_and_cancellation() {
+    let (registry, backend) = registry();
+    let metrics = PopulationMetrics::new(&backend);
+    let memory = MemoryCache::new(1024);
+    let (population, mut receiver) = DiskPopulation::channel_with_metrics(1, 8, metrics);
+    enqueue(&population, &memory, "queued");
+    enqueue(&population, &memory, "full");
+    assert_eq!(
+        value(
+            &registry,
+            "feuer_disk_population_queue_total",
+            &[("outcome", "queue_full")]
+        ),
+        1.0
+    );
+    assert_eq!(value(&registry, "feuer_disk_population_pending_bytes", &[]), 4.0);
+    assert_eq!(value(&registry, "feuer_disk_population_queued_entries", &[]), 1.0);
+    let mut active = receiver.try_recv().unwrap();
+    active.source.dequeue();
+    assert_eq!(value(&registry, "feuer_disk_population_queued_entries", &[]), 0.0);
+    assert_eq!(value(&registry, "feuer_disk_population_pending_bytes", &[]), 4.0);
+    assert_eq!(
+        value(&registry, "feuer_disk_population_queue_duration_seconds", &[]),
+        1.0
+    );
+    enqueue(&population, &memory, "queued-again");
+    enqueue(&population, &memory, "budget");
+    assert_eq!(
+        value(
+            &registry,
+            "feuer_disk_population_queue_total",
+            &[("outcome", "byte_budget")]
+        ),
+        1.0
+    );
+    drop(active);
+    drop(receiver);
+    assert_eq!(
+        value(
+            &registry,
+            "feuer_disk_population_queue_total",
+            &[("outcome", "canceled")]
+        ),
+        1.0
+    );
+    assert_eq!(value(&registry, "feuer_disk_population_queued_entries", &[]), 0.0);
+    assert_eq!(value(&registry, "feuer_disk_population_pending_bytes", &[]), 0.0);
+    enqueue(&population, &memory, "closed");
+    assert_eq!(
+        value(
+            &registry,
+            "feuer_disk_population_queue_total",
+            &[("outcome", "queue_closed")]
+        ),
+        1.0
+    );
+    let (small, _) = DiskPopulation::channel_with_metrics(1, 3, PopulationMetrics::new(&backend));
+    enqueue(&small, &memory, "oversized");
+    assert_eq!(
+        value(
+            &registry,
+            "feuer_disk_population_queue_total",
+            &[("outcome", "oversized")]
+        ),
+        1.0
+    );
+}
 
 fn enqueue(population: &DiskPopulation, memory: &MemoryCache, key: &str) {
     let key = key.to_owned();
@@ -56,7 +126,8 @@ async fn queued_eviction_and_readmission_cancel_old_writes_while_live_entries_ba
     )
     .await
     .unwrap();
-    let (population, receiver) = DiskPopulation::channel(8, 32);
+    let (registry, backend) = registry();
+    let (population, receiver) = DiskPopulation::channel_with_metrics(8, 32, PopulationMetrics::new(&backend));
     let range = ByteRange::new(3, 7).unwrap();
     for key in ["live-a", "evicted", "readmitted", "live-b"] {
         enqueue(&population, &memory, key);
@@ -84,4 +155,10 @@ async fn queued_eviction_and_readmission_cancel_old_writes_while_live_entries_ba
         );
     }
     assert_eq!(budget.available_permits(), 32);
+    assert_eq!(
+        value(&registry, "feuer_disk_population_queue_total", &[("outcome", "stale")]),
+        2.0
+    );
+    assert_eq!(value(&registry, "feuer_disk_population_pending_bytes", &[]), 0.0);
+    assert_eq!(value(&registry, "feuer_disk_population_queued_entries", &[]), 0.0);
 }

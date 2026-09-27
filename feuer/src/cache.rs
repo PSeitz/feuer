@@ -1,20 +1,28 @@
-use std::{fmt, future::Future, sync::Arc};
+use std::{fmt, future::Future, sync::Arc, time::Instant};
 
 #[cfg(target_os = "linux")]
 use crate::population::DiskPopulation;
 use bytes::Bytes;
 use feuer_memory::MemoryCache;
 #[cfg(target_os = "linux")]
+use feuer_memory::MemoryMetrics;
+#[cfg(target_os = "linux")]
 use feuer_storage::{DiskRangeCache, DiskRangeCacheError, IoMetrics};
 use feuer_types::{ByteRange, Download, ObjectKey};
+#[cfg(target_os = "linux")]
+use mixtrics::metrics::BoxedRegistry;
 use thiserror::Error;
 
-use crate::CacheConfig;
+use crate::{
+    CacheConfig,
+    metrics::{LookupMetrics, LookupOutcome},
+};
 
 /// Configuration and both tiers shared by cloned cache handles.
 struct CacheState {
     config: CacheConfig,
     memory: Arc<MemoryCache>,
+    metrics: LookupMetrics,
     #[cfg(target_os = "linux")]
     disk: DiskRangeCache,
     #[cfg(target_os = "linux")]
@@ -47,19 +55,33 @@ impl TieredMemoryDiskCache {
     /// Existing disk entries are not recovered yet.
     #[cfg(target_os = "linux")]
     pub async fn open(config: CacheConfig) -> Result<Self, DiskRangeCacheError> {
-        let memory = Arc::new(MemoryCache::new(config.memory_capacity()));
-        let disk = DiskRangeCache::open_with_access_histories(
+        let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
+        Self::open_with_metrics(config, &registry).await
+    }
+
+    /// Opens a cache with metrics registered through `mixtrics`.
+    /// Labels are bounded and contain no object identities or cache names. Caches
+    /// sharing a registry contribute to the same counters and aggregate gauges.
+    #[cfg(target_os = "linux")]
+    pub async fn open_with_metrics(config: CacheConfig, registry: &BoxedRegistry) -> Result<Self, DiskRangeCacheError> {
+        let memory = Arc::new(MemoryCache::with_metrics(
+            config.memory_capacity(),
+            MemoryMetrics::new(registry),
+        ));
+        let disk = DiskRangeCache::open_with_metrics(
             config.directory(),
             config.disk_capacity(),
-            IoMetrics::noop(),
+            IoMetrics::new(registry),
             memory.access_histories(),
+            feuer_storage::DiskMetrics::new(registry),
         )
         .await?;
-        let population = DiskPopulation::new(memory.clone(), disk.clone());
+        let population = DiskPopulation::with_metrics(memory.clone(), disk.clone(), registry);
         Ok(Self {
             state: Arc::new(CacheState {
                 config,
                 memory,
+                metrics: LookupMetrics::new(registry),
                 disk,
                 population,
             }),
@@ -94,7 +116,10 @@ impl TieredMemoryDiskCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Download, E>>,
     {
+        let started = Instant::now();
+        let metrics = &self.state.metrics;
         if let Some(bytes) = self.state.memory.get(&object_key, requested_range) {
+            metrics.record(LookupOutcome::MemoryHit, started.elapsed(), requested_range.len());
             return Ok(bytes);
         }
 
@@ -108,12 +133,31 @@ impl TieredMemoryDiskCache {
                 Download::new(requested_range.start(), bytes.clone()).expect("disk result covers the request"),
                 requested_range,
             );
+            metrics.record(LookupOutcome::DiskHit, started.elapsed(), requested_range.len());
             return Ok(bytes);
         }
 
-        let download = callback().await.map_err(GetOrFetchError::Callback)?;
+        metrics.callbacks.increase(1);
+        let callback_started = Instant::now();
+        let download = match callback().await {
+            Ok(download) => {
+                metrics
+                    .callback_success_duration
+                    .record(callback_started.elapsed().as_secs_f64());
+                metrics.download_bytes.increase(download.bytes().len() as u64);
+                download
+            }
+            Err(error) => {
+                metrics
+                    .callback_error_duration
+                    .record(callback_started.elapsed().as_secs_f64());
+                metrics.record(LookupOutcome::CallbackError, started.elapsed(), 0);
+                return Err(GetOrFetchError::Callback(error));
+            }
+        };
         let downloaded_range = download.downloaded_range();
         if !downloaded_range.contains(requested_range) {
+            metrics.record(LookupOutcome::InvalidDownload, started.elapsed(), 0);
             return Err(GetOrFetchError::DownloadDoesNotCover {
                 requested_range,
                 downloaded_range,
@@ -123,7 +167,9 @@ impl TieredMemoryDiskCache {
         let requested_bytes = requested_slice(download.bytes(), downloaded_range, requested_range);
         #[cfg(target_os = "linux")]
         if self.state.disk.contains(&object_key, downloaded_range) {
+            self.state.population.skip_covered();
             self.state.memory.record_access(&object_key, requested_range);
+            metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
             return Ok(requested_bytes);
         }
         let entry_id = self
@@ -133,10 +179,13 @@ impl TieredMemoryDiskCache {
         #[cfg(target_os = "linux")]
         if let Some(entry_id) = entry_id {
             self.state.population.schedule(object_key, download, entry_id, accesses);
+        } else {
+            self.state.population.skip_redundant();
         }
         #[cfg(not(target_os = "linux"))]
         let _ = (entry_id, accesses);
 
+        metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
         Ok(requested_bytes)
     }
 }
@@ -179,6 +228,113 @@ mod tests {
     use tokio::sync::{Barrier, Notify};
 
     use super::*;
+    use crate::test_metrics::{registry, value};
+
+    #[tokio::test]
+    async fn public_registry_observes_memory_disk_callbacks_and_population() {
+        let directory = tempfile::tempdir().unwrap();
+        let (registry, backend) = registry();
+        let cache = TieredMemoryDiskCache::open_with_metrics(
+            CacheConfig::new(directory.path(), 4 << 20, 32).unwrap(),
+            &backend,
+        )
+        .await
+        .unwrap();
+        let key = "object".to_owned();
+        assert!(
+            cache
+                .get_or_fetch(key.clone(), range(0, 2), || async { Err::<Download, _>("failed") })
+                .await
+                .is_err()
+        );
+        assert!(
+            cache
+                .get_or_fetch(key.clone(), range(0, 2), || async {
+                    Ok::<_, Infallible>(Download::new(0, Bytes::from_static(b"x")).unwrap())
+                })
+                .await
+                .is_err()
+        );
+        cache
+            .get_or_fetch(key.clone(), range(1, 3), || async {
+                Ok::<_, Infallible>(Download::new(0, Bytes::from_static(b"abcd")).unwrap())
+            })
+            .await
+            .unwrap();
+        wait_for_disk(&cache, &key, range(0, 4)).await;
+        cache
+            .get_or_fetch(key.clone(), range(0, 2), || async {
+                Err::<Download, _>("memory hit must not fetch")
+            })
+            .await
+            .unwrap();
+        cache
+            .state
+            .memory
+            .insert(key.clone(), Download::new(100, Bytes::from(vec![0; 64])).unwrap());
+        cache
+            .get_or_fetch(key.clone(), range(1, 3), || async {
+                Err::<Download, _>("disk hit must not fetch")
+            })
+            .await
+            .unwrap();
+        for outcome in [
+            "memory_hit",
+            "disk_hit",
+            "callback",
+            "callback_error",
+            "invalid_download",
+        ] {
+            assert_eq!(value(&registry, "feuer_lookup_total", &[("outcome", outcome)]), 1.0);
+            assert_eq!(
+                value(&registry, "feuer_lookup_duration_seconds", &[("outcome", outcome)]),
+                1.0
+            );
+        }
+        for source in ["memory", "disk", "callback"] {
+            assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", source)]), 2.0);
+        }
+        assert_eq!(value(&registry, "feuer_callback_total", &[]), 3.0);
+        assert_eq!(value(&registry, "feuer_callback_download_bytes_total", &[]), 5.0);
+        assert_eq!(
+            value(&registry, "feuer_callback_duration_seconds", &[("outcome", "success")]),
+            2.0
+        );
+        assert_eq!(
+            value(&registry, "feuer_callback_duration_seconds", &[("outcome", "error")]),
+            1.0
+        );
+        assert_eq!(
+            value(&registry, "feuer_memory_operations_total", &[("operation", "hit")]),
+            1.0
+        );
+        assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", "hit")]), 1.0);
+        assert_eq!(
+            value(
+                &registry,
+                "feuer_disk_io_total",
+                &[("operation", "write"), ("outcome", "success")]
+            ),
+            1.0
+        );
+        assert_eq!(
+            value(&registry, "feuer_disk_population_total", &[("outcome", "published")]),
+            1.0
+        );
+        // Closing the cache also releases the detached population worker's gauges.
+        drop(cache);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while value(&registry, "feuer_disk_chunks", &[("state", "free")]) != 0.0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(value(&registry, "feuer_disk_population_pending_bytes", &[]), 0.0);
+        assert_eq!(value(&registry, "feuer_disk_population_queued_entries", &[]), 0.0);
+        assert_eq!(value(&registry, "feuer_memory_payload_bytes", &[]), 0.0);
+        assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
+    }
 
     fn range(start: u64, end: u64) -> ByteRange {
         ByteRange::new(start, end).unwrap()

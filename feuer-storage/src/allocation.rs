@@ -9,6 +9,8 @@ use std::{
     },
 };
 
+use crate::DiskMetrics;
+
 /// Size in bytes of a whole-chunk reservation. Written chunks stay immutable until
 /// all entry owners and read guards release them; individual holes cannot be reused.
 pub(super) const CHUNK_BYTES: u64 = 1024 * 1024;
@@ -25,6 +27,8 @@ struct FreeSpace {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
     free_chunk_count_by_start: BTreeMap<u64, u64>,
     available_chunks: u64,
+    quarantined_chunks: u64,
+    metrics: Arc<DiskMetrics>,
 }
 
 impl FreeSpace {
@@ -34,6 +38,8 @@ impl FreeSpace {
             self.free_chunk_count_by_start.insert(start + 1, count - 1);
         }
         self.available_chunks -= 1;
+        self.metrics.free_chunks.decrease(1);
+        self.metrics.reserved_chunks.increase(1);
         start
     }
 
@@ -57,6 +63,16 @@ impl FreeSpace {
         }
         self.free_chunk_count_by_start.insert(start, count);
         self.available_chunks += 1;
+        self.metrics.free_chunks.increase(1);
+        self.metrics.reserved_chunks.decrease(1);
+    }
+}
+
+impl Drop for FreeSpace {
+    fn drop(&mut self) {
+        // The last reservation has gone; only free or quarantined chunks remain.
+        self.metrics.free_chunks.decrease(self.available_chunks);
+        self.metrics.quarantined_chunks.decrease(self.quarantined_chunks);
     }
 }
 
@@ -71,7 +87,12 @@ impl DiskAllocator {
         self.free.lock().unwrap().available_chunks * CHUNK_BYTES
     }
 
+    #[cfg(test)]
     pub(super) fn for_disk_range(disk_range: Range<u64>) -> Option<Self> {
+        Self::with_metrics(disk_range, DiskMetrics::noop())
+    }
+
+    pub(super) fn with_metrics(disk_range: Range<u64>, metrics: Arc<DiskMetrics>) -> Option<Self> {
         if disk_range.start >= disk_range.end
             || disk_range.end > i64::MAX as u64
             || !disk_range.start.is_multiple_of(CHUNK_BYTES)
@@ -79,6 +100,9 @@ impl DiskAllocator {
         {
             return None;
         }
+        metrics
+            .free_chunks
+            .increase((disk_range.end - disk_range.start) / CHUNK_BYTES);
         Some(Self {
             chunk_capacity: (disk_range.end - disk_range.start) / CHUNK_BYTES,
             free: Arc::new(Mutex::new(FreeSpace {
@@ -87,6 +111,8 @@ impl DiskAllocator {
                     (disk_range.end - disk_range.start) / CHUNK_BYTES,
                 )]),
                 available_chunks: (disk_range.end - disk_range.start) / CHUNK_BYTES,
+                quarantined_chunks: 0,
+                metrics,
             })),
         })
     }
@@ -152,7 +178,12 @@ impl DiskRegion {
 
     /// Unknown write completion forbids reuse of the entire chunk for this allocator's lifetime.
     pub(super) fn quarantine(self) {
-        self.state.reusable.store(false, Ordering::Relaxed);
+        if self.state.reusable.swap(false, Ordering::Relaxed) {
+            let mut free = self.state.free.lock().unwrap();
+            free.quarantined_chunks += 1;
+            free.metrics.reserved_chunks.decrease(1);
+            free.metrics.quarantined_chunks.increase(1);
+        }
     }
 }
 
