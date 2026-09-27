@@ -4,8 +4,8 @@ use thiserror::Error;
 
 /// Explicit capacities and location for one Feuer cache.
 ///
-/// Capacities are measured in payload bytes. The disk file is fixed to
-/// `disk_capacity` when the disk lifecycle is enabled. `memory_capacity` is a
+/// `disk_capacity` is the fixed physical file size, including metadata and alignment.
+/// Opening requires a positive multiple of 1 MiB. `memory_capacity` is a
 /// soft eviction target divided among the in-memory shards; oversized entries
 /// can make retained usage exceed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,7 +36,7 @@ impl CacheConfig {
         })
     }
 
-    /// Returns the directory configured for the cache's future disk lifecycle.
+    /// Returns the directory containing the cache's exclusively locked backing file.
     pub fn directory(&self) -> &Path {
         &self.directory
     }

@@ -123,10 +123,30 @@ impl MemoryCache {
     /// Population and access remain distinct policy events, but sharing one
     /// shard lock prevents an intervening admission from losing the callback's
     /// attribution. Containment suppression still records the access.
-    pub fn insert_and_record(&self, object_key: ObjectKey, download: Download, requested_range: ByteRange) {
+    /// Returns the new shard-local entry identity, or `None` for a redundant download.
+    pub fn insert_and_record(
+        &self,
+        object_key: ObjectKey,
+        download: Download,
+        requested_range: ByteRange,
+    ) -> Option<u64> {
         let (downloaded_range, bytes) = download.into_parts();
         debug_assert!(downloaded_range.contains(requested_range));
-        self.admit_download(object_key, downloaded_range, bytes, Some(requested_range));
+        self.admit_download(object_key, downloaded_range, bytes, Some(requested_range))
+    }
+
+    /// Runs a short synchronous action only while this exact admission remains cached.
+    /// Eviction, replacement and compaction cannot intervene before the action finishes.
+    /// The action must not reenter this memory cache or perform I/O.
+    pub fn with_current_entry<R>(
+        &self,
+        object_key: &ObjectKey,
+        range: ByteRange,
+        entry_id: u64,
+        action: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let shard = self.shards[self.shard_index(object_key)].lock();
+        shard.contains_entry(object_key, range, entry_id).then(action)
     }
 
     fn admit_download(
@@ -135,7 +155,7 @@ impl MemoryCache {
         downloaded_range: ByteRange,
         bytes: Bytes,
         requested_range: Option<ByteRange>,
-    ) {
+    ) -> Option<u64> {
         let shard_index = self.shard_index(&object_key);
         let mut allow_range_trim = true;
         loop {
@@ -147,7 +167,7 @@ impl MemoryCache {
                 allow_range_trim,
             );
             match step {
-                AdmissionProgress::Complete => return,
+                AdmissionProgress::Complete(id) => return id,
                 AdmissionProgress::Retry => continue,
                 AdmissionProgress::Trim(source) => {
                     // Payload copying is deliberately outside the shard lock.

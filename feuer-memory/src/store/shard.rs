@@ -201,7 +201,7 @@ pub(super) struct RangeTrimReplacement {
 
 /// Progress after a bounded admission attempt: complete, retry, or trim before retrying.
 pub(super) enum AdmissionProgress {
-    Complete,
+    Complete(Option<u64>),
     Retry,
     Trim(RangeTrimSource),
 }
@@ -281,7 +281,7 @@ impl MemoryCacheShard {
                 if let Some(requested_range) = requested_range {
                     self.record_successful_access(object_key, requested_range);
                 }
-                return AdmissionProgress::Complete;
+                return AdmissionProgress::Complete(None);
             }
             Some(entries) => entries.superseded_by(range),
             None => SupersededRanges::default(),
@@ -293,7 +293,7 @@ impl MemoryCacheShard {
         if used_bytes_without_superseded <= max_existing_bytes {
             let removal = self.remove_superseded(object_key, &superseded.ranges);
             debug_assert_eq!(removal.payload_bytes, superseded.payload_bytes);
-            self.insert_admission(object_key.clone(), range, bytes.clone());
+            let id = self.insert_admission(object_key.clone(), range, bytes.clone());
 
             if removal.entry_count != 0 {
                 self.metrics.decrease_usage(removal.payload_bytes, removal.entry_count);
@@ -303,7 +303,7 @@ impl MemoryCacheShard {
             if let Some(requested_range) = requested_range {
                 self.record_successful_access(object_key, requested_range);
             }
-            return AdmissionProgress::Complete;
+            return AdmissionProgress::Complete(Some(id));
         }
 
         let Some(candidate) = self.select_reclaim_candidate(object_key, range) else {
@@ -329,7 +329,7 @@ impl MemoryCacheShard {
         AdmissionProgress::Retry
     }
 
-    fn insert_admission(&mut self, object_key: ObjectKey, range: ByteRange, bytes: Bytes) {
+    fn insert_admission(&mut self, object_key: ObjectKey, range: ByteRange, bytes: Bytes) -> u64 {
         self.used_bytes += bytes.len() as u64;
         let id = self.allocate_entry_id();
         let candidate_slot = self.candidates.register(CachedRangeIdentity {
@@ -356,6 +356,14 @@ impl MemoryCacheShard {
         entries.object_generation = entries.object_generation.saturating_add(1);
         let replaced = entries.by_start.insert(range.start(), entry);
         debug_assert!(replaced.is_none());
+        id
+    }
+
+    pub(super) fn contains_entry(&self, key: &ObjectKey, range: ByteRange, id: u64) -> bool {
+        self.ranges
+            .get(key)
+            .and_then(|entries| entries.by_start.get(&range.start()))
+            .is_some_and(|entry| entry.id == id && entry.range == range)
     }
 
     fn insert_trimmed(&mut self, object_key: &ObjectKey, range: ByteRange, bytes: Bytes) {

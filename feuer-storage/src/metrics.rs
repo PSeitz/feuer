@@ -80,8 +80,8 @@ impl IoMetrics {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn noop() -> Arc<Self> {
+    /// Creates unregistered no-op metrics for caches without a metrics registry.
+    pub fn noop() -> Arc<Self> {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         Self::new(&registry)
     }

@@ -356,9 +356,12 @@ version = "0.23.0-dev"
 dependencies = [
  "bytes",
  "feuer-memory",
+ "feuer-storage",
  "feuer-tokio",
  "feuer-types",
+ "tempfile",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

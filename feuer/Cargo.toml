@@ -18,8 +18,14 @@ feuer-memory = { workspace = true }
 feuer-types = { workspace = true }
 thiserror = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+feuer-storage = { path = "../feuer-storage" }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true }
+
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["runtime-tokio", "macros", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true

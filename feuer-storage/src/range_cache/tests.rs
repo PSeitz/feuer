@@ -892,6 +892,65 @@ async fn racing_equal_and_containing_writes_revalidate_publication() {
 }
 
 #[tokio::test]
+async fn completed_write_revalidates_memory_identity_before_publication() {
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let memory = Arc::new(feuer_memory::MemoryCache::new(1 << 20));
+    let mut entries = Vec::new();
+    // Different lengths exercise token association through batch sorting.
+    for (key, length) in [("stale", 200), ("current", 100)] {
+        let key = key.to_owned();
+        let source = download(0, length);
+        let range = source.downloaded_range();
+        let id = memory.insert_and_record(key.clone(), source.clone(), range).unwrap();
+        entries.push((key.clone(), source, (key, range, id)));
+    }
+    let published = cache
+        .insert_batch_checked(entries, move |(key, range, id), publish| {
+            if key == "stale" {
+                // Called only after complete I/O: readmitting the identical range must
+                // not authorize publication from the old memory admission.
+                assert!(memory.remove(key, *range));
+                memory.insert(key.clone(), download(range.start(), range.len() as usize));
+            }
+            memory.with_current_entry(key, *range, *id, publish);
+        })
+        .await
+        .unwrap();
+    assert_eq!(published, 1);
+    assert!(!cache.contains(&"stale".to_owned(), range(0, 200)));
+    assert_eq!(
+        cache.get(&"current".to_owned(), range(0, 100)).await.unwrap(),
+        download(0, 100).bytes()
+    );
+}
+
+#[tokio::test]
+async fn canceled_checked_writer_still_finishes_and_releases_rejected_storage() {
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (finished, completion) = tokio::sync::oneshot::channel();
+    let finished = Mutex::new(Some(finished));
+    let mut requester = Box::pin(cache.insert_batch_checked(
+        vec![("rejected".to_owned(), download(0, 100), ())],
+        move |(), _publish| {
+            finished.lock().unwrap().take().unwrap().send(()).unwrap();
+        },
+    ));
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(requester.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    drop(requester);
+    tokio::time::timeout(Duration::from_secs(5), completion)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!cache.contains(&"rejected".to_owned(), range(0, 100)));
+    // The sole chunk is safely reusable once the detached owner rejects publication.
+    assert!(cache.insert("next".to_owned(), download(0, 100)).await.unwrap());
+}
+
+#[tokio::test]
 async fn canceled_requester_does_not_abort_the_reservation_owner() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let mut requester = Box::pin(cache.insert("object".to_owned(), download(0, 100)));

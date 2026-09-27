@@ -5,13 +5,14 @@ contract; this document records what exists and what remains to build.
 
 ## Current state
 
-The public cache is **memory-only**. It does not open or modify the configured disk directory. A standalone
-experimental `DiskRangeCache` now connects allocation, metadata writes and integrity-checked disk reads,
-but is not integrated with public lookup or population and does not recover entries on reopen.
+The public cache now connects **memory → integrity-checked disk → callback**. The fallible asynchronous
+`TieredMemoryDiskCache::open` opens the configured directory using Linux direct I/O and io_uring, with no
+silent fallback. A bounded worker batches retained downloads into the experimental `DiskRangeCache`.
+Reopening still starts with an empty disk index: recovery is not implemented.
 
 | Area | Implemented | Remaining |
 | --- | --- | --- |
-| `feuer` | Cloneable `TieredMemoryDiskCache`, one soft memory target, per-call asynchronous `get_or_fetch`, typed callback and validation errors | Disk lifecycle, I/O mode selection, and tier orchestration |
+| `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, bounded batched population, typed callback and validation errors | I/O mode selection, recovery, tier-aware retention tuning |
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range, internal shared access evidence and value comparison | None for the current public type boundary |
 | `feuer-memory` | Sharded covering-range index, bounded exact access evidence shared with disk, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
 | `feuer-storage` | Fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, experimental sharded `DiskRangeCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, guarded whole-chunk reuse and bounded value-aware entry eviction | Recovery, buffered mode, retention-policy evaluation, comparative allocator measurements |
@@ -21,7 +22,9 @@ but is not integrated with public lookup or population and does not recover entr
 
 ### Public lookup and memory population
 
-- Memory lookup finds a cached range covering the request before invoking the per-call callback.
+- Lookup checks memory, then integrity-checked disk, before invoking the per-call callback. Disk hits promote
+  only the requested bytes to memory without scheduling another write. Read uncertainty invalidates disk
+  state through the existing storage path and falls through to the callback.
 - Misses invoke callbacks independently, without internal coordination or source retries. Each callback returns
   one `Download { downloaded_start, bytes }`, whose derived range must cover the request.
 - Successful lookups return exactly the requested bytes in one `Bytes`, which may share a larger allocation.
@@ -71,7 +74,8 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
   durability; there are no global scheduling barriers.
 - Caller cancellation does not cancel submitted kernel writes. The task owning a write's `DiskRegion` must
   keep awaiting completion and prevent conflicting access or reuse, even when the result is abandoned.
-  The standalone `DiskRangeCache` now owns reservation lifetime and publication; public tier scheduling is still pending.
+  `DiskRangeCache` owns reservation lifetime; public scheduling additionally revalidates the memory-entry
+  identity under its shard lock throughout disk publication.
 - Submitted buffers survive caller cancellation. Last-handle drop drains and joins the driver. Abnormal
   driver failure retains uncertain active buffers and the directory lock until process exit.
 - Raw capacity must be positive, 4-KiB-aligned, and representable as a Linux signed file offset. Opening
@@ -131,9 +135,9 @@ Alignment, metadata and chunk overhead do not enter the score. Only selected ent
 remain indexed and may keep a partially empty chunk unavailable. No eviction metadata reads are needed.
 Each shard batch is limited to 64 sampled decisions and 4,096 removed region references. Guarded or active
 storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
-standalone disk cache to a memory cache's evidence; public tier orchestration is still pending.
-Reopening deliberately starts empty and logs the reset. Recovery and the bounded memory-to-disk queue remain
-unimplemented. No comparative layout/performance claim is established.
+disk cache to a memory cache's evidence; public tier orchestration now uses it.
+Reopening deliberately starts empty and logs the reset. Recovery remains unimplemented.
+No comparative layout/performance claim is established.
 
 The range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
 cancellation, corruption/reused payload, partial batch failure, metadata-only chunks, disjoint arenas,
@@ -146,15 +150,27 @@ unrelated entries and metadata are not loaded. On `m8g-32cpu-local-ssd`, all 71 
 and io_uring on the local ext4 SSD. Workspace Clippy passed with warnings denied; formatting and whitespace
 checks passed for the changed files.
 
-## Later: best-effort disk scheduling
+## Implemented: best-effort disk scheduling
 
-- Bound the pending-write queue by payload bytes and entry count.
-- Allow policy to skip or replace candidates without blocking or failing a successful lookup.
-- Cancel queued writes when their memory range is evicted before I/O starts.
-- Let active writes finish safely, publishing only a current generation still admitted by disk policy.
-- Log failed writes and keep them invisible to disk lookup.
+- A nonblocking queue allows at most 256 pending entries. A byte budget covers at most 64 MiB of queued
+  and active payload together; larger downloads stay memory-only. These limits are internal.
+- One worker drains up to 64 entries into an explicit immutable batch; there is no batching timer or flush API.
+  Queue saturation skips candidates without blocking or failing successful lookups.
+- Queued writes are discarded if their exact memory admission was evicted, replaced, or compacted.
+- Active writes retain reservations through completion despite cancellation. Publication checks the original
+  memory-entry identity under the memory shard lock, within the disk index lock; no memory operation takes
+  a disk lock. Stale writes are discarded, and disk containment/allocation policy can still skip entries.
+- Failed writes are logged and remain invisible. Shared evidence survives queued and active population.
+- Disk hits, memory hits, and successful callbacks each record exactly one request. Callback results already
+  covered by disk are discarded without memory admission or another write.
 
-Scheduling must integrate with `DiskRangeCache` before the public cache can serve disk hits.
+On `m8g-32cpu-local-ssd`, all 145 workspace tests passed with real direct I/O and io_uring after integration.
+New tests cover disk hits after memory pressure, requested-range promotion, exactly-once evidence, directory
+ownership, byte/count saturation, oversized candidates, queued eviction/readmission, batching, callback and
+writer cancellation, stale publication, and disk-contained callback suppression. No new corruption tests were
+added in this slice. Workspace Clippy passed with warnings denied; formatting checks passed for changed Rust
+files, and whitespace checks passed.
+The isolated validation checkout is `/mnt/local-ssd/feuer-tiered.iB2JNA`.
 
 ## Remaining implementation
 
@@ -178,7 +194,7 @@ permanently excluded by the design.
 
 ### Integrity and recovery
 
-- Extend the prototype's checked reads and safe publication to tier-policy revalidation.
+- Extend current memory-identity publication checks when tier-aware retention policy is implemented.
 - Validate the versioned metadata format and whole-entry BLAKE3 checksums against injected crash and reuse cases.
 - Recover a safe subset after process and machine crashes; test corruption and torn state.
 - Automatically reset unsupported persistent formats and log the reset.

@@ -1,6 +1,6 @@
 # Disk range-cache prototype
 
-Experimental `DiskRangeCache`; the public `TieredMemoryDiskCache` remains memory-only.
+Experimental `DiskRangeCache`, connected to public tiered lookup and bounded background population.
 [tiered-plan.md](../tiered-plan.md) remains authoritative.
 
 **Every open starts empty. Recovery is not implemented.** Old on-disk metadata is not cleared;
@@ -26,11 +26,15 @@ free capacity in another shard cannot satisfy an admission. No metadata lock is 
 `insert_batch` accepts explicit `(ObjectKey, Download)` pairs and returns the number published.
 Within each shard, entries are sorted smallest first and packed into complete chunk buffers.
 Payload, metadata, metadata-start bitmaps, and zero padding are finalized before each chunk's single write.
-Partially filled chunks are written too; later batches cannot append. There is no background batching.
+Partially filled chunks are written too; later batches cannot append. The public tier supplies bounded
+batches from its background worker; storage itself adds no batching delay.
 
 All writes for a shard finish before publication. Publication rechecks containment, larger entries
 first: broader entries replace contained entries, while partial overlaps coexist. Contained entries
 and entries that cannot fit are skipped. Publication is not transactional across shards.
+`insert_batch_checked` additionally retains caller tokens through detached I/O and invokes a synchronous
+publication check. The public tier uses this to hold the memory shard lock while validating the original
+admission identity and publishing, so stale writes cannot become visible.
 
 A detached task retains reservations through I/O despite caller cancellation. A write error or
 unexpected drop during I/O quarantines every chunk in that shard's batch, including completed and
@@ -84,6 +88,6 @@ TMPDIR=/mnt/local-ssd/<isolated-test-directory> cargo test --locked -p feuer-sto
 ```
 
 Reopen tests assert an empty reset, not recovery. Device power-loss and torn-persistence tests remain
-outstanding, along with public tier integration, a bounded population queue, and buffered mode.
+outstanding, along with buffered mode and tier-aware retention tuning.
 Measure chunk utilization, metadata overhead, read/write amplification, and retention quality before
 selecting this layout over alternatives.

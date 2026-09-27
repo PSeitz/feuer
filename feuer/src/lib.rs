@@ -1,13 +1,17 @@
 //! Feuer is a tiered cache for ranges of immutable objects.
 //!
 //! The current public boundary provides exact requested byte ranges, opaque
-//! object identities, one soft-capacity memory tier, and per-call asynchronous
-//! download callbacks. The memory tier uses bounded age-limited access history
-//! and range trimming; best-effort disk population and recovery remain in progress.
+//! object identities, a soft-capacity memory tier, integrity-checked disk hits,
+//! bounded best-effort disk population, and per-call asynchronous download callbacks.
+//! Opening a cache requires Linux direct I/O and io_uring. Recovery is not implemented.
 
 mod cache;
 mod config;
+#[cfg(target_os = "linux")]
+mod population;
 
 pub use cache::{GetOrFetchError, TieredMemoryDiskCache};
 pub use config::{CacheConfig, CacheConfigError};
+#[cfg(target_os = "linux")]
+pub use feuer_storage::DiskRangeCacheError;
 pub use feuer_types::{ByteRange, Download, DownloadError, InvalidByteRange, ObjectKey};

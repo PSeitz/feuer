@@ -30,7 +30,7 @@ const PAYLOAD_ALIGNMENT_BYTES: u64 = crate::uring::DIRECT_IO_ALIGNMENT_BYTES as 
 const MAX_EVICTION_ATTEMPTS: usize = 64;
 const MAX_EVICTION_REGIONS: usize = 4096;
 
-/// A standalone experimental disk cache, not yet connected to the public tiered cache.
+/// An experimental disk range cache used by the public tiered cache.
 ///
 /// Explicit batches pack smaller entries together and write complete immutable 1-MiB chunks.
 /// Entries have plain payload bytes, 4-KiB-aligned storage, and a checksum in their entry metadata.
@@ -216,21 +216,46 @@ impl DiskRangeCache {
     /// Callers bound batch size and concurrency: complete chunk buffers are assembled in memory.
     /// Dropping this future does not abort its detached writer or release storage needed by submitted I/O.
     pub async fn insert_batch(&self, downloads: Vec<(ObjectKey, Download)>) -> Result<usize, DiskRangeCacheError> {
+        self.insert_batch_checked(
+            downloads
+                .into_iter()
+                .map(|(key, download)| (key, download, ()))
+                .collect(),
+            |(), publish| publish(),
+        )
+        .await
+    }
+
+    /// Writes a batch with per-entry publication checks owned by the caller.
+    /// `with_current` must synchronously invoke `publish` once if its token is still current,
+    /// keeping it current throughout publication, or not invoke it to discard the completed write.
+    /// It runs under the disk index lock and must not reenter disk storage or perform I/O.
+    /// The detached writer retains tokens and reservations even if this future is canceled.
+    pub async fn insert_batch_checked<T, F>(
+        &self,
+        downloads: Vec<(ObjectKey, Download, T)>,
+        with_current: F,
+    ) -> Result<usize, DiskRangeCacheError>
+    where
+        T: Send + 'static,
+        F: Fn(&T, &mut dyn FnMut()) + Send + 'static,
+    {
         let disk = self.disk.clone();
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
         runtime
             .spawn(async move {
                 let mut by_arena: Vec<Vec<_>> = (0..disk.arenas.len()).map(|_| Vec::new()).collect();
-                for (key, download) in downloads {
-                    by_arena[disk.arena_index_for_key(&key)].push((key, download));
+                for (key, download, token) in downloads {
+                    by_arena[disk.arena_index_for_key(&key)].push((key, download, token));
                 }
                 let mut published = 0;
                 for (arena, mut downloads) in disk.arenas.iter().zip(by_arena) {
-                    downloads.sort_by_key(|(_, download)| download.bytes().len());
+                    downloads.sort_by_key(|(_, download, _)| download.bytes().len());
                     let mut batch = UnwrittenBatch::default();
+                    let mut publication_tokens = Vec::new();
                     let mut attempts_left = MAX_EVICTION_ATTEMPTS;
                     let mut regions_left = MAX_EVICTION_REGIONS;
-                    for (key, download) in downloads {
+                    for (key, download, token) in downloads {
                         if arena
                             .entry_index
                             .lock()
@@ -240,6 +265,7 @@ impl DiskRangeCache {
                         {
                             // Preserve the object's evidence even if pressure removes its last existing entry.
                             let accesses = disk.access_histories.for_key(&key);
+                            let previous_entries = batch.entries.len();
                             while let Err(chunks_needed) = batch.push(&arena.allocator, &key, &download, &accesses) {
                                 // Evicting cannot help an entry that exceeds the capacity left by this batch.
                                 if chunks_needed > arena.allocator.chunk_capacity - batch.chunks.len() as u64
@@ -248,25 +274,43 @@ impl DiskRangeCache {
                                     break;
                                 }
                             }
+                            if batch.entries.len() != previous_entries {
+                                publication_tokens.push(token);
+                            }
                         }
                     }
                     let entries = batch.write(&disk.file).await?;
                     let mut index = arena.entry_index.lock().unwrap();
                     // Publish larger entries first so contained batch members need not publish at all.
-                    for (key, storage) in entries.into_iter().rev() {
+                    for ((key, storage), token) in entries.into_iter().zip(publication_tokens).rev() {
                         let object_range = storage.object_range;
                         // Another writer or an earlier entry in this batch may already cover this range.
                         if index.covering_range(&key, object_range).is_some() {
                             continue;
                         }
-                        index.insert(key, storage);
-                        published += 1;
+                        let mut entry = Some((key, storage));
+                        with_current(&token, &mut || {
+                            if let Some((key, storage)) = entry.take() {
+                                index.insert(key, storage);
+                                published += 1;
+                            }
+                        });
                     }
                 }
                 Ok(published)
             })
             .await
             .map_err(DiskRangeCacheError::PopulationTaskFailed)?
+    }
+
+    /// Checks indexed coverage without reading payload or recording an access.
+    pub fn contains(&self, key: &ObjectKey, range: ByteRange) -> bool {
+        self.disk.arenas[self.disk.arena_index_for_key(key)]
+            .entry_index
+            .lock()
+            .unwrap()
+            .covering_range(key, range)
+            .is_some()
     }
 
     /// Returns exactly requested bytes from one covering entry, or a miss on any I/O/integrity uncertainty.

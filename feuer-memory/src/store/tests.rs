@@ -13,6 +13,31 @@ use super::{
 };
 use crate::MemoryMetrics;
 
+#[test]
+fn disk_population_identity_expires_on_removal_replacement_and_readmission() {
+    let cache = cache(1024);
+    let key = ObjectKey::from("disk-source");
+    let payload = Download::new(10, Bytes::from_static(b"abcd")).unwrap();
+    let range = payload.downloaded_range();
+    let id = cache.insert_and_record(key.clone(), payload.clone(), range).unwrap();
+    assert_eq!(cache.with_current_entry(&key, range, id, || 7), Some(7));
+    assert_eq!(cache.insert_and_record(key.clone(), payload.clone(), range), None);
+    assert!(cache.remove(&key, range));
+    let replacement_id = cache.insert_and_record(key.clone(), payload, range).unwrap();
+    assert_ne!(id, replacement_id);
+    assert!(
+        cache
+            .with_current_entry(&key, range, id, || panic!("stale admission"))
+            .is_none()
+    );
+    cache.insert(key.clone(), Download::new(9, Bytes::from_static(b"abcdef")).unwrap());
+    assert!(
+        cache
+            .with_current_entry(&key, range, replacement_id, || panic!("superseded admission"))
+            .is_none()
+    );
+}
+
 fn range(start: u64, end: u64) -> ByteRange {
     ByteRange::new(start, end).unwrap()
 }

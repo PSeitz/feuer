@@ -4,9 +4,9 @@ Feuer is a restart-recoverable tiered cache for byte ranges of immutable
 objects. It is designed for arbitrary, non-empty ranges and fixed disk
 capacities of at least 1 TiB.
 
-> **Status:** active development. The public per-call callback, covering-memory
-> path, and sampled, pressure-driven memory policy are present, but
-> best-effort disk population and recovery are not yet complete.
+> **Status:** active development. Public lookups connect memory, integrity-checked
+> disk reads, and per-call callbacks, with bounded best-effort disk population.
+> Recovery, buffered I/O, and tier-aware retention tuning remain unimplemented.
 > This repository is not ready for production use.
 
 ## Contract
@@ -30,9 +30,14 @@ work are tracked in [`implementation-status.md`](implementation-status.md).
 
 The public boundary contains `ObjectKey`, `ByteRange`, a keyless validated
 `Download`, explicit capacities in `CacheConfig`, and a cloneable `TieredMemoryDiskCache`. Each
-`get_or_fetch` checks for a covering memory range before independently invoking
-that call's asynchronous callback. Successful results are sliced to the exact
-request and appended once to the key's accessed ranges, independently of downloaded-range population.
+`get_or_fetch` checks memory, then disk, before independently invoking that call's asynchronous callback.
+Successful results contain exactly the request and record it once, independently of population.
+`TieredMemoryDiskCache::open(config).await` opens the configured directory and can fail;
+there is no memory-only fallback. Disk capacity must be a positive multiple of 1 MiB.
+Disk hits promote only the requested bytes to memory. Retained callback downloads are queued without
+waiting for disk: at most 256 queued entries, 64 entries per active batch, and 64 MiB of queued plus active
+payload. Larger downloads remain memory-only. Eviction before a write starts discards it; completed writes
+publish only while their original memory admission is still current.
 
 The internal `feuer-storage` crate currently provides an exclusively owned,
 fixed-capacity O_DIRECT file and separate read/write io_uring queues (each with
@@ -51,8 +56,8 @@ their chunks exclusively. Payload is 4-KiB-aligned with no page headers. Bounded
 individual entries by recent retrieval value per payload byte; it does not evict their neighbors as a group.
 Chunks are reused only after all entry owners and readers release them.
 Each entry has one checksum in its metadata; a hit verifies the whole entry and returns only the requested
-bytes without reading neighboring entries. Reopen deliberately starts empty. Recovery, buffered mode and
-public-cache integration remain unimplemented.
+bytes without reading neighboring entries. Reopen deliberately starts empty. Recovery and buffered mode
+remain unimplemented.
 
 `feuer-memory` provides a sharded soft-capacity covering-range index with bounded ageable request evidence,
 sampled retrieval-cost-per-byte eviction, a short range-trimming grace, and
@@ -68,7 +73,7 @@ memory eviction while disk entries retain it.
 Storage builds and tests require Linux, enabled io_uring, and a filesystem that
 reports compatible direct-I/O alignment through `statx` (for example, ext4 on a
 recent kernel). Unsupported environments fail explicitly; tests do not silently
-skip real I/O. On other platforms, memory-only packages can still be tested with
+skip real I/O. On other platforms, configuration, memory and shared-type tests still run with
 `cargo test -p feuer -p feuer-memory -p feuer-types`.
 
 ```console
