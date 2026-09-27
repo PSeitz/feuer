@@ -5,15 +5,16 @@ contract; this document records what exists and what remains to build.
 
 ## Current state
 
-The public cache is **memory-only**. It does not open or modify the configured disk directory. The raw
-Linux direct-I/O layer is implemented separately but is not yet connected to cache lookup or population.
+The public cache is **memory-only**. It does not open or modify the configured disk directory. A standalone
+experimental `DiskRangeCache` now connects allocation, metadata writes and integrity-checked disk reads,
+but is not integrated with public lookup or population and does not recover entries on reopen.
 
 | Area | Implemented | Remaining |
 | --- | --- | --- |
 | `feuer` | Cloneable `TieredMemoryDiskCache`, one soft memory target, per-call asynchronous `get_or_fetch`, typed callback and validation errors | Disk lifecycle, I/O mode selection, and tier orchestration |
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range | None for the current public type boundary |
 | `feuer-memory` | Sharded covering-range index, bounded exact access evidence, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
-| `feuer-storage` | Exclusively locked fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, arbitrary-range reads, aligned writes, tracing, metrics | Buffered mode, range index, allocation, integrity, persistent metadata, recovery |
+| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, experimental sharded `DiskRangeCache` with aligned entries sharing 1-MiB chunks, entry metadata writes, whole-entry checksums and guarded reuse | Pressure eviction, recovery, buffered mode, comparative allocator measurements |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
 
 ## Implemented behavior
@@ -57,8 +58,8 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
 - Reads and writes have separate request channels, pending queues, active slots, rings, and worker threads.
   Each queue overlaps up to 64 operations in arrival order and wakes for new requests while I/O is outstanding,
   without busy polling or registered buffers.
-- Read and write admission each reserve up to 64 requests and 64 MiB of staging buffers. Chunks are at most
-  1 MiB. Caller inputs and read-result allocations are outside the combined 128-MiB staging budget.
+- Read and write admission each reserve up to 64 requests and 64 MiB of aligned I/O buffers. Chunks are at most
+  1 MiB. Caller inputs and read-result allocations are outside the combined 128-MiB I/O buffer memory budget.
 - Reads accept arbitrary byte ranges; write offsets and lengths must be multiples of 4 KiB, enforced by
   assertions. The driver performs no read-modify-write or overlap checks: the upper layer must supply
   complete aligned blocks and prevent conflicting access across physical byte ranges rounded outward
@@ -68,7 +69,7 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
   durability; there are no global scheduling barriers.
 - Caller cancellation does not cancel submitted kernel writes. The task owning a write's `DiskRegion` must
   keep awaiting completion and prevent conflicting access or reuse, even when the result is abandoned.
-  Publication belongs to the future disk range engine.
+  The standalone `DiskRangeCache` now owns reservation lifetime and publication; public tier scheduling is still pending.
 - Submitted buffers survive caller cancellation. Last-handle drop drains and joins the driver. Abnormal
   driver failure retains uncertain active buffers and the directory lock until process exit.
 - Raw capacity must be positive, 4-KiB-aligned, and representable as a Linux signed file offset. Opening
@@ -91,23 +92,35 @@ This is a raw I/O layer, not a disk cache or population queue. Disk storage and 
   an end-to-end cache or matched backend comparison. Separate [SSD measurements](benchmarks/ssd/ssd-concurrent-read-write.md)
   explore mixed reads and writes; small-read-heavy workloads may still warrant write throttling.
 
-## In progress: disk allocation/recovery prototype
+## In progress: disk range-cache prototype
 
-Before public-cache integration, [`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) records
-an experimental physical layout and ownership/reuse rules. The test-only allocator uses 1-MiB units with a
-reserved 4-KiB index page, sparse subdivision into 4-KiB blocks, and coalesced free-unit runs. Large entries
-can own multiple regions and share subdivided units for their tails. Shared small-block ownership and
-`DiskRegionReadGuard` delay reuse until all owners/readers release the allocation; unknown-completion
-regions can be quarantined.
+[`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) specifies the experimental layout and
+remaining crash/recovery questions. `DiskRangeCache::insert` reserves payload and entry metadata storage, writes
+both plus an embedded entry metadata index, then publishes after containment revalidation. Full keys and exact
+object ranges map to ordered physical regions. Payload bytes have no interleaved headers. Entry metadata stores
+one BLAKE3 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
+entry while copying only requested bytes into the result. It does not read neighboring entries or metadata.
 
-This is not a disk range engine: tests model eviction by dropping allocations and manually pack small values.
-Entry metadata, integrity, recovery, publication, eviction policy, and a population packer remain unimplemented.
-One mutex protects each prototype allocator; production concurrency and allocator selection remain open.
+Independent arenas have their own allocator, range-index lock and serialized index-page writes. The allocator
+uses 1-MiB chunks, reserved 4-KiB index pages, sparse 4-KiB subdivision and coalesced free-chunk runs. Read guards
+delay reuse after replacement/invalidation. Detached writer tasks retain reservations despite caller
+cancellation; write errors or abandoned owner tasks conservatively quarantine their allocations.
 
-On `m8g-32cpu-local-ssd`, all 36 storage tests (13 new allocator tests) and all 96 workspace tests passed,
-with real direct I/O and io_uring on the local ext4 SSD. Storage Clippy also passed with warnings denied.
-The tests include fragmented reuse, concurrent readers, abandoned writer results, sparse 40-TiB accounting,
-and a real 100-MiB write with subrange reads. These are correctness checks, not comparative measurements.
+Entries share 1-MiB chunks but have independent 4-KiB-aligned allocations. Small entries cost at least 4 KiB of
+payload storage plus 4 KiB of entry metadata storage; metadata for different entries is not packed together.
+The v3 format uses a checksum over the complete entry metadata and a bitmap of entry metadata starts,
+without write IDs or generation counters.
+Read invalidation compares expected payload checksums; discarding a newer identical copy is an allowed miss.
+Reopening deliberately starts empty and logs the reset. Recovery, pressure eviction, and the bounded
+memory-to-disk queue remain unimplemented. No comparative layout/performance claim is established.
+
+The 21 range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
+cancellation, corruption/reused payload, partial write failure, metadata capacity, disjoint arenas, aligned
+entries sharing one chunk, independent reuse, fragmented payloads and whole-entry validation of 100-MiB subrange
+hits. A 1-KiB hit succeeds with only its aligned payload block readable; unrelated entries and metadata are not
+loaded. On `m8g-32cpu-local-ssd`, all 57 storage tests and all 117 workspace tests passed with real direct I/O
+and io_uring on the local ext4 SSD. Storage Clippy passed with warnings denied; formatting and whitespace
+checks passed for the changed files.
 
 ## Later: best-effort disk scheduling
 
@@ -117,19 +130,17 @@ and a real 100-MiB write with subrange reads. These are correctness checks, not 
 - Let active writes finish safely, publishing only a current generation still admitted by disk policy.
 - Log failed writes and keep them invisible to disk lookup.
 
-Scheduling must integrate with the disk engine below before the public cache can serve disk hits.
+Scheduling must integrate with `DiskRangeCache` before the public cache can serve disk hits.
 
 ## Remaining implementation
 
 ### Disk range engine and I/O modes
 
-- Add covering-range lookup and request-sized reads with bounded integrity/alignment overhead.
+- Integrate and measure covering-range lookup and whole-entry validation, including subrange read amplification.
 - Add `PayloadIoMode::Buffered` and `PayloadIoMode::Direct`, integrating the existing driver without silent
   backend fallback.
-- Keep requested and downloaded ranges arbitrary and unaligned. Pack sub-alignment values without charging
-  each one a complete physical alignment unit.
-- Implement allocation and safe reuse. A `DiskRegionReadGuard` must prevent overwriting or reusing a disk
-  region while a read depends on it, without serializing concurrent reads.
+- Keep requested and downloaded ranges arbitrary and unaligned; physical entry allocations are 4-KiB-aligned.
+- Add pressure eviction to the allocator and guarded-reuse prototype.
 - Bound allocation work, fragmentation reclamation, rewrite traffic, metadata, and physical capacity at the
   contract's target scale of at least 30 TiB; avoid a cache-wide hot lock.
 
@@ -143,9 +154,8 @@ permanently excluded by the design.
 
 ### Integrity and recovery
 
-- Validate disk bytes before returning them; uncertainty becomes a miss.
-- Prevent failed, stale, superseded, or partial writes from becoming lookup-visible.
-- Choose and version internal checksum and persistent metadata formats.
+- Extend the prototype's checked reads and safe publication to tier-policy revalidation.
+- Validate the versioned metadata format and whole-entry BLAKE3 checksums against injected crash and reuse cases.
 - Recover a safe subset after process and machine crashes; test corruption and torn state.
 - Automatically reset unsupported persistent formats and log the reset.
 

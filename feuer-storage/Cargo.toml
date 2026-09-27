@@ -16,7 +16,9 @@ exclude.workspace = true
 default = ["tokio/runtime-tokio"]
 
 [dependencies]
+blake3 = "1"
 bytes = { workspace = true }
+feuer-types = { workspace = true }
 fs4 = { workspace = true, features = ["sync"] }
 mixtrics = { workspace = true }
 thiserror = { workspace = true }

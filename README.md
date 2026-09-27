@@ -43,8 +43,14 @@ Callers must prevent conflicting access to aligned byte ranges and retain a
 submitted write's disk region until completion, even after cancellation.
 Separate read/write admission
 budgets protect read admission from write backlogs. Raw file capacity must be a positive multiple of
-4 KiB. Buffered mode and the recoverable range engine remain to be implemented. `feuer-memory` provides a
-sharded soft-capacity covering-range index with bounded ageable request evidence,
+4 KiB. Above that, an experimental [`DiskRangeCache`](feuer-storage/disk-prototype.md)
+connects allocation, persisted entry metadata, covering-range lookup and integrity-checked subrange reads.
+Variable-length entries share 1-MiB chunks with 4-KiB-aligned payload allocations and no payload page headers.
+Each entry has one checksum in its metadata; a hit verifies the whole entry and returns only the requested
+bytes without reading neighboring entries. Reopen deliberately starts empty. Pressure eviction, recovery,
+buffered mode and public-cache integration remain unimplemented.
+
+`feuer-memory` provides a sharded soft-capacity covering-range index with bounded ageable request evidence,
 sampled retrieval-cost-per-byte eviction, a short range-trimming grace, and
 pressure-driven trimming of the selected victim toward observed requests. Its [memory-only comparison](benchmarks/memory/results.md)
 records the current policy baseline. `feuer-types` holds shared range

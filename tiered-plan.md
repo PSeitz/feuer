@@ -17,7 +17,7 @@ tracking which bytes are actually requested so unused prefetched data does not h
 broader download may still be retained on disk for future subrange reads.
 
 Feuer is a performance layer, not authoritative storage. The application owns object identity, source access,
-and download coordination; Feuer owns cache retention, range lookup, request-sized disk reads, integrity, and
+and download coordination; Feuer owns cache retention, range lookup, integrity-checked disk reads, and
 best-effort recovery.
 
 Its central result contract is:
@@ -94,8 +94,9 @@ A returned `Bytes` may share a larger heap allocation. Feuer does not require a 
 subrange result. Caller-held results are outside cache-capacity accounting and may keep shared backing memory
 alive after cache eviction.
 
-A disk hit reads only the requested bytes plus bounded integrity and I/O-alignment overhead; it does not
-materialize a complete larger download merely to answer a subrange lookup. Returned disk results do not retain
+A disk hit reads and verifies the whole covering entry using its expected checksum, then returns only the
+requested bytes. A subrange lookup may therefore read a complete larger download; packing independent entries
+in one allocation chunk does not require reading the neighboring entries. Returned disk results do not retain
 disk storage, allocation guards, or file mappings.
 
 Every successful lookup appends its exact requested range once to the accessed ranges for its complete cache
@@ -169,11 +170,11 @@ required baseline is native Foyer at a pinned revision and reported tuning. The 
 cost-weighted, request, and byte hit rates together with useful-payload utilization, fragmentation, metadata
 footprint, read and write amplification, cleaning or relocation traffic, throughput, and tail latency.
 
-The performance hypotheses are that integrated containment can reuse a larger downloaded range, request-sized
-disk reads avoid Foyer's complete-value load path, sub-alignment packing avoids its block engine's per-entry
-page rounding for small values, and exact range attribution improves frequency-aware retention.
-These are hypotheses to isolate, not evidence of superiority. Feuer must not claim to beat Foyer until the
-comparison demonstrates the claim without violating correctness or the stated resource guardrails.
+The performance hypotheses are that integrated containment can reuse a larger downloaded range and exact
+range attribution improves frequency-aware retention. The current disk design uses whole-entry checksum
+validation and 4-KiB-aligned entry allocations; it does not claim smaller reads or sub-alignment packing than
+Foyer. These are hypotheses to isolate, not evidence of superiority. Feuer must not claim to beat Foyer until
+the comparison demonstrates the claim without violating correctness or the stated resource guardrails.
 
 ## 6. In-memory cache
 
@@ -236,12 +237,12 @@ region while a read depends on its contents; multiple reads may hold guards conc
 whose result is discarded no longer needs unchanged disk contents, but its submitted I/O buffer must still
 survive until completion. The I/O layer owns that buffer lifetime.
 
-Physical I/O alignment must not become a minimum allocation charge for every retained value. Values smaller
-than the required I/O alignment must be physically packable so the target population of small ranges can use
-disk efficiently. The allocator must handle the full size distribution, reclaim fragmented capacity with
-bounded work and rewrite traffic, remain practical at 1-TiB-plus capacities, and avoid a cache-wide hot lock.
-Size classes, slabs, disk regions, free-space structures, relocation, and cleaning algorithms remain
-private, benchmark-selected mechanisms.
+The current disk design packs variable-length entries into shared 1-MiB allocation chunks. Payload starts
+and allocated lengths are rounded to 4 KiB; values smaller than that consume 4 KiB of payload storage, plus their
+metadata. Large entries may span chunks. Payload bytes have no interleaved page headers, and each entry's
+expected checksum lives in separate metadata. The allocator must handle the full size distribution, reclaim
+fragmented capacity with bounded work and rewrite traffic, remain practical at 1-TiB-plus capacities, and
+avoid a cache-wide hot lock. Free-space structures, relocation, and cleaning remain private mechanisms.
 
 ## 8. Payload I/O modes
 
@@ -336,13 +337,12 @@ The MVP is complete when tests demonstrate that:
 - disk-write queues remain bounded and queue pressure does not block or fail successful lookups;
 - evicted queued writes cannot later publish stale state, while already-active current writes can complete safely;
 - failed or uncertain disk writes never become disk hits;
-- multiple retained values smaller than the physical I/O alignment can share allocation space rather than each
-  consuming one full alignment unit;
+- multiple variable-length entries share 1-MiB allocation chunks with independent 4-KiB-aligned payload storage;
 - allocator stress tests report useful utilization, fragmentation, allocation latency, and rewrite traffic
   across the target size distribution;
 - buffered and direct modes return identical requested bytes, and requested direct mode never silently falls back;
 - Linux supports direct mode on a capable filesystem, with simultaneous reads and writes through bounded io_uring submission;
-- disk subrange hits avoid reading a complete larger download;
+- disk hits verify the whole covering entry, return only requested bytes, and do not read neighboring entries;
 - corrupted or uncertain disk bytes always miss and are never returned;
 - restart recovers a safe useful subset after injected crashes;
 - unsupported persistent formats are reset and logged safely;
