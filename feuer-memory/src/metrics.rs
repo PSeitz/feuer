@@ -10,9 +10,6 @@ pub struct MemoryMetrics {
     insert: BoxedCounter,
     replace: BoxedCounter,
     redundant: BoxedCounter,
-    access: BoxedCounter,
-    hit: BoxedCounter,
-    miss: BoxedCounter,
     remove: BoxedCounter,
     evict: BoxedCounter,
     trim: BoxedCounter,
@@ -56,9 +53,6 @@ impl MemoryMetrics {
             insert: operation("insert"),
             replace: operation("replace"),
             redundant: operation("redundant"),
-            access: operation("access"),
-            hit: operation("hit"),
-            miss: operation("miss"),
             remove: operation("remove"),
             evict: operation("evict"),
             trim: operation("compact"),
@@ -78,18 +72,6 @@ impl MemoryMetrics {
 
     pub(crate) fn record_redundant(&self) {
         self.redundant.increase(1);
-    }
-
-    pub(crate) fn record_access(&self) {
-        self.access.increase(1);
-    }
-
-    pub(crate) fn record_lookup(&self, hit: bool) {
-        if hit {
-            self.hit.increase(1);
-        } else {
-            self.miss.increase(1);
-        }
     }
 
     pub(crate) fn record_remove(&self) {
@@ -131,8 +113,6 @@ mod tests {
 
         metrics.record_insert(false);
         metrics.record_redundant();
-        metrics.record_access();
-        metrics.record_lookup(true);
         metrics.increase_usage(17, 1);
         metrics.record_evictions(1);
         metrics.record_range_trim(3);

@@ -9,7 +9,6 @@ struct IoOperationMetrics {
     error: BoxedCounter,
     bytes: BoxedCounter,
     success_duration: BoxedHistogram,
-    error_duration: BoxedHistogram,
 }
 
 impl fmt::Debug for IoOperationMetrics {
@@ -45,7 +44,7 @@ impl IoMetrics {
         );
         let duration = registry.register_histogram_vec_with_buckets(
             "feuer_disk_io_duration_seconds".into(),
-            "Feuer data-file operation duration in seconds".into(),
+            "Successful Feuer data-file operation duration in seconds".into(),
             &["operation", "outcome"],
             Buckets::exponential(0.000_001, 2.0, 25),
         );
@@ -62,7 +61,6 @@ impl IoMetrics {
             error: operations.counter(&[label.into(), "error".into()]),
             bytes: bytes.counter(&[label.into()]),
             success_duration: duration.histogram(&[label.into(), "success".into()]),
-            error_duration: duration.histogram(&[label.into(), "error".into()]),
         };
 
         Arc::new(Self {
@@ -88,7 +86,6 @@ impl IoMetrics {
             }
         } else {
             metrics.error.increase(1);
-            metrics.error_duration.record(elapsed.as_secs_f64());
         }
     }
 
@@ -133,10 +130,37 @@ mod tests {
     }
 
     #[test]
-    fn registers_with_the_normal_registry_boundary() {
-        let metrics = IoMetrics::noop();
-
-        metrics.record(IoOperation::Read, 17, Duration::from_micros(2), true);
-        metrics.record(IoOperation::Write, 0, Duration::from_micros(3), false);
+    fn durations_only_record_successes_but_counters_include_errors() {
+        let (registry, backend) = crate::test_metrics::registry();
+        let metrics = IoMetrics::new(&backend);
+        for operation in [IoOperation::Read, IoOperation::Write] {
+            metrics.record(operation, 17, Duration::from_micros(2), true);
+            metrics.record(operation, 0, Duration::from_micros(3), false);
+            for outcome in ["success", "error"] {
+                assert_eq!(
+                    crate::test_metrics::value(
+                        &registry,
+                        "feuer_disk_io_total",
+                        &[("operation", operation.as_str()), ("outcome", outcome)]
+                    ),
+                    1.0
+                );
+            }
+        }
+        let family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "feuer_disk_io_duration_seconds")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 2);
+        for metric in family.get_metric() {
+            assert_eq!(metric.get_histogram().get_sample_count(), 1);
+            assert!(
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| { label.name() == "outcome" && label.value() == "success" })
+            );
+        }
     }
 }

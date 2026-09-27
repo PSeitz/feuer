@@ -25,7 +25,7 @@ pub(crate) enum PopulationOutcome {
 #[derive(Debug)]
 pub struct DiskMetrics {
     lookup_count: [BoxedCounter; 4],
-    lookup_duration: [BoxedHistogram; 4],
+    hit_duration: BoxedHistogram,
     population: [BoxedCounter; 6],
     pub(crate) written_entries: BoxedCounter,
     pub(crate) free_chunks: BoxedGauge,
@@ -48,7 +48,7 @@ impl DiskMetrics {
         );
         let duration = registry.register_histogram_vec_with_buckets(
             "feuer_disk_lookup_duration_seconds".into(),
-            "Completed disk lookup duration including integrity checking and copying".into(),
+            "Completed disk hit duration including integrity checking and copying".into(),
             &["outcome"],
             Buckets::exponential(0.000_001, 2.0, 25),
         );
@@ -87,7 +87,7 @@ impl DiskMetrics {
         let outcomes = ["hit", "absent", "io_error", "integrity_failure"];
         Arc::new(Self {
             lookup_count: outcomes.map(|label| lookups.counter(&[label.into()])),
-            lookup_duration: outcomes.map(|label| duration.histogram(&[label.into()])),
+            hit_duration: duration.histogram(&["hit".into()]),
             population: [
                 "published",
                 "already_covered",
@@ -117,7 +117,9 @@ impl DiskMetrics {
 
     pub(crate) fn record_lookup(&self, outcome: DiskLookupOutcome, elapsed: Duration) {
         self.lookup_count[outcome as usize].increase(1);
-        self.lookup_duration[outcome as usize].record(elapsed.as_secs_f64());
+        if matches!(outcome, DiskLookupOutcome::Hit) {
+            self.hit_duration.record(elapsed.as_secs_f64());
+        }
     }
 }
 
@@ -143,5 +145,36 @@ impl PopulationAttempt {
 impl Drop for PopulationAttempt {
     fn drop(&mut self) {
         self.metrics.population[self.outcome as usize].increase(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_metrics::{registry, value};
+
+    #[test]
+    fn lookup_durations_only_record_hits_but_counters_include_all_outcomes() {
+        let (registry, backend) = registry();
+        let metrics = DiskMetrics::new(&backend);
+        for (outcome, label) in [
+            (DiskLookupOutcome::Hit, "hit"),
+            (DiskLookupOutcome::Absent, "absent"),
+            (DiskLookupOutcome::IoError, "io_error"),
+            (DiskLookupOutcome::IntegrityFailure, "integrity_failure"),
+        ] {
+            metrics.record_lookup(outcome, Duration::from_micros(10));
+            assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", label)]), 1.0);
+        }
+        let family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "feuer_disk_lookup_duration_seconds")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 1);
+        assert_eq!(
+            value(&registry, "feuer_disk_lookup_duration_seconds", &[("outcome", "hit")]),
+            1.0
+        );
     }
 }

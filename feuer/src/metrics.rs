@@ -38,7 +38,7 @@ impl LookupMetrics {
         );
         let duration = registry.register_histogram_vec_with_buckets(
             "feuer_lookup_duration_seconds".into(),
-            "Completed Feuer memory and disk hit lookup duration".into(),
+            "Completed successful Feuer lookup duration, including callback work".into(),
             &["outcome"],
             Buckets::exponential(0.000_001, 2.0, 30),
         );
@@ -57,7 +57,8 @@ impl LookupMetrics {
             ]
             .map(|label| LookupOutcomeMetrics {
                 count: count.counter(&[label.into()]),
-                duration: matches!(label, "memory_hit" | "disk_hit").then(|| duration.histogram(&[label.into()])),
+                duration: matches!(label, "memory_hit" | "disk_hit" | "callback")
+                    .then(|| duration.histogram(&[label.into()])),
             }),
             served_bytes: ["memory", "disk", "callback"].map(|label| served_bytes.counter(&[label.into()])),
         }

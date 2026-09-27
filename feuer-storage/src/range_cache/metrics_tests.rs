@@ -72,11 +72,11 @@ async fn records_population_outcomes_packing_and_index_usage() {
     assert!(cache.get(&"absent".into(), request).await.is_none());
     for label in ["hit", "absent"] {
         assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", label)]), 1.0);
-        assert_eq!(
-            value(&registry, "feuer_disk_lookup_duration_seconds", &[("outcome", label)]),
-            1.0
-        );
     }
+    assert_eq!(
+        value(&registry, "feuer_disk_lookup_duration_seconds", &[("outcome", "hit")]),
+        1.0
+    );
     drop(cache);
     for name in ["feuer_disk_entries", "feuer_disk_payload_bytes"] {
         assert_eq!(value(&registry, name, &[]), 0.0);

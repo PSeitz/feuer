@@ -243,17 +243,9 @@ impl MemoryCacheShard {
     }
 
     pub(super) fn get(&mut self, object_key: &ObjectKey, requested_range: ByteRange) -> Option<Bytes> {
-        let accessed = self.ranges.get_mut(object_key).and_then(|entries| {
+        self.ranges.get_mut(object_key).and_then(|entries| {
             entries.record_covering_access(requested_range, |entry| entry.requested_bytes(requested_range))
-        });
-        let Some(bytes) = accessed else {
-            self.metrics.record_lookup(false);
-            return None;
-        };
-
-        self.metrics.record_access();
-        self.metrics.record_lookup(true);
-        Some(bytes)
+        })
     }
 
     pub(super) fn record_access(&mut self, object_key: &ObjectKey, requested_range: ByteRange) {
@@ -267,7 +259,6 @@ impl MemoryCacheShard {
             // A successful disk-only lookup still contributes to the shared object's evidence.
             self.access_histories.record_access(object_key, requested_range);
         }
-        self.metrics.record_access();
     }
 
     /// Advances one bounded admission action while holding the shard lock.

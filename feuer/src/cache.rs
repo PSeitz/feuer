@@ -277,7 +277,7 @@ mod tests {
         ] {
             assert_eq!(value(&registry, "feuer_lookup_total", &[("outcome", outcome)]), 1.0);
         }
-        for outcome in ["memory_hit", "disk_hit"] {
+        for outcome in ["memory_hit", "disk_hit", "callback"] {
             assert_eq!(
                 value(&registry, "feuer_lookup_duration_seconds", &[("outcome", outcome)]),
                 1.0
@@ -286,10 +286,6 @@ mod tests {
         for source in ["memory", "disk", "callback"] {
             assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", source)]), 2.0);
         }
-        assert_eq!(
-            value(&registry, "feuer_memory_operations_total", &[("operation", "hit")]),
-            1.0
-        );
         assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", "hit")]), 1.0);
         assert_eq!(
             value(

@@ -31,7 +31,7 @@ operations; use the public lookup counters to measure caller-visible behavior.
 | Metric | Type | Labels / meaning |
 |---|---|---|
 | `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `integrity_failure` |
-| `feuer_disk_lookup_duration_seconds` | Histogram | Same outcomes; includes whole-entry reading, checksum verification and copying |
+| `feuer_disk_lookup_duration_seconds` | Histogram | `outcome`: `hit`; includes whole-entry reading, checksum verification and copying |
 | `feuer_disk_chunks` | Gauge | `state`: `free`, `reserved`, `quarantined`; each chunk is 1 MiB |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
@@ -106,11 +106,15 @@ completion release their counts along with the associated payload budget.
 
 ## Existing metrics
 
-- `feuer_memory_operations_total{operation}`, `feuer_memory_payload_bytes`,
-  `feuer_memory_entries`, `feuer_memory_compacted_payload_bytes_total`.
-- `feuer_disk_io_total{operation,outcome}`,
-  `feuer_disk_io_duration_seconds{operation,outcome}`,
-  `feuer_disk_io_bytes_total{operation}`; operations are `read` and `write`,
-  outcomes are `success` and `error`.
+- `feuer_memory_operations_total{operation}`: `insert`, `replace`, `redundant`,
+  `remove`, `evict`, `compact`. Internal access/hit/miss counters are not emitted;
+  use public lookup counters for hit ratios.
+- `feuer_memory_payload_bytes`, `feuer_memory_entries`,
+  `feuer_memory_compacted_payload_bytes_total`.
+- `feuer_disk_io_total{operation,outcome}`: operations `read` and `write`,
+  outcomes `success` and `error`.
+- `feuer_disk_io_duration_seconds{operation,outcome}`: operations `read` and
+  `write`, outcome `success` only. Errors remain counted but are not timed.
+- `feuer_disk_io_bytes_total{operation}`: operations `read` and `write`.
 
 No recovery, flush, serialization, or source-download-manager metrics are added.
