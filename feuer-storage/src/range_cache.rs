@@ -17,9 +17,11 @@ use feuer_types::{ByteRange, Download, ObjectKey};
 
 use crate::{
     DataFile, DataFileError, DataFileResult, IoMetrics,
-    allocation::{BLOCK_BYTES, CHUNK_BYTES, DiskAllocator, DiskRegion, DiskRegionReadGuard},
+    allocation::{CHUNK_BYTES, DiskAllocator, DiskRegion, DiskRegionReadGuard},
 };
-use page_format::{PAGE_BYTES, PAGE_CONTENT_BYTES};
+use page_format::{METADATA_PAGE_BYTES, PAGE_CONTENT_BYTES};
+
+const PAYLOAD_ALIGNMENT_BYTES: u64 = crate::uring::DIRECT_IO_ALIGNMENT_BYTES as u64;
 
 /// A standalone experimental disk cache, not yet connected to the public tiered cache.
 ///
@@ -75,7 +77,7 @@ struct EntryMetadataStarts {
 
 impl EntryMetadataStarts {
     fn insert(&mut self, offset_in_chunk: u64) {
-        let slot = (offset_in_chunk / BLOCK_BYTES) as usize;
+        let slot = (offset_in_chunk / METADATA_PAGE_BYTES as u64) as usize;
         self.bitmap[slot / 8] |= 1 << (slot % 8);
     }
 }
@@ -285,14 +287,14 @@ impl DiskRangeCacheInner {
 fn page_storage_bytes(content_bytes: usize) -> Option<u64> {
     (content_bytes as u64)
         .div_ceil(PAGE_CONTENT_BYTES as u64)
-        .checked_mul(BLOCK_BYTES)
+        .checked_mul(METADATA_PAGE_BYTES as u64)
 }
 
 impl UnwrittenBatch {
     fn push(&mut self, allocator: &DiskAllocator, key: ObjectKey, download: Download) {
         let (object_range, bytes) = download.into_parts();
-        let payload_bytes = (bytes.len() as u64).next_multiple_of(BLOCK_BYTES);
-        let chunk_data_bytes = CHUNK_BYTES - BLOCK_BYTES;
+        let payload_bytes = (bytes.len() as u64).next_multiple_of(PAYLOAD_ALIGNMENT_BYTES);
+        let chunk_data_bytes = CHUNK_BYTES - METADATA_PAGE_BYTES as u64;
         let tail_bytes = self.chunks.last().map_or(0, |chunk| CHUNK_BYTES - chunk.used_bytes);
         let payload_region_count =
             u64::from(tail_bytes > 0) + payload_bytes.saturating_sub(tail_bytes).div_ceil(chunk_data_bytes);
@@ -310,7 +312,7 @@ impl UnwrittenBatch {
             self.chunks.extend(regions.into_iter().map(|region| UnwrittenChunk {
                 region,
                 bytes: vec![0; CHUNK_BYTES as usize],
-                used_bytes: BLOCK_BYTES,
+                used_bytes: METADATA_PAGE_BYTES as u64,
                 metadata_starts: EntryMetadataStarts::default(),
             }));
         }
@@ -338,9 +340,9 @@ impl UnwrittenBatch {
             .enumerate()
         {
             let range = region.range();
-            for page_address in (range.start..range.end).step_by(PAGE_BYTES) {
-                let next = if page_address + BLOCK_BYTES < range.end {
-                    page_address + BLOCK_BYTES
+            for page_address in (range.start..range.end).step_by(METADATA_PAGE_BYTES) {
+                let next = if page_address + (METADATA_PAGE_BYTES as u64) < range.end {
+                    page_address + METADATA_PAGE_BYTES as u64
                 } else {
                     entry_metadata_regions
                         .get(region_index + 1)
@@ -349,7 +351,7 @@ impl UnwrittenBatch {
                 let offset = (page_address % CHUNK_BYTES) as usize;
                 let end = (consumed + PAGE_CONTENT_BYTES).min(contents.len());
                 page_format::encode_page(
-                    &mut chunk.bytes[offset..offset + PAGE_BYTES],
+                    &mut chunk.bytes[offset..offset + METADATA_PAGE_BYTES],
                     page_format::ENTRY_METADATA_PAGE_TAG,
                     content_checksum.as_bytes(),
                     page_address,
@@ -403,7 +405,7 @@ impl UnwrittenBatch {
         for chunk in &mut self.chunks {
             let address = chunk.region.range().start;
             page_format::encode_page(
-                &mut chunk.bytes[..PAGE_BYTES],
+                &mut chunk.bytes[..METADATA_PAGE_BYTES],
                 page_format::ENTRY_METADATA_INDEX_PAGE_TAG,
                 blake3::hash(&chunk.metadata_starts.bitmap).as_bytes(),
                 address,

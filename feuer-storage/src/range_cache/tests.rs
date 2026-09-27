@@ -90,7 +90,7 @@ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers()
             .unwrap(),
         lengths.len()
     );
-    let mut previous_end = BLOCK_BYTES;
+    let mut previous_end = METADATA_PAGE_BYTES as u64;
     for length in [1, 1024, 4016, 4096, 4097, 3 * 4096 + 9] {
         let key = format!("entry-{length}");
         let source = download(17, length);
@@ -98,11 +98,11 @@ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers()
         assert_eq!(payload.len(), 1);
         let allocated = &payload[0];
         assert!(allocated.start >= previous_end);
-        assert!(allocated.start.is_multiple_of(BLOCK_BYTES));
+        assert!(allocated.start.is_multiple_of(PAYLOAD_ALIGNMENT_BYTES));
         assert!(allocated.end <= CHUNK_BYTES);
         assert_eq!(
             allocated.end - allocated.start,
-            (length as u64).next_multiple_of(BLOCK_BYTES)
+            (length as u64).next_multiple_of(PAYLOAD_ALIGNMENT_BYTES)
         );
         let stored = cache
             .disk
@@ -150,7 +150,7 @@ async fn mixed_batch_groups_small_entries_and_records_every_metadata_start() {
         }
     }
     for address in (0..3 * CHUNK_BYTES).step_by(CHUNK_BYTES as usize) {
-        let page = cache.disk.file.read_at(address, PAGE_BYTES).await.unwrap();
+        let page = cache.disk.file.read_at(address, METADATA_PAGE_BYTES).await.unwrap();
         let starts = expected.remove(&address).unwrap_or_default();
         let (_, contents) = page_format::validate_page(
             &page,
@@ -186,7 +186,7 @@ async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk_or_its_entry_met
         2
     );
     let (payload, _) = entry_disk_ranges(&cache, &key);
-    assert_eq!(payload[0].end - payload[0].start, BLOCK_BYTES);
+    assert_eq!(payload[0].end - payload[0].start, PAYLOAD_ALIGNMENT_BYTES);
     // A read reaching beyond this entry's alignment boundary would now fail with short I/O.
     std::fs::OpenOptions::new()
         .write(true)
@@ -211,7 +211,7 @@ async fn alignment_padding_is_not_part_of_the_entry_checksum() {
     let mut bytes = cache
         .disk
         .file
-        .read_at(address, BLOCK_BYTES as usize)
+        .read_at(address, PAYLOAD_ALIGNMENT_BYTES as usize)
         .await
         .unwrap()
         .to_vec();
@@ -327,7 +327,7 @@ fn entry_metadata_starts_preserve_bitmap_encoding() {
     let mut starts = EntryMetadataStarts::default();
     assert_eq!(starts.bitmap, [0; 32]);
     for slot in [1, 7, 8, 63, 64, 255, 1] {
-        starts.insert(slot * BLOCK_BYTES);
+        starts.insert(slot * METADATA_PAGE_BYTES as u64);
     }
     let mut expected = [0; 32];
     expected[0] = 0b1000_0010;
@@ -347,7 +347,12 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
     let (payload, entry_metadata) = entry_disk_ranges(&cache, &key);
     let entry_metadata_start_address = entry_metadata[0].start;
     let chunk_address = entry_metadata_start_address / CHUNK_BYTES * CHUNK_BYTES;
-    let index_bytes = cache.disk.file.read_at(chunk_address, PAGE_BYTES).await.unwrap();
+    let index_bytes = cache
+        .disk
+        .file
+        .read_at(chunk_address, METADATA_PAGE_BYTES)
+        .await
+        .unwrap();
     let index_checksum: [u8; 32] = index_bytes[32..64].try_into().unwrap();
     let (next_entry_metadata_page_address, entry_metadata_starts) = page_format::validate_page(
         &index_bytes,
@@ -358,27 +363,27 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
     )
     .unwrap();
     assert_eq!(next_entry_metadata_page_address, 0);
-    let slot = ((entry_metadata_start_address - chunk_address) / BLOCK_BYTES) as usize;
+    let slot = ((entry_metadata_start_address - chunk_address) / METADATA_PAGE_BYTES as u64) as usize;
     assert_eq!(blake3::hash(&entry_metadata_starts[..32]).as_bytes(), &index_checksum);
     assert_ne!(entry_metadata_starts[slot / 8] & (1 << (slot % 8)), 0);
     assert_eq!(entry_metadata_starts[0] & 1, 0);
     let head = cache
         .disk
         .file
-        .read_at(entry_metadata_start_address, PAGE_BYTES)
+        .read_at(entry_metadata_start_address, METADATA_PAGE_BYTES)
         .await
         .unwrap();
     let entry_metadata_checksum: [u8; 32] = head[32..64].try_into().unwrap();
     let expected_addresses: Vec<_> = entry_metadata
         .iter()
-        .flat_map(|range| range.clone().step_by(PAGE_BYTES))
+        .flat_map(|range| range.clone().step_by(METADATA_PAGE_BYTES))
         .collect();
     assert!(expected_addresses.len() > 1);
     let mut entry_metadata_bytes = Vec::new();
     let mut address = entry_metadata_start_address;
     for (ordinal, expected) in expected_addresses.iter().enumerate() {
         assert_eq!(address, *expected);
-        let page = cache.disk.file.read_at(address, PAGE_BYTES).await.unwrap();
+        let page = cache.disk.file.read_at(address, METADATA_PAGE_BYTES).await.unwrap();
         let (next_entry_metadata_page_address, contents) = page_format::validate_page(
             &page,
             page_format::ENTRY_METADATA_PAGE_TAG,
@@ -462,18 +467,21 @@ async fn metadata_only_chunks_remain_owned_until_the_entry_is_removed() {
 #[tokio::test]
 async fn entry_metadata_space_is_charged_and_failed_reservations_roll_back() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    // All 255 data blocks fit the payload, leaving no room for its entry metadata.
+    // Fill all space after the discovery page, leaving no room for entry metadata.
     assert!(
         !cache
-            .insert("too large".to_owned(), download(0, BLOCK_BYTES as usize * 255))
+            .insert(
+                "too large".to_owned(),
+                download(0, CHUNK_BYTES as usize - METADATA_PAGE_BYTES)
+            )
             .await
             .unwrap()
     );
-    // 254 aligned payload blocks + one entry metadata page fill this arena exactly.
+    // Leave exactly one page for entry metadata after the payload.
     let key = "fits exactly".to_owned();
     assert!(
         cache
-            .insert(key.clone(), download(7, BLOCK_BYTES as usize * 254))
+            .insert(key.clone(), download(7, CHUNK_BYTES as usize - 2 * METADATA_PAGE_BYTES))
             .await
             .unwrap()
     );
@@ -559,7 +567,12 @@ async fn readers_keep_replaced_payload_reserved_but_results_do_not() {
     };
     let result = cache.get(&key, range(6, 7)).await.unwrap();
     cache.insert(key.clone(), download(0, 200)).await.unwrap();
-    let bytes = cache.disk.file.read_at(guard.range().start, PAGE_BYTES).await.unwrap();
+    let bytes = cache
+        .disk
+        .file
+        .read_at(guard.range().start, PAYLOAD_ALIGNMENT_BYTES as usize)
+        .await
+        .unwrap();
     assert_eq!(blake3::hash(&bytes[..100]), payload_checksum);
     assert!(cache.disk.arenas[0].allocator.reserve_chunks(1).is_none());
     drop(guard);
@@ -576,23 +589,29 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
         cache.insert(key.clone(), download(3, 50)).await.unwrap();
         let (payload, _) = entry_disk_ranges(&cache, &key);
         let address = payload[0].start;
-        let mut page = cache.disk.file.read_at(address, PAGE_BYTES).await.unwrap().to_vec();
+        let mut bytes = cache
+            .disk
+            .file
+            .read_at(address, PAYLOAD_ALIGNMENT_BYTES as usize)
+            .await
+            .unwrap()
+            .to_vec();
         if stale {
             // Another valid entry's payload must not match this entry metadata's expected checksum.
             let other = "other object".to_owned();
             cache.insert(other.clone(), download(100, 50)).await.unwrap();
             let (other_payload, _) = entry_disk_ranges(&cache, &other);
-            page = cache
+            bytes = cache
                 .disk
                 .file
-                .read_at(other_payload[0].start, PAGE_BYTES)
+                .read_at(other_payload[0].start, PAYLOAD_ALIGNMENT_BYTES as usize)
                 .await
                 .unwrap()
                 .to_vec();
         } else {
-            page[49] ^= 1;
+            bytes[49] ^= 1;
         }
-        cache.disk.file.write_at(address, &Bytes::from(page)).await.unwrap();
+        cache.disk.file.write_at(address, &Bytes::from(bytes)).await.unwrap();
         assert!(cache.get(&key, range(3, 4)).await.is_none());
         assert!(
             !cache.disk.arenas[0]
@@ -616,7 +635,7 @@ async fn a_short_read_is_a_miss_not_unverified_bytes() {
         .write(true)
         .open(directory.path().join("data"))
         .unwrap()
-        .set_len(BLOCK_BYTES + 100)
+        .set_len(METADATA_PAGE_BYTES as u64 + 100)
         .unwrap();
     assert!(cache.get(&key, range(0, 1)).await.is_none());
 }
@@ -640,7 +659,7 @@ async fn failed_chunk_write_quarantines_the_batch_without_publication() {
     assert!(cache.get(&"small".to_owned(), range(0, 1)).await.is_none());
     assert!(cache.get(&"large".to_owned(), range(0, 1)).await.is_none());
     assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), 0);
-    let index_page = cache.disk.file.read_at(0, PAGE_BYTES).await.unwrap();
+    let index_page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
     assert_eq!(&index_page[88..96], page_format::ENTRY_METADATA_INDEX_PAGE_TAG);
 }
 
@@ -668,7 +687,7 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
     let key = "large object".to_owned();
     let source = download(3, 100 * CHUNK_BYTES as usize + 17);
     assert!(cache.insert(key.clone(), source.clone()).await.unwrap());
-    let boundary = 3 + CHUNK_BYTES - BLOCK_BYTES;
+    let boundary = 3 + CHUNK_BYTES - METADATA_PAGE_BYTES as u64;
     for request in [
         range(7, 33),
         range(boundary - 3, boundary + 13),
@@ -682,11 +701,14 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
         );
     }
     let (payload, _) = entry_disk_ranges(&cache, &key);
-    let last_page = payload.last().unwrap().end - BLOCK_BYTES;
+    let last_aligned_offset = payload.last().unwrap().end - PAYLOAD_ALIGNMENT_BYTES;
     cache
         .disk
         .file
-        .write_at(last_page, &Bytes::from(vec![0; PAGE_BYTES]))
+        .write_at(
+            last_aligned_offset,
+            &Bytes::from(vec![0; PAYLOAD_ALIGNMENT_BYTES as usize]),
+        )
         .await
         .unwrap();
     // Even a request at the beginning must detect corruption at the end of this entry.
@@ -760,42 +782,63 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
 
 #[test]
 fn metadata_page_checks_bind_content_checksum_address_ordinal_tag_and_entire_contents() {
-    let mut page = vec![0; PAGE_BYTES];
+    let mut page = vec![0; METADATA_PAGE_BYTES];
     page_format::encode_page(
         &mut page,
         page_format::ENTRY_METADATA_PAGE_TAG,
         &[7; 32],
-        BLOCK_BYTES,
+        METADATA_PAGE_BYTES as u64,
         2,
         8192,
         b"entry metadata contents",
     );
     let validate = |bytes: &[u8]| {
-        page_format::validate_page(bytes, page_format::ENTRY_METADATA_PAGE_TAG, &[7; 32], BLOCK_BYTES, 2).is_some()
+        page_format::validate_page(
+            bytes,
+            page_format::ENTRY_METADATA_PAGE_TAG,
+            &[7; 32],
+            METADATA_PAGE_BYTES as u64,
+            2,
+        )
+        .is_some()
     };
     assert!(validate(&page));
-    for offset in [0, 32, 64, 72, 80, 88, 96, PAGE_BYTES - 1] {
+    for offset in [0, 32, 64, 72, 80, 88, 96, METADATA_PAGE_BYTES - 1] {
         let mut torn = page.clone();
         torn[offset] ^= 1;
         assert!(!validate(&torn));
     }
-    assert!(!validate(&page[..PAGE_BYTES - 1]));
+    assert!(!validate(&page[..METADATA_PAGE_BYTES - 1]));
     assert!(
         page_format::validate_page(
             &page,
             page_format::ENTRY_METADATA_INDEX_PAGE_TAG,
             &[7; 32],
-            BLOCK_BYTES,
+            METADATA_PAGE_BYTES as u64,
             2
         )
         .is_none()
     );
     assert!(
-        page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG, &[8; 32], BLOCK_BYTES, 2).is_none()
+        page_format::validate_page(
+            &page,
+            page_format::ENTRY_METADATA_PAGE_TAG,
+            &[8; 32],
+            METADATA_PAGE_BYTES as u64,
+            2
+        )
+        .is_none()
     );
     assert!(page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG, &[7; 32], 8192, 2).is_none());
     assert!(
-        page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG, &[7; 32], BLOCK_BYTES, 3).is_none()
+        page_format::validate_page(
+            &page,
+            page_format::ENTRY_METADATA_PAGE_TAG,
+            &[7; 32],
+            METADATA_PAGE_BYTES as u64,
+            3
+        )
+        .is_none()
     );
 
     // A valid page of different entry metadata at the same address must not join this chain.
@@ -803,7 +846,7 @@ fn metadata_page_checks_bind_content_checksum_address_ordinal_tag_and_entire_con
         &mut page,
         page_format::ENTRY_METADATA_PAGE_TAG,
         &[8; 32],
-        BLOCK_BYTES,
+        METADATA_PAGE_BYTES as u64,
         2,
         8192,
         b"different entry metadata contents",

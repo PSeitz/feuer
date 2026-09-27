@@ -9,7 +9,8 @@ use std::{
     },
 };
 
-pub(super) const BLOCK_BYTES: u64 = 4096;
+/// Size in bytes of a whole-chunk reservation. Written chunks stay immutable until
+/// all entry owners and read guards release them; individual holes cannot be reused.
 pub(super) const CHUNK_BYTES: u64 = 1024 * 1024;
 
 /// Free whole chunks in one independently allocated disk range.
@@ -20,16 +21,16 @@ pub(super) struct DiskAllocator {
 
 #[derive(Debug)]
 struct FreeSpace {
-    /// Coalesced free runs, represented as chunk number -> exclusive end.
-    chunks: BTreeMap<u64, u64>,
+    /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
+    free_chunk_count_by_start: BTreeMap<u64, u64>,
     available_chunks: u64,
 }
 
 impl FreeSpace {
     fn take_chunk(&mut self) -> u64 {
-        let (start, end) = self.chunks.pop_first().unwrap();
-        if start + 1 < end {
-            self.chunks.insert(start + 1, end);
+        let (start, count) = self.free_chunk_count_by_start.pop_first().unwrap();
+        if count > 1 {
+            self.free_chunk_count_by_start.insert(start + 1, count - 1);
         }
         self.available_chunks -= 1;
         start
@@ -37,22 +38,23 @@ impl FreeSpace {
 
     fn release_chunk(&mut self, chunk: u64) {
         let mut start = chunk;
-        let mut end = chunk + 1;
-        if let Some((&previous_start, &previous_end)) = self.chunks.range(..chunk).next_back() {
-            assert!(previous_end <= chunk);
-            if previous_end == chunk {
+        let mut count = 1;
+        if let Some((&previous_start, &previous_count)) = self.free_chunk_count_by_start.range(..chunk).next_back() {
+            assert!(previous_start + previous_count <= chunk);
+            if previous_start + previous_count == chunk {
                 start = previous_start;
-                self.chunks.remove(&previous_start);
+                count += previous_count;
+                self.free_chunk_count_by_start.remove(&previous_start);
             }
         }
-        if let Some((&next_start, &next_end)) = self.chunks.range(chunk..).next() {
-            assert!(next_start >= end);
-            if next_start == end {
-                end = next_end;
-                self.chunks.remove(&next_start);
+        if let Some((&next_start, &next_count)) = self.free_chunk_count_by_start.range(chunk..).next() {
+            assert!(next_start > chunk);
+            if next_start == chunk + 1 {
+                count += next_count;
+                self.free_chunk_count_by_start.remove(&next_start);
             }
         }
-        self.chunks.insert(start, end);
+        self.free_chunk_count_by_start.insert(start, count);
         self.available_chunks += 1;
     }
 }
@@ -78,7 +80,10 @@ impl DiskAllocator {
         }
         Some(Self {
             free: Arc::new(Mutex::new(FreeSpace {
-                chunks: BTreeMap::from([(disk_range.start / CHUNK_BYTES, disk_range.end / CHUNK_BYTES)]),
+                free_chunk_count_by_start: BTreeMap::from([(
+                    disk_range.start / CHUNK_BYTES,
+                    (disk_range.end - disk_range.start) / CHUNK_BYTES,
+                )]),
                 available_chunks: (disk_range.end - disk_range.start) / CHUNK_BYTES,
             })),
         })

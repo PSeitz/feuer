@@ -3,7 +3,10 @@ use std::sync::Barrier;
 
 fn assert_empty(allocator: &DiskAllocator, capacity: u64) {
     let free = allocator.free.lock().unwrap();
-    assert_eq!(free.chunks, BTreeMap::from([(0, capacity / CHUNK_BYTES)]));
+    assert_eq!(
+        free.free_chunk_count_by_start,
+        BTreeMap::from([(0, capacity / CHUNK_BYTES)])
+    );
     assert_eq!(free.available_chunks * CHUNK_BYTES, capacity);
 }
 
@@ -26,8 +29,29 @@ fn reserves_whole_chunks_through_100_mib() {
 }
 
 #[test]
+fn free_chunk_counts_are_independent_of_start() {
+    let allocator = DiskAllocator::for_disk_range(7 * CHUNK_BYTES..12 * CHUNK_BYTES).unwrap();
+    assert_eq!(
+        allocator.free.lock().unwrap().free_chunk_count_by_start,
+        BTreeMap::from([(7, 5)])
+    );
+    let chunks = allocator.reserve_chunks(2).unwrap();
+    assert_eq!(chunks[0].range(), 7 * CHUNK_BYTES..8 * CHUNK_BYTES);
+    assert_eq!(chunks[1].range(), 8 * CHUNK_BYTES..9 * CHUNK_BYTES);
+    assert_eq!(
+        allocator.free.lock().unwrap().free_chunk_count_by_start,
+        BTreeMap::from([(9, 3)])
+    );
+    drop(chunks);
+    assert_eq!(
+        allocator.free.lock().unwrap().free_chunk_count_by_start,
+        BTreeMap::from([(7, 5)])
+    );
+}
+
+#[test]
 fn rejects_invalid_sizes_and_reserves_all_or_nothing() {
-    for capacity in [0, 1, BLOCK_BYTES, CHUNK_BYTES + BLOCK_BYTES, 1 << 63, u64::MAX] {
+    for capacity in [0, 1, CHUNK_BYTES - 1, CHUNK_BYTES + 1, 1 << 63, u64::MAX] {
         assert!(DiskAllocator::new(capacity).is_none());
     }
     let allocator = DiskAllocator::new(2 * CHUNK_BYTES).unwrap();
@@ -48,14 +72,14 @@ fn rejects_invalid_sizes_and_reserves_all_or_nothing() {
 fn entry_regions_and_readers_prevent_whole_chunk_reuse() {
     let allocator = DiskAllocator::new(CHUNK_BYTES).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
-    let first = chunk.slice(BLOCK_BYTES..2 * BLOCK_BYTES);
-    let second = chunk.slice(2 * BLOCK_BYTES..4 * BLOCK_BYTES);
+    let first = chunk.slice(1..2);
+    let second = chunk.slice(2..4);
     let reader = first.read_guard();
     drop((chunk, first));
     assert!(allocator.reserve_chunks(1).is_none());
     drop(second);
     assert!(allocator.reserve_chunks(1).is_none());
-    assert_eq!(reader.range(), BLOCK_BYTES..2 * BLOCK_BYTES);
+    assert_eq!(reader.range(), 1..2);
     drop(reader);
     assert_empty(&allocator, CHUNK_BYTES);
 }
@@ -88,8 +112,8 @@ fn reuse_waits_for_all_concurrent_readers() {
 fn quarantining_any_region_prevents_reuse_of_its_entire_chunk() {
     let allocator = DiskAllocator::new(CHUNK_BYTES).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
-    let first = chunk.slice(BLOCK_BYTES..2 * BLOCK_BYTES);
-    let second = chunk.slice(2 * BLOCK_BYTES..3 * BLOCK_BYTES);
+    let first = chunk.slice(1..2);
+    let second = chunk.slice(2..3);
     first.quarantine();
     drop((chunk, second));
     assert!(allocator.reserve_chunks(1).is_none());
@@ -102,7 +126,7 @@ fn forty_tib_initialization_is_sparse() {
     let allocator = DiskAllocator::new(capacity).unwrap();
     assert_empty(&allocator, capacity);
     let large = allocator.reserve_chunks(100).unwrap();
-    assert_eq!(allocator.free.lock().unwrap().chunks.len(), 1);
+    assert_eq!(allocator.free.lock().unwrap().free_chunk_count_by_start.len(), 1);
     drop(large);
     assert_empty(&allocator, capacity);
 }

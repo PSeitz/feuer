@@ -8,9 +8,11 @@ use feuer_types::ByteRange;
 
 use crate::allocation::DiskRegion;
 
-pub(super) const PAGE_BYTES: usize = 4096;
+/// Size in bytes of a metadata page, including its header and padding.
+/// An entry's metadata may span multiple linked pages.
+pub(super) const METADATA_PAGE_BYTES: usize = 4096;
 const PAGE_HEADER_BYTES: usize = 96;
-pub(super) const PAGE_CONTENT_BYTES: usize = PAGE_BYTES - PAGE_HEADER_BYTES;
+pub(super) const PAGE_CONTENT_BYTES: usize = METADATA_PAGE_BYTES - PAGE_HEADER_BYTES;
 pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES03";
 pub(super) const ENTRY_METADATA_INDEX_PAGE_TAG: &[u8; 8] = b"FEUIDX03";
 
@@ -24,7 +26,7 @@ pub(super) fn encode_page(
     next_entry_metadata_page_address: u64,
     contents: &[u8],
 ) {
-    assert_eq!(page.len(), PAGE_BYTES);
+    assert_eq!(page.len(), METADATA_PAGE_BYTES);
     assert!(contents.len() <= PAGE_CONTENT_BYTES);
     page.fill(0);
     page[32..64].copy_from_slice(content_checksum);
@@ -45,7 +47,7 @@ pub(super) fn validate_page<'a>(
     page_address: u64,
     page_ordinal: u64,
 ) -> Option<(u64, &'a [u8])> {
-    if page.len() != PAGE_BYTES
+    if page.len() != METADATA_PAGE_BYTES
         || page[32..64] != *content_checksum
         || page[64..72] != page_address.to_le_bytes()
         || page[72..80] != page_ordinal.to_le_bytes()
