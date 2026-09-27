@@ -134,7 +134,7 @@ struct GuardedObjectRangeRead {
 #[derive(Debug, thiserror::Error)]
 pub enum DiskRangeCacheError {
     /// The prototype requires a positive whole number of 1-MiB chunks within Linux's file-offset limit.
-    #[error("disk range cache capacity must be a positive multiple of 1 MiB and at most i64::MAX")]
+    #[error("disk range cache capacity must be at least 1 MiB and at most i64::MAX")]
     InvalidCapacity,
     /// Raw storage failed.
     #[error(transparent)]
@@ -190,9 +190,10 @@ impl DiskRangeCache {
         access_histories: Arc<ObjectAccessHistories>,
         metrics: Arc<DiskMetrics>,
     ) -> Result<Self, DiskRangeCacheError> {
-        if capacity == 0 || capacity > i64::MAX as u64 || !capacity.is_multiple_of(CHUNK_BYTES) {
+        if capacity < CHUNK_BYTES || capacity > i64::MAX as u64 {
             return Err(DiskRangeCacheError::InvalidCapacity);
         }
+        let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
         let file = DataFile::open(directory, capacity, io_metrics).await?;
         tracing::warn!(target: "feuer::storage", "disk range cache prototype starts empty; recovery is not implemented");
         let shard_count = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
