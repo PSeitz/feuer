@@ -138,20 +138,9 @@ impl TieredMemoryDiskCache {
             return Ok(bytes);
         }
 
-        metrics.callbacks.increase(1);
-        let callback_started = Instant::now();
         let download = match callback().await {
-            Ok(download) => {
-                metrics
-                    .callback_success_duration
-                    .record(callback_started.elapsed().as_secs_f64());
-                metrics.download_bytes.increase(download.bytes().len() as u64);
-                download
-            }
+            Ok(download) => download,
             Err(error) => {
-                metrics
-                    .callback_error_duration
-                    .record(callback_started.elapsed().as_secs_f64());
                 metrics.record(LookupOutcome::CallbackError, started.elapsed(), 0);
                 return Err(GetOrFetchError::Callback(error));
             }
@@ -287,6 +276,8 @@ mod tests {
             "invalid_download",
         ] {
             assert_eq!(value(&registry, "feuer_lookup_total", &[("outcome", outcome)]), 1.0);
+        }
+        for outcome in ["memory_hit", "disk_hit"] {
             assert_eq!(
                 value(&registry, "feuer_lookup_duration_seconds", &[("outcome", outcome)]),
                 1.0
@@ -295,16 +286,6 @@ mod tests {
         for source in ["memory", "disk", "callback"] {
             assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", source)]), 2.0);
         }
-        assert_eq!(value(&registry, "feuer_callback_total", &[]), 3.0);
-        assert_eq!(value(&registry, "feuer_callback_download_bytes_total", &[]), 5.0);
-        assert_eq!(
-            value(&registry, "feuer_callback_duration_seconds", &[("outcome", "success")]),
-            2.0
-        );
-        assert_eq!(
-            value(&registry, "feuer_callback_duration_seconds", &[("outcome", "error")]),
-            1.0
-        );
         assert_eq!(
             value(&registry, "feuer_memory_operations_total", &[("operation", "hit")]),
             1.0

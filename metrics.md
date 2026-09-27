@@ -2,7 +2,7 @@
 
 On Linux, use `TieredMemoryDiskCache::open_with_metrics(config, &registry).await`
 with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup,
-callback, memory, disk I/O, range-cache and population metrics in that registry.
+memory, disk I/O, range-cache and population metrics in that registry.
 `open(config)` keeps the no-op default. Feuer does not install an exporter;
 the application owns the registry and its export endpoint.
 
@@ -15,17 +15,11 @@ counters and gauges; use separate registries if they must be distinguished.
 | Metric | Type | Labels / meaning |
 |---|---|---|
 | `feuer_lookup_total` | Counter | `outcome`: `memory_hit`, `disk_hit`, `callback`, `callback_error`, `invalid_download` |
-| `feuer_lookup_duration_seconds` | Histogram | Same outcomes; entire completed lookup, including callback work and synchronous population scheduling |
+| `feuer_lookup_duration_seconds` | Histogram | `outcome`: `memory_hit`, `disk_hit`; entire completed lookup for cache hits only |
 | `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`; exact requested bytes successfully returned |
-| `feuer_callback_total` | Counter | Callback invocations, including callbacks later canceled |
-| `feuer_callback_download_bytes_total` | Counter | Bytes returned by successful callbacks, including downloads rejected for not covering the request |
-| `feuer_callback_duration_seconds` | Histogram | `outcome`: `success`, `error`; callback execution only, before coverage validation |
 
 Lookup outcomes and duration histograms count completed operations, not canceled
-futures. A non-covering callback result is a callback success but an
-`invalid_download` lookup. Callback invocations are **not source GETs**, and
-returned download bytes are **not network transfer bytes**: the application may
-share downloads among callbacks.
+futures. A non-covering callback result is an `invalid_download` lookup.
 
 Use lookup counters for request-weighted hit ratios and lookup byte counters for
 byte-weighted hit ratios. Memory-tier counters also include internal memory
