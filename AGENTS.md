@@ -4,6 +4,10 @@ Added code is a liability. Less code is usually better; every addition must just
 
 Implement only what the stated requirements need. Do not add features, abstractions, guarantees, or configuration "for completeness" or hypothetical future use. Every addition must solve a concrete, current requirement. If its necessity is unclear, ask before implementing. Prefer the smallest correct solution.
 
+# Disk chunks
+
+A written chunk is immutable until all entry owners and read guards release it. Explicit batches group small entries into chunks and finalize payload, metadata, and discovery bitmaps before writing. Do not append to written chunks or reuse individual entry holes.
+
 # Naming
 
 - Naming is important. Prefer concrete, descriptive names that explain what something represents or protects.

@@ -45,7 +45,8 @@ Separate read/write admission
 budgets protect read admission from write backlogs. Raw file capacity must be a positive multiple of
 4 KiB. Above that, an experimental [`DiskRangeCache`](feuer-storage/disk-prototype.md)
 connects allocation, persisted entry metadata, covering-range lookup and integrity-checked subrange reads.
-Variable-length entries share 1-MiB chunks with 4-KiB-aligned payload allocations and no payload page headers.
+Explicit batches group small entries into immutable 1-MiB chunks, each written once with its metadata.
+Payload is 4-KiB-aligned with no page headers. Chunks are reused only after all entry owners and readers release them.
 Each entry has one checksum in its metadata; a hit verifies the whole entry and returns only the requested
 bytes without reading neighboring entries. Reopen deliberately starts empty. Pressure eviction, recovery,
 buffered mode and public-cache integration remain unimplemented.

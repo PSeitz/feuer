@@ -237,10 +237,13 @@ region while a read depends on its contents; multiple reads may hold guards conc
 whose result is discarded no longer needs unchanged disk contents, but its submitted I/O buffer must still
 survive until completion. The I/O layer owns that buffer lifetime.
 
-The current disk design packs variable-length entries into shared 1-MiB allocation chunks. Payload starts
-and allocated lengths are rounded to 4 KiB; values smaller than that consume 4 KiB of payload storage, plus their
-metadata. Large entries may span chunks. Payload bytes have no interleaved page headers, and each entry's
-expected checksum lives in separate metadata. The allocator must handle the full size distribution, reclaim
+The current disk design packs explicit batches of variable-length entries into immutable 1-MiB chunks,
+grouping smaller entries together. Each chunk's payload, metadata and discovery bitmap are finalized before
+its only write. Later batches cannot append to it or reuse holes left by removed entries. A chunk becomes
+reusable only after all entry owners and read guards release it. Partially filled final chunks consume their
+full capacity. Payload starts and allocated lengths are rounded to 4 KiB; small entries consume at least
+4 KiB of payload storage plus metadata within their batch's chunks. Large entries may span chunks. Payload
+bytes have no interleaved page headers, and each entry's expected checksum lives in separate metadata. The allocator must handle the full size distribution, reclaim
 fragmented capacity with bounded work and rewrite traffic, remain practical at 1-TiB-plus capacities, and
 avoid a cache-wide hot lock. Free-space structures, relocation, and cleaning remain private mechanisms.
 
@@ -337,7 +340,8 @@ The MVP is complete when tests demonstrate that:
 - disk-write queues remain bounded and queue pressure does not block or fail successful lookups;
 - evicted queued writes cannot later publish stale state, while already-active current writes can complete safely;
 - failed or uncertain disk writes never become disk hits;
-- multiple variable-length entries share 1-MiB allocation chunks with independent 4-KiB-aligned payload storage;
+- explicit batches group small entries in immutable 1-MiB chunks with 4-KiB-aligned payload storage;
+- written chunks are neither modified nor reused until all entry owners and read guards release them;
 - allocator stress tests report useful utilization, fragmentation, allocation latency, and rewrite traffic
   across the target size distribution;
 - buffered and direct modes return identical requested bytes, and requested direct mode never silently falls back;

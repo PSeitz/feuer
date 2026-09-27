@@ -1,4 +1,4 @@
-//! Experimental allocation → payload/entry metadata write → publication → checked subrange read path.
+//! Experimental immutable batch writes, live range lookup and whole-entry validation.
 
 mod page_format;
 #[cfg(test)]
@@ -14,7 +14,6 @@ use std::{
 
 use bytes::Bytes;
 use feuer_types::{ByteRange, Download, ObjectKey};
-use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     DataFile, DataFileError, DataFileResult, IoMetrics,
@@ -22,16 +21,15 @@ use crate::{
 };
 use page_format::{PAGE_BYTES, PAGE_CONTENT_BYTES};
 
-/// A standalone, experimental disk range cache, not yet connected to the public tiered cache.
+/// A standalone experimental disk cache, not yet connected to the public tiered cache.
 ///
-/// Insertions write payload, entry metadata and an embedded entry metadata index before publication.
-/// Entries have plain payload bytes, 4-KiB-aligned allocations, and one checksum stored in their entry metadata.
-/// Reads verify the entire covering entry, returning only the requested bytes. Entries share 1-MiB chunks.
-/// Each object belongs to one independently locked arena; an insertion that does not fit is skipped.
+/// Explicit batches pack smaller entries together and write complete immutable 1-MiB chunks.
+/// Entries have plain payload bytes, 4-KiB-aligned storage, and a checksum in their entry metadata.
+/// Reads verify the whole covering entry, returning only requested bytes. Reuse requires a wholly free chunk.
+/// Full-key hashing selects an independently allocated shard; admission may fail despite space elsewhere.
 ///
-/// **Recovery and pressure eviction are not implemented.** Every open starts empty and logs
-/// that reset. The experimental format is not a persistence guarantee or a stable on-disk interface.
-/// Payload I/O uses the real Linux direct-I/O backend; no buffered fallback exists.
+/// **Recovery and pressure eviction are not implemented.** Every open starts empty and logs that reset.
+/// The experimental format is neither a persistence guarantee nor a stable on-disk interface.
 #[derive(Clone)]
 pub struct DiskRangeCache {
     disk: Arc<DiskRangeCacheInner>,
@@ -43,12 +41,10 @@ struct DiskRangeCacheInner {
     arenas: Box<[Shard]>,
 }
 
-/// An independently allocated disk-cache shard with range lookup and entry metadata index writes.
+/// An independently allocated disk-cache shard with live range lookup.
 struct Shard {
     allocator: DiskAllocator,
     entry_index: Mutex<DiskEntryIndex>,
-    // Index pages are shared by entries. Serialize their writes, not payload writes or reads.
-    entry_metadata_index: AsyncMutex<EntryMetadataIndex>,
 }
 
 /// Disk entries indexed by object key and range start.
@@ -56,12 +52,19 @@ struct DiskEntryIndex {
     ranges_by_key: HashMap<ObjectKey, BTreeMap<u64, ObjectRangeDiskStorage>>,
 }
 
-/// An index of where entry metadata starts on disk, with cached bitmaps and write availability.
-struct EntryMetadataIndex {
-    starts_by_chunk_address: BTreeMap<u64, EntryMetadataStarts>,
-    // Cleared before issuing an index write, restored only on success. Failure/abandonment stops
-    // further index writes, including after an unknown completion, without reusing that page.
-    writes_enabled: bool,
+/// One reserved chunk being assembled in memory before its only write.
+struct UnwrittenChunk {
+    region: DiskRegion,
+    bytes: Vec<u8>,
+    used_bytes: u64,
+    metadata_starts: EntryMetadataStarts,
+}
+
+/// Entries and their complete chunk buffers prepared for one shard's batch write.
+#[derive(Default)]
+struct UnwrittenBatch {
+    chunks: Vec<UnwrittenChunk>,
+    entries: Vec<(ObjectKey, ObjectRangeDiskStorage)>,
 }
 
 /// Candidate entry metadata start positions within one chunk, encoded as a bitmap.
@@ -82,28 +85,22 @@ struct ObjectRangeDiskStorage {
     object_range: ByteRange,
     payload_checksum: blake3::Hash,
     payload_regions: Vec<DiskRegion>,
-    entry_metadata_regions: Vec<DiskRegion>,
+    // Keep metadata-only chunks reserved for as long as the entry exists.
+    _entry_metadata_regions: Vec<DiskRegion>,
 }
 
-/// Reserved storage for unfinished writes. A write error or unexpected task drop quarantines it;
-/// successful completion transfers ordinary ownership.
-struct UnfinishedWriteStorage(Option<ObjectRangeDiskStorage>);
+/// Whole chunks retained through batch I/O; errors or unexpected task drops quarantine them.
+struct UnfinishedChunkWrites(Vec<DiskRegion>);
 
-impl Drop for UnfinishedWriteStorage {
+impl Drop for UnfinishedChunkWrites {
     fn drop(&mut self) {
-        if let Some(storage) = self.0.take() {
-            for region in storage
-                .payload_regions
-                .into_iter()
-                .chain(storage.entry_metadata_regions)
-            {
-                region.quarantine();
-            }
+        for region in self.0.drain(..) {
+            region.quarantine();
         }
     }
 }
 
-/// A guarded object-range read, with the expected checksum and all of the entry's payload regions.
+/// A guarded object-range read, with the expected checksum and all payload regions.
 struct GuardedObjectRangeRead {
     object_range: ByteRange,
     payload_checksum: blake3::Hash,
@@ -119,10 +116,7 @@ pub enum DiskRangeCacheError {
     /// Raw storage failed.
     #[error(transparent)]
     DataFile(#[from] DataFileError),
-    /// A previous failed or abandoned index write prevents safe further index updates in this arena.
-    #[error("entry metadata index writes are disabled in this arena")]
-    EntryMetadataIndexWritesDisabled,
-    /// The task that owns a population failed; its unfinished reservations remain quarantined.
+    /// The task that owns a population failed; unfinished writes remain quarantined.
     #[error("disk population task failed: {0}")]
     PopulationTaskFailed(#[source] tokio::task::JoinError),
 }
@@ -138,9 +132,7 @@ impl fmt::Debug for DiskRangeCache {
 
 impl DiskRangeCache {
     /// Opens an exclusively locked, fixed-capacity file and starts with an empty cache.
-    ///
-    /// Existing entries are deliberately not recovered yet. Reopening resets the first embedded index;
-    /// this is not a persistent reset of every entry metadata index in the file.
+    /// Existing entries are neither recovered nor cleared. This is not a durable reset protocol.
     pub async fn open(
         directory: impl AsRef<Path>,
         capacity: u64,
@@ -150,21 +142,7 @@ impl DiskRangeCache {
             return Err(DiskRangeCacheError::InvalidCapacity);
         }
         let file = DataFile::open(directory, capacity, metrics).await?;
-        let mut first_index_page = vec![0; PAGE_BYTES];
-        page_format::encode_page(
-            &mut first_index_page,
-            page_format::ENTRY_METADATA_INDEX_PAGE_TAG,
-            blake3::hash(&[0; 32]).as_bytes(),
-            0,
-            0,
-            0,
-            &[0; 32],
-        );
-        file.write_at(0, &Bytes::from(first_index_page)).await?;
         tracing::warn!(target: "feuer::storage", "disk range cache prototype starts empty; recovery is not implemented");
-
-        // Keep small test/deployment capacities useful for ~100-MiB entries. This is an experimental
-        // arena split, not a public tuning knob or a guarantee that every entry fits every arena.
         let arena_count = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
         let chunk_count = capacity / CHUNK_BYTES;
         let arenas = (0..arena_count)
@@ -177,10 +155,6 @@ impl DiskRangeCache {
                 entry_index: Mutex::new(DiskEntryIndex {
                     ranges_by_key: HashMap::new(),
                 }),
-                entry_metadata_index: AsyncMutex::new(EntryMetadataIndex {
-                    starts_by_chunk_address: BTreeMap::new(),
-                    writes_enabled: true,
-                }),
             })
             .collect();
         Ok(Self {
@@ -188,86 +162,67 @@ impl DiskRangeCache {
         })
     }
 
-    /// Writes one download and publishes it only after successful I/O and containment revalidation.
-    /// Returns false when contained by existing data or when its arena has insufficient free space.
-    /// Does not record an access. Partially overlapping downloads may coexist.
+    /// Packs an explicit batch into immutable chunks, grouping smaller payloads first within each shard.
+    /// Returns the number of entries published; contained entries and entries that do not fit are skipped.
+    /// Each shard's chunks finish writing before its entries publish, with containment revalidation.
+    /// Publication is not transactional across shards. Does not record accesses.
     ///
-    /// Dropping this future does not abort a started writer. Its task owns storage through completion;
-    /// a successfully completed population may still publish after its requester has gone away.
-    pub async fn insert(&self, key: ObjectKey, download: Download) -> Result<bool, DiskRangeCacheError> {
-        let arena_index = self.disk.arena_index_for_key(&key);
-        let arena = &self.disk.arenas[arena_index];
-        let (object_range, bytes) = download.into_parts();
-        if arena
-            .entry_index
-            .lock()
-            .unwrap()
-            .covering_range(&key, object_range)
-            .is_some()
-        {
-            return Ok(false);
-        }
-        let Some(payload_regions) = arena.allocator.reserve(bytes.len() as u64) else {
-            return Ok(false);
-        };
-        let payload_checksum = blake3::hash(&bytes);
-        let entry_metadata_bytes =
-            page_format::encode_entry_metadata(&key, object_range, &payload_regions, &payload_checksum);
-        let Some(entry_metadata_storage_bytes) = page_storage_bytes(entry_metadata_bytes.len()) else {
-            return Ok(false);
-        };
-        let Some(entry_metadata_regions) = arena.allocator.reserve(entry_metadata_storage_bytes) else {
-            return Ok(false);
-        };
-        let entry_metadata_start_address = entry_metadata_regions[0].range().start;
-        let storage = ObjectRangeDiskStorage {
-            object_range,
-            payload_checksum,
-            payload_regions,
-            entry_metadata_regions,
-        };
+    /// Partially filled final chunks are written too; later batches cannot fill their unused space.
+    /// Callers bound batch size and concurrency: complete chunk buffers are assembled in memory.
+    /// Dropping this future does not abort its detached writer or release storage needed by submitted I/O.
+    pub async fn insert_batch(&self, downloads: Vec<(ObjectKey, Download)>) -> Result<usize, DiskRangeCacheError> {
         let disk = self.disk.clone();
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
-        // The caller never receives the task handle, so cancellation cannot abort submitted writes.
         runtime
             .spawn(async move {
-                let mut unfinished = UnfinishedWriteStorage(Some(storage));
-                let storage = unfinished.0.as_ref().unwrap();
-                let write_result = async {
-                    write_payload(&disk.file, &storage.payload_regions, &bytes).await?;
-                    write_entry_metadata_pages(&disk.file, &storage.entry_metadata_regions, &entry_metadata_bytes).await?;
-                    disk.write_entry_metadata_index_page(arena_index, entry_metadata_start_address).await
+                let mut by_arena: Vec<Vec<_>> = (0..disk.arenas.len()).map(|_| Vec::new()).collect();
+                for (key, download) in downloads {
+                    by_arena[disk.arena_index_for_key(&key)].push((key, download));
                 }
-                .await;
-                if let Err(error) = write_result {
-                    tracing::warn!(target: "feuer::storage", %error, "disk population failed; reservations quarantined");
-                    return Err(error);
+                let mut published = 0;
+                for (arena, mut downloads) in disk.arenas.iter().zip(by_arena) {
+                    downloads.sort_by_key(|(_, download)| download.bytes().len());
+                    let mut batch = UnwrittenBatch::default();
+                    for (key, download) in downloads {
+                        if arena
+                            .entry_index
+                            .lock()
+                            .unwrap()
+                            .covering_range(&key, download.downloaded_range())
+                            .is_none()
+                        {
+                            batch.push(&arena.allocator, key, download);
+                        }
+                    }
+                    let entries = batch.write(&disk.file).await?;
+                    let mut index = arena.entry_index.lock().unwrap();
+                    // Publish larger entries first so contained batch members need not publish at all.
+                    for (key, storage) in entries.into_iter().rev() {
+                        let object_range = storage.object_range;
+                        // Another writer or an earlier entry in this batch may already cover this range.
+                        if index.covering_range(&key, object_range).is_some() {
+                            continue;
+                        }
+                        let entries = index.ranges_by_key.entry(key).or_default();
+                        let replaced_starts: Vec<_> = entries
+                            .range(object_range.start()..object_range.end())
+                            .filter_map(|(&start, entry)| object_range.contains(entry.object_range).then_some(start))
+                            .collect();
+                        for start in replaced_starts {
+                            entries.remove(&start);
+                        }
+                        entries.insert(object_range.start(), storage);
+                        published += 1;
+                    }
                 }
-                let storage = unfinished.0.take().unwrap();
-                let mut index = disk.arenas[arena_index].entry_index.lock().unwrap();
-                // Another writer may have published an equal or broader interval while we wrote.
-                if index.covering_range(&key, object_range).is_some() {
-                    return Ok(false);
-                }
-                let entries = index.ranges_by_key.entry(key).or_default();
-                let replaced_starts: Vec<_> = entries
-                    .range(object_range.start()..object_range.end())
-                    .filter_map(|(&start, storage)| object_range.contains(storage.object_range).then_some(start))
-                    .collect();
-                for start in replaced_starts {
-                    entries.remove(&start);
-                }
-                entries.insert(object_range.start(), storage);
-                Ok(true)
+                Ok(published)
             })
             .await
             .map_err(DiskRangeCacheError::PopulationTaskFailed)?
     }
 
-    /// Returns exactly the requested bytes from one covering entry, or a miss on any I/O/integrity
-    /// uncertainty. Reads and hashes the whole covering entry, but copies only the requested bytes.
-    /// Does not read neighboring entries or the entry metadata chain.
-    /// Returned bytes retain neither disk allocations nor read guards. Does not record an access.
+    /// Returns exactly requested bytes from one covering entry, or a miss on any I/O/integrity uncertainty.
+    /// Reads and hashes the whole entry, not neighboring entries or metadata. Results retain no disk ownership.
     pub async fn get(&self, key: &ObjectKey, requested: ByteRange) -> Option<Bytes> {
         let arena = &self.disk.arenas[self.disk.arena_index_for_key(key)];
         let guarded_read = {
@@ -325,34 +280,6 @@ impl DiskRangeCacheInner {
         key.hash(&mut hasher);
         (hasher.finish() % self.arenas.len() as u64) as usize
     }
-
-    async fn write_entry_metadata_index_page(
-        &self,
-        arena_index: usize,
-        entry_metadata_start_address: u64,
-    ) -> Result<(), DiskRangeCacheError> {
-        let mut index_pages = self.arenas[arena_index].entry_metadata_index.lock().await;
-        if !index_pages.writes_enabled {
-            return Err(DiskRangeCacheError::EntryMetadataIndexWritesDisabled);
-        }
-        let chunk_address = entry_metadata_start_address / CHUNK_BYTES * CHUNK_BYTES;
-        let entry_metadata_starts = index_pages.starts_by_chunk_address.entry(chunk_address).or_default();
-        entry_metadata_starts.insert(entry_metadata_start_address - chunk_address);
-        let mut page = vec![0; PAGE_BYTES];
-        page_format::encode_page(
-            &mut page,
-            page_format::ENTRY_METADATA_INDEX_PAGE_TAG,
-            blake3::hash(&entry_metadata_starts.bitmap).as_bytes(),
-            chunk_address,
-            chunk_address / CHUNK_BYTES,
-            0,
-            &entry_metadata_starts.bitmap,
-        );
-        index_pages.writes_enabled = false;
-        self.file.write_at(chunk_address, &Bytes::from(page)).await?;
-        index_pages.writes_enabled = true;
-        Ok(())
-    }
 }
 
 fn page_storage_bytes(content_bytes: usize) -> Option<u64> {
@@ -361,59 +288,140 @@ fn page_storage_bytes(content_bytes: usize) -> Option<u64> {
         .checked_mul(BLOCK_BYTES)
 }
 
-async fn write_payload(file: &DataFile, regions: &[DiskRegion], bytes: &Bytes) -> DataFileResult<()> {
-    let mut consumed = 0;
-    for region in regions {
-        let disk_range = region.range();
-        let length = (disk_range.end - disk_range.start) as usize;
-        let end = (consumed + length).min(bytes.len());
-        let contents = if end - consumed == length {
-            bytes.slice(consumed..end)
-        } else {
-            // Only the final region needs padding; complete regions use the source bytes directly.
-            let mut padded = vec![0; length];
-            padded[..end - consumed].copy_from_slice(&bytes[consumed..end]);
-            Bytes::from(padded)
+impl UnwrittenBatch {
+    fn push(&mut self, allocator: &DiskAllocator, key: ObjectKey, download: Download) {
+        let (object_range, bytes) = download.into_parts();
+        let payload_bytes = (bytes.len() as u64).next_multiple_of(BLOCK_BYTES);
+        let chunk_data_bytes = CHUNK_BYTES - BLOCK_BYTES;
+        let tail_bytes = self.chunks.last().map_or(0, |chunk| CHUNK_BYTES - chunk.used_bytes);
+        let payload_region_count =
+            u64::from(tail_bytes > 0) + payload_bytes.saturating_sub(tail_bytes).div_ceil(chunk_data_bytes);
+        let Some(metadata_bytes) = page_storage_bytes(72 + 16 * payload_region_count as usize + key.len()) else {
+            return;
         };
-        file.write_at(disk_range.start, &contents).await?;
-        consumed = end;
-    }
-    debug_assert_eq!(consumed, bytes.len());
-    Ok(())
-}
-
-async fn write_entry_metadata_pages(file: &DataFile, regions: &[DiskRegion], contents: &[u8]) -> DataFileResult<()> {
-    let content_checksum = blake3::hash(contents);
-    let mut page_ordinal = 0;
-    let mut consumed = 0;
-    for (region_index, region) in regions.iter().enumerate() {
-        let disk_range = region.range();
-        // Encode at most one chunk of metadata at a time.
-        let mut buffer = vec![0; (disk_range.end - disk_range.start) as usize];
-        for (page_index, page) in buffer.as_chunks_mut::<PAGE_BYTES>().0.iter_mut().enumerate() {
-            let page_address = disk_range.start + page_index as u64 * BLOCK_BYTES;
-            let next_entry_metadata_page_address = if page_address + BLOCK_BYTES < disk_range.end {
-                page_address + BLOCK_BYTES
-            } else {
-                regions.get(region_index + 1).map_or(0, |region| region.range().start)
+        let new_chunk_count = (payload_bytes + metadata_bytes)
+            .saturating_sub(tail_bytes)
+            .div_ceil(chunk_data_bytes);
+        let mut cursor = self.chunks.len().saturating_sub(1);
+        if new_chunk_count > 0 {
+            let Some(regions) = allocator.reserve_chunks(new_chunk_count) else {
+                return;
             };
-            let end = (consumed + PAGE_CONTENT_BYTES).min(contents.len());
-            page_format::encode_page(
-                page,
-                page_format::ENTRY_METADATA_PAGE_TAG,
-                content_checksum.as_bytes(),
-                page_address,
-                page_ordinal,
-                next_entry_metadata_page_address,
-                &contents[consumed..end],
-            );
-            consumed = end;
-            page_ordinal += 1;
+            self.chunks.extend(regions.into_iter().map(|region| UnwrittenChunk {
+                region,
+                bytes: vec![0; CHUNK_BYTES as usize],
+                used_bytes: BLOCK_BYTES,
+                metadata_starts: EntryMetadataStarts::default(),
+            }));
         }
-        file.write_at(disk_range.start, &Bytes::from(buffer)).await?;
+        let (payload_regions, first_chunk) = self.take_regions(&mut cursor, payload_bytes);
+        let mut consumed = 0;
+        for (chunk, region) in self.chunks[first_chunk..].iter_mut().zip(&payload_regions) {
+            let range = region.range();
+            let offset = (range.start % CHUNK_BYTES) as usize;
+            let end = (consumed + (range.end - range.start) as usize).min(bytes.len());
+            chunk.bytes[offset..offset + end - consumed].copy_from_slice(&bytes[consumed..end]);
+            consumed = end;
+        }
+        let payload_checksum = blake3::hash(&bytes);
+        let contents = page_format::encode_entry_metadata(&key, object_range, &payload_regions, &payload_checksum);
+        let (entry_metadata_regions, first_chunk) = self.take_regions(&mut cursor, metadata_bytes);
+        self.chunks[first_chunk]
+            .metadata_starts
+            .insert(entry_metadata_regions[0].range().start % CHUNK_BYTES);
+        let content_checksum = blake3::hash(&contents);
+        let mut page_ordinal = 0;
+        let mut consumed = 0;
+        for (region_index, (chunk, region)) in self.chunks[first_chunk..]
+            .iter_mut()
+            .zip(&entry_metadata_regions)
+            .enumerate()
+        {
+            let range = region.range();
+            for page_address in (range.start..range.end).step_by(PAGE_BYTES) {
+                let next = if page_address + BLOCK_BYTES < range.end {
+                    page_address + BLOCK_BYTES
+                } else {
+                    entry_metadata_regions
+                        .get(region_index + 1)
+                        .map_or(0, |region| region.range().start)
+                };
+                let offset = (page_address % CHUNK_BYTES) as usize;
+                let end = (consumed + PAGE_CONTENT_BYTES).min(contents.len());
+                page_format::encode_page(
+                    &mut chunk.bytes[offset..offset + PAGE_BYTES],
+                    page_format::ENTRY_METADATA_PAGE_TAG,
+                    content_checksum.as_bytes(),
+                    page_address,
+                    page_ordinal,
+                    next,
+                    &contents[consumed..end],
+                );
+                consumed = end;
+                page_ordinal += 1;
+            }
+        }
+        self.entries.push((
+            key,
+            ObjectRangeDiskStorage {
+                object_range,
+                payload_checksum,
+                payload_regions,
+                _entry_metadata_regions: entry_metadata_regions,
+            },
+        ));
     }
-    debug_assert_eq!(consumed, contents.len());
-    Ok(())
+
+    /// Carves aligned entry regions from reserved chunks, preserving shared whole-chunk ownership.
+    fn take_regions(&mut self, cursor: &mut usize, mut bytes: u64) -> (Vec<DiskRegion>, usize) {
+        while self.chunks[*cursor].used_bytes == CHUNK_BYTES {
+            *cursor += 1;
+        }
+        let first_chunk = *cursor;
+        let mut regions = Vec::new();
+        while bytes > 0 {
+            let chunk = &mut self.chunks[*cursor];
+            let length = bytes.min(CHUNK_BYTES - chunk.used_bytes);
+            let start = chunk.region.range().start + chunk.used_bytes;
+            regions.push(chunk.region.slice(start..start + length));
+            chunk.used_bytes += length;
+            bytes -= length;
+            if bytes > 0 {
+                *cursor += 1;
+            }
+        }
+        (regions, first_chunk)
+    }
+
+    async fn write(mut self, file: &DataFile) -> Result<Vec<(ObjectKey, ObjectRangeDiskStorage)>, DiskRangeCacheError> {
+        let mut unfinished = UnfinishedChunkWrites(
+            self.chunks
+                .iter()
+                .map(|chunk| chunk.region.slice(chunk.region.range()))
+                .collect(),
+        );
+        for chunk in &mut self.chunks {
+            let address = chunk.region.range().start;
+            page_format::encode_page(
+                &mut chunk.bytes[..PAGE_BYTES],
+                page_format::ENTRY_METADATA_INDEX_PAGE_TAG,
+                blake3::hash(&chunk.metadata_starts.bitmap).as_bytes(),
+                address,
+                address / CHUNK_BYTES,
+                0,
+                &chunk.metadata_starts.bitmap,
+            );
+            if let Err(error) = file
+                .write_at(address, &Bytes::from(std::mem::take(&mut chunk.bytes)))
+                .await
+            {
+                tracing::warn!(target: "feuer::storage", %error, "batch write failed; chunks quarantined");
+                return Err(error.into());
+            }
+        }
+        unfinished.0.clear();
+        Ok(self.entries)
+    }
 }
 
 impl GuardedObjectRangeRead {

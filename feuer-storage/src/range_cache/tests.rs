@@ -1,5 +1,12 @@
 use super::*;
-use std::time::Duration;
+use std::{future::Future, task::Poll, time::Duration};
+
+// Keep single-entry scenarios concise while exercising the explicit batch API.
+impl DiskRangeCache {
+    async fn insert(&self, key: ObjectKey, download: Download) -> Result<bool, DiskRangeCacheError> {
+        self.insert_batch(vec![(key, download)]).await.map(|count| count == 1)
+    }
+}
 
 fn range(start: u64, end: u64) -> ByteRange {
     ByteRange::new(start, end).unwrap()
@@ -33,7 +40,7 @@ fn entry_disk_ranges(cache: &DiskRangeCache, key: &str) -> (Vec<std::ops::Range<
     let storage = index.ranges_by_key[key].first_key_value().unwrap().1;
     (
         storage.payload_regions.iter().map(DiskRegion::range).collect(),
-        storage.entry_metadata_regions.iter().map(DiskRegion::range).collect(),
+        storage._entry_metadata_regions.iter().map(DiskRegion::range).collect(),
     )
 }
 
@@ -69,11 +76,24 @@ async fn exact_unaligned_reads_containment_and_full_key_identity() {
 #[tokio::test]
 async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    // Deliberately unordered input: small entries should be packed ahead of larger ones.
+    let lengths = [4097, 1024, 3 * 4096 + 9, 1, 4096, 4016];
+    assert_eq!(
+        cache
+            .insert_batch(
+                lengths
+                    .into_iter()
+                    .map(|length| (format!("entry-{length}"), download(17, length)))
+                    .collect()
+            )
+            .await
+            .unwrap(),
+        lengths.len()
+    );
     let mut previous_end = BLOCK_BYTES;
     for length in [1, 1024, 4016, 4096, 4097, 3 * 4096 + 9] {
         let key = format!("entry-{length}");
         let source = download(17, length);
-        assert!(cache.insert(key.clone(), source.clone()).await.unwrap());
         let (payload, entry_metadata) = entry_disk_ranges(&cache, &key);
         assert_eq!(payload.len(), 1);
         let allocated = &payload[0];
@@ -101,12 +121,70 @@ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers()
 }
 
 #[tokio::test]
+async fn mixed_batch_groups_small_entries_and_records_every_metadata_start() {
+    let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+    assert_eq!(cache.insert_batch(Vec::new()).await.unwrap(), 0);
+    let mut inputs = vec![("large".to_owned(), download(0, CHUNK_BYTES as usize))];
+    inputs.extend((0..130).map(|i| (format!("small-{i}"), download(i, 1024))));
+    assert_eq!(cache.insert_batch(inputs).await.unwrap(), 131);
+    let large_start = entry_disk_ranges(&cache, "large").0[0].start;
+    let mut expected = BTreeMap::<u64, EntryMetadataStarts>::new();
+    for i in 0..130 {
+        let key = format!("small-{i}");
+        assert_eq!(
+            cache.get(&key, range(i, i + 1024)).await.unwrap(),
+            download(i, 1024).bytes()
+        );
+        assert!(entry_disk_ranges(&cache, &key).0[0].start < large_start);
+    }
+    {
+        let index = cache.disk.arenas[0].entry_index.lock().unwrap();
+        for entries in index.ranges_by_key.values() {
+            for entry in entries.values() {
+                let address = entry._entry_metadata_regions[0].range().start;
+                expected
+                    .entry(address / CHUNK_BYTES * CHUNK_BYTES)
+                    .or_default()
+                    .insert(address % CHUNK_BYTES);
+            }
+        }
+    }
+    for address in (0..3 * CHUNK_BYTES).step_by(CHUNK_BYTES as usize) {
+        let page = cache.disk.file.read_at(address, PAGE_BYTES).await.unwrap();
+        let starts = expected.remove(&address).unwrap_or_default();
+        let (_, contents) = page_format::validate_page(
+            &page,
+            page_format::ENTRY_METADATA_INDEX_PAGE_TAG,
+            blake3::hash(&starts.bitmap).as_bytes(),
+            address,
+            address / CHUNK_BYTES,
+        )
+        .unwrap();
+        assert_eq!(&contents[..32], &starts.bitmap);
+    }
+    assert!(expected.is_empty());
+    assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), 0);
+    assert_eq!(
+        cache.get(&"large".to_owned(), range(0, CHUNK_BYTES)).await.unwrap(),
+        download(0, CHUNK_BYTES as usize).bytes()
+    );
+}
+
+#[tokio::test]
 async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk_or_its_entry_metadata() {
     let (directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let key = "small entry".to_owned();
     let source = download(3, 1024);
-    cache.insert(key.clone(), source.clone()).await.unwrap();
-    cache.insert("neighbor".to_owned(), download(0, 8192)).await.unwrap();
+    assert_eq!(
+        cache
+            .insert_batch(vec![
+                (key.clone(), source.clone()),
+                ("neighbor".to_owned(), download(0, 8192))
+            ])
+            .await
+            .unwrap(),
+        2
+    );
     let (payload, _) = entry_disk_ranges(&cache, &key);
     assert_eq!(payload[0].end - payload[0].start, BLOCK_BYTES);
     // A read reaching beyond this entry's alignment boundary would now fail with short I/O.
@@ -146,36 +224,56 @@ async fn alignment_padding_is_not_part_of_the_entry_checksum() {
 }
 
 #[tokio::test]
-async fn reusing_an_entry_does_not_overwrite_its_neighbors() {
+async fn a_written_chunk_is_immutable_until_all_entries_and_readers_release_it() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let first = "first".to_owned();
     let neighbor = "neighbor".to_owned();
-    cache.insert(first.clone(), download(3, 1024)).await.unwrap();
-    cache.insert(neighbor.clone(), download(7, 4097)).await.unwrap();
-    let old = entry_disk_ranges(&cache, &first).0;
-    cache.disk.arenas[0]
-        .entry_index
-        .lock()
-        .unwrap()
-        .ranges_by_key
-        .remove(&first);
-    cache.insert(first.clone(), download(100, 1024)).await.unwrap();
-    assert_eq!(entry_disk_ranges(&cache, &first).0, old);
     assert_eq!(
-        cache.get(&first, range(100, 1124)).await.unwrap(),
-        download(100, 1024).bytes()
+        cache
+            .insert_batch(vec![
+                (first.clone(), download(3, 1024)),
+                (neighbor.clone(), download(7, 4097))
+            ])
+            .await
+            .unwrap(),
+        2
+    );
+    let original = cache.disk.file.read_at(0, CHUNK_BYTES as usize).await.unwrap();
+    let reader = {
+        let mut index = cache.disk.arenas[0].entry_index.lock().unwrap();
+        let entry = index.ranges_by_key.remove(&first).unwrap();
+        entry.first_key_value().unwrap().1.payload_regions[0].read_guard()
+    };
+    // Neither the removed entry's bytes nor the unwritten tail can accept a later batch.
+    assert!(!cache.insert(first.clone(), download(100, 1024)).await.unwrap());
+    assert_eq!(
+        cache.disk.file.read_at(0, CHUNK_BYTES as usize).await.unwrap(),
+        original
     );
     assert_eq!(
         cache.get(&neighbor, range(7, 4104)).await.unwrap(),
         download(7, 4097).bytes()
     );
+    cache.disk.arenas[0]
+        .entry_index
+        .lock()
+        .unwrap()
+        .ranges_by_key
+        .remove(&neighbor);
+    assert!(!cache.insert(first.clone(), download(100, 1024)).await.unwrap());
+    drop(reader);
+    assert!(cache.insert(first.clone(), download(100, 1024)).await.unwrap());
+    assert_eq!(
+        cache.get(&first, range(100, 1124)).await.unwrap(),
+        download(100, 1024).bytes()
+    );
 }
 
 #[tokio::test]
-async fn whole_entry_checksum_follows_fragmented_payload_regions() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+async fn whole_entry_checksum_follows_fragmented_chunks() {
+    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     for key in ["a", "b", "c", "d"] {
-        cache.insert(key.to_owned(), download(0, 1024)).await.unwrap();
+        assert!(cache.insert(key.to_owned(), download(0, 1024)).await.unwrap());
     }
     {
         let mut index = cache.disk.arenas[0].entry_index.lock().unwrap();
@@ -183,7 +281,7 @@ async fn whole_entry_checksum_follows_fragmented_payload_regions() {
         index.ranges_by_key.remove("c");
     }
     let key = "fragmented".to_owned();
-    let source = download(100, 3 * BLOCK_BYTES as usize - 17);
+    let source = download(100, CHUNK_BYTES as usize + 17);
     cache.insert(key.clone(), source.clone()).await.unwrap();
     let (payload, _) = entry_disk_ranges(&cache, &key);
     assert_eq!(payload.len(), 2);
@@ -207,7 +305,7 @@ async fn whole_entry_checksum_follows_fragmented_payload_regions() {
 
 #[tokio::test]
 async fn partial_overlaps_coexist_without_assembly_and_a_covering_range_replaces_them() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     let key = "object".to_owned();
     for (start, length) in [(10, 10), (30, 10), (15, 20)] {
         assert!(cache.insert(key.clone(), download(start, length)).await.unwrap());
@@ -315,6 +413,53 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
 }
 
 #[tokio::test]
+async fn batch_skips_oversized_and_contained_entries_without_losing_accepted_entries() {
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    assert_eq!(
+        cache
+            .insert_batch(vec![
+                ("object".to_owned(), download(5, 100)),
+                ("too large".to_owned(), download(0, CHUNK_BYTES as usize)),
+                ("object".to_owned(), download(0, 200)),
+                ("object".to_owned(), download(0, 200)),
+            ])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        cache.get(&"object".to_owned(), range(0, 200)).await.unwrap(),
+        download(0, 200).bytes()
+    );
+    assert!(cache.get(&"too large".to_owned(), range(0, 1)).await.is_none());
+    assert_eq!(
+        cache.disk.arenas[0].entry_index.lock().unwrap().ranges_by_key["object"].len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn metadata_only_chunks_remain_owned_until_the_entry_is_removed() {
+    let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+    let key = "k".repeat(CHUNK_BYTES as usize);
+    assert!(cache.insert(key.clone(), download(0, 1)).await.unwrap());
+    let (payload, metadata) = entry_disk_ranges(&cache, &key);
+    assert_eq!(payload.len(), 1);
+    assert_eq!(metadata.len(), 2);
+    assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), CHUNK_BYTES);
+    assert!(cache.insert("other".to_owned(), download(0, 1)).await.unwrap());
+    assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), 0);
+    assert_eq!(cache.get(&key, range(0, 1)).await.unwrap(), download(0, 1).bytes());
+    cache.disk.arenas[0]
+        .entry_index
+        .lock()
+        .unwrap()
+        .ranges_by_key
+        .remove(&key);
+    assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
+}
+
+#[tokio::test]
 async fn entry_metadata_space_is_charged_and_failed_reservations_roll_back() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     // All 255 data blocks fit the payload, leaving no room for its entry metadata.
@@ -332,42 +477,24 @@ async fn entry_metadata_space_is_charged_and_failed_reservations_roll_back() {
             .await
             .unwrap()
     );
-    assert!(cache.disk.arenas[0].allocator.reserve(1).is_none());
+    assert!(cache.disk.arenas[0].allocator.reserve_chunks(1).is_none());
     assert!(!cache.insert("full".to_owned(), download(0, 1)).await.unwrap());
     assert_eq!(cache.get(&key, range(8, 12)).await.unwrap(), download(8, 4).bytes());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn racing_equal_and_containing_writes_revalidate_publication() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    let index_pages = cache.disk.arenas[0].entry_metadata_index.lock().await;
+    let (_directory, cache) = open_test_cache(16 * CHUNK_BYTES).await;
+    let start = Arc::new(tokio::sync::Barrier::new(16));
     let mut tasks = Vec::new();
     for _ in 0..16 {
         let cache = cache.clone();
+        let start = start.clone();
         tasks.push(tokio::spawn(async move {
+            start.wait().await;
             cache.insert("object".to_owned(), download(7, 100)).await.unwrap()
         }));
     }
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            // Every writer must reserve both payload and entry metadata before we release publication.
-            if cache.disk.arenas[0].allocator.available_bytes() == CHUNK_BYTES - (1 + 16 * 2) * BLOCK_BYTES {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(
-        cache.disk.arenas[0]
-            .entry_index
-            .lock()
-            .unwrap()
-            .ranges_by_key
-            .is_empty()
-    );
-    drop(index_pages);
     let mut published = 0;
     for task in tasks {
         published += usize::from(task.await.unwrap());
@@ -395,35 +522,18 @@ async fn racing_equal_and_containing_writes_revalidate_publication() {
     assert_eq!(cache.get(&key, range(0, 200)).await.unwrap(), download(0, 200).bytes());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test]
 async fn canceled_requester_does_not_abort_the_reservation_owner() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    // Block the final metadata write. The actual background writer must keep owning its reservations.
-    let index_pages = cache.disk.arenas[0].entry_metadata_index.lock().await;
-    let requester = {
-        let cache = cache.clone();
-        tokio::spawn(async move { cache.insert("object".to_owned(), download(0, 100)).await })
-    };
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if cache.disk.arenas[0].allocator.available_bytes() == CHUNK_BYTES - 3 * BLOCK_BYTES {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    requester.abort();
-    assert!(requester.await.unwrap_err().is_cancelled());
+    let mut requester = Box::pin(cache.insert("object".to_owned(), download(0, 100)));
+    // On the current-thread runtime, one poll spawns the owner without letting it run yet.
     assert!(
-        cache.disk.arenas[0]
-            .allocator
-            .reserve(CHUNK_BYTES - BLOCK_BYTES)
-            .is_none()
+        std::future::poll_fn(|cx| Poll::Ready(requester.as_mut().poll(cx)))
+            .await
+            .is_pending()
     );
+    drop(requester);
     assert!(cache.get(&"object".to_owned(), range(0, 1)).await.is_none());
-    drop(index_pages);
     let bytes = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(bytes) = cache.get(&"object".to_owned(), range(0, 100)).await {
@@ -439,7 +549,7 @@ async fn canceled_requester_does_not_abort_the_reservation_owner() {
 
 #[tokio::test]
 async fn readers_keep_replaced_payload_reserved_but_results_do_not() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
     let key = "object".to_owned();
     cache.insert(key.clone(), download(5, 100)).await.unwrap();
     let (guard, payload_checksum) = {
@@ -451,20 +561,17 @@ async fn readers_keep_replaced_payload_reserved_but_results_do_not() {
     cache.insert(key.clone(), download(0, 200)).await.unwrap();
     let bytes = cache.disk.file.read_at(guard.range().start, PAGE_BYTES).await.unwrap();
     assert_eq!(blake3::hash(&bytes[..100]), payload_checksum);
-    let reserved = cache.disk.arenas[0].allocator.reserve(BLOCK_BYTES).unwrap();
-    assert_ne!(reserved[0].range(), guard.range());
-    drop(reserved);
-    let old = guard.range();
+    assert!(cache.disk.arenas[0].allocator.reserve_chunks(1).is_none());
     drop(guard);
-    let reused = cache.disk.arenas[0].allocator.reserve(BLOCK_BYTES).unwrap();
-    assert_eq!(reused[0].range(), old);
+    let reused = cache.disk.arenas[0].allocator.reserve_chunks(1).unwrap();
+    assert_eq!(reused[0].range(), 0..CHUNK_BYTES);
     assert_eq!(result, download(6, 1).bytes());
 }
 
 #[tokio::test]
 async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
     for stale in [false, true] {
-        let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+        let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
         let key = "object".to_owned();
         cache.insert(key.clone(), download(3, 50)).await.unwrap();
         let (payload, _) = entry_disk_ranges(&cache, &key);
@@ -515,51 +622,44 @@ async fn a_short_read_is_a_miss_not_unverified_bytes() {
 }
 
 #[tokio::test]
-async fn failed_payload_or_entry_metadata_writes_quarantine_storage_without_publication() {
-    for fail_entry_metadata in [false, true] {
-        let capacity = if fail_entry_metadata {
-            CHUNK_BYTES
-        } else {
-            2 * CHUNK_BYTES
-        };
-        let (_directory, mut cache) = open_test_cache(capacity).await;
-        // Inject an allocator/file bounds mismatch. In both cases real writes complete before a
-        // later write fails: a second payload region, or the entry metadata after a complete payload.
-        let start = if fail_entry_metadata { 0 } else { CHUNK_BYTES };
-        Arc::get_mut(&mut cache.disk).unwrap().arenas[0].allocator =
-            DiskAllocator::for_disk_range(start..start + 2 * CHUNK_BYTES).unwrap();
-        let length = BLOCK_BYTES as usize * if fail_entry_metadata { 255 } else { 256 };
-        assert!(matches!(
-            cache.insert("object".to_owned(), download(0, length)).await,
-            Err(DiskRangeCacheError::DataFile(DataFileError::OutOfBounds { .. }))
-        ));
-        assert!(cache.get(&"object".to_owned(), range(0, 1)).await.is_none());
-        assert!(
-            cache.disk.arenas[0]
-                .allocator
-                .reserve(2 * (CHUNK_BYTES - BLOCK_BYTES))
-                .is_none()
-        );
-        let first_page = cache.disk.file.read_at(start + BLOCK_BYTES, PAGE_BYTES).await.unwrap();
-        assert_eq!(first_page, download(0, BLOCK_BYTES as usize).bytes());
-    }
+async fn failed_chunk_write_quarantines_the_batch_without_publication() {
+    let (_directory, mut cache) = open_test_cache(CHUNK_BYTES).await;
+    // First chunk succeeds, second is outside the real file. Even the complete small entry
+    // in the first chunk must remain unpublished when its shard's batch fails.
+    Arc::get_mut(&mut cache.disk).unwrap().arenas[0].allocator =
+        DiskAllocator::for_disk_range(0..2 * CHUNK_BYTES).unwrap();
+    assert!(matches!(
+        cache
+            .insert_batch(vec![
+                ("small".to_owned(), download(0, 1)),
+                ("large".to_owned(), download(0, CHUNK_BYTES as usize)),
+            ])
+            .await,
+        Err(DiskRangeCacheError::DataFile(DataFileError::OutOfBounds { .. }))
+    ));
+    assert!(cache.get(&"small".to_owned(), range(0, 1)).await.is_none());
+    assert!(cache.get(&"large".to_owned(), range(0, 1)).await.is_none());
+    assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), 0);
+    let index_page = cache.disk.file.read_at(0, PAGE_BYTES).await.unwrap();
+    assert_eq!(&index_page[88..96], page_format::ENTRY_METADATA_INDEX_PAGE_TAG);
 }
 
-#[tokio::test]
-async fn disabled_entry_metadata_index_writes_prevent_publication() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    cache.disk.arenas[0].entry_metadata_index.lock().await.writes_enabled = false;
-    assert!(matches!(
-        cache.insert("object".to_owned(), download(0, 100)).await,
-        Err(DiskRangeCacheError::EntryMetadataIndexWritesDisabled)
-    ));
-    assert!(cache.get(&"object".to_owned(), range(0, 1)).await.is_none());
-    assert!(
-        cache.disk.arenas[0]
-            .allocator
-            .reserve(CHUNK_BYTES - BLOCK_BYTES)
-            .is_none()
+#[test]
+fn abandoned_chunk_write_owner_quarantines_shared_storage() {
+    let allocator = DiskAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
+    let mut batch = UnwrittenBatch::default();
+    batch.push(&allocator, "a".to_owned(), download(0, 10));
+    batch.push(&allocator, "b".to_owned(), download(0, 10));
+    let unfinished = UnfinishedChunkWrites(
+        batch
+            .chunks
+            .iter()
+            .map(|chunk| chunk.region.slice(chunk.region.range()))
+            .collect(),
     );
+    drop(unfinished);
+    drop(batch);
+    assert_eq!(allocator.available_bytes(), 0);
 }
 
 #[tokio::test]
@@ -605,9 +705,13 @@ async fn arenas_are_disjoint_and_reopening_intentionally_starts_empty() {
                 .unwrap()
         })
         .collect();
-    for key in &keys {
-        assert!(cache.insert(key.clone(), download(0, 100)).await.unwrap());
-    }
+    assert_eq!(
+        cache
+            .insert_batch(keys.iter().map(|key| (key.clone(), download(0, 100))).collect())
+            .await
+            .unwrap(),
+        2
+    );
     let first = entry_disk_ranges(&cache, &keys[0]).0;
     let second = entry_disk_ranges(&cache, &keys[1]).0;
     assert!(first.last().unwrap().end <= 128 * CHUNK_BYTES);
@@ -641,7 +745,7 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
                         object_range: range(0, 3),
                         payload_checksum: blake3::hash(replacement),
                         payload_regions: Vec::new(),
-                        entry_metadata_regions: Vec::new(),
+                        _entry_metadata_regions: Vec::new(),
                     },
                 )]),
             )]),

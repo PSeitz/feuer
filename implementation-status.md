@@ -14,7 +14,7 @@ but is not integrated with public lookup or population and does not recover entr
 | `feuer` | Cloneable `TieredMemoryDiskCache`, one soft memory target, per-call asynchronous `get_or_fetch`, typed callback and validation errors | Disk lifecycle, I/O mode selection, and tier orchestration |
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range | None for the current public type boundary |
 | `feuer-memory` | Sharded covering-range index, bounded exact access evidence, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
-| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, experimental sharded `DiskRangeCache` with aligned entries sharing 1-MiB chunks, entry metadata writes, whole-entry checksums and guarded reuse | Pressure eviction, recovery, buffered mode, comparative allocator measurements |
+| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, experimental sharded `DiskRangeCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums and guarded whole-chunk reuse | Pressure eviction, recovery, buffered mode, comparative allocator measurements |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
 
 ## Implemented behavior
@@ -95,30 +95,33 @@ This is a raw I/O layer, not a disk cache or population queue. Disk storage and 
 ## In progress: disk range-cache prototype
 
 [`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) specifies the experimental layout and
-remaining crash/recovery questions. `DiskRangeCache::insert` reserves payload and entry metadata storage, writes
-both plus an embedded entry metadata index, then publishes after containment revalidation. Full keys and exact
+remaining crash/recovery questions. `DiskRangeCache::insert_batch` groups smaller entries together within each
+shard, assembles whole chunks including entry metadata and discovery bitmaps, writes each chunk once, and then
+publishes after containment revalidation. Partial final chunks are finalized too; later batches cannot fill them. Full keys and exact
 object ranges map to ordered physical regions. Payload bytes have no interleaved headers. Entry metadata stores
 one BLAKE3 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
 entry while copying only requested bytes into the result. It does not read neighboring entries or metadata.
 
-Independent arenas have their own allocator, range-index lock and serialized index-page writes. The allocator
-uses 1-MiB chunks, reserved 4-KiB index pages, sparse 4-KiB subdivision and coalesced free-chunk runs. Read guards
-delay reuse after replacement/invalidation. Detached writer tasks retain reservations despite caller
-cancellation; write errors or abandoned owner tasks conservatively quarantine their allocations.
+Independent arenas have their own allocator and range-index lock. The allocator tracks only coalesced free
+whole-chunk runs. There is no persistent bitmap map or async index-write lock. Written chunks remain immutable;
+all entry owners and read guards must release a chunk before reuse. Detached writer tasks retain reservations
+despite caller cancellation; write errors or abandoned owners during I/O quarantine the shard's batch chunks.
+Publication is not transactional across shards. Callers bound batch memory and concurrency.
 
-Entries share 1-MiB chunks but have independent 4-KiB-aligned allocations. Small entries cost at least 4 KiB of
-payload storage plus 4 KiB of entry metadata storage; metadata for different entries is not packed together.
+Entries within a batch share 1-MiB chunks with 4-KiB-aligned storage. Small entries use at least 4 KiB of payload
+plus 4 KiB of metadata inside their batch's chunks. Metadata pages are not shared between entries. A single-entry
+batch costs at least one chunk; removed entries leave holes that cannot be reused individually.
 The v3 format uses a checksum over the complete entry metadata and a bitmap of entry metadata starts,
 without write IDs or generation counters.
 Read invalidation compares expected payload checksums; discarding a newer identical copy is an allowed miss.
 Reopening deliberately starts empty and logs the reset. Recovery, pressure eviction, and the bounded
 memory-to-disk queue remain unimplemented. No comparative layout/performance claim is established.
 
-The 21 range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
-cancellation, corruption/reused payload, partial write failure, metadata capacity, disjoint arenas, aligned
-entries sharing one chunk, independent reuse, fragmented payloads and whole-entry validation of 100-MiB subrange
-hits. A 1-KiB hit succeeds with only its aligned payload block readable; unrelated entries and metadata are not
-loaded. On `m8g-32cpu-local-ssd`, all 57 storage tests and all 117 workspace tests passed with real direct I/O
+The 24 range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
+cancellation, corruption/reused payload, partial batch failure, metadata-only chunks, disjoint arenas,
+mixed-size packing, finalized discovery bitmaps, whole-chunk ownership/reuse, fragmented chunks and whole-entry
+validation of 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable;
+unrelated entries and metadata are not loaded. On `m8g-32cpu-local-ssd`, all 56 storage tests and all 116 workspace tests passed with real direct I/O
 and io_uring on the local ext4 SSD. Storage Clippy passed with warnings denied; formatting and whitespace
 checks passed for the changed files.
 

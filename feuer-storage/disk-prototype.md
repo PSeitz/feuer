@@ -5,25 +5,31 @@ Experimental `DiskRangeCache` in `feuer-storage`, not a selected production desi
 
 ## Implemented slice
 
-`src/range_cache.rs` connects the two-level allocator to a sharded covering-range index and real `DataFile`
-I/O. `open`, `insert`, and `get` are available independently of the public cache. Insert returns false for
-contained downloads or insufficient arena space. Get returns exact requested bytes or a miss on uncertainty.
+`src/range_cache.rs` connects whole-chunk allocation to a sharded covering-range index and real `DataFile`
+I/O. `open`, `insert_batch`, and `get` are available independently of the public cache. Insertion accepts an
+explicit `Vec<(ObjectKey, Download)>` and returns the number of entries published. Contained entries and
+entries that do not fit are skipped. Get returns exact requested bytes or a miss on uncertainty.
 Neither operation records accesses; that belongs to later tier orchestration.
 
-An insertion reserves both payload and entry metadata storage, writes plain payload bytes and the entry metadata
-chain, then updates the embedded entry metadata index. Only successful writes may publish an in-memory mapping, after
-containment revalidation. Broader entries replace contained entries; partial overlaps coexist. Reads acquire
-`DiskRegionReadGuard`s before releasing the range-index lock. Returned `Bytes` retain no disk ownership.
+Within each shard, a batch sorts entries by payload size, smallest first, to group small entries together.
+It reserves whole chunks and assembles payload, entry metadata chains, and discovery bitmaps in memory.
+Each complete 1-MiB chunk is written once, including its index page and zero-filled unused space.
+Partially filled final chunks are written too; later batches cannot append to them. A single-entry batch
+therefore costs at least one chunk. There is no background batching or flush timer.
 
-A detached owner task keeps reservations through write completion despite requester cancellation. Any write
-error or unexpected owner-task drop conservatively quarantines its allocations, including when completion
-might be known; error classification can be refined later. A failed/abandoned embedded-index write disables
-further index writes in that arena. Payload writes and reads do not hold the index-page write mutex.
+All chunk writes for a shard finish before any of its batch entries publish. Publication rechecks containment,
+with larger entries published first. Broader entries replace contained entries; partial overlaps coexist.
+Publication is not transactional across shards: earlier shards may publish before a later shard fails.
+Reads acquire `DiskRegionReadGuard`s before releasing the range-index lock. Returned `Bytes` retain no disk ownership.
 
-Entries share 1-MiB chunks, with independently owned 4-KiB-aligned allocations. There is no pressure eviction
-or write batching yet. Released storage is reused after redundant publication, broader replacement, or
-corruption invalidation, subject to outstanding read guards. Callers must bound population concurrency;
-the future memory-to-disk queue remains separate.
+A detached owner task retains chunk reservations through I/O despite requester cancellation. A write error or
+unexpected drop during I/O conservatively quarantines all chunks in that shard's batch. This includes completed
+or not-yet-submitted chunks; error classification can be refined later. Unwritten reservations can be released
+normally. Distinct batches own disjoint chunks, so there is no shared-index write lock or persistent bitmap map.
+
+Removing an entry never frees a hole inside a written chunk. The whole chunk becomes reusable only after all
+entry owners and read guards release it. Pressure eviction is not implemented. Callers must bound batch size
+and concurrency, including memory for complete chunk buffers; the future memory-to-disk queue remains separate.
 
 **Every open deliberately starts empty and logs this reset. Recovery is not implemented.** Persisting the
 metadata connection now is not a promise that these entries survive reopen or that this format is final.
@@ -32,24 +38,24 @@ metadata connection now is not a promise that these entries survive reopen or th
 
 - The file is divided into 1-MiB chunks. Each starts with a permanently reserved 4-KiB embedded index page;
   255 blocks remain for payload and entry metadata. File capacity must be a positive multiple of 1 MiB.
-- Whole free chunks are tracked as coalesced runs. Only partly free chunks need a 256-bit free-block bitmap.
-  When the last allocated payload/entry metadata block is released, the chunk rejoins the whole-chunk pool.
-- Large allocations take multiple chunks. Tails use 4-KiB blocks shared at chunk granularity with other entries.
-  Scattered free blocks may satisfy an allocation without relocation, at the cost of more mapping records.
+- Whole free chunks are tracked as coalesced runs. There are no free-block bitmaps or partial-chunk reuse.
+  A chunk returns to the free pool only when its last entry region or read guard is released.
+- Large entries can span nonadjacent chunks. Entries in one batch can share a chunk, including a large entry's
+  partial chunk. `DiskRegion` subranges share ownership of their containing whole-chunk reservation.
 - The current private arena count is `clamp(capacity / 128 MiB, 1, 64)`. Each arena owns disjoint whole chunks,
-  an allocator mutex, a range-index mutex and an asynchronous index-write mutex. Full-key hashing selects an
-  arena; full-key equality selects entries. There is no cache-wide metadata mutex.
+  an allocator mutex and a range-index mutex. Full-key hashing selects an arena; full-key equality selects
+  entries. There is no cache-wide metadata mutex and no metadata lock held across I/O.
 - This split is experimental: an entry may fail admission in its arena while other arenas have free space.
   The in-memory shard hash is not an on-disk identity and is not stable across Rust releases.
-- Each entry's payload starts and allocated length are 4-KiB-aligned. Different entries never share an aligned
-  write area, so replacing one does not require rewriting its neighbors. The minimum cost is 4 KiB of payload
-  storage plus one 4-KiB entry metadata page; metadata for different entries is not packed together yet.
+- Each entry's payload starts and allocated length are 4-KiB-aligned. Replacements use fresh chunks; existing
+  chunks remain unchanged. Each small entry uses at least 4 KiB of payload plus one 4-KiB metadata page inside
+  its batch's chunks. Metadata for different entries is not packed into shared metadata pages yet.
 
 ## Plain payload and per-entry checksums
 
-Payload is stored unchanged, with no interleaved headers or per-page checksums. Only the last 4-KiB alignment block
-is zero-padded. Complete regions use slices of the source buffer for writes; the raw direct-I/O layer still
-copies into aligned I/O buffers. A final partial region is padded separately.
+Payload is stored unchanged, with no interleaved headers or per-page checksums. Final alignment padding and
+unused chunk space are zero-filled. Payload is copied into complete chunk buffers; the raw direct-I/O layer
+then copies those into aligned I/O buffers. Batch buffers are outside the raw I/O queue's memory budget.
 
 Entry metadata stores a 32-byte BLAKE3 checksum over exactly its entry's payload, excluding alignment padding.
 The in-memory entry index retains that expected checksum. Every hit reads and hashes the entire covering entry
@@ -86,32 +92,32 @@ and physical mappings. A future decoder must check this checksum over the assemb
 validate each page independently.
 
 Each embedded index contains a 256-bit bitmap of entry metadata starts, with bit zero unused. Bit `i` identifies
-candidate entry metadata at `chunk_start + i * 4096`. Index-page updates are serialized within their arena.
-Bits are not currently cleared when an entry is removed. These are recovery candidates, not a persistent
-free-space map or proof of liveness. A reused address may contain different valid entry metadata; its complete
-metadata and payload must be validated on their own merits, with ownership conflicts rejected.
+candidate entry metadata at `chunk_start + i * 4096`. The bitmap is temporary chunk-construction state,
+finalized before that chunk's only write. Payload-continuation chunks without metadata starts have an empty
+bitmap. Removing an entry does not modify its chunk or bitmap. Bits identify recovery candidates, not liveness.
+Whole-chunk reuse writes a completely new chunk, including a new bitmap.
 
-Runtime allocation uses owned regions, not stale index bits. Opening deliberately starts with an empty
-in-memory index and writes an empty first entry metadata index, but does not clear every index in the file.
-This is not a durable reset protocol for future recovery.
+Runtime allocation uses shared chunk ownership, not index bits. Opening starts with an empty in-memory lookup
+index without writing or clearing old metadata. This is not a durable reset protocol for future recovery.
 
 ## Crash/reuse rules and remaining recovery work
 
-Writes complete in payload → entry metadata → embedded-index order before runtime publication. **Completion is
-not persistence order.** There are no durability barriers. A valid embedded-index checksum does not prove that
-its entry metadata or payload persisted. Recovery must not simply trust these index slots and reserve their mappings.
+Each chunk write includes its discovery index, payload and entry metadata. **A chunk write is not atomic or
+a durability barrier.** A valid index checksum does not prove that entry metadata or payload persisted, even
+within the same write. Multi-chunk entries can also be partially persisted. Recovery must not simply trust
+index bits and reserve their mappings.
 
 The connected format makes the next recovery prototype possible: scan embedded index pages, check their
 version, address and bitmap checksum, then traverse each candidate's checksummed entry metadata chain without
 scanning payload. Verify the complete-entry-metadata checksum before trusting its key, range, or mappings.
 Before admitting candidates, validate all lengths, arithmetic, pointers, ordinals, chain termination,
-file/arena bounds, full keys, ranges, and ownership conflicts. Reconstructed occupancy must protect both
-payload and entry metadata storage. Stale index bits identifying reused addresses must never authorize
+file/arena bounds, full keys, ranges, and ownership conflicts. Reconstructed occupancy must protect whole
+chunks containing either payload or entry metadata, allowing disjoint live entries to share a chunk. Stale index bits identifying reused addresses must never authorize
 conflicting allocations. Payload integrity remains checked against the entry metadata's expected whole-entry
 checksum at read time; stale mappings to different payload bytes cannot pass that check.
 
 The next slice must decide and test the exact acceptance/ordering rules for new index bits with missing payload,
-old index bits with reused payload, conflicting entry metadata chains, torn index updates, and restart after reuse.
+old index bits with reused payload, conflicting entry metadata chains, torn chunk writes, and restart after reuse.
 This may require format changes or persistence barriers; none of those crash guarantees is established by the
 current runtime tests. A future recovery implementation must reset unsupported or structurally uncertain
 formats safely.
@@ -121,8 +127,10 @@ formats safely.
 The reserved index pages alone cost 0.390625% of capacity. At 40 TiB, scanning them would read 160 GiB before
 reading entry metadata. Payload has no header overhead and wastes at most 4,095 alignment bytes per entry.
 Entry metadata still costs at least 4 KiB per entry, including a 32-byte payload checksum, and fragmented payloads
-need more mapping records. Metadata packing and read amplification need measurement; none of these choices
-is benchmark-selected. Sparse empty-arena accounting is not a claim of bounded live-index memory.
+need more mapping records. Partially filled final chunks consume their full size, and holes left by removed
+entries remain unavailable until whole-chunk reclamation. Batch buffers consume additional memory proportional
+to their reserved chunks. Batch utilization, metadata packing, and read/write amplification need measurement;
+none of these choices is benchmark-selected. Sparse empty-arena accounting does not bound live-index memory.
 
 Run on Linux with real io_uring/direct I/O and a freshly created test directory:
 
@@ -133,8 +141,9 @@ TMPDIR=/mnt/local-ssd/<isolated-test-directory> cargo test --locked -p feuer-sto
 
 Tests on `m8g-32cpu-local-ssd` use the local ext4 SSD. They cover allocation/reuse, long-key linked entry metadata,
 full-key range lookup, containment races, caller cancellation, corruption/reused payload, partial population
-failure, charged metadata capacity, disjoint arenas, aligned entries sharing a chunk, fragmented payloads, and
-whole-entry validation of 100-MiB subrange hits. A truncated-file test verifies that a 1-KiB entry read does not
+failure, charged metadata capacity, disjoint arenas, mixed-size batches, finalized discovery bitmaps,
+whole-chunk reuse delayed by entry owners and readers, fragmented chunks, and whole-entry validation of
+100-MiB subrange hits. A truncated-file test verifies that a 1-KiB entry read does not
 require its entry metadata or the rest of the chunk. Reopen tests assert the current intentional empty reset,
 not recovery. Injected bounds failures exercise a successful write
 followed by a failed write; actual device power-loss and torn-persistence tests remain outstanding.
