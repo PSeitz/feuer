@@ -1,18 +1,12 @@
-mod access_history;
 mod range_trim;
 mod shard;
 #[cfg(test)]
 mod tests;
 
-use std::{
-    collections::hash_map::DefaultHasher,
-    fmt,
-    hash::{Hash, Hasher},
-    sync::Arc,
-};
+use std::{fmt, sync::Arc};
 
 use bytes::Bytes;
-use feuer_types::{ByteRange, Download, ObjectKey};
+use feuer_types::{ByteRange, Download, ObjectKey, retention::ObjectAccessHistories};
 use parking_lot::Mutex;
 
 use self::shard::{AdmissionProgress, MemoryCacheShard};
@@ -43,6 +37,7 @@ pub struct MemoryCache {
     capacity: u64,
     /// Independently locked partitions selected by complete object identity.
     shards: Box<[Mutex<MemoryCacheShard>]>,
+    access_histories: Arc<ObjectAccessHistories>,
 }
 
 impl fmt::Debug for MemoryCache {
@@ -75,15 +70,26 @@ impl MemoryCache {
 
     fn with_shard_count(capacity: u64, metrics: Arc<MemoryMetrics>, shard_count: usize) -> Self {
         assert!(shard_count > 0, "memory cache requires at least one shard");
+        let access_histories = Arc::new(ObjectAccessHistories::new(shard_count));
         let shards = (0..shard_count)
             .map(|index| {
                 Mutex::new(MemoryCacheShard::new(
                     shard_capacity_for(capacity, shard_count, index),
                     metrics.clone(),
+                    access_histories.clone(),
                 ))
             })
             .collect();
-        Self { capacity, shards }
+        Self {
+            capacity,
+            shards,
+            access_histories,
+        }
+    }
+
+    /// Shared per-object evidence for attaching a disk tier to this memory cache.
+    pub fn access_histories(&self) -> Arc<ObjectAccessHistories> {
+        self.access_histories.clone()
     }
 
     /// Returns the configured soft payload-byte target.
@@ -180,9 +186,7 @@ impl MemoryCache {
     ///
     /// The hash is not stable across Rust releases and must never be persisted.
     fn shard_index(&self, object_key: &ObjectKey) -> usize {
-        let mut hasher = DefaultHasher::new();
-        object_key.hash(&mut hasher);
-        (hasher.finish() % self.shards.len() as u64) as usize
+        self.access_histories.shard_index(object_key)
     }
 
     #[cfg(test)]

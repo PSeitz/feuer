@@ -12,9 +12,9 @@ but is not integrated with public lookup or population and does not recover entr
 | Area | Implemented | Remaining |
 | --- | --- | --- |
 | `feuer` | Cloneable `TieredMemoryDiskCache`, one soft memory target, per-call asynchronous `get_or_fetch`, typed callback and validation errors | Disk lifecycle, I/O mode selection, and tier orchestration |
-| `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range | None for the current public type boundary |
-| `feuer-memory` | Sharded covering-range index, bounded exact access evidence, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
-| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, experimental sharded `DiskRangeCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums and guarded whole-chunk reuse | Pressure eviction, recovery, buffered mode, comparative allocator measurements |
+| `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range, internal shared access evidence and value comparison | None for the current public type boundary |
+| `feuer-memory` | Sharded covering-range index, bounded exact access evidence shared with disk, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
+| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, experimental sharded `DiskRangeCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, guarded whole-chunk reuse and bounded value-aware entry eviction | Recovery, buffered mode, retention-policy evaluation, comparative allocator measurements |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
 
 ## Implemented behavior
@@ -36,7 +36,9 @@ but is not integrated with public lookup or population and does not recover entr
 ### Memory retention and compaction
 
 - Each key retains at most 64 exact, repeated access events. Events expire after 32,768 later successful
-  same-shard accesses; removing the key's last cached range releases its metadata. Wall-clock aging is not
+  same-shard accesses. Both tiers use the shared history and cost calculation in `feuer-types::retention`.
+  Evidence survives memory eviction while disk entries or active population retain it; releasing the final
+  owner removes the weak registry record. Histories are volatile, not persisted. Wall-clock aging is not
   implemented.
 - Each event contributes 10,000,000 fixed-cost-equivalent bytes plus its requested bytes. Only cached ranges
   covering the exact event receive credit.
@@ -48,8 +50,8 @@ but is not integrated with public lookup or population and does not recover entr
 - Compaction merges only overlapping or adjacent observed intervals and copies them into independent `Bytes`.
   It preserves exact coverage, updates accounting and metrics, creates no access, and leaves caller-held
   slices valid.
-- Copying happens outside the shard lock. Generation checks reject output invalidated by concurrent access or
-  same-object structural changes; admission falls back to eviction.
+- Copying happens outside the shard lock. Generation checks reject output invalidated by concurrent access
+  through either tier or same-object structural changes; admission falls back to eviction.
 
 There is no periodic compaction, separate prefetch-promotion state, or public policy configuration.
 
@@ -86,6 +88,14 @@ This is a raw I/O layer, not a disk cache or population queue. Disk storage and 
 - [Memory results](benchmarks/memory/results.md) cover configured targets from 256 MiB through 32 GiB and
   report request/source-cost hit rates, actual retained memory, throughput, and shard-count sensitivity.
   These results do not establish general or tiered superiority over Foyer.
+- The complete memory gate was rerun after sharing access evidence (eight capacities through 32 GiB, exact
+  and expanded downloads, 1/4/16/64 shards). All hit counts, hit bytes, source GETs/bytes and retained-payload
+  values matched the preceding implementation across all 256 engine rows. In this single same-host comparison,
+  Feuer's median elapsed-time ratio across its 64 cases was 1.153 (about 15% slower); the native Foyer medians
+  were approximately unchanged. Shared evidence adds synchronization and metadata; this is not a throughput
+  improvement. CSV artifacts on `m8g-32cpu-local-ssd` are
+  `/mnt/local-ssd/feuer-value.BkkxPo/memory-gate.csv` and
+  `/mnt/local-ssd/feuer-pressure.RgwqyQ/memory-baseline.csv`.
 - Storage tests cover independent read/write queue capacity and progress, mixed concurrency,
   caller-serialized shared pages, bounds, short I/O, cancellation, and reopening.
 - The [direct-I/O smoke benchmark](benchmarks/storage/README.md) measures the driver on the local SSD, not
@@ -108,21 +118,32 @@ all entry owners and read guards must release a chunk before reuse. Detached wri
 despite caller cancellation; write errors or abandoned owners during I/O quarantine the shard's batch chunks.
 Publication is not transactional across shards. Callers bound batch memory and concurrency.
 
-Entries within a batch share 1-MiB chunks with 4-KiB-aligned storage. Small entries use at least 4 KiB of payload
+Entries within a batch share 1-MiB chunks with 4-KiB-aligned storage only when each entry's complete payload
+and metadata fit inside that chunk. Multi-chunk entries own their chunks exclusively, including unused tails. Small entries use at least 4 KiB of payload
 plus 4 KiB of metadata inside their batch's chunks. Metadata pages are not shared between entries. A single-entry
 batch costs at least one chunk; removed entries leave holes that cannot be reused individually.
 The v3 format uses a checksum over the complete entry metadata and a bitmap of entry metadata starts,
 without write IDs or generation counters.
 Read invalidation compares expected payload checksums; discarding a newer identical copy is an allowed miss.
-Reopening deliberately starts empty and logs the reset. Recovery, pressure eviction, and the bounded
-memory-to-disk queue remain unimplemented. No comparative layout/performance claim is established.
+Pressure eviction samples up to 64 live entries and selects the lowest recent retrieval value per payload
+byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.
+Alignment, metadata and chunk overhead do not enter the score. Only selected entries are removed; neighbors
+remain indexed and may keep a partially empty chunk unavailable. No eviction metadata reads are needed.
+Each shard batch is limited to 64 sampled decisions and 4,096 removed region references. Guarded or active
+storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
+standalone disk cache to a memory cache's evidence; public tier orchestration is still pending.
+Reopening deliberately starts empty and logs the reset. Recovery and the bounded memory-to-disk queue remain
+unimplemented. No comparative layout/performance claim is established.
 
-The 24 range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
+The range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
 cancellation, corruption/reused payload, partial batch failure, metadata-only chunks, disjoint arenas,
-mixed-size packing, finalized discovery bitmaps, whole-chunk ownership/reuse, fragmented chunks and whole-entry
+mixed-size packing, exclusive multi-chunk ownership, finalized discovery bitmaps, whole-chunk ownership/reuse,
+bounded value-aware entry eviction, shared evidence across tiers, payload-only scoring, mixed-size churn,
+concurrent eviction/reads,
+fragmented chunks and whole-entry
 validation of 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable;
-unrelated entries and metadata are not loaded. On `m8g-32cpu-local-ssd`, all 56 storage tests and all 116 workspace tests passed with real direct I/O
-and io_uring on the local ext4 SSD. Storage Clippy passed with warnings denied; formatting and whitespace
+unrelated entries and metadata are not loaded. On `m8g-32cpu-local-ssd`, all 71 storage tests and all 135 workspace tests passed with real direct I/O
+and io_uring on the local ext4 SSD. Workspace Clippy passed with warnings denied; formatting and whitespace
 checks passed for the changed files.
 
 ## Later: best-effort disk scheduling
@@ -143,7 +164,7 @@ Scheduling must integrate with `DiskRangeCache` before the public cache can serv
 - Add `PayloadIoMode::Buffered` and `PayloadIoMode::Direct`, integrating the existing driver without silent
   backend fallback.
 - Keep requested and downloaded ranges arbitrary and unaligned; physical entry allocations are 4-KiB-aligned.
-- Add pressure eviction to the allocator and guarded-reuse prototype.
+- Evaluate sampled value-aware disk eviction, payload-only scoring and partially empty chunk utilization.
 - Bound allocation work, fragmentation reclamation, rewrite traffic, metadata, and physical capacity at the
   contract's target scale of at least 30 TiB; avoid a cache-wide hot lock.
 

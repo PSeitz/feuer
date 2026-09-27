@@ -1,19 +1,17 @@
 use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
 
 use bytes::Bytes;
-use feuer_types::{ByteRange, ObjectKey};
+use feuer_types::{
+    ByteRange, ObjectKey,
+    retention::{ObjectAccessHistories, ObjectAccessHistory, compare_cost_per_byte, sample_candidates},
+};
 use rustc_hash::FxHashMap;
 
-use super::{
-    access_history::RangeAccessHistory,
-    range_trim::{RangeTrimPlan, plan_range_trim},
-};
+use super::range_trim::{RangeTrimPlan, plan_range_trim};
 use crate::MemoryMetrics;
 
 /// Successful shard-local accesses allowed before a cached range can be trimmed.
 pub(super) const RANGE_TRIM_GRACE_ACCESSES: u64 = 64;
-/// Maximum entries inspected for one pressure decision.
-const RECLAIM_SAMPLE_SIZE: usize = 64;
 
 /// One retained downloaded range.
 struct CachedRange {
@@ -45,13 +43,12 @@ impl CachedRange {
 /// No cached range fully contains another. Partial overlaps remain indexed.
 /// Because starts and ends both increase, the predecessor of a request start
 /// is the only possible covering entry.
-#[derive(Default)]
 struct ObjectCachedRanges {
     /// Entries ordered by exact start for predecessor-based covering lookup.
     by_start: BTreeMap<u64, CachedRange>,
-    /// Exact access history shared by this object's cached ranges.
-    accesses: RangeAccessHistory,
-    /// Structural and access generation used by copy-outside-lock range trimming.
+    /// Exact access history shared by this object's memory and disk ranges.
+    accesses: Arc<ObjectAccessHistory>,
+    /// Structural generation used by copy-outside-lock range trimming.
     object_generation: u64,
 }
 
@@ -64,7 +61,6 @@ impl ObjectCachedRanges {
     fn record_covering_access<R>(
         &mut self,
         requested: ByteRange,
-        access_clock: u64,
         project: impl FnOnce(&CachedRange) -> R,
     ) -> Option<R> {
         let projected = {
@@ -74,8 +70,7 @@ impl ObjectCachedRanges {
             }
             project(entry)
         };
-        self.object_generation = self.object_generation.saturating_add(1);
-        self.accesses.record(requested, access_clock);
+        self.accesses.record(requested);
         Some(projected)
     }
 
@@ -142,13 +137,7 @@ impl ReclaimCandidateRing {
     }
 
     fn sample(&mut self) -> (usize, usize) {
-        let count = self.entries.len().min(RECLAIM_SAMPLE_SIZE);
-        if count == 0 {
-            return (0, 0);
-        }
-        let start = self.cursor % self.entries.len();
-        self.cursor = (start + count) % self.entries.len();
-        (start, count)
+        sample_candidates(&mut self.cursor, self.entries.len())
     }
 }
 
@@ -167,6 +156,7 @@ pub(super) struct RangeTrimSource {
     start: u64,
     id: u64,
     object_generation: u64,
+    access_generation: u64,
     plan: RangeTrimPlan,
     source_bytes: Bytes,
 }
@@ -191,6 +181,7 @@ impl RangeTrimSource {
             start: self.start,
             id: self.id,
             object_generation: self.object_generation,
+            access_generation: self.access_generation,
             plan: self.plan,
             retained_payloads,
         }
@@ -203,6 +194,7 @@ pub(super) struct RangeTrimReplacement {
     start: u64,
     id: u64,
     object_generation: u64,
+    access_generation: u64,
     plan: RangeTrimPlan,
     retained_payloads: Vec<(ByteRange, Bytes)>,
 }
@@ -219,19 +211,23 @@ pub(super) struct MemoryCacheShard {
     capacity: u64,
     used_bytes: u64,
     ranges: FxHashMap<ObjectKey, ObjectCachedRanges>,
-    access_clock: u64,
+    access_histories: Arc<ObjectAccessHistories>,
     next_entry_id: u64,
     candidates: ReclaimCandidateRing,
     metrics: Arc<MemoryMetrics>,
 }
 
 impl MemoryCacheShard {
-    pub(super) fn new(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self {
+    pub(super) fn new(
+        capacity: u64,
+        metrics: Arc<MemoryMetrics>,
+        access_histories: Arc<ObjectAccessHistories>,
+    ) -> Self {
         Self {
             capacity,
             used_bytes: 0,
             ranges: FxHashMap::default(),
-            access_clock: 0,
+            access_histories,
             next_entry_id: 0,
             candidates: ReclaimCandidateRing::default(),
             metrics,
@@ -243,18 +239,14 @@ impl MemoryCacheShard {
     }
 
     pub(super) fn get(&mut self, object_key: &ObjectKey, requested_range: ByteRange) -> Option<Bytes> {
-        let access_clock = self.access_clock.saturating_add(1);
         let accessed = self.ranges.get_mut(object_key).and_then(|entries| {
-            entries.record_covering_access(requested_range, access_clock, |entry| {
-                entry.requested_bytes(requested_range)
-            })
+            entries.record_covering_access(requested_range, |entry| entry.requested_bytes(requested_range))
         });
         let Some(bytes) = accessed else {
             self.metrics.record_lookup(false);
             return None;
         };
 
-        self.access_clock = access_clock;
         self.metrics.record_access();
         self.metrics.record_lookup(true);
         Some(bytes)
@@ -265,10 +257,12 @@ impl MemoryCacheShard {
     }
 
     fn record_successful_access(&mut self, object_key: &ObjectKey, requested_range: ByteRange) {
-        self.access_clock = self.access_clock.saturating_add(1);
-        self.ranges
-            .get_mut(object_key)
-            .and_then(|entries| entries.record_covering_access(requested_range, self.access_clock, |_| ()));
+        if let Some(entries) = self.ranges.get(object_key) {
+            entries.accesses.record(requested_range);
+        } else {
+            // A successful disk-only lookup still contributes to the shared object's evidence.
+            self.access_histories.record_access(object_key, requested_range);
+        }
         self.metrics.record_access();
     }
 
@@ -343,15 +337,22 @@ impl MemoryCacheShard {
             start: range.start(),
             id,
         });
+        let entries = self
+            .ranges
+            .entry(object_key.clone())
+            .or_insert_with(|| ObjectCachedRanges {
+                by_start: BTreeMap::new(),
+                accesses: self.access_histories.for_key(&object_key),
+                object_generation: 0,
+            });
         let entry = CachedRange {
             id,
             range,
             bytes,
             candidate_slot,
-            admitted_at_access: self.access_clock,
+            admitted_at_access: entries.accesses.clock(),
         };
 
-        let entries = self.ranges.entry(object_key).or_default();
         entries.object_generation = entries.object_generation.saturating_add(1);
         let replaced = entries.by_start.insert(range.start(), entry);
         debug_assert!(replaced.is_none());
@@ -364,14 +365,17 @@ impl MemoryCacheShard {
             start: range.start(),
             id,
         });
+        let entries = self
+            .ranges
+            .get_mut(object_key)
+            .expect("trimming retains the object's evidence");
         let entry = CachedRange {
             id,
             range,
             bytes,
             candidate_slot,
-            admitted_at_access: self.access_clock,
+            admitted_at_access: entries.accesses.clock(),
         };
-        let entries = self.ranges.entry(object_key.clone()).or_default();
         entries.object_generation = entries.object_generation.saturating_add(1);
         let replaced = entries.by_start.insert(range.start(), entry);
         debug_assert!(replaced.is_none());
@@ -481,7 +485,7 @@ impl MemoryCacheShard {
                 range: entry.range,
                 id: entry.id,
                 retained_bytes: entry.bytes.len() as u64,
-                retrieval_cost: entries.accesses.covered_retrieval_cost(entry.range, self.access_clock),
+                retrieval_cost: entries.accesses.covered_retrieval_cost(entry.range),
             };
             if selected
                 .as_ref()
@@ -504,15 +508,18 @@ impl MemoryCacheShard {
             .get(&candidate.range.start())
             .filter(|entry| entry.id == candidate.id)
             .expect("a selected pressure candidate must identify a live entry");
-        if self.access_clock.saturating_sub(entry.admitted_at_access) < RANGE_TRIM_GRACE_ACCESSES {
+        let history = entries.accesses.lock();
+        let access_clock = entries.accesses.clock();
+        if access_clock.saturating_sub(entry.admitted_at_access) < RANGE_TRIM_GRACE_ACCESSES {
             return None;
         }
-        let plan = plan_range_trim(entry.range, entries.accesses.active_ranges(self.access_clock))?;
+        let plan = plan_range_trim(entry.range, history.active_ranges(access_clock))?;
         Some(RangeTrimSource {
             object_key: candidate.object_key.clone(),
             start: candidate.range.start(),
             id: candidate.id,
             object_generation: entries.object_generation,
+            access_generation: history.generation(),
             plan,
             source_bytes: entry.bytes.clone(),
         })
@@ -520,8 +527,15 @@ impl MemoryCacheShard {
 
     /// Publishes copied range trimming output only if source metadata is unchanged.
     pub(super) fn publish_range_trim(&mut self, replacement: RangeTrimReplacement) -> bool {
+        let Some(entries) = self.ranges.get(&replacement.object_key) else {
+            return false;
+        };
+        let accesses = entries.accesses.clone();
+        // Evidence can change through disk-only requests while payload copying happens outside this lock.
+        let history = accesses.lock();
         let valid = self.ranges.get(&replacement.object_key).is_some_and(|entries| {
-            entries.object_generation == replacement.object_generation
+            history.generation() == replacement.access_generation
+                && entries.object_generation == replacement.object_generation
                 && entries
                     .by_start
                     .get(&replacement.start)
@@ -573,14 +587,18 @@ impl MemoryCacheShard {
 
     #[cfg(test)]
     pub(super) fn accessed_ranges(&self, object_key: &ObjectKey) -> Vec<ByteRange> {
-        self.ranges
-            .get(object_key)
-            .map_or_else(Vec::new, |entries| entries.accesses.ranges())
+        self.ranges.get(object_key).map_or_else(Vec::new, |entries| {
+            entries
+                .accesses
+                .lock()
+                .active_ranges(entries.accesses.clock())
+                .collect()
+        })
     }
 
     #[cfg(test)]
     pub(super) fn access_history_len(&self, object_key: &ObjectKey) -> usize {
-        self.ranges.get(object_key).map_or(0, |entries| entries.accesses.len())
+        self.accessed_ranges(object_key).len()
     }
 
     #[cfg(test)]
@@ -600,10 +618,6 @@ fn compare_retrieval_cost_per_byte(left: &ReclaimCandidate, right: &ReclaimCandi
     .then_with(|| left.id.cmp(&right.id))
     .then_with(|| left.object_key.cmp(&right.object_key))
     .then_with(|| left.range.cmp(&right.range))
-}
-
-fn compare_cost_per_byte(left_cost: u64, left_bytes: u64, right_cost: u64, right_bytes: u64) -> Ordering {
-    (u128::from(left_cost) * u128::from(right_bytes)).cmp(&(u128::from(right_cost) * u128::from(left_bytes)))
 }
 
 impl Drop for MemoryCacheShard {

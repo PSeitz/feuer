@@ -46,17 +46,22 @@ budgets protect read admission from write backlogs. Raw file capacity must be a 
 4 KiB. Above that, an experimental [`DiskRangeCache`](feuer-storage/disk-prototype.md)
 connects allocation, persisted entry metadata, covering-range lookup and integrity-checked subrange reads.
 Explicit batches group small entries into immutable 1-MiB chunks, each written once with its metadata.
-Payload is 4-KiB-aligned with no page headers. Chunks are reused only after all entry owners and readers release them.
+Entries share a chunk only when their complete payload and metadata fit inside it; multi-chunk entries own
+their chunks exclusively. Payload is 4-KiB-aligned with no page headers. Bounded pressure eviction selects
+individual entries by recent retrieval value per payload byte; it does not evict their neighbors as a group.
+Chunks are reused only after all entry owners and readers release them.
 Each entry has one checksum in its metadata; a hit verifies the whole entry and returns only the requested
-bytes without reading neighboring entries. Reopen deliberately starts empty. Pressure eviction, recovery,
-buffered mode and public-cache integration remain unimplemented.
+bytes without reading neighboring entries. Reopen deliberately starts empty. Recovery, buffered mode and
+public-cache integration remain unimplemented.
 
 `feuer-memory` provides a sharded soft-capacity covering-range index with bounded ageable request evidence,
 sampled retrieval-cost-per-byte eviction, a short range-trimming grace, and
 pressure-driven trimming of the selected victim toward observed requests. Its [memory-only comparison](benchmarks/memory/results.md)
 records the current policy baseline. `feuer-types` holds shared range
 foundations, while `feuer-tokio` remains the Tokio/madsim runtime switch. None of these internal
-package boundaries is a public compatibility commitment.
+package boundaries is a public compatibility commitment. The memory and disk policies share volatile
+per-object access evidence and payload-value scoring through `feuer-types::retention`; evidence survives
+memory eviction while disk entries retain it.
 
 ## Development
 

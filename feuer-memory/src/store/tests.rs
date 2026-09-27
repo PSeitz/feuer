@@ -1,11 +1,13 @@
 use std::{sync::Arc, thread};
 
 use bytes::Bytes;
-use feuer_types::{ByteRange, Download, ObjectKey};
+use feuer_types::{
+    ByteRange, Download, ObjectKey,
+    retention::{MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY},
+};
 
 use super::{
     MemoryCache,
-    access_history::{MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY},
     shard::{AdmissionProgress, RANGE_TRIM_GRACE_ACCESSES},
     shard_capacity_for,
 };
@@ -529,7 +531,8 @@ fn copied_range_trim_is_revalidated_before_publication_and_can_fall_back() {
         source.copy_payload()
     };
 
-    cache.record_access(&key, range(6, 8));
+    // Simulate a disk-served request: it changes shared evidence without taking the memory shard lock.
+    cache.access_histories().record_access(&key, range(6, 8));
     assert!(!cache.shards[0].lock().publish_range_trim(replacement));
     assert_eq!(cache.used_bytes(), 10);
     assert!(cache.get(&key, range(6, 8)).is_some());
@@ -551,6 +554,25 @@ fn removing_the_last_cached_range_releases_its_access_history() {
     assert_eq!(access_history_len(&cache, &key), 1);
     assert!(cache.remove(&key, range(0, 1)));
     assert_eq!(access_history_len(&cache, &key), 0);
+}
+
+#[test]
+fn shared_evidence_survives_memory_eviction_and_records_disk_only_requests() {
+    let cache = cache(1);
+    let key = "object".to_owned();
+    cache.insert_and_record(
+        key.clone(),
+        download(range(0, 1), Bytes::from_static(b"a")),
+        range(0, 1),
+    );
+    let disk_owner = cache.access_histories().for_key(&key);
+    assert!(cache.remove(&key, range(0, 1)));
+    cache.record_access(&key, range(10, 11));
+    assert_eq!(disk_owner.lock().generation(), 2);
+    populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
+    assert_eq!(accessed_ranges(&cache, &key), vec![range(0, 1), range(10, 11)]);
+    assert!(cache.get(&key, range(0, 1)).is_some());
+    assert_eq!(disk_owner.lock().generation(), 3);
 }
 
 #[test]

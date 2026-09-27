@@ -17,6 +17,7 @@ pub(super) const CHUNK_BYTES: u64 = 1024 * 1024;
 #[derive(Clone, Debug)]
 pub(super) struct DiskAllocator {
     free: Arc<Mutex<FreeSpace>>,
+    pub(super) chunk_capacity: u64,
 }
 
 #[derive(Debug)]
@@ -79,6 +80,7 @@ impl DiskAllocator {
             return None;
         }
         Some(Self {
+            chunk_capacity: (disk_range.end - disk_range.start) / CHUNK_BYTES,
             free: Arc::new(Mutex::new(FreeSpace {
                 free_chunk_count_by_start: BTreeMap::from([(
                     disk_range.start / CHUNK_BYTES,

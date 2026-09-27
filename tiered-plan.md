@@ -150,10 +150,17 @@ constant. Prefetch and downloaded-range selection are evaluated in a separate en
 charges each strategy for its actual source GETs and downloaded bytes.
 
 The retention objective is expected future source or lower-tier retrieval time avoided per retained footprint,
-not raw object hit rate. The memory-only policy values each exact access at the modeled fixed source-request
-cost plus its requested bytes, then compares recent retrieval value per retained byte. Repeated access must
+not raw object hit rate. The shared policy values each exact access at the modeled fixed source-request
+cost plus its requested bytes, then compares recent retrieval value per retained payload byte. Disk scoring
+uses payload length only; alignment, metadata and chunk overhead still consume physical capacity but do not
+enter the score's denominator. Repeated access must
 increase retention value, stale evidence must eventually expire, and only the exact requested interval receives
 observed-access credit.
+
+Access evidence is held in RAM per object key and shared by both tiers. Each successful lookup records once,
+regardless of its source; disk reads and population do not record additional events. Evidence survives memory
+eviction while a disk entry or active population retains it, and is released after its last owner disappears.
+It is not persisted: recovered entries start without pre-restart access evidence.
 
 Every admission gets a short, deterministic shard-local grace before compaction. Policy keeps no separate
 prefetch-promotion state: bounded exact request evidence drives both retention and compaction. Grace never protects
@@ -243,7 +250,13 @@ its only write. Later batches cannot append to it or reuse holes left by removed
 reusable only after all entry owners and read guards release it. Partially filled final chunks consume their
 full capacity. Payload starts and allocated lengths are rounded to 4 KiB; small entries consume at least
 4 KiB of payload storage plus metadata within their batch's chunks. Large entries may span chunks. Payload
-bytes have no interleaved page headers, and each entry's expected checksum lives in separate metadata. The allocator must handle the full size distribution, reclaim
+bytes have no interleaved page headers, and each entry's expected checksum lives in separate metadata.
+Multiple entries may share a chunk only when each entry's complete payload and metadata fit inside that chunk.
+An entry spanning multiple chunks owns those chunks exclusively; its unused tail cannot hold another entry.
+Disk pressure selects individual entries by sampled retrieval value per payload byte, not all owners of a
+shared chunk together. Removing an entry may free no whole chunk. If bounded eviction cannot reclaim enough
+capacity, population is skipped; still-retained neighbors are not removed merely to empty the chunk.
+The allocator must handle the full size distribution, reclaim
 fragmented capacity with bounded work and rewrite traffic, remain practical at 1-TiB-plus capacities, and
 avoid a cache-wide hot lock. Free-space structures, relocation, and cleaning remain private mechanisms.
 
@@ -341,6 +354,7 @@ The MVP is complete when tests demonstrate that:
 - evicted queued writes cannot later publish stale state, while already-active current writes can complete safely;
 - failed or uncertain disk writes never become disk hits;
 - explicit batches group small entries in immutable 1-MiB chunks with 4-KiB-aligned payload storage;
+- shared chunks contain each entry's complete payload and metadata, while multi-chunk entries own their chunks exclusively;
 - written chunks are neither modified nor reused until all entry owners and read guards release them;
 - allocator stress tests report useful utilization, fragmentation, allocation latency, and rewrite traffic
   across the target size distribution;

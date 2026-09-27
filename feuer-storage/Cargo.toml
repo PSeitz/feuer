@@ -30,6 +30,7 @@ io-uring = "0.7"
 libc = "0.2"
 
 [dev-dependencies]
+feuer-memory = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 

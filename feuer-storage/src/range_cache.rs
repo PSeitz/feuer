@@ -13,7 +13,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use feuer_types::{ByteRange, Download, ObjectKey};
+use feuer_types::{
+    ByteRange, Download, ObjectKey,
+    retention::{ObjectAccessHistories, ObjectAccessHistory, compare_cost_per_byte, sample_candidates},
+};
 
 use crate::{
     DataFile, DataFileError, DataFileResult, IoMetrics,
@@ -23,6 +26,10 @@ use page_format::{METADATA_PAGE_BYTES, PAGE_CONTENT_BYTES};
 
 const PAYLOAD_ALIGNMENT_BYTES: u64 = crate::uring::DIRECT_IO_ALIGNMENT_BYTES as u64;
 
+// Per shard batch: bound sampled eviction decisions and removal work, including multi-chunk entries.
+const MAX_EVICTION_ATTEMPTS: usize = 64;
+const MAX_EVICTION_REGIONS: usize = 4096;
+
 /// A standalone experimental disk cache, not yet connected to the public tiered cache.
 ///
 /// Explicit batches pack smaller entries together and write complete immutable 1-MiB chunks.
@@ -30,7 +37,8 @@ const PAYLOAD_ALIGNMENT_BYTES: u64 = crate::uring::DIRECT_IO_ALIGNMENT_BYTES as 
 /// Reads verify the whole covering entry, returning only requested bytes. Reuse requires a wholly free chunk.
 /// Full-key hashing selects an independently allocated shard; admission may fail despite space elsewhere.
 ///
-/// **Recovery and pressure eviction are not implemented.** Every open starts empty and logs that reset.
+/// Pressure eviction samples individual entries by recent retrieval value per payload byte.
+/// **Recovery is not implemented.** Every open starts empty and logs that reset.
 /// The experimental format is neither a persistence guarantee nor a stable on-disk interface.
 #[derive(Clone)]
 pub struct DiskRangeCache {
@@ -41,6 +49,7 @@ pub struct DiskRangeCache {
 struct DiskRangeCacheInner {
     file: DataFile,
     arenas: Box<[Shard]>,
+    access_histories: Arc<ObjectAccessHistories>,
 }
 
 /// An independently allocated disk-cache shard with live range lookup.
@@ -49,9 +58,13 @@ struct Shard {
     entry_index: Mutex<DiskEntryIndex>,
 }
 
-/// Disk entries indexed by object key and range start.
+/// Disk entries indexed by object key and range start, with dense rotating eviction candidates.
+#[derive(Default)]
 struct DiskEntryIndex {
     ranges_by_key: HashMap<ObjectKey, BTreeMap<u64, ObjectRangeDiskStorage>>,
+    eviction_candidates: Vec<(ObjectKey, u64)>,
+    next_candidate: usize,
+    next_publication_id: u64,
 }
 
 /// One reserved chunk being assembled in memory before its only write.
@@ -84,11 +97,14 @@ impl EntryMetadataStarts {
 
 /// Disk storage reserved for one object range, with its expected payload checksum.
 struct ObjectRangeDiskStorage {
+    eviction_position: usize,
+    publication_id: u64,
+    accesses: Arc<ObjectAccessHistory>,
     object_range: ByteRange,
     payload_checksum: blake3::Hash,
     payload_regions: Vec<DiskRegion>,
     // Keep metadata-only chunks reserved for as long as the entry exists.
-    _entry_metadata_regions: Vec<DiskRegion>,
+    entry_metadata_regions: Vec<DiskRegion>,
 }
 
 /// Whole chunks retained through batch I/O; errors or unexpected task drops quarantine them.
@@ -140,6 +156,24 @@ impl DiskRangeCache {
         capacity: u64,
         metrics: Arc<IoMetrics>,
     ) -> Result<Self, DiskRangeCacheError> {
+        let shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
+        Self::open_with_access_histories(
+            directory,
+            capacity,
+            metrics,
+            Arc::new(ObjectAccessHistories::new(shards)),
+        )
+        .await
+    }
+
+    /// Opens a disk tier using the memory tier's shared access evidence.
+    /// Population and `get` do not record accesses; the successful public lookup records exactly once.
+    pub async fn open_with_access_histories(
+        directory: impl AsRef<Path>,
+        capacity: u64,
+        metrics: Arc<IoMetrics>,
+        access_histories: Arc<ObjectAccessHistories>,
+    ) -> Result<Self, DiskRangeCacheError> {
         if capacity == 0 || capacity > i64::MAX as u64 || !capacity.is_multiple_of(CHUNK_BYTES) {
             return Err(DiskRangeCacheError::InvalidCapacity);
         }
@@ -154,14 +188,21 @@ impl DiskRangeCache {
                         ..(chunk_count * (arena_index + 1) / arena_count) * CHUNK_BYTES,
                 )
                 .unwrap(),
-                entry_index: Mutex::new(DiskEntryIndex {
-                    ranges_by_key: HashMap::new(),
-                }),
+                entry_index: Mutex::new(DiskEntryIndex::default()),
             })
             .collect();
         Ok(Self {
-            disk: Arc::new(DiskRangeCacheInner { file, arenas }),
+            disk: Arc::new(DiskRangeCacheInner {
+                file,
+                arenas,
+                access_histories,
+            }),
         })
+    }
+
+    /// Shared evidence for recording successful lookups, once, outside raw storage operations.
+    pub fn access_histories(&self) -> Arc<ObjectAccessHistories> {
+        self.disk.access_histories.clone()
     }
 
     /// Packs an explicit batch into immutable chunks, grouping smaller payloads first within each shard.
@@ -169,7 +210,9 @@ impl DiskRangeCache {
     /// Each shard's chunks finish writing before its entries publish, with containment revalidation.
     /// Publication is not transactional across shards. Does not record accesses.
     ///
-    /// Partially filled final chunks are written too; later batches cannot fill their unused space.
+    /// Entries share a chunk only when their complete payload and metadata fit inside it.
+    /// Multi-chunk entries own their chunks exclusively. Partially filled chunks are finalized too.
+    /// Pressure eviction is bounded; unavailable capacity causes admission to be skipped, not waited for.
     /// Callers bound batch size and concurrency: complete chunk buffers are assembled in memory.
     /// Dropping this future does not abort its detached writer or release storage needed by submitted I/O.
     pub async fn insert_batch(&self, downloads: Vec<(ObjectKey, Download)>) -> Result<usize, DiskRangeCacheError> {
@@ -185,6 +228,8 @@ impl DiskRangeCache {
                 for (arena, mut downloads) in disk.arenas.iter().zip(by_arena) {
                     downloads.sort_by_key(|(_, download)| download.bytes().len());
                     let mut batch = UnwrittenBatch::default();
+                    let mut attempts_left = MAX_EVICTION_ATTEMPTS;
+                    let mut regions_left = MAX_EVICTION_REGIONS;
                     for (key, download) in downloads {
                         if arena
                             .entry_index
@@ -193,7 +238,16 @@ impl DiskRangeCache {
                             .covering_range(&key, download.downloaded_range())
                             .is_none()
                         {
-                            batch.push(&arena.allocator, key, download);
+                            // Preserve the object's evidence even if pressure removes its last existing entry.
+                            let accesses = disk.access_histories.for_key(&key);
+                            while let Err(chunks_needed) = batch.push(&arena.allocator, &key, &download, &accesses) {
+                                // Evicting cannot help an entry that exceeds the capacity left by this batch.
+                                if chunks_needed > arena.allocator.chunk_capacity - batch.chunks.len() as u64
+                                    || !arena.evict_candidate(&mut attempts_left, &mut regions_left)
+                                {
+                                    break;
+                                }
+                            }
                         }
                     }
                     let entries = batch.write(&disk.file).await?;
@@ -205,15 +259,7 @@ impl DiskRangeCache {
                         if index.covering_range(&key, object_range).is_some() {
                             continue;
                         }
-                        let entries = index.ranges_by_key.entry(key).or_default();
-                        let replaced_starts: Vec<_> = entries
-                            .range(object_range.start()..object_range.end())
-                            .filter_map(|(&start, entry)| object_range.contains(entry.object_range).then_some(start))
-                            .collect();
-                        for start in replaced_starts {
-                            entries.remove(&start);
-                        }
-                        entries.insert(object_range.start(), storage);
+                        index.insert(key, storage);
                         published += 1;
                     }
                 }
@@ -252,20 +298,114 @@ impl DiskRangeCache {
     }
 }
 
+impl Shard {
+    /// Evicts one sampled low-value entry, never its neighbors. Chunk release is left to ownership.
+    fn evict_candidate(&self, attempts_left: &mut usize, regions_left: &mut usize) -> bool {
+        if *attempts_left == 0 || *regions_left == 0 {
+            return false;
+        }
+        let mut index = self.entry_index.lock().unwrap();
+        let length = index.eviction_candidates.len();
+        if length == 0 {
+            return false;
+        }
+        *attempts_left -= 1;
+        let (start, count) = sample_candidates(&mut index.next_candidate, length);
+        let mut selected: Option<(usize, u64, u64, u64)> = None;
+        for offset in 0..count {
+            let position = (start + offset) % length;
+            let (key, range_start) = &index.eviction_candidates[position];
+            let entry = &index.ranges_by_key[key][range_start];
+            if entry.region_count() > *regions_left {
+                continue;
+            }
+            let value = entry.accesses.covered_retrieval_cost(entry.object_range);
+            let payload_bytes = entry.object_range.len();
+            if selected.is_none_or(|(_, current_value, current_bytes, current_id)| {
+                compare_cost_per_byte(value, payload_bytes, current_value, current_bytes)
+                    .then_with(|| entry.publication_id.cmp(&current_id))
+                    .is_lt()
+            }) {
+                selected = Some((position, value, payload_bytes, entry.publication_id));
+            }
+        }
+        if let Some((position, ..)) = selected {
+            let (key, start) = index.eviction_candidates[position].clone();
+            *regions_left -= index.ranges_by_key[&key][&start].region_count();
+            index.remove(&key, start);
+        }
+        true
+    }
+}
+
+impl ObjectRangeDiskStorage {
+    fn region_count(&self) -> usize {
+        self.payload_regions.len() + self.entry_metadata_regions.len()
+    }
+
+    #[cfg(test)]
+    fn shared_chunk(&self) -> Option<u64> {
+        if self.payload_regions.len() != 1 || self.entry_metadata_regions.len() != 1 {
+            return None;
+        }
+        let chunk = self.payload_regions[0].range().start / CHUNK_BYTES;
+        (self.entry_metadata_regions[0].range().start / CHUNK_BYTES == chunk).then_some(chunk * CHUNK_BYTES)
+    }
+}
+
 impl DiskEntryIndex {
+    fn insert(&mut self, key: ObjectKey, mut storage: ObjectRangeDiskStorage) {
+        let object_range = storage.object_range;
+        if let Some(entries) = self.ranges_by_key.get(&key) {
+            let replaced: Vec<_> = entries
+                .range(object_range.start()..object_range.end())
+                .filter_map(|(&start, entry)| object_range.contains(entry.object_range).then_some(start))
+                .collect();
+            for start in replaced {
+                self.remove(&key, start);
+            }
+        }
+        self.next_publication_id = self
+            .next_publication_id
+            .checked_add(1)
+            .expect("disk entry identities exhausted");
+        storage.publication_id = self.next_publication_id;
+        storage.eviction_position = self.eviction_candidates.len();
+        self.eviction_candidates.push((key.clone(), object_range.start()));
+        self.ranges_by_key
+            .entry(key)
+            .or_default()
+            .insert(object_range.start(), storage);
+    }
+
+    fn remove(&mut self, key: &str, start: u64) -> Option<ObjectRangeDiskStorage> {
+        let entries = self.ranges_by_key.get_mut(key)?;
+        let storage = entries.remove(&start)?;
+        if entries.is_empty() {
+            self.ranges_by_key.remove(key);
+        }
+        self.eviction_candidates.swap_remove(storage.eviction_position);
+        if let Some((moved_key, moved_start)) = self.eviction_candidates.get(storage.eviction_position) {
+            self.ranges_by_key
+                .get_mut(moved_key)
+                .unwrap()
+                .get_mut(moved_start)
+                .unwrap()
+                .eviction_position = storage.eviction_position;
+        }
+        Some(storage)
+    }
+
     fn invalidate(&mut self, key: &str, read: &GuardedObjectRangeRead) {
-        if let Some(entries) = self.ranges_by_key.get_mut(key) {
-            let start = read.object_range.start();
-            // Preserve different contents. Discarding a newer identical copy is an acceptable miss.
-            if entries
-                .get(&start)
-                .is_some_and(|storage| storage.payload_checksum == read.payload_checksum)
-            {
-                entries.remove(&start);
-            }
-            if entries.is_empty() {
-                self.ranges_by_key.remove(key);
-            }
+        let start = read.object_range.start();
+        // Preserve different contents. Discarding a newer identical copy is an acceptable miss.
+        if self
+            .ranges_by_key
+            .get(key)
+            .and_then(|entries| entries.get(&start))
+            .is_some_and(|storage| storage.payload_checksum == read.payload_checksum)
+        {
+            self.remove(key, start);
         }
     }
 
@@ -291,24 +431,36 @@ fn page_storage_bytes(content_bytes: usize) -> Option<u64> {
 }
 
 impl UnwrittenBatch {
-    fn push(&mut self, allocator: &DiskAllocator, key: ObjectKey, download: Download) {
-        let (object_range, bytes) = download.into_parts();
+    /// Allocation failure leaves the batch unchanged and reports the required number of new chunks.
+    fn push(
+        &mut self,
+        allocator: &DiskAllocator,
+        key: &ObjectKey,
+        download: &Download,
+        accesses: &Arc<ObjectAccessHistory>,
+    ) -> Result<(), u64> {
+        let object_range = download.downloaded_range();
+        let bytes = download.bytes();
         let payload_bytes = (bytes.len() as u64).next_multiple_of(PAYLOAD_ALIGNMENT_BYTES);
         let chunk_data_bytes = CHUNK_BYTES - METADATA_PAGE_BYTES as u64;
+        let payload_region_count = payload_bytes.div_ceil(chunk_data_bytes);
+        let metadata_bytes = page_storage_bytes(72 + 16 * payload_region_count as usize + key.len()).ok_or(u64::MAX)?;
+        let entry_bytes = payload_bytes + metadata_bytes;
         let tail_bytes = self.chunks.last().map_or(0, |chunk| CHUNK_BYTES - chunk.used_bytes);
-        let payload_region_count =
-            u64::from(tail_bytes > 0) + payload_bytes.saturating_sub(tail_bytes).div_ceil(chunk_data_bytes);
-        let Some(metadata_bytes) = page_storage_bytes(72 + 16 * payload_region_count as usize + key.len()) else {
-            return;
+        // Never split an entry across a shared chunk boundary, even if only metadata would spill.
+        let shares_tail = entry_bytes <= tail_bytes;
+        let new_chunk_count = if shares_tail {
+            0
+        } else {
+            entry_bytes.div_ceil(chunk_data_bytes)
         };
-        let new_chunk_count = (payload_bytes + metadata_bytes)
-            .saturating_sub(tail_bytes)
-            .div_ceil(chunk_data_bytes);
-        let mut cursor = self.chunks.len().saturating_sub(1);
+        let mut cursor = if shares_tail {
+            self.chunks.len() - 1
+        } else {
+            self.chunks.len()
+        };
         if new_chunk_count > 0 {
-            let Some(regions) = allocator.reserve_chunks(new_chunk_count) else {
-                return;
-            };
+            let regions = allocator.reserve_chunks(new_chunk_count).ok_or(new_chunk_count)?;
             self.chunks.extend(regions.into_iter().map(|region| UnwrittenChunk {
                 region,
                 bytes: vec![0; CHUNK_BYTES as usize],
@@ -325,8 +477,8 @@ impl UnwrittenBatch {
             chunk.bytes[offset..offset + end - consumed].copy_from_slice(&bytes[consumed..end]);
             consumed = end;
         }
-        let payload_checksum = blake3::hash(&bytes);
-        let contents = page_format::encode_entry_metadata(&key, object_range, &payload_regions, &payload_checksum);
+        let payload_checksum = blake3::hash(bytes);
+        let contents = page_format::encode_entry_metadata(key, object_range, &payload_regions, &payload_checksum);
         let (entry_metadata_regions, first_chunk) = self.take_regions(&mut cursor, metadata_bytes);
         self.chunks[first_chunk]
             .metadata_starts
@@ -363,15 +515,23 @@ impl UnwrittenBatch {
                 page_ordinal += 1;
             }
         }
+        // A multi-chunk entry's tail must never be offered to another entry.
+        if new_chunk_count > 1 {
+            self.chunks.last_mut().unwrap().used_bytes = CHUNK_BYTES;
+        }
         self.entries.push((
-            key,
+            key.clone(),
             ObjectRangeDiskStorage {
+                eviction_position: 0,
+                publication_id: 0,
+                accesses: accesses.clone(),
                 object_range,
                 payload_checksum,
                 payload_regions,
-                _entry_metadata_regions: entry_metadata_regions,
+                entry_metadata_regions,
             },
         ));
+        Ok(())
     }
 
     /// Carves aligned entry regions from reserved chunks, preserving shared whole-chunk ownership.
