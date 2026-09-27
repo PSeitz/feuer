@@ -1,3 +1,5 @@
+mod s3_fifo;
+
 use std::{sync::Arc, thread};
 
 use bytes::Bytes;

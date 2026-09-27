@@ -1,3 +1,5 @@
+mod s3_fifo;
+
 use super::*;
 use std::{future::Future, task::Poll, time::Duration};
 

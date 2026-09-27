@@ -53,28 +53,54 @@ connects allocation, persisted entry metadata, covering-range lookup and integri
 Explicit batches group small entries into immutable 1-MiB chunks, each written once with its metadata.
 Entries share a chunk only when their complete payload and metadata fit inside it; multi-chunk entries own
 their chunks exclusively. Payload is 4-KiB-aligned with no page headers. Bounded pressure eviction selects
-individual entries by recent retrieval value per payload byte; it does not evict their neighbors as a group.
+individual entries using the configured policy (cost-aware by default); it does not evict their neighbors as a group.
 Chunks are reused only after all entry owners and readers release them.
 Each entry has one checksum in its metadata; a hit verifies the whole entry and returns only the requested
 bytes without reading neighboring entries. Reopen deliberately starts empty. Recovery and buffered mode
 remain unimplemented.
 
 `feuer-memory` provides a sharded soft-capacity covering-range index with bounded ageable request evidence,
-sampled retrieval-cost-per-byte eviction, a short range-trimming grace, and
-pressure-driven trimming of the selected victim toward observed requests. Its [memory-only comparison](benchmarks/memory/results.md)
+configurable eviction. The default cost-aware policy uses sampled retrieval cost per byte, a short
+range-trimming grace, and pressure-driven trimming of the selected victim toward observed requests. Its [memory-only comparison](benchmarks/memory/results.md)
 records the current policy baseline. `feuer-types` holds shared range
 foundations, while `feuer-tokio` remains the Tokio/madsim runtime switch. None of these internal
-package boundaries is a public compatibility commitment. The memory and disk policies share volatile
-per-object access evidence and payload-value scoring through `feuer-types::retention`; evidence survives
-memory eviction while disk entries retain it.
+package boundaries is a public compatibility commitment. The cost-aware memory and disk policies share
+volatile per-object access evidence and payload-value scoring through `feuer-types::retention`; evidence
+survives memory eviction while disk entries retain it.
 
-## Eviction sampling
+## Eviction policy
+
+Set `FEUER_EVICTION_POLICY=s3fifo` to select S3-FIFO for both tiers, or
+`FEUER_EVICTION_POLICY=cost-aware` for cost-aware eviction. `CacheConfig::new` reads
+this variable, defaulting to `EvictionPolicy::CostAware` when unset and rejecting
+invalid values. Override a valid environment setting for an individual cache with:
+
+```rust
+use feuer::{CacheConfig, EvictionPolicy};
+
+let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?
+    .with_eviction_policy(EvictionPolicy::S3Fifo);
+```
+
+S3-FIFO maintains independent queues per shard and tier, weighted by payload bytes:
+
+- A small FIFO targets 10% of shard capacity. Entries with at least two accesses move to the main FIFO.
+- Main-queue accesses earn up to three second chances; hits do not reorder entries.
+- Cold small-queue victims leave exact key/range ghosts, bounded to 90% of shard capacity in former payload bytes.
+  Ghost readmissions go directly to the main FIFO; ghosts retain no payload or disk ownership.
+- Memory counts successful covering accesses, including the request recorded with a callback download or disk promotion.
+  Disk counts verified disk hits, not memory hits. Population alone does not count as an access.
+- S3-FIFO evicts whole entries and disables memory range trimming. Soft memory capacity, bounded disk admission,
+  and immutable-chunk/read-guard ownership are unchanged.
+
+### Eviction work limit
 
 Set `FEUER_RECLAIM_SAMPLE_SIZE=128` to inspect up to 128 candidates per memory
 or disk eviction decision. `CacheConfig::new` reads this variable, defaulting to
 64 when unset. Zero, invalid integers, and values larger than `usize` are rejected.
 `config.with_reclaim_sample_size(...)` overrides a valid environment setting for
-that cache.
+that cache. With S3-FIFO, this limits queue-head processing per decision instead of sampled candidates;
+memory retries after promotions or second chances, while disk retains its per-batch work limits.
 
 ## Metrics
 

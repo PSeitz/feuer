@@ -6,7 +6,7 @@ mod tests;
 use std::{fmt, sync::Arc};
 
 use bytes::Bytes;
-use feuer_types::{ByteRange, Download, ObjectKey, retention::ObjectAccessHistories};
+use feuer_types::{ByteRange, Download, EvictionPolicy, ObjectKey, retention::ObjectAccessHistories};
 use parking_lot::Mutex;
 
 use self::shard::{AdmissionProgress, MemoryCacheShard};
@@ -28,10 +28,11 @@ const MAX_SHARDS: usize = 64;
 /// The configured capacity is divided among independently locked shards. Each
 /// shard evicts locally before insertion. A payload larger than its shard's
 /// target is retained after that shard is emptied, so total usage can exceed the
-/// configured capacity. Victims are selected shard-locally by recent modeled
-/// retrieval value per retained byte. Under pressure, a rotating sample selects one
-/// victim. If its observed requests form a useful smaller payload, Feuer trims
-/// that victim outside the shard lock instead of evicting it completely.
+/// configured capacity. By default, victims are selected shard-locally by recent
+/// modeled retrieval value per retained byte. A rotating sample selects one victim;
+/// if its observed requests form a useful smaller payload, Feuer trims that victim
+/// outside the shard lock. Optional S3-FIFO eviction uses small/main FIFO queues
+/// and an exact-range ghost history instead, without range trimming.
 pub struct MemoryCache {
     /// Total soft target divided among the shards.
     capacity: u64,
@@ -87,7 +88,16 @@ impl MemoryCache {
         }
     }
 
-    /// Sets the maximum candidates inspected per eviction decision. Panics if zero.
+    /// Selects the shard-local policy before population. Defaults to cost-aware.
+    /// Panics if any shard already contains entries. S3-FIFO does not trim ranges.
+    pub fn with_eviction_policy(mut self, policy: EvictionPolicy) -> Self {
+        for shard in &mut self.shards {
+            shard.get_mut().set_eviction_policy(policy);
+        }
+        self
+    }
+
+    /// Sets the maximum candidates inspected (or S3-FIFO queue steps) per decision. Panics if zero.
     pub fn with_reclaim_sample_size(mut self, sample_size: usize) -> Self {
         assert!(sample_size > 0, "reclaim sample size must be greater than zero");
         for shard in &mut self.shards {

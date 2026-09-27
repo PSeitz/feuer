@@ -18,4 +18,4 @@ pub use cache::{GetOrFetchError, TieredMemoryDiskCache};
 pub use config::{CacheConfig, CacheConfigError};
 #[cfg(target_os = "linux")]
 pub use feuer_storage::DiskRangeCacheError;
-pub use feuer_types::{ByteRange, Download, DownloadError, InvalidByteRange, ObjectKey};
+pub use feuer_types::{ByteRange, Download, DownloadError, EvictionPolicy, InvalidByteRange, ObjectKey};
