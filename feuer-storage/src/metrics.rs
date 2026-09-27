@@ -27,6 +27,7 @@ impl fmt::Debug for IoOperationMetrics {
 pub struct IoMetrics {
     read: IoOperationMetrics,
     write: IoOperationMetrics,
+    read_size: BoxedHistogram,
 }
 
 impl IoMetrics {
@@ -49,6 +50,13 @@ impl IoMetrics {
             Buckets::exponential(0.000_001, 2.0, 25),
         );
 
+        let read_size = registry.register_histogram_vec_with_buckets(
+            "feuer_disk_read_size_bytes".into(),
+            "Requested bytes per successful Feuer data-file read, excluding alignment padding".into(),
+            &[],
+            Buckets::exponential(1024.0, 2.0, 21),
+        );
+
         let operation = |label: &'static str| IoOperationMetrics {
             success: operations.counter(&[label.into(), "success".into()]),
             error: operations.counter(&[label.into(), "error".into()]),
@@ -60,6 +68,7 @@ impl IoMetrics {
         Arc::new(Self {
             read: operation(IoOperation::Read.as_str()),
             write: operation(IoOperation::Write.as_str()),
+            read_size: read_size.histogram(&[]),
         })
     }
 
@@ -74,6 +83,9 @@ impl IoMetrics {
             metrics.success.increase(1);
             metrics.bytes.increase(bytes);
             metrics.success_duration.record(elapsed.as_secs_f64());
+            if operation == IoOperation::Read {
+                self.read_size.record(bytes as f64);
+            }
         } else {
             metrics.error.increase(1);
             metrics.error_duration.record(elapsed.as_secs_f64());
@@ -90,6 +102,35 @@ impl IoMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_size_records_only_successful_reads() {
+        let (registry, backend) = crate::test_metrics::registry();
+        let metrics = IoMetrics::new(&backend);
+        let elapsed = Duration::from_micros(2);
+
+        metrics.record(IoOperation::Read, 17, elapsed, true);
+        metrics.record(IoOperation::Read, 4096, elapsed, true);
+        metrics.record(IoOperation::Read, 8192, elapsed, false);
+        metrics.record(IoOperation::Write, 16384, elapsed, true);
+
+        let family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "feuer_disk_read_size_bytes")
+            .unwrap();
+        let histogram = family.get_metric()[0].get_histogram();
+        assert_eq!(histogram.get_sample_count(), 2);
+        assert_eq!(histogram.get_sample_sum(), 4113.0);
+        for (bound, count) in [(1024.0, 1), (2048.0, 1), (4096.0, 2)] {
+            let bucket = histogram
+                .get_bucket()
+                .iter()
+                .find(|bucket| bucket.upper_bound() == bound)
+                .unwrap();
+            assert_eq!(bucket.cumulative_count(), count);
+        }
+    }
 
     #[test]
     fn registers_with_the_normal_registry_boundary() {

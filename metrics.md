@@ -15,11 +15,12 @@ counters and gauges; use separate registries if they must be distinguished.
 | Metric | Type | Labels / meaning |
 |---|---|---|
 | `feuer_lookup_total` | Counter | `outcome`: `memory_hit`, `disk_hit`, `callback`, `callback_error`, `invalid_download` |
-| `feuer_lookup_duration_seconds` | Histogram | `outcome`: `memory_hit`, `disk_hit`; entire completed lookup for cache hits only |
+| `feuer_lookup_duration_seconds` | Histogram | `outcome`: `memory_hit`, `disk_hit`, `callback`; entire successful lookup, including callback work and synchronous population scheduling |
 | `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`; exact requested bytes successfully returned |
 
-Lookup outcomes and duration histograms count completed operations, not canceled
-futures. A non-covering callback result is an `invalid_download` lookup.
+Lookup outcomes count completed operations, not canceled futures. Duration
+histograms record successful lookups only. A non-covering callback result is an
+`invalid_download` lookup and does not record a duration.
 
 Use lookup counters for request-weighted hit ratios and lookup byte counters for
 byte-weighted hit ratios. Memory-tier counters also include internal memory
@@ -58,6 +59,22 @@ successful writes later discarded at publication. Raw disk-I/O byte counters
 still include successful writes from partially failed batches. Existing read-I/O
 byte counters measure completed DataFile read lengths, not alignment padding or
 individual kernel submissions.
+
+## Disk read sizes
+
+`feuer_disk_read_size_bytes` is a histogram with no labels, recording the requested
+byte length of each successful DataFile read. It excludes alignment padding,
+failed reads and canceled futures, and records once per DataFile call rather
+than per kernel submission. These are not necessarily caller-requested lookup
+sizes: disk lookups also read metadata and whole cached entries.
+
+Buckets double from 1 KiB through 1 GiB. For the p95 read size in bytes:
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(feuer_disk_read_size_bytes_bucket[5m])))
+```
+
+Use `0.50` or `0.99` for p50 or p99. Percentiles are estimated from the buckets.
 
 ## Best-effort disk population
 
