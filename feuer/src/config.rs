@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 
 use feuer_types::retention::RECLAIM_SAMPLE_SIZE;
 use thiserror::Error;
@@ -19,6 +22,9 @@ pub struct CacheConfig {
 
 impl CacheConfig {
     /// Creates a cache configuration with no implicit capacity defaults.
+    ///
+    /// Reads `FEUER_RECLAIM_SAMPLE_SIZE` for the eviction candidate limit, defaulting
+    /// to 64 when unset. A set value must be a positive `usize` integer.
     pub fn new(
         directory: impl Into<PathBuf>,
         disk_capacity: u64,
@@ -35,11 +41,12 @@ impl CacheConfig {
             directory: directory.into(),
             disk_capacity,
             memory_capacity,
-            reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
+            reclaim_sample_size: parse_reclaim_sample_size(std::env::var_os("FEUER_RECLAIM_SAMPLE_SIZE").as_deref())?,
         })
     }
 
     /// Sets the maximum candidates inspected per memory or disk eviction decision.
+    /// Overrides the value read from `FEUER_RECLAIM_SAMPLE_SIZE`.
     pub fn with_reclaim_sample_size(mut self, sample_size: usize) -> Result<Self, CacheConfigError> {
         if sample_size == 0 {
             return Err(CacheConfigError::InvalidReclaimSampleSize);
@@ -48,7 +55,7 @@ impl CacheConfig {
         Ok(self)
     }
 
-    /// Returns the maximum candidates inspected per eviction decision. Defaults to 64.
+    /// Returns the maximum candidates inspected per eviction decision.
     pub const fn reclaim_sample_size(&self) -> usize {
         self.reclaim_sample_size
     }
@@ -69,6 +76,17 @@ impl CacheConfig {
     }
 }
 
+fn parse_reclaim_sample_size(value: Option<&OsStr>) -> Result<usize, CacheConfigError> {
+    let Some(value) = value else {
+        return Ok(RECLAIM_SAMPLE_SIZE);
+    };
+    value
+        .to_str()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .ok_or(CacheConfigError::InvalidReclaimSampleSize)
+}
+
 /// An invalid Feuer configuration.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum CacheConfigError {
@@ -78,14 +96,51 @@ pub enum CacheConfigError {
     /// The configured memory eviction target must be positive.
     #[error("memory capacity must be greater than zero")]
     InvalidMemoryCapacity,
-    /// Eviction must inspect at least one candidate.
-    #[error("reclaim sample size must be greater than zero")]
+    /// The eviction candidate limit must be a positive integer that fits in `usize`.
+    #[error(
+        "reclaim sample size must be a positive usize integer; check FEUER_RECLAIM_SAMPLE_SIZE or the explicit setting"
+    )]
     InvalidReclaimSampleSize,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_reclaim_sample_size() {
+        assert_eq!(parse_reclaim_sample_size(None), Ok(64));
+        for value in [1, 32, 128, usize::MAX] {
+            assert_eq!(
+                parse_reclaim_sample_size(Some(OsStr::new(&value.to_string()))),
+                Ok(value)
+            );
+        }
+        for value in ["", "0", "-1", "abc", "1.5", " 64", "18446744073709551616"] {
+            assert_eq!(
+                parse_reclaim_sample_size(Some(OsStr::new(value))),
+                Err(CacheConfigError::InvalidReclaimSampleSize)
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert_eq!(
+                parse_reclaim_sample_size(Some(OsStr::from_bytes(b"\xff"))),
+                Err(CacheConfigError::InvalidReclaimSampleSize)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_reclaim_sample_size_overrides_configuration() {
+        let config = CacheConfig::new("cache", 1, 1).unwrap();
+        assert_eq!(
+            config.clone().with_reclaim_sample_size(0),
+            Err(CacheConfigError::InvalidReclaimSampleSize)
+        );
+        assert_eq!(config.with_reclaim_sample_size(128).unwrap().reclaim_sample_size(), 128);
+    }
 
     #[test]
     fn requires_both_capacity_roles_to_be_explicit() {

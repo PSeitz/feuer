@@ -68,6 +68,14 @@ package boundaries is a public compatibility commitment. The memory and disk pol
 per-object access evidence and payload-value scoring through `feuer-types::retention`; evidence survives
 memory eviction while disk entries retain it.
 
+## Eviction sampling
+
+Set `FEUER_RECLAIM_SAMPLE_SIZE=128` to inspect up to 128 candidates per memory
+or disk eviction decision. `CacheConfig::new` reads this variable, defaulting to
+64 when unset. Zero, invalid integers, and values larger than `usize` are rejected.
+`config.with_reclaim_sample_size(...)` overrides a valid environment setting for
+that cache.
+
 ## Metrics
 
 `TieredMemoryDiskCache::open_with_metrics(config, &registry).await` accepts a
