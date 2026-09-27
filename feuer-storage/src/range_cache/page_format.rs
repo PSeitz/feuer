@@ -14,9 +14,9 @@ pub(super) const METADATA_PAGE_BYTES: usize = 4096;
 const PAGE_HEADER_BYTES: usize = 96;
 pub(super) const PAGE_CONTENT_BYTES: usize = METADATA_PAGE_BYTES - PAGE_HEADER_BYTES;
 pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES03";
-pub(super) const ENTRY_METADATA_INDEX_PAGE_TAG: &[u8; 8] = b"FEUIDX03";
+pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX03";
 
-/// Content checksum covers the complete entry metadata, or the index's 32-byte bitmap of entry metadata starts.
+/// Content checksum covers the complete entry metadata, or the chunk metadata page's 32-byte bitmap of entry metadata starts.
 pub(super) fn encode_page(
     page: &mut [u8],
     page_tag: &[u8; 8],

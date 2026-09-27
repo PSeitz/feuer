@@ -154,7 +154,7 @@ async fn mixed_batch_groups_small_entries_and_records_every_metadata_start() {
         let starts = expected.remove(&address).unwrap_or_default();
         let (_, contents) = page_format::validate_page(
             &page,
-            page_format::ENTRY_METADATA_INDEX_PAGE_TAG,
+            page_format::CHUNK_METADATA_PAGE_TAG,
             blake3::hash(&starts.bitmap).as_bytes(),
             address,
             address / CHUNK_BYTES,
@@ -705,24 +705,24 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
     let (payload, entry_metadata) = entry_disk_ranges(&cache, &key);
     let entry_metadata_start_address = entry_metadata[0].start;
     let chunk_address = entry_metadata_start_address / CHUNK_BYTES * CHUNK_BYTES;
-    let index_bytes = cache
+    let chunk_metadata_page = cache
         .disk
         .file
         .read_at(chunk_address, METADATA_PAGE_BYTES)
         .await
         .unwrap();
-    let index_checksum: [u8; 32] = index_bytes[32..64].try_into().unwrap();
+    let bitmap_checksum: [u8; 32] = chunk_metadata_page[32..64].try_into().unwrap();
     let (next_entry_metadata_page_address, entry_metadata_starts) = page_format::validate_page(
-        &index_bytes,
-        page_format::ENTRY_METADATA_INDEX_PAGE_TAG,
-        &index_checksum,
+        &chunk_metadata_page,
+        page_format::CHUNK_METADATA_PAGE_TAG,
+        &bitmap_checksum,
         chunk_address,
         chunk_address / CHUNK_BYTES,
     )
     .unwrap();
     assert_eq!(next_entry_metadata_page_address, 0);
     let slot = ((entry_metadata_start_address - chunk_address) / METADATA_PAGE_BYTES as u64) as usize;
-    assert_eq!(blake3::hash(&entry_metadata_starts[..32]).as_bytes(), &index_checksum);
+    assert_eq!(blake3::hash(&entry_metadata_starts[..32]).as_bytes(), &bitmap_checksum);
     assert_ne!(entry_metadata_starts[slot / 8] & (1 << (slot % 8)), 0);
     assert_eq!(entry_metadata_starts[0] & 1, 0);
     let head = cache
@@ -1020,8 +1020,8 @@ async fn failed_chunk_write_quarantines_the_batch_without_publication() {
     assert!(cache.get(&"small".to_owned(), range(0, 1)).await.is_none());
     assert!(cache.get(&"large".to_owned(), range(0, 1)).await.is_none());
     assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), 0);
-    let index_page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
-    assert_eq!(&index_page[88..96], page_format::ENTRY_METADATA_INDEX_PAGE_TAG);
+    let chunk_metadata_page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
+    assert_eq!(&chunk_metadata_page[88..96], page_format::CHUNK_METADATA_PAGE_TAG);
 }
 
 #[test]
@@ -1187,7 +1187,7 @@ fn metadata_page_checks_bind_content_checksum_address_ordinal_tag_and_entire_con
     assert!(
         page_format::validate_page(
             &page,
-            page_format::ENTRY_METADATA_INDEX_PAGE_TAG,
+            page_format::CHUNK_METADATA_PAGE_TAG,
             &[7; 32],
             METADATA_PAGE_BYTES as u64,
             2

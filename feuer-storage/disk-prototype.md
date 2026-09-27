@@ -8,7 +8,7 @@ this is not a durable reset protocol.
 
 ## Layout and ownership
 
-- The file contains 1-MiB chunks, each starting with a reserved 4-KiB index page.
+- The file contains 1-MiB chunks, each starting with a reserved 4-KiB chunk metadata page.
   The remaining 1,020 KiB holds payload bytes and entry metadata.
 - Payload is plain bytes in 4-KiB-aligned allocations. Only metadata uses 4-KiB pages.
   Each entry requires at least one metadata page; entries do not share metadata pages.
@@ -25,7 +25,7 @@ free capacity in another shard cannot satisfy an admission. No metadata lock is 
 
 `insert_batch` accepts explicit `(ObjectKey, Download)` pairs and returns the number published.
 Within each shard, entries are sorted smallest first and packed into complete chunk buffers.
-Payload, metadata, index bitmaps, and zero padding are finalized before each chunk's single write.
+Payload, metadata, metadata-start bitmaps, and zero padding are finalized before each chunk's single write.
 Partially filled chunks are written too; later batches cannot append. There is no background batching.
 
 All writes for a shard finish before publication. Publication rechecks containment, larger entries
@@ -65,12 +65,12 @@ for readers or writers. There is no relocation or cleaning.
 store the full key, object range, ordered payload regions, and payload checksum. Each page has a
 checksum, and each chain carries a checksum of the complete entry metadata.
 
-Each chunk's index page contains a bitmap of metadata starts at 4-KiB-aligned offsets. These are
+Each chunk metadata page contains a bitmap of metadata starts at 4-KiB-aligned offsets. These are
 recovery candidates, not live-entry or free-space bits. Removal does not update the bitmap;
 whole-chunk reuse replaces it.
 
 **Chunk writes are neither atomic nor durability barriers.** Recovery must validate metadata chains,
-mappings, and ownership conflicts rather than trust index bits. Acceptance rules for torn writes,
+mappings, and ownership conflicts rather than trust bitmap bits. Acceptance rules for torn writes,
 missing payload, and reused addresses remain unresolved and may require format or persistence changes.
 Current runtime tests do not establish crash guarantees.
 

@@ -566,7 +566,7 @@ impl UnwrittenBatch {
             let address = chunk.region.range().start;
             page_format::encode_page(
                 &mut chunk.bytes[..METADATA_PAGE_BYTES],
-                page_format::ENTRY_METADATA_INDEX_PAGE_TAG,
+                page_format::CHUNK_METADATA_PAGE_TAG,
                 blake3::hash(&chunk.metadata_starts.bitmap).as_bytes(),
                 address,
                 address / CHUNK_BYTES,
