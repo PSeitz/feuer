@@ -91,7 +91,7 @@ async fn distinguishes_integrity_failures_from_io_errors_and_removes_index_usage
     let request = ByteRange::new(0, 1).unwrap();
     let key = "corrupt".to_owned();
     cache.insert_batch(vec![(key.clone(), download(4))]).await.unwrap();
-    let address = cache.disk.arenas[0].entry_index.lock().unwrap().ranges_by_key[&key][&0].payload_regions[0]
+    let address = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key][&0].payload_regions[0]
         .range()
         .start;
     cache
@@ -135,8 +135,8 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
     // As in the existing write-failure test, let allocation exceed the actual file.
     let disk = Arc::get_mut(&mut cache.disk).unwrap();
-    disk.arenas[0].entry_index.lock().unwrap().remove("second", 0);
-    disk.arenas[0].allocator = DiskAllocator::with_metrics(0..3 * CHUNK_BYTES, disk.metrics.clone()).unwrap();
+    disk.shards[0].entry_index.lock().unwrap().remove("second", 0);
+    disk.shards[0].allocator = DiskChunkAllocator::with_metrics(0..3 * CHUNK_BYTES, disk.metrics.clone()).unwrap();
     assert!(
         cache
             .insert_batch(vec![
@@ -165,7 +165,7 @@ fn abandoned_population_attempts_count_once_as_canceled() {
     let metrics = DiskMetrics::new(&backend);
     drop(PopulationAttempt::new(metrics.clone()));
     let mut finished = PopulationAttempt::new(metrics);
-    finished.finish(PopulationOutcome::Published);
+    finished.set_outcome(PopulationOutcome::Published);
     drop(finished);
     assert_eq!(
         value(&registry, "feuer_disk_population_total", &[("outcome", "canceled")]),

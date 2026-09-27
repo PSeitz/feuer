@@ -23,7 +23,7 @@ use feuer_types::{
 
 use crate::{
     DataFile, DataFileError, DataFileResult, DiskMetrics, IoMetrics,
-    allocation::{CHUNK_BYTES, DiskAllocator, DiskRegion, DiskRegionReadGuard},
+    allocation::{CHUNK_BYTES, DiskChunkAllocator, DiskRegion, DiskRegionReadGuard},
     disk_metrics::{DiskLookupOutcome, PopulationAttempt, PopulationOutcome},
 };
 use page_format::{METADATA_PAGE_BYTES, PAGE_CONTENT_BYTES};
@@ -46,20 +46,20 @@ const MAX_EVICTION_REGIONS: usize = 4096;
 /// The experimental format is neither a persistence guarantee nor a stable on-disk interface.
 #[derive(Clone)]
 pub struct DiskRangeCache {
-    disk: Arc<DiskRangeCacheInner>,
+    disk: Arc<DiskRangeCacheState>,
 }
 
-/// Shared inner state of the disk range cache: its file and independently allocated arenas.
-struct DiskRangeCacheInner {
+/// Shared state of the disk range cache: its file and independently allocated shards.
+struct DiskRangeCacheState {
     file: DataFile,
-    arenas: Box<[Shard]>,
+    shards: Box<[DiskCacheShard]>,
     access_histories: Arc<ObjectAccessHistories>,
     metrics: Arc<DiskMetrics>,
 }
 
 /// An independently allocated disk-cache shard with live range lookup.
-struct Shard {
-    allocator: DiskAllocator,
+struct DiskCacheShard {
+    allocator: DiskChunkAllocator,
     entry_index: Mutex<DiskEntryIndex>,
 }
 
@@ -77,23 +77,23 @@ struct UnwrittenChunk {
     region: DiskRegion,
     bytes: Vec<u8>,
     used_bytes: u64,
-    metadata_starts: EntryMetadataStarts,
+    metadata_starts: EntryMetadataStartBitmap,
 }
 
 /// Entries and their complete chunk buffers prepared for one shard's batch write.
 #[derive(Default)]
-struct UnwrittenBatch {
+struct UnwrittenShardBatch {
     chunks: Vec<UnwrittenChunk>,
     entries: Vec<(ObjectKey, ObjectRangeDiskStorage)>,
 }
 
 /// Candidate entry metadata start positions within one chunk, encoded as a bitmap.
 #[derive(Default)]
-struct EntryMetadataStarts {
+struct EntryMetadataStartBitmap {
     bitmap: [u8; 32],
 }
 
-impl EntryMetadataStarts {
+impl EntryMetadataStartBitmap {
     fn insert(&mut self, offset_in_chunk: u64) {
         let slot = (offset_in_chunk / METADATA_PAGE_BYTES as u64) as usize;
         self.bitmap[slot / 8] |= 1 << (slot % 8);
@@ -148,7 +148,7 @@ impl fmt::Debug for DiskRangeCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DiskRangeCache")
             .field("capacity", &self.disk.file.capacity())
-            .field("arenas", &self.disk.arenas.len())
+            .field("arenas", &self.disk.shards.len())
             .finish_non_exhaustive()
     }
 }
@@ -195,13 +195,13 @@ impl DiskRangeCache {
         }
         let file = DataFile::open(directory, capacity, io_metrics).await?;
         tracing::warn!(target: "feuer::storage", "disk range cache prototype starts empty; recovery is not implemented");
-        let arena_count = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
+        let shard_count = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
         let chunk_count = capacity / CHUNK_BYTES;
-        let arenas = (0..arena_count)
-            .map(|arena_index| Shard {
-                allocator: DiskAllocator::with_metrics(
-                    (chunk_count * arena_index / arena_count) * CHUNK_BYTES
-                        ..(chunk_count * (arena_index + 1) / arena_count) * CHUNK_BYTES,
+        let shards = (0..shard_count)
+            .map(|shard_index| DiskCacheShard {
+                allocator: DiskChunkAllocator::with_metrics(
+                    (chunk_count * shard_index / shard_count) * CHUNK_BYTES
+                        ..(chunk_count * (shard_index + 1) / shard_count) * CHUNK_BYTES,
                     metrics.clone(),
                 )
                 .unwrap(),
@@ -209,9 +209,9 @@ impl DiskRangeCache {
             })
             .collect();
         Ok(Self {
-            disk: Arc::new(DiskRangeCacheInner {
+            disk: Arc::new(DiskRangeCacheState {
                 file,
-                arenas,
+                shards,
                 access_histories,
                 metrics,
             }),
@@ -266,19 +266,19 @@ impl DiskRangeCache {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
         runtime
             .spawn(async move {
-                let mut by_arena: Vec<Vec<_>> = (0..disk.arenas.len()).map(|_| Vec::new()).collect();
+                let mut by_shard: Vec<Vec<_>> = (0..disk.shards.len()).map(|_| Vec::new()).collect();
                 for (key, download, token, attempt) in downloads {
-                    by_arena[disk.arena_index_for_key(&key)].push((key, download, token, attempt));
+                    by_shard[disk.shard_index_for_key(&key)].push((key, download, token, attempt));
                 }
                 let mut published = 0;
-                for (arena, mut downloads) in disk.arenas.iter().zip(by_arena) {
+                for (shard, mut downloads) in disk.shards.iter().zip(by_shard) {
                     downloads.sort_by_key(|(_, download, _, _)| download.bytes().len());
-                    let mut batch = UnwrittenBatch::default();
+                    let mut batch = UnwrittenShardBatch::default();
                     let mut publication_tokens = Vec::new();
                     let mut attempts_left = MAX_EVICTION_ATTEMPTS;
                     let mut regions_left = MAX_EVICTION_REGIONS;
                     for (key, download, token, mut attempt) in downloads {
-                        if arena
+                        if shard
                             .entry_index
                             .lock()
                             .unwrap()
@@ -288,10 +288,10 @@ impl DiskRangeCache {
                             // Preserve the object's evidence even if pressure removes its last existing entry.
                             let accesses = disk.access_histories.for_key(&key);
                             let previous_entries = batch.entries.len();
-                            while let Err(chunks_needed) = batch.push(&arena.allocator, &key, &download, &accesses) {
+                            while let Err(chunks_needed) = batch.push(&shard.allocator, &key, &download, &accesses) {
                                 // Evicting cannot help an entry that exceeds the capacity left by this batch.
-                                if chunks_needed > arena.allocator.chunk_capacity - batch.chunks.len() as u64
-                                    || !arena.evict_candidate(&mut attempts_left, &mut regions_left)
+                                if chunks_needed > shard.allocator.chunk_capacity - batch.chunks.len() as u64
+                                    || !shard.evict_candidate(&mut attempts_left, &mut regions_left)
                                 {
                                     break;
                                 }
@@ -299,37 +299,37 @@ impl DiskRangeCache {
                             if batch.entries.len() != previous_entries {
                                 publication_tokens.push((token, attempt));
                             } else {
-                                attempt.finish(PopulationOutcome::NoCapacity);
+                                attempt.set_outcome(PopulationOutcome::NoCapacity);
                             }
                         } else {
-                            attempt.finish(PopulationOutcome::AlreadyCovered);
+                            attempt.set_outcome(PopulationOutcome::AlreadyCovered);
                         }
                     }
                     let entries = match batch.write(&disk.file, &disk.metrics).await {
                         Ok(entries) => entries,
                         Err(error) => {
                             for (_, attempt) in &mut publication_tokens {
-                                attempt.finish(PopulationOutcome::Failed);
+                                attempt.set_outcome(PopulationOutcome::Failed);
                             }
                             return Err(error);
                         }
                     };
-                    let mut index = arena.entry_index.lock().unwrap();
+                    let mut index = shard.entry_index.lock().unwrap();
                     // Publish larger entries first so contained batch members need not publish at all.
                     for ((key, storage), (token, mut attempt)) in entries.into_iter().zip(publication_tokens).rev() {
                         let object_range = storage.object_range;
                         // Another writer or an earlier entry in this batch may already cover this range.
                         if index.covering_range(&key, object_range).is_some() {
-                            attempt.finish(PopulationOutcome::AlreadyCovered);
+                            attempt.set_outcome(PopulationOutcome::AlreadyCovered);
                             continue;
                         }
-                        attempt.finish(PopulationOutcome::Stale);
+                        attempt.set_outcome(PopulationOutcome::Stale);
                         let mut entry = Some((key, storage));
                         with_current(&token, &mut || {
                             if let Some((key, storage)) = entry.take() {
                                 index.insert(key, storage);
                                 published += 1;
-                                attempt.finish(PopulationOutcome::Published);
+                                attempt.set_outcome(PopulationOutcome::Published);
                             }
                         });
                     }
@@ -342,7 +342,7 @@ impl DiskRangeCache {
 
     /// Checks indexed coverage without reading payload or recording an access.
     pub fn contains(&self, key: &ObjectKey, range: ByteRange) -> bool {
-        self.disk.arenas[self.disk.arena_index_for_key(key)]
+        self.disk.shards[self.disk.shard_index_for_key(key)]
             .entry_index
             .lock()
             .unwrap()
@@ -355,9 +355,9 @@ impl DiskRangeCache {
     pub async fn get(&self, key: &ObjectKey, requested: ByteRange) -> Option<Bytes> {
         let started = Instant::now();
         let metrics = &self.disk.metrics;
-        let arena = &self.disk.arenas[self.disk.arena_index_for_key(key)];
+        let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
         let guarded_read = {
-            let index = arena.entry_index.lock().unwrap();
+            let index = shard.entry_index.lock().unwrap();
             let Some(storage) = index.covering_range(key, requested) else {
                 metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
                 return None;
@@ -384,7 +384,7 @@ impl DiskRangeCache {
                         DiskLookupOutcome::IntegrityFailure
                     }
                 };
-                arena.entry_index.lock().unwrap().invalidate(key, &guarded_read);
+                shard.entry_index.lock().unwrap().invalidate(key, &guarded_read);
                 metrics.record_lookup(outcome, started.elapsed());
                 None
             }
@@ -392,7 +392,7 @@ impl DiskRangeCache {
     }
 }
 
-impl Shard {
+impl DiskCacheShard {
     /// Evicts one sampled low-value entry, never its neighbors. Chunk release is left to ownership.
     fn evict_candidate(&self, attempts_left: &mut usize, regions_left: &mut usize) -> bool {
         if *attempts_left == 0 || *regions_left == 0 {
@@ -439,7 +439,7 @@ impl ObjectRangeDiskStorage {
     }
 
     #[cfg(test)]
-    fn shared_chunk(&self) -> Option<u64> {
+    fn single_chunk_start(&self) -> Option<u64> {
         if self.payload_regions.len() != 1 || self.entry_metadata_regions.len() != 1 {
             return None;
         }
@@ -538,11 +538,11 @@ impl Drop for DiskEntryIndex {
     }
 }
 
-impl DiskRangeCacheInner {
-    fn arena_index_for_key(&self, key: &str) -> usize {
+impl DiskRangeCacheState {
+    fn shard_index_for_key(&self, key: &str) -> usize {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
-        (hasher.finish() % self.arenas.len() as u64) as usize
+        (hasher.finish() % self.shards.len() as u64) as usize
     }
 }
 
@@ -552,11 +552,11 @@ fn page_storage_bytes(content_bytes: usize) -> Option<u64> {
         .checked_mul(METADATA_PAGE_BYTES as u64)
 }
 
-impl UnwrittenBatch {
+impl UnwrittenShardBatch {
     /// Allocation failure leaves the batch unchanged and reports the required number of new chunks.
     fn push(
         &mut self,
-        allocator: &DiskAllocator,
+        allocator: &DiskChunkAllocator,
         key: &ObjectKey,
         download: &Download,
         accesses: &Arc<ObjectAccessHistory>,
@@ -587,7 +587,7 @@ impl UnwrittenBatch {
                 region,
                 bytes: vec![0; CHUNK_BYTES as usize],
                 used_bytes: METADATA_PAGE_BYTES as u64,
-                metadata_starts: EntryMetadataStarts::default(),
+                metadata_starts: EntryMetadataStartBitmap::default(),
             }));
         }
         let (payload_regions, first_chunk) = self.take_regions(&mut cursor, payload_bytes);

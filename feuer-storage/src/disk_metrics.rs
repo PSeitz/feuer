@@ -135,7 +135,7 @@ impl PopulationAttempt {
         }
     }
 
-    pub(crate) fn finish(&mut self, outcome: PopulationOutcome) {
+    pub(crate) fn set_outcome(&mut self, outcome: PopulationOutcome) {
         self.outcome = outcome;
     }
 }

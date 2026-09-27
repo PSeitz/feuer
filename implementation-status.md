@@ -116,7 +116,7 @@ object ranges map to ordered physical regions. Payload bytes have no interleaved
 one BLAKE3 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
 entry while copying only requested bytes into the result. It does not read neighboring entries or metadata.
 
-Independent arenas have their own allocator and range-index lock. The allocator tracks only coalesced free
+Independent shards have their own allocator and range-index lock. The allocator tracks only coalesced free
 whole-chunk runs. There is no persistent bitmap map or async index-write lock. Written chunks remain immutable;
 all entry owners and read guards must release a chunk before reuse. Detached writer tasks retain reservations
 despite caller cancellation; write errors or abandoned owners during I/O quarantine the shard's batch chunks.
@@ -140,7 +140,7 @@ Reopening deliberately starts empty and logs the reset. Recovery remains unimple
 No comparative layout/performance claim is established.
 
 The range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
-cancellation, corruption/reused payload, partial batch failure, metadata-only chunks, disjoint arenas,
+cancellation, corruption/reused payload, partial batch failure, metadata-only chunks, disjoint shards,
 mixed-size packing, exclusive multi-chunk ownership, finalized discovery bitmaps, whole-chunk ownership/reuse,
 bounded value-aware entry eviction, shared evidence across tiers, payload-only scoring, mixed-size churn,
 concurrent eviction/reads,

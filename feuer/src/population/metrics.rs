@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedHistogram, BoxedRegistry, Buckets};
 
+/// An admission or discard outcome from the disk-population queue.
 #[derive(Clone, Copy)]
-pub(super) enum QueueOutcome {
+pub(super) enum PopulationQueueOutcome {
     Queued,
     Full,
     Closed,
@@ -15,14 +16,15 @@ pub(super) enum QueueOutcome {
     Redundant,
 }
 
-pub(super) struct PopulationMetrics {
+/// Metrics for population-queue admission, waiting entries, and pending bytes.
+pub(super) struct PopulationQueueMetrics {
     outcomes: [BoxedCounter; 9],
     pub(super) queued_entries: BoxedGauge,
     pub(super) pending_bytes: BoxedGauge,
     pub(super) queue_duration: BoxedHistogram,
 }
 
-impl PopulationMetrics {
+impl PopulationQueueMetrics {
     pub(super) fn new(registry: &BoxedRegistry) -> Arc<Self> {
         let outcomes = registry.register_counter_vec(
             "feuer_disk_population_queue_total".into(),
@@ -64,7 +66,7 @@ impl PopulationMetrics {
         })
     }
 
-    pub(super) fn record(&self, outcome: QueueOutcome) {
+    pub(super) fn record(&self, outcome: PopulationQueueOutcome) {
         self.outcomes[outcome as usize].increase(1);
     }
 }

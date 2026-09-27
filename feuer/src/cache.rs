@@ -1,7 +1,7 @@
 use std::{fmt, future::Future, sync::Arc, time::Instant};
 
 #[cfg(target_os = "linux")]
-use crate::population::DiskPopulation;
+use crate::population::DiskPopulationQueue;
 use bytes::Bytes;
 use feuer_memory::MemoryCache;
 #[cfg(target_os = "linux")]
@@ -26,7 +26,7 @@ struct CacheState {
     #[cfg(target_os = "linux")]
     disk: DiskRangeCache,
     #[cfg(target_os = "linux")]
-    population: DiskPopulation,
+    population: DiskPopulationQueue,
 }
 
 /// A cloneable handle to one Feuer cache.
@@ -76,7 +76,7 @@ impl TieredMemoryDiskCache {
             feuer_storage::DiskMetrics::new(registry),
         )
         .await?;
-        let population = DiskPopulation::with_metrics(memory.clone(), disk.clone(), registry);
+        let population = DiskPopulationQueue::with_metrics(memory.clone(), disk.clone(), registry);
         Ok(Self {
             state: Arc::new(CacheState {
                 config,

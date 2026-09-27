@@ -15,15 +15,16 @@ use crate::DiskMetrics;
 /// all entry owners and read guards release them; individual holes cannot be reused.
 pub(super) const CHUNK_BYTES: u64 = 1024 * 1024;
 
-/// Free whole chunks in one independently allocated disk range.
+/// Allocator reserving whole disk chunks in one independently allocated disk range.
 #[derive(Clone, Debug)]
-pub(super) struct DiskAllocator {
-    free: Arc<Mutex<FreeSpace>>,
+pub(super) struct DiskChunkAllocator {
+    free: Arc<Mutex<DiskChunkAvailability>>,
     pub(super) chunk_capacity: u64,
 }
 
+/// Free disk-chunk ranges and availability accounting.
 #[derive(Debug)]
-struct FreeSpace {
+struct DiskChunkAvailability {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
     free_chunk_count_by_start: BTreeMap<u64, u64>,
     available_chunks: u64,
@@ -31,7 +32,7 @@ struct FreeSpace {
     metrics: Arc<DiskMetrics>,
 }
 
-impl FreeSpace {
+impl DiskChunkAvailability {
     fn take_chunk(&mut self) -> u64 {
         let (start, count) = self.free_chunk_count_by_start.pop_first().unwrap();
         if count > 1 {
@@ -68,7 +69,7 @@ impl FreeSpace {
     }
 }
 
-impl Drop for FreeSpace {
+impl Drop for DiskChunkAvailability {
     fn drop(&mut self) {
         // The last reservation has gone; only free or quarantined chunks remain.
         self.metrics.free_chunks.decrease(self.available_chunks);
@@ -76,7 +77,7 @@ impl Drop for FreeSpace {
     }
 }
 
-impl DiskAllocator {
+impl DiskChunkAllocator {
     #[cfg(test)]
     fn new(capacity: u64) -> Option<Self> {
         Self::for_disk_range(0..capacity)
@@ -105,7 +106,7 @@ impl DiskAllocator {
             .increase((disk_range.end - disk_range.start) / CHUNK_BYTES);
         Some(Self {
             chunk_capacity: (disk_range.end - disk_range.start) / CHUNK_BYTES,
-            free: Arc::new(Mutex::new(FreeSpace {
+            free: Arc::new(Mutex::new(DiskChunkAvailability {
                 free_chunk_count_by_start: BTreeMap::from([(
                     disk_range.start / CHUNK_BYTES,
                     (disk_range.end - disk_range.start) / CHUNK_BYTES,
@@ -151,7 +152,7 @@ pub(super) struct DiskRegion {
 /// Ownership of one whole chunk, shared by its entry regions and read guards.
 #[derive(Debug)]
 struct ChunkReservation {
-    free: Arc<Mutex<FreeSpace>>,
+    free: Arc<Mutex<DiskChunkAvailability>>,
     chunk: u64,
     reusable: AtomicBool,
 }

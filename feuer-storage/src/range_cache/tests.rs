@@ -33,7 +33,7 @@ async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache) {
 }
 
 fn entry_disk_ranges(cache: &DiskRangeCache, key: &str) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
-    let index = cache.disk.arenas[cache.disk.arena_index_for_key(key)]
+    let index = cache.disk.shards[cache.disk.shard_index_for_key(key)]
         .entry_index
         .lock()
         .unwrap();
@@ -69,7 +69,7 @@ async fn exact_unaligned_reads_containment_and_full_key_identity() {
     );
     assert!(!cache.insert(key.clone(), source).await.unwrap());
     assert!(!cache.insert(key.clone(), download(7, 100)).await.unwrap());
-    let index = cache.disk.arenas[0].entry_index.lock().unwrap();
+    let index = cache.disk.shards[0].entry_index.lock().unwrap();
     assert_eq!(index.ranges_by_key[&key].len(), 1);
 }
 
@@ -128,7 +128,7 @@ async fn mixed_batch_groups_small_entries_and_records_every_metadata_start() {
     inputs.extend((0..130).map(|i| (format!("small-{i}"), download(i, 1024))));
     assert_eq!(cache.insert_batch(inputs).await.unwrap(), 131);
     let large_start = entry_disk_ranges(&cache, "large").0[0].start;
-    let mut expected = BTreeMap::<u64, EntryMetadataStarts>::new();
+    let mut expected = BTreeMap::<u64, EntryMetadataStartBitmap>::new();
     for i in 0..130 {
         let key = format!("small-{i}");
         assert_eq!(
@@ -138,7 +138,7 @@ async fn mixed_batch_groups_small_entries_and_records_every_metadata_start() {
         assert!(entry_disk_ranges(&cache, &key).0[0].start < large_start);
     }
     {
-        let index = cache.disk.arenas[0].entry_index.lock().unwrap();
+        let index = cache.disk.shards[0].entry_index.lock().unwrap();
         for entries in index.ranges_by_key.values() {
             for entry in entries.values() {
                 let address = entry.entry_metadata_regions[0].range().start;
@@ -163,7 +163,7 @@ async fn mixed_batch_groups_small_entries_and_records_every_metadata_start() {
         assert_eq!(&contents[..32], &starts.bitmap);
     }
     assert!(expected.is_empty());
-    assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), 0);
+    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 0);
     assert_eq!(
         cache.get(&"large".to_owned(), range(0, CHUNK_BYTES)).await.unwrap(),
         download(0, CHUNK_BYTES as usize).bytes()
@@ -172,8 +172,8 @@ async fn mixed_batch_groups_small_entries_and_records_every_metadata_start() {
 
 #[test]
 fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighbors() {
-    let allocator = DiskAllocator::for_disk_range(0..8 * CHUNK_BYTES).unwrap();
-    let mut batch = UnwrittenBatch::default();
+    let allocator = DiskChunkAllocator::for_disk_range(0..8 * CHUNK_BYTES).unwrap();
+    let mut batch = UnwrittenShardBatch::default();
     let histories = ObjectAccessHistories::new(1);
     // Exercise boundaries in input order, including small entries after exclusive tails.
     for (key, length) in [
@@ -198,14 +198,18 @@ fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighb
             .collect();
         chunks.sort_unstable();
         chunks.dedup();
-        assert_eq!(entry.shared_chunk().is_some(), chunks.len() == 1);
+        assert_eq!(entry.single_chunk_start().is_some(), chunks.len() == 1);
         for chunk in chunks {
             owners.entry(chunk).or_default().push(entry_number);
         }
     }
     for entries in owners.values() {
         if entries.len() > 1 {
-            assert!(entries.iter().all(|&i| batch.entries[i].1.shared_chunk().is_some()));
+            assert!(
+                entries
+                    .iter()
+                    .all(|&i| batch.entries[i].1.single_chunk_start().is_some())
+            );
         }
     }
     assert_eq!(batch.chunks.len(), 8);
@@ -213,8 +217,8 @@ fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighb
 
 #[test]
 fn metadata_must_fit_before_an_entry_can_share_a_chunk() {
-    let allocator = DiskAllocator::for_disk_range(0..2 * CHUNK_BYTES).unwrap();
-    let mut batch = UnwrittenBatch::default();
+    let allocator = DiskChunkAllocator::for_disk_range(0..2 * CHUNK_BYTES).unwrap();
+    let mut batch = UnwrittenShardBatch::default();
     let histories = ObjectAccessHistories::new(1);
     batch
         .push(
@@ -233,8 +237,8 @@ fn metadata_must_fit_before_an_entry_can_share_a_chunk() {
             &histories.for_key(&"second".to_owned()),
         )
         .unwrap();
-    assert_eq!(batch.entries[0].1.shared_chunk(), Some(0));
-    assert_eq!(batch.entries[1].1.shared_chunk(), Some(CHUNK_BYTES));
+    assert_eq!(batch.entries[0].1.single_chunk_start(), Some(0));
+    assert_eq!(batch.entries[1].1.single_chunk_start(), Some(CHUNK_BYTES));
     assert_eq!(batch.chunks[0].used_bytes, CHUNK_BYTES - METADATA_PAGE_BYTES as u64);
 }
 
@@ -254,7 +258,7 @@ async fn pressure_reclaims_shared_and_exclusive_chunks_during_mixed_size_churn()
                 source.bytes()
             );
         }
-        let index = cache.disk.arenas[0].entry_index.lock().unwrap();
+        let index = cache.disk.shards[0].entry_index.lock().unwrap();
         assert_eq!(
             index.eviction_candidates.len(),
             index.ranges_by_key.values().map(BTreeMap::len).sum::<usize>()
@@ -295,7 +299,7 @@ async fn multi_chunk_eviction_preserves_an_in_progress_read_until_its_guards_dro
     let source = download(3, CHUNK_BYTES as usize + 17);
     cache.insert(key.clone(), source.clone()).await.unwrap();
     let read = {
-        let index = cache.disk.arenas[0].entry_index.lock().unwrap();
+        let index = cache.disk.shards[0].entry_index.lock().unwrap();
         let entry = index.covering_range(&key, source.downloaded_range()).unwrap();
         GuardedObjectRangeRead {
             object_range: entry.object_range,
@@ -331,19 +335,19 @@ async fn eviction_budgets_and_active_reservations_bound_reclamation() {
         .insert(key.clone(), download(0, CHUNK_BYTES as usize))
         .await
         .unwrap();
-    let arena = &cache.disk.arenas[0];
+    let shard = &cache.disk.shards[0];
     let mut candidates = 0;
     let mut regions = MAX_EVICTION_REGIONS;
-    assert!(!arena.evict_candidate(&mut candidates, &mut regions));
+    assert!(!shard.evict_candidate(&mut candidates, &mut regions));
     candidates = 1;
     regions = 1;
-    assert!(arena.evict_candidate(&mut candidates, &mut regions));
+    assert!(shard.evict_candidate(&mut candidates, &mut regions));
     assert_eq!(candidates, 0);
     assert!(cache.get(&key, range(0, 1)).await.is_some());
     candidates = 1;
     regions = MAX_EVICTION_REGIONS;
-    assert!(arena.evict_candidate(&mut candidates, &mut regions));
-    let active = arena.allocator.reserve_chunks(2).unwrap();
+    assert!(shard.evict_candidate(&mut candidates, &mut regions));
+    let active = shard.allocator.reserve_chunks(2).unwrap();
     assert!(!cache.insert("blocked".to_owned(), download(0, 1)).await.unwrap());
     drop(active);
     assert!(cache.insert("unblocked".to_owned(), download(0, 1)).await.unwrap());
@@ -373,13 +377,13 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
         .write_at(0, &Bytes::from(vec![0; METADATA_PAGE_BYTES]))
         .await
         .unwrap();
-    let arena = &cache.disk.arenas[0];
+    let shard = &cache.disk.shards[0];
     let mut attempts = 1;
     let mut regions = MAX_EVICTION_REGIONS;
-    assert!(arena.evict_candidate(&mut attempts, &mut regions));
+    assert!(shard.evict_candidate(&mut attempts, &mut regions));
     assert!(cache.get(&cold, range(0, 1)).await.is_none());
     assert!(cache.get(&hot, range(0, 1)).await.is_some());
-    assert_eq!(arena.allocator.available_bytes(), 0); // Hot neighbor still owns the chunk.
+    assert_eq!(shard.allocator.available_bytes(), 0); // Hot neighbor still owns the chunk.
     assert!(cache.insert("new".to_owned(), download(0, 100)).await.unwrap());
     assert!(cache.get(&other, range(0, 1)).await.is_none());
     assert!(cache.get(&hot, range(0, 1)).await.is_some());
@@ -485,7 +489,7 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     assert_eq!(history.lock().generation(), 5);
     let released = Arc::downgrade(&history);
     drop(history);
-    cache.disk.arenas[0].entry_index.lock().unwrap().remove(&hot, 0);
+    cache.disk.shards[0].entry_index.lock().unwrap().remove(&hot, 0);
     assert!(released.upgrade().is_none());
     assert_eq!(cache.access_histories().for_key(&hot).lock().generation(), 0);
 }
@@ -504,7 +508,7 @@ async fn per_batch_eviction_limit_does_not_force_out_a_shared_chunks_last_entry(
     assert!(!cache.insert("incoming".to_owned(), download(0, 1)).await.unwrap());
     assert!(cache.get(&hot, range(0, 1)).await.is_some());
     assert_eq!(
-        cache.disk.arenas[0]
+        cache.disk.shards[0]
             .entry_index
             .lock()
             .unwrap()
@@ -606,7 +610,7 @@ async fn a_written_chunk_is_immutable_until_all_entries_and_readers_release_it()
     );
     let original = cache.disk.file.read_at(0, CHUNK_BYTES as usize).await.unwrap();
     let reader = {
-        let mut index = cache.disk.arenas[0].entry_index.lock().unwrap();
+        let mut index = cache.disk.shards[0].entry_index.lock().unwrap();
         let entry = index.remove(&first, 3).unwrap();
         entry.payload_regions[0].read_guard()
     };
@@ -634,7 +638,7 @@ async fn whole_entry_checksum_follows_fragmented_chunks() {
         assert!(cache.insert(key.to_owned(), download(0, 1024)).await.unwrap());
     }
     {
-        let mut index = cache.disk.arenas[0].entry_index.lock().unwrap();
+        let mut index = cache.disk.shards[0].entry_index.lock().unwrap();
         index.remove("a", 0);
         index.remove("c", 0);
     }
@@ -673,7 +677,7 @@ async fn partial_overlaps_coexist_without_assembly_and_a_covering_range_replaces
     let returned = cache.get(&key, range(11, 19)).await.unwrap();
     assert!(cache.insert(key.clone(), download(5, 50)).await.unwrap());
     assert_eq!(
-        cache.disk.arenas[0].entry_index.lock().unwrap().ranges_by_key[&key].len(),
+        cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key].len(),
         1
     );
     assert_eq!(returned, download(11, 8).bytes());
@@ -682,7 +686,7 @@ async fn partial_overlaps_coexist_without_assembly_and_a_covering_range_replaces
 
 #[test]
 fn entry_metadata_starts_preserve_bitmap_encoding() {
-    let mut starts = EntryMetadataStarts::default();
+    let mut starts = EntryMetadataStartBitmap::default();
     assert_eq!(starts.bitmap, [0; 32]);
     for slot in [1, 7, 8, 63, 64, 255, 1] {
         starts.insert(slot * METADATA_PAGE_BYTES as u64);
@@ -796,7 +800,7 @@ async fn batch_skips_oversized_and_contained_entries_without_losing_accepted_ent
     );
     assert!(cache.get(&"too large".to_owned(), range(0, 1)).await.is_none());
     assert_eq!(
-        cache.disk.arenas[0].entry_index.lock().unwrap().ranges_by_key["object"].len(),
+        cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key["object"].len(),
         1
     );
 }
@@ -809,12 +813,12 @@ async fn metadata_only_chunks_remain_owned_until_the_entry_is_removed() {
     let (payload, metadata) = entry_disk_ranges(&cache, &key);
     assert_eq!(payload.len(), 1);
     assert_eq!(metadata.len(), 2);
-    assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), CHUNK_BYTES);
+    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), CHUNK_BYTES);
     assert!(cache.insert("other".to_owned(), download(0, 1)).await.unwrap());
-    assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), 0);
+    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 0);
     assert_eq!(cache.get(&key, range(0, 1)).await.unwrap(), download(0, 1).bytes());
-    cache.disk.arenas[0].entry_index.lock().unwrap().remove(&key, 0);
-    assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
+    cache.disk.shards[0].entry_index.lock().unwrap().remove(&key, 0);
+    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
 }
 
 #[tokio::test]
@@ -838,8 +842,8 @@ async fn entry_metadata_space_is_charged_and_failed_reservations_roll_back() {
             .await
             .unwrap()
     );
-    assert!(cache.disk.arenas[0].allocator.reserve_chunks(1).is_none());
-    // A two-chunk entry cannot fit this arena; do not evict the existing entry in vain.
+    assert!(cache.disk.shards[0].allocator.reserve_chunks(1).is_none());
+    // A two-chunk entry cannot fit this shard; do not evict the existing entry in vain.
     assert!(
         !cache
             .insert("oversized".to_owned(), download(0, CHUNK_BYTES as usize))
@@ -883,7 +887,7 @@ async fn racing_equal_and_containing_writes_revalidate_publication() {
         task.await.unwrap();
     }
     let key = "object".to_owned();
-    let ranges: Vec<_> = cache.disk.arenas[0].entry_index.lock().unwrap().ranges_by_key[&key]
+    let ranges: Vec<_> = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key]
         .values()
         .map(|storage| storage.object_range)
         .collect();
@@ -981,7 +985,7 @@ async fn readers_keep_replaced_payload_reserved_but_results_do_not() {
     let key = "object".to_owned();
     cache.insert(key.clone(), download(5, 100)).await.unwrap();
     let (guard, payload_checksum) = {
-        let index = cache.disk.arenas[0].entry_index.lock().unwrap();
+        let index = cache.disk.shards[0].entry_index.lock().unwrap();
         let storage = index.covering_range(&key, range(6, 7)).unwrap();
         (storage.payload_regions[0].read_guard(), storage.payload_checksum)
     };
@@ -994,9 +998,9 @@ async fn readers_keep_replaced_payload_reserved_but_results_do_not() {
         .await
         .unwrap();
     assert_eq!(blake3::hash(&bytes[..100]), payload_checksum);
-    assert!(cache.disk.arenas[0].allocator.reserve_chunks(1).is_none());
+    assert!(cache.disk.shards[0].allocator.reserve_chunks(1).is_none());
     drop(guard);
-    let reused = cache.disk.arenas[0].allocator.reserve_chunks(1).unwrap();
+    let reused = cache.disk.shards[0].allocator.reserve_chunks(1).unwrap();
     assert_eq!(reused[0].range(), 0..CHUNK_BYTES);
     assert_eq!(result, download(6, 1).bytes());
 }
@@ -1034,7 +1038,7 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
         cache.disk.file.write_at(address, &Bytes::from(bytes)).await.unwrap();
         assert!(cache.get(&key, range(3, 4)).await.is_none());
         assert!(
-            !cache.disk.arenas[0]
+            !cache.disk.shards[0]
                 .entry_index
                 .lock()
                 .unwrap()
@@ -1065,8 +1069,8 @@ async fn failed_chunk_write_quarantines_the_batch_without_publication() {
     let (_directory, mut cache) = open_test_cache(CHUNK_BYTES).await;
     // First chunk succeeds, second is outside the real file. Even the complete small entry
     // in the first chunk must remain unpublished when its shard's batch fails.
-    Arc::get_mut(&mut cache.disk).unwrap().arenas[0].allocator =
-        DiskAllocator::for_disk_range(0..3 * CHUNK_BYTES).unwrap();
+    Arc::get_mut(&mut cache.disk).unwrap().shards[0].allocator =
+        DiskChunkAllocator::for_disk_range(0..3 * CHUNK_BYTES).unwrap();
     assert!(matches!(
         cache
             .insert_batch(vec![
@@ -1078,15 +1082,15 @@ async fn failed_chunk_write_quarantines_the_batch_without_publication() {
     ));
     assert!(cache.get(&"small".to_owned(), range(0, 1)).await.is_none());
     assert!(cache.get(&"large".to_owned(), range(0, 1)).await.is_none());
-    assert_eq!(cache.disk.arenas[0].allocator.available_bytes(), 0);
+    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 0);
     let chunk_metadata_page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
     assert_eq!(&chunk_metadata_page[88..96], page_format::CHUNK_METADATA_PAGE_TAG);
 }
 
 #[test]
 fn abandoned_chunk_write_owner_quarantines_shared_storage() {
-    let allocator = DiskAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
-    let mut batch = UnwrittenBatch::default();
+    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
+    let mut batch = UnwrittenShardBatch::default();
     let histories = ObjectAccessHistories::new(1);
     batch
         .push(
@@ -1151,14 +1155,14 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
 }
 
 #[tokio::test]
-async fn arenas_are_disjoint_and_reopening_intentionally_starts_empty() {
+async fn shards_are_disjoint_and_reopening_intentionally_starts_empty() {
     let (directory, cache) = open_test_cache(256 * CHUNK_BYTES).await;
-    assert_eq!(cache.disk.arenas.len(), 2);
+    assert_eq!(cache.disk.shards.len(), 2);
     let keys: Vec<_> = (0..2)
-        .map(|arena_index| {
+        .map(|shard_index| {
             (0..100)
                 .map(|i| format!("object-{i}"))
-                .find(|key| cache.disk.arena_index_for_key(key) == arena_index)
+                .find(|key| cache.disk.shard_index_for_key(key) == shard_index)
                 .unwrap()
         })
         .collect();
