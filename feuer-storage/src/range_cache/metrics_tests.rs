@@ -14,6 +14,7 @@ async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache, pr
         IoMetrics::new(&backend),
         Arc::new(ObjectAccessHistories::new(1)),
         DiskMetrics::new(&backend),
+        RECLAIM_SAMPLE_SIZE,
     )
     .await
     .unwrap();

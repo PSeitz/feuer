@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use feuer_types::retention::RECLAIM_SAMPLE_SIZE;
 use thiserror::Error;
 
 /// Explicit capacities and location for one Feuer cache.
@@ -13,6 +14,7 @@ pub struct CacheConfig {
     directory: PathBuf,
     disk_capacity: u64,
     memory_capacity: u64,
+    reclaim_sample_size: usize,
 }
 
 impl CacheConfig {
@@ -33,7 +35,22 @@ impl CacheConfig {
             directory: directory.into(),
             disk_capacity,
             memory_capacity,
+            reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
         })
+    }
+
+    /// Sets the maximum candidates inspected per memory or disk eviction decision.
+    pub fn with_reclaim_sample_size(mut self, sample_size: usize) -> Result<Self, CacheConfigError> {
+        if sample_size == 0 {
+            return Err(CacheConfigError::InvalidReclaimSampleSize);
+        }
+        self.reclaim_sample_size = sample_size;
+        Ok(self)
+    }
+
+    /// Returns the maximum candidates inspected per eviction decision. Defaults to 64.
+    pub const fn reclaim_sample_size(&self) -> usize {
+        self.reclaim_sample_size
     }
 
     /// Returns the directory containing the cache's exclusively locked backing file.
@@ -61,6 +78,9 @@ pub enum CacheConfigError {
     /// The configured memory eviction target must be positive.
     #[error("memory capacity must be greater than zero")]
     InvalidMemoryCapacity,
+    /// Eviction must inspect at least one candidate.
+    #[error("reclaim sample size must be greater than zero")]
+    InvalidReclaimSampleSize,
 }
 
 #[cfg(test)]

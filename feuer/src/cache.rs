@@ -64,16 +64,17 @@ impl TieredMemoryDiskCache {
     /// sharing a registry contribute to the same counters and aggregate gauges.
     #[cfg(target_os = "linux")]
     pub async fn open_with_metrics(config: CacheConfig, registry: &BoxedRegistry) -> Result<Self, DiskRangeCacheError> {
-        let memory = Arc::new(MemoryCache::with_metrics(
-            config.memory_capacity(),
-            MemoryMetrics::new(registry),
-        ));
+        let memory = Arc::new(
+            MemoryCache::with_metrics(config.memory_capacity(), MemoryMetrics::new(registry))
+                .with_reclaim_sample_size(config.reclaim_sample_size()),
+        );
         let disk = DiskRangeCache::open_with_metrics(
             config.directory(),
             config.disk_capacity(),
             IoMetrics::new(registry),
             memory.access_histories(),
             feuer_storage::DiskMetrics::new(registry),
+            config.reclaim_sample_size(),
         )
         .await?;
         let population = DiskPopulationQueue::with_metrics(memory.clone(), disk.clone(), registry);

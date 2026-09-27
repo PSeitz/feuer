@@ -12,16 +12,16 @@ use std::{
 
 use crate::{ByteRange, ObjectKey};
 
-/// Maximum entries inspected in one retention-policy sample.
+/// Default maximum entries inspected in one retention-policy sample.
 pub const RECLAIM_SAMPLE_SIZE: usize = 64;
 
 /// Chooses the next bounded, rotating sample from a dense candidate list.
-pub fn sample_candidates(cursor: &mut usize, length: usize) -> (usize, usize) {
+pub fn sample_candidates(cursor: &mut usize, length: usize, sample_size: usize) -> (usize, usize) {
     if length == 0 {
         return (0, 0);
     }
     let start = *cursor % length;
-    let count = length.min(RECLAIM_SAMPLE_SIZE);
+    let count = length.min(sample_size);
     *cursor = (start + count) % length;
     (start, count)
 }
@@ -270,9 +270,9 @@ mod tests {
     #[test]
     fn sampling_is_bounded_and_value_comparison_does_not_overflow() {
         let mut cursor = 0;
-        assert_eq!(sample_candidates(&mut cursor, 0), (0, 0));
-        assert_eq!(sample_candidates(&mut cursor, 100), (0, 64));
-        assert_eq!(sample_candidates(&mut cursor, 100), (64, 64));
+        assert_eq!(sample_candidates(&mut cursor, 0, RECLAIM_SAMPLE_SIZE), (0, 0));
+        assert_eq!(sample_candidates(&mut cursor, 100, RECLAIM_SAMPLE_SIZE), (0, 64));
+        assert_eq!(sample_candidates(&mut cursor, 100, RECLAIM_SAMPLE_SIZE), (64, 64));
         assert_eq!(
             compare_cost_per_byte(u64::MAX, u64::MAX, u64::MAX - 1, u64::MAX),
             Ordering::Greater

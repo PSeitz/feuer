@@ -18,7 +18,9 @@ use std::{
 use bytes::Bytes;
 use feuer_types::{
     ByteRange, Download, ObjectKey,
-    retention::{ObjectAccessHistories, ObjectAccessHistory, compare_cost_per_byte, sample_candidates},
+    retention::{
+        ObjectAccessHistories, ObjectAccessHistory, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates,
+    },
 };
 
 use crate::{
@@ -59,6 +61,7 @@ struct DiskRangeCacheState {
 
 /// An independently allocated disk-cache shard with live range lookup.
 struct DiskCacheShard {
+    reclaim_sample_size: usize,
     allocator: DiskChunkAllocator,
     entry_index: Mutex<DiskEntryIndex>,
 }
@@ -179,7 +182,15 @@ impl DiskRangeCache {
         metrics: Arc<IoMetrics>,
         access_histories: Arc<ObjectAccessHistories>,
     ) -> Result<Self, DiskRangeCacheError> {
-        Self::open_with_metrics(directory, capacity, metrics, access_histories, DiskMetrics::noop()).await
+        Self::open_with_metrics(
+            directory,
+            capacity,
+            metrics,
+            access_histories,
+            DiskMetrics::noop(),
+            RECLAIM_SAMPLE_SIZE,
+        )
+        .await
     }
 
     /// Opens a disk tier with registered file-I/O and range-cache metrics.
@@ -189,7 +200,9 @@ impl DiskRangeCache {
         io_metrics: Arc<IoMetrics>,
         access_histories: Arc<ObjectAccessHistories>,
         metrics: Arc<DiskMetrics>,
+        reclaim_sample_size: usize,
     ) -> Result<Self, DiskRangeCacheError> {
+        assert!(reclaim_sample_size > 0, "reclaim sample size must be greater than zero");
         if capacity < CHUNK_BYTES || capacity > i64::MAX as u64 {
             return Err(DiskRangeCacheError::InvalidCapacity);
         }
@@ -200,6 +213,7 @@ impl DiskRangeCache {
         let chunk_count = capacity / CHUNK_BYTES;
         let shards = (0..shard_count)
             .map(|shard_index| DiskCacheShard {
+                reclaim_sample_size,
                 allocator: DiskChunkAllocator::with_metrics(
                     (chunk_count * shard_index / shard_count) * CHUNK_BYTES
                         ..(chunk_count * (shard_index + 1) / shard_count) * CHUNK_BYTES,
@@ -405,7 +419,7 @@ impl DiskCacheShard {
             return false;
         }
         *attempts_left -= 1;
-        let (start, count) = sample_candidates(&mut index.next_candidate, length);
+        let (start, count) = sample_candidates(&mut index.next_candidate, length, self.reclaim_sample_size);
         let mut selected: Option<(usize, u64, u64, u64)> = None;
         for offset in 0..count {
             let position = (start + offset) % length;

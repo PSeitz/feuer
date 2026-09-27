@@ -3,7 +3,9 @@ use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
 use bytes::Bytes;
 use feuer_types::{
     ByteRange, ObjectKey,
-    retention::{ObjectAccessHistories, ObjectAccessHistory, compare_cost_per_byte, sample_candidates},
+    retention::{
+        ObjectAccessHistories, ObjectAccessHistory, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates,
+    },
 };
 use rustc_hash::FxHashMap;
 
@@ -136,8 +138,8 @@ impl ReclaimCandidateRing {
         moved
     }
 
-    fn sample(&mut self) -> (usize, usize) {
-        sample_candidates(&mut self.cursor, self.entries.len())
+    fn sample(&mut self, sample_size: usize) -> (usize, usize) {
+        sample_candidates(&mut self.cursor, self.entries.len(), sample_size)
     }
 }
 
@@ -209,6 +211,7 @@ pub(super) enum AdmissionProgress {
 /// One memory-cache shard's range indexes, access history, and payload accounting.
 pub(super) struct MemoryCacheShard {
     capacity: u64,
+    pub(super) reclaim_sample_size: usize,
     used_bytes: u64,
     ranges: FxHashMap<ObjectKey, ObjectCachedRanges>,
     access_histories: Arc<ObjectAccessHistories>,
@@ -225,6 +228,7 @@ impl MemoryCacheShard {
     ) -> Self {
         Self {
             capacity,
+            reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             used_bytes: 0,
             ranges: FxHashMap::default(),
             access_histories,
@@ -469,7 +473,7 @@ impl MemoryCacheShard {
         admitting_key: &ObjectKey,
         admitting_range: ByteRange,
     ) -> Option<ReclaimCandidate> {
-        let (sample_start, sample_count) = self.candidates.sample();
+        let (sample_start, sample_count) = self.candidates.sample(self.reclaim_sample_size);
         let candidate_count = self.candidates.entries.len();
         let mut selected: Option<ReclaimCandidate> = None;
 

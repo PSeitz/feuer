@@ -87,6 +87,15 @@ impl MemoryCache {
         }
     }
 
+    /// Sets the maximum candidates inspected per eviction decision. Panics if zero.
+    pub fn with_reclaim_sample_size(mut self, sample_size: usize) -> Self {
+        assert!(sample_size > 0, "reclaim sample size must be greater than zero");
+        for shard in &mut self.shards {
+            shard.get_mut().reclaim_sample_size = sample_size;
+        }
+        self
+    }
+
     /// Shared per-object evidence for attaching a disk tier to this memory cache.
     pub fn access_histories(&self) -> Arc<ObjectAccessHistories> {
         self.access_histories.clone()
