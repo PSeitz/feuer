@@ -96,8 +96,9 @@ impl DataFile {
             duration_seconds = field::Empty,
         );
         let result = async {
+            let queue_metrics = metrics.clone();
             let state = runtime
-                .spawn_blocking(move || open_file_state(directory, capacity))
+                .spawn_blocking(move || open_file_state(directory, capacity, &queue_metrics))
                 .await
                 .map_err(|source| DataFileError::Task {
                     operation: IoOperation::OpenDataFile,
@@ -106,7 +107,7 @@ impl DataFile {
             // Exercise an actual aligned direct read before claiming open succeeded.
             state
                 .read_queue
-                .execute(0, uring::DIRECT_IO_ALIGNMENT_BYTES, &[])
+                .read(0, uring::DIRECT_IO_ALIGNMENT_BYTES)
                 .await
                 .map_err(|source| DataFileError::Io {
                     operation: IoOperation::OpenDataFile,
@@ -162,8 +163,9 @@ impl DataFile {
 
     /// Writes complete 4096-byte-aligned blocks.
     ///
-    /// Internally copies bounded chunks into aligned buffers. Callers must protect
-    /// the full aligned byte range from conflicting access through completion.
+    /// Retains aligned byte slices directly; copies unaligned inputs into bounded
+    /// aligned buffers. Callers must protect the full aligned byte range from
+    /// conflicting access through completion.
     /// Dropping this future may leave a partial write and does not stop submitted
     /// writes: retain the disk region until they complete, as described in
     /// [`DataFile`]'s cancellation contract. Publish a cached byte range only after success.
@@ -176,14 +178,11 @@ impl DataFile {
         assert!(bytes.len().is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
         self.measure_io(IoOperation::Write, offset, bytes.len(), async {
             check_range(IoOperation::Write, offset, bytes.len() as u64, self.state.capacity)?;
-            for (index, payload) in bytes.chunks(uring::MAX_IO_CHUNK_BYTES).enumerate() {
+            for start in (0..bytes.len()).step_by(uring::MAX_IO_CHUNK_BYTES) {
+                let end = (start + uring::MAX_IO_CHUNK_BYTES).min(bytes.len());
                 self.state
                     .write_queue
-                    .execute(
-                        offset + (index * uring::MAX_IO_CHUNK_BYTES) as u64,
-                        payload.len(),
-                        payload,
-                    )
+                    .write_parts(offset + start as u64, end - start, &[(0, bytes.slice(start..end))])
                     .await
                     .map_err(|source| DataFileError::Io {
                         operation: IoOperation::Write,
@@ -191,19 +190,36 @@ impl DataFile {
                         source,
                     })?;
             }
-            Ok(Bytes::new())
+            Ok(())
         })
         .await
-        .map(|_| ())
     }
 
-    async fn measure_io(
+    /// Writes one complete chunk from ordered parts, zero-filling gaps without
+    /// materializing an intermediate chunk buffer. The usual write cancellation contract applies.
+    pub(crate) async fn write_parts(&self, offset: u64, length: usize, parts: &[(usize, Bytes)]) -> DataFileResult<()> {
+        self.measure_io(IoOperation::Write, offset, length, async {
+            check_range(IoOperation::Write, offset, length as u64, self.state.capacity)?;
+            self.state
+                .write_queue
+                .write_parts(offset, length, parts)
+                .await
+                .map_err(|source| DataFileError::Io {
+                    operation: IoOperation::Write,
+                    path: self.state.data_path.clone(),
+                    source,
+                })
+        })
+        .await
+    }
+
+    async fn measure_io<T>(
         &self,
         operation: IoOperation,
         offset: u64,
         length: usize,
-        execute: impl Future<Output = DataFileResult<Bytes>>,
-    ) -> DataFileResult<Bytes> {
+        execute: impl Future<Output = DataFileResult<T>>,
+    ) -> DataFileResult<T> {
         let started = Instant::now();
         let observed_bytes = u64::try_from(length).unwrap_or(u64::MAX);
         let span = tracing::trace_span!(
@@ -263,7 +279,7 @@ impl DataFile {
     }
 }
 
-fn open_file_state(directory: PathBuf, capacity: u64) -> DataFileResult<DataFileState> {
+fn open_file_state(directory: PathBuf, capacity: u64, metrics: &IoMetrics) -> DataFileResult<DataFileState> {
     if capacity == 0 || capacity > i64::MAX as u64 || !capacity.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64)
     {
         return Err(DataFileError::InvalidCapacity);
@@ -318,9 +334,9 @@ fn open_file_state(directory: PathBuf, capacity: u64) -> DataFileResult<DataFile
     // Construct both rings before resizing, so unavailable io_uring does not resize an existing cache.
     let file = Arc::new(file);
     let lock_file = Arc::new(lock_file);
-    let read_queue = uring::IoQueueHandle::new(file.clone(), lock_file.clone(), IoOperation::Read)
+    let read_queue = uring::IoQueueHandle::new(file.clone(), lock_file.clone(), IoOperation::Read, metrics)
         .map_err(|source| error(IoOperation::OpenDataFile, source))?;
-    let write_queue = uring::IoQueueHandle::new(file.clone(), lock_file, IoOperation::Write)
+    let write_queue = uring::IoQueueHandle::new(file.clone(), lock_file, IoOperation::Write, metrics)
         .map_err(|source| error(IoOperation::OpenDataFile, source))?;
     file.set_len(capacity)
         .map_err(|source| error(IoOperation::ResizeDataFile, source))?;

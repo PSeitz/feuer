@@ -1,14 +1,24 @@
 use std::{fmt, sync::Arc, time::Duration};
 
-use mixtrics::metrics::{BoxedCounter, BoxedHistogram, BoxedRegistry, Buckets};
+use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedHistogram, BoxedRegistry, Buckets};
 
 use crate::IoOperation;
+
+/// Metrics for one size class of idle aligned I/O buffers.
+#[derive(Debug)]
+pub(crate) struct IoBufferPoolMetrics {
+    pub(crate) idle_bytes: BoxedGauge,
+    pub(crate) capacity_bytes: BoxedGauge,
+    pub(crate) retained: BoxedCounter,
+    pub(crate) discarded: BoxedCounter,
+}
 
 struct IoOperationMetrics {
     success: BoxedCounter,
     error: BoxedCounter,
     bytes: BoxedCounter,
     success_duration: BoxedHistogram,
+    buffer_pools: [Arc<IoBufferPoolMetrics>; 3],
 }
 
 impl fmt::Debug for IoOperationMetrics {
@@ -20,8 +30,8 @@ impl fmt::Debug for IoOperationMetrics {
 /// Internal metric handles for fixed-file positional I/O.
 ///
 /// Feuer's public API does not expose this as a statistics snapshot. The
-/// handles emit monotonic counters and histograms through the configured
-/// `mixtrics` registry using only bounded operation and outcome labels.
+/// handles emit counters, gauges and histograms through the configured
+/// `mixtrics` registry using only bounded labels.
 #[derive(Debug)]
 pub struct IoMetrics {
     read: IoOperationMetrics,
@@ -56,11 +66,35 @@ impl IoMetrics {
             Buckets::exponential(1024.0, 2.0, 21),
         );
 
+        let idle_bytes = registry.register_gauge_vec(
+            "feuer_io_buffer_pool_idle_bytes".into(),
+            "Idle aligned I/O buffer bytes available for reuse".into(),
+            &["operation", "pool"],
+        );
+        let capacity_bytes = registry.register_gauge_vec(
+            "feuer_io_buffer_pool_capacity_bytes".into(),
+            "Live I/O buffer pools' configured idle byte capacity".into(),
+            &["operation", "pool"],
+        );
+        let returns = registry.register_counter_vec(
+            "feuer_io_buffer_pool_returns_total".into(),
+            "Buffers returned to live I/O pools, retained or discarded due to insufficient idle capacity".into(),
+            &["operation", "pool", "outcome"],
+        );
+
         let operation = |label: &'static str| IoOperationMetrics {
             success: operations.counter(&[label.into(), "success".into()]),
             error: operations.counter(&[label.into(), "error".into()]),
             bytes: bytes.counter(&[label.into()]),
             success_duration: duration.histogram(&[label.into(), "success".into()]),
+            buffer_pools: ["small", "medium", "large"].map(|pool| {
+                Arc::new(IoBufferPoolMetrics {
+                    idle_bytes: idle_bytes.gauge(&[label.into(), pool.into()]),
+                    capacity_bytes: capacity_bytes.gauge(&[label.into(), pool.into()]),
+                    retained: returns.counter(&[label.into(), pool.into(), "retained".into()]),
+                    discarded: returns.counter(&[label.into(), pool.into(), "discarded".into()]),
+                })
+            }),
         };
 
         Arc::new(Self {
@@ -68,6 +102,14 @@ impl IoMetrics {
             write: operation(IoOperation::Write.as_str()),
             read_size: read_size.histogram(&[]),
         })
+    }
+
+    pub(crate) fn buffer_pools(&self, operation: IoOperation) -> &[Arc<IoBufferPoolMetrics>; 3] {
+        match operation {
+            IoOperation::Read => &self.read.buffer_pools,
+            IoOperation::Write => &self.write.buffer_pools,
+            _ => unreachable!("buffer pools only support reads and writes"),
+        }
     }
 
     pub(crate) fn record(&self, operation: IoOperation, bytes: u64, elapsed: Duration, success: bool) {

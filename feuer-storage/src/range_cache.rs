@@ -76,15 +76,16 @@ struct DiskEntryIndex {
     metrics: Arc<DiskMetrics>,
 }
 
-/// One reserved chunk being assembled in memory before its only write.
+/// One reserved chunk's metadata and retained payload slices, before its only write.
 struct UnwrittenChunk {
     region: DiskRegion,
-    bytes: Vec<u8>,
+    // Ordered byte positions and contents; gaps are zero-filled by the I/O layer.
+    parts: Vec<(usize, Bytes)>,
     used_bytes: u64,
     metadata_starts: EntryMetadataStartBitmap,
 }
 
-/// Entries and their complete chunk buffers prepared for one shard's batch write.
+/// Entries and their chunk contents prepared for one shard's batch write.
 #[derive(Default)]
 struct UnwrittenShardBatch {
     chunks: Vec<UnwrittenChunk>,
@@ -252,7 +253,7 @@ impl DiskRangeCache {
     /// Entries share a chunk only when their complete payload and metadata fit inside it.
     /// Multi-chunk entries own their chunks exclusively. Partially filled chunks are finalized too.
     /// Pressure eviction is bounded; unavailable capacity causes admission to be skipped, not waited for.
-    /// Callers bound batch size and concurrency: complete chunk buffers are assembled in memory.
+    /// Callers bound batch size and concurrency: payload slices are retained until writing completes.
     /// Dropping this future does not abort its detached writer or release storage needed by submitted I/O.
     pub async fn insert_batch(&self, downloads: Vec<(ObjectKey, Download)>) -> Result<usize, DiskRangeCacheError> {
         self.insert_batch_checked(
@@ -632,7 +633,8 @@ impl UnwrittenShardBatch {
             let regions = allocator.reserve_chunks(new_chunk_count).ok_or(new_chunk_count)?;
             self.chunks.extend(regions.into_iter().map(|region| UnwrittenChunk {
                 region,
-                bytes: vec![0; CHUNK_BYTES as usize],
+                // The discovery page is filled after all entry positions are known.
+                parts: vec![(0, Bytes::new())],
                 used_bytes: METADATA_PAGE_BYTES as u64,
                 metadata_starts: EntryMetadataStartBitmap::default(),
             }));
@@ -643,7 +645,7 @@ impl UnwrittenShardBatch {
             let range = region.range();
             let offset = (range.start % CHUNK_BYTES) as usize;
             let end = (consumed + (range.end - range.start) as usize).min(bytes.len());
-            chunk.bytes[offset..offset + end - consumed].copy_from_slice(&bytes[consumed..end]);
+            chunk.parts.push((offset, bytes.slice(consumed..end)));
             consumed = end;
         }
         let payload_checksum = blake3::hash(bytes);
@@ -671,8 +673,9 @@ impl UnwrittenShardBatch {
                 };
                 let offset = (page_address % CHUNK_BYTES) as usize;
                 let end = (consumed + PAGE_CONTENT_BYTES).min(contents.len());
+                let mut page = vec![0; METADATA_PAGE_BYTES];
                 page_format::encode_page(
-                    &mut chunk.bytes[offset..offset + METADATA_PAGE_BYTES],
+                    &mut page,
                     page_format::ENTRY_METADATA_PAGE_TAG,
                     content_checksum.as_bytes(),
                     page_address,
@@ -680,6 +683,7 @@ impl UnwrittenShardBatch {
                     next,
                     &contents[consumed..end],
                 );
+                chunk.parts.push((offset, Bytes::from(page)));
                 consumed = end;
                 page_ordinal += 1;
             }
@@ -738,8 +742,9 @@ impl UnwrittenShardBatch {
         );
         for chunk in &mut self.chunks {
             let address = chunk.region.range().start;
+            let mut page = vec![0; METADATA_PAGE_BYTES];
             page_format::encode_page(
-                &mut chunk.bytes[..METADATA_PAGE_BYTES],
+                &mut page,
                 page_format::CHUNK_METADATA_PAGE_TAG,
                 blake3::hash(&chunk.metadata_starts.bitmap).as_bytes(),
                 address,
@@ -747,10 +752,8 @@ impl UnwrittenShardBatch {
                 0,
                 &chunk.metadata_starts.bitmap,
             );
-            if let Err(error) = file
-                .write_at(address, &Bytes::from(std::mem::take(&mut chunk.bytes)))
-                .await
-            {
+            chunk.parts[0].1 = Bytes::from(page);
+            if let Err(error) = file.write_parts(address, CHUNK_BYTES as usize, &chunk.parts).await {
                 tracing::warn!(target: "feuer::storage", %error, "batch write failed; chunks quarantined");
                 return Err(error.into());
             }

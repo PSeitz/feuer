@@ -17,7 +17,7 @@ use bytes::Bytes;
 use io_uring::{IoUring, opcode, squeue, types};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
-use crate::{IoOperation, allocation::DiskRegionReadGuard};
+use crate::{IoMetrics, IoOperation, allocation::DiskRegionReadGuard, metrics::IoBufferPoolMetrics};
 
 // Buffer addresses, physical offsets, and I/O lengths use this alignment.
 // Opening verifies that the filesystem's direct-I/O requirements divide it.
@@ -75,11 +75,16 @@ struct IoAdmissionBudgets {
 }
 
 impl IoAdmissionBudgets {
-    fn new(max_in_flight: usize) -> Self {
+    fn new(max_in_flight: usize, operation: IoOperation, metrics: &IoMetrics) -> Self {
         Self {
             request_slots: Arc::new(Semaphore::new(max_in_flight)),
             buffer_memory: Arc::new(Semaphore::new(MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES)),
-            idle_buffers: IDLE_IO_BUFFER_CAPACITIES.map(|capacity| Arc::new(Mutex::new(IdleIoBuffers::new(capacity)))),
+            idle_buffers: std::array::from_fn(|index| {
+                Arc::new(Mutex::new(IdleIoBuffers::new(
+                    IDLE_IO_BUFFER_CAPACITIES[index],
+                    metrics.buffer_pools(operation)[index].clone(),
+                )))
+            }),
         }
     }
 
@@ -96,7 +101,12 @@ impl IoAdmissionBudgets {
 }
 
 impl IoQueueHandle {
-    pub(crate) fn new(file: Arc<File>, directory_lock: Arc<File>, operation: IoOperation) -> io::Result<Self> {
+    pub(crate) fn new(
+        file: Arc<File>,
+        directory_lock: Arc<File>,
+        operation: IoOperation,
+        metrics: &IoMetrics,
+    ) -> io::Result<Self> {
         let (thread_name, max_in_flight) = match operation {
             IoOperation::Read => ("feuer-read-io", MAX_IN_FLIGHT_IO),
             IoOperation::Write => ("feuer-write-io", MAX_IN_FLIGHT_WRITES),
@@ -111,7 +121,7 @@ impl IoQueueHandle {
         // SAFETY: fd was just created and has no other owner.
         let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
         let (sender, receiver) = mpsc::sync_channel(max_in_flight);
-        let admission = Arc::new(IoAdmissionBudgets::new(max_in_flight));
+        let admission = Arc::new(IoAdmissionBudgets::new(max_in_flight, operation, metrics));
         let mut queue = IoQueue {
             admission: admission.clone(),
             ring,
@@ -162,18 +172,27 @@ impl IoQueueHandle {
         AlignedIoBuffer::new(length, read_guards, self.admission.buffer_pool(length))
     }
 
-    pub(crate) async fn execute(&self, offset: u64, length: usize, payload: &[u8]) -> io::Result<Bytes> {
+    pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
+        assert_eq!(self.operation, IoOperation::Read);
         let permits = self.acquire(length).await?;
-        let mut buffer = self.allocate_buffer(length, Vec::new())?;
-        if self.operation == IoOperation::Write {
-            buffer.as_mut_slice().copy_from_slice(payload);
-        }
-        let buffer = self.execute_buffer(offset, buffer, 0..length, permits).await?;
-        Ok(if self.operation == IoOperation::Read {
-            buffer.into_bytes()
-        } else {
-            Bytes::new()
-        })
+        let buffer = self.allocate_buffer(length, Vec::new())?;
+        Ok(self
+            .execute_buffers(offset, IoBuffers::Read(buffer), 0..length, permits)
+            .await?
+            .into_read()
+            .into_bytes())
+    }
+
+    /// Writes ordered, nonoverlapping parts in one request; unspecified bytes become zero.
+    /// Aligned payload slices are retained directly; only other bytes need a copy.
+    pub(crate) async fn write_parts(&self, offset: u64, length: usize, parts: &[(usize, Bytes)]) -> io::Result<()> {
+        assert_eq!(self.operation, IoOperation::Write);
+        assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);
+        assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
+        let permits = self.acquire(length).await?;
+        let buffers = IoBuffers::write(length, parts, self.admission.buffer_pool(length))?;
+        self.execute_buffers(offset, buffers, 0..length, permits).await?;
+        Ok(())
     }
 
     /// Transfers exclusive buffer ownership to the queue until this slice completes.
@@ -185,18 +204,21 @@ impl IoQueueHandle {
     ) -> io::Result<AlignedIoBuffer> {
         assert_eq!(self.operation, IoOperation::Read);
         let permits = self.acquire(destination.len()).await?;
-        self.execute_buffer(offset, buffer, destination, permits).await
+        Ok(self
+            .execute_buffers(offset, IoBuffers::Read(buffer), destination, permits)
+            .await?
+            .into_read())
     }
 
-    async fn execute_buffer(
+    async fn execute_buffers(
         &self,
         offset: u64,
-        buffer: AlignedIoBuffer,
+        buffers: IoBuffers,
         destination: Range<usize>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
-    ) -> io::Result<AlignedIoBuffer> {
+    ) -> io::Result<IoBuffers> {
         let (reply, receive) = oneshot::channel();
-        let request = IoRequest::new(self.operation, offset, buffer, destination, reply, permits);
+        let request = IoRequest::new(offset, buffers, destination, reply, permits);
         // All queued + active requests hold a permit, so this cannot wait for space.
         self.sender
             .as_ref()
@@ -228,15 +250,25 @@ struct IdleIoBuffers {
     by_length: BTreeMap<usize, Vec<AlignedIoBuffer>>,
     bytes: usize,
     capacity: usize,
+    metrics: Arc<IoBufferPoolMetrics>,
 }
 
 impl IdleIoBuffers {
-    fn new(capacity: usize) -> Self {
+    fn new(capacity: usize, metrics: Arc<IoBufferPoolMetrics>) -> Self {
+        metrics.capacity_bytes.increase(capacity as u64);
         Self {
             by_length: BTreeMap::new(),
             bytes: 0,
             capacity,
+            metrics,
         }
+    }
+}
+
+impl Drop for IdleIoBuffers {
+    fn drop(&mut self) {
+        self.metrics.idle_bytes.decrease(self.bytes as u64);
+        self.metrics.capacity_bytes.decrease(self.capacity as u64);
     }
 }
 
@@ -263,6 +295,7 @@ impl AlignedIoBuffer {
             let buffer = idle.by_length.get_mut(&length).and_then(Vec::pop);
             if buffer.is_some() {
                 idle.bytes -= length;
+                idle.metrics.idle_bytes.decrease(length as u64);
                 if idle.by_length[&length].is_empty() {
                     idle.by_length.remove(&length);
                 }
@@ -334,28 +367,137 @@ impl Drop for AlignedIoBuffer {
                     idle_buffers: Weak::new(),
                 });
                 idle.bytes += length;
+                idle.metrics.idle_bytes.increase(length as u64);
+                idle.metrics.retained.increase(1);
                 return;
             }
+            idle.metrics.discarded.increase(1);
         }
         // SAFETY: the matching allocation remains owned, and no kernel operation references it.
         unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
     }
 }
 
+/// Memory retained by a read or vectored write until completion.
+enum IoBuffers {
+    Read(AlignedIoBuffer),
+    Write {
+        bytes: Vec<Bytes>,
+        vectors: Vec<libc::iovec>,
+    },
+}
+
+impl IoBuffers {
+    fn write(length: usize, parts: &[(usize, Bytes)], pool: &Arc<Mutex<IdleIoBuffers>>) -> io::Result<Self> {
+        let mut buffers = Vec::new();
+        let mut copy_start = 0;
+        let mut copy_part = 0;
+        let mut end = 0;
+        for (index, (offset, bytes)) in parts.iter().enumerate() {
+            assert!(end <= *offset && *offset <= length && bytes.len() <= length - offset);
+            end = offset + bytes.len();
+            let aligned_length = bytes.len() / DIRECT_IO_ALIGNMENT_BYTES * DIRECT_IO_ALIGNMENT_BYTES;
+            if aligned_length == 0
+                || !offset.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES)
+                || !(bytes.as_ptr() as usize).is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES)
+            {
+                continue;
+            }
+            if copy_start < *offset {
+                buffers.push(Self::copy_parts(copy_start..*offset, &parts[copy_part..index], pool)?);
+            }
+            buffers.push(bytes.slice(..aligned_length));
+            copy_start = offset + aligned_length;
+            // Include any unaligned tail of this part in the next copied range.
+            copy_part = index;
+        }
+        if copy_start < length {
+            buffers.push(Self::copy_parts(copy_start..length, &parts[copy_part..], pool)?);
+        }
+        Ok(Self::Write {
+            vectors: Vec::with_capacity(buffers.len()),
+            bytes: buffers,
+        })
+    }
+
+    fn copy_parts(
+        range: Range<usize>,
+        parts: &[(usize, Bytes)],
+        pool: &Arc<Mutex<IdleIoBuffers>>,
+    ) -> io::Result<Bytes> {
+        let mut buffer = AlignedIoBuffer::new(range.len(), Vec::new(), pool)?;
+        let destination = buffer.as_mut_slice();
+        let mut written = 0;
+        for (offset, bytes) in parts {
+            let start = (*offset).max(range.start);
+            let end = (offset + bytes.len()).min(range.end);
+            if start >= end {
+                continue;
+            }
+            destination[written..start - range.start].fill(0);
+            destination[start - range.start..end - range.start].copy_from_slice(&bytes[start - offset..end - offset]);
+            written = end - range.start;
+        }
+        destination[written..].fill(0);
+        Ok(buffer.into_bytes())
+    }
+
+    fn submission_entry(&mut self, fd: types::Fd, offset: u64, range: Range<usize>) -> squeue::Entry {
+        match self {
+            Self::Read(buffer) => {
+                // SAFETY: the destination is in bounds and exclusively owned by the
+                // active request until its completion has been consumed.
+                let ptr = unsafe { buffer.ptr.as_ptr().add(range.start) };
+                opcode::Read::new(fd, ptr, range.len() as u32).offset(offset).build()
+            }
+            Self::Write { bytes, vectors } => {
+                vectors.clear();
+                let mut skip = range.start;
+                for bytes in bytes {
+                    if skip >= bytes.len() {
+                        skip -= bytes.len();
+                        continue;
+                    }
+                    let remaining = &bytes[skip..];
+                    vectors.push(libc::iovec {
+                        iov_base: remaining.as_ptr().cast_mut().cast(),
+                        iov_len: remaining.len(),
+                    });
+                    skip = 0;
+                }
+                // Each slice covers at least 4 KiB: at most 256 descriptors per
+                // 1-MiB request, below Linux's IOV_MAX. The request owns them all.
+                opcode::Writev::new(fd, vectors.as_ptr(), vectors.len() as u32)
+                    .offset(offset)
+                    .build()
+            }
+        }
+    }
+
+    fn into_read(self) -> AlignedIoBuffer {
+        match self {
+            Self::Read(buffer) => buffer,
+            Self::Write { .. } => unreachable!("write result cannot be used as a read buffer"),
+        }
+    }
+}
+
+// SAFETY: read buffers own their allocations; write descriptors point only into owned
+// immutable Bytes. Moving either does not move payload memory. Only the queue submits them.
+unsafe impl Send for IoBuffers {}
+
 /// One admitted I/O request, owning its buffers and permits through completion.
 struct IoRequest {
-    // I/O direction, unchanged through short-I/O continuations.
-    operation: IoOperation,
     // Aligned physical start, used for kernel offsets.
     offset: u64,
     // Aligned memory for disk reads/writes; kept alive until I/O completes.
-    io_buffer: AlignedIoBuffer,
-    // Disjoint destination slice within the exclusively owned allocation.
+    buffers: IoBuffers,
+    // Read destination slice, or the complete logical range of a vectored write.
     destination: Range<usize>,
     // Bytes completed, allowing aligned short-I/O continuations.
     completed_bytes: usize,
     // Caller result channel; taken on finish/failure, also detects cancellation.
-    reply: Option<oneshot::Sender<io::Result<AlignedIoBuffer>>>,
+    reply: Option<oneshot::Sender<io::Result<IoBuffers>>>,
     // Holds request admission until this request is dropped.
     _request_permit: OwnedSemaphorePermit,
     // Holds the I/O buffer memory charge until this request is dropped.
@@ -364,23 +506,24 @@ struct IoRequest {
 
 impl IoRequest {
     fn new(
-        operation: IoOperation,
         offset: u64,
-        io_buffer: AlignedIoBuffer,
+        buffers: IoBuffers,
         destination: Range<usize>,
-        reply: oneshot::Sender<io::Result<AlignedIoBuffer>>,
+        reply: oneshot::Sender<io::Result<IoBuffers>>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
     ) -> Self {
         assert!(offset.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES as u64));
         assert!(destination.start.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         let length = destination.len();
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
-        assert!(!destination.is_empty() && destination.end <= io_buffer.layout.size());
-        assert!(destination.len() <= MAX_IO_CHUNK_BYTES);
+        match &buffers {
+            IoBuffers::Read(buffer) => assert!(destination.end <= buffer.layout.size()),
+            IoBuffers::Write { bytes, .. } => assert_eq!(destination, 0..bytes.iter().map(Bytes::len).sum()),
+        }
+        assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);
         Self {
-            operation,
             offset,
-            io_buffer,
+            buffers,
             destination,
             completed_bytes: 0,
             reply: Some(reply),
@@ -390,23 +533,13 @@ impl IoRequest {
     }
 
     fn submission_entry(&mut self, fd: i32, slot: usize) -> squeue::Entry {
-        let fd = types::Fd(fd);
-        // SAFETY: completed_bytes is within io_buffer. The request owns this memory
-        // in its active slot until the completion is consumed.
-        let ptr = unsafe {
-            self.io_buffer
-                .ptr
-                .as_ptr()
-                .add(self.destination.start + self.completed_bytes)
-        };
-        let length = (self.destination.len() - self.completed_bytes) as u32;
-        let offset = self.offset + self.completed_bytes as u64;
-        let entry = if self.operation == IoOperation::Read {
-            opcode::Read::new(fd, ptr, length).offset(offset).build()
-        } else {
-            opcode::Write::new(fd, ptr, length).offset(offset).build()
-        };
-        entry.user_data(slot as u64)
+        self.buffers
+            .submission_entry(
+                types::Fd(fd),
+                self.offset + self.completed_bytes as u64,
+                self.destination.start + self.completed_bytes..self.destination.end,
+            )
+            .user_data(slot as u64)
     }
 
     // true means the operation needs to be retried or its remainder submitted.
@@ -434,7 +567,7 @@ impl IoRequest {
 
     fn incomplete_io_error(&self) -> io::Error {
         io::Error::new(
-            if self.operation == IoOperation::Read {
+            if matches!(self.buffers, IoBuffers::Read(_)) {
                 io::ErrorKind::UnexpectedEof
             } else {
                 io::ErrorKind::WriteZero
@@ -444,7 +577,7 @@ impl IoRequest {
     }
 
     fn finish(mut self, result: io::Result<()>) {
-        let result = result.map(|()| self.io_buffer);
+        let result = result.map(|()| self.buffers);
         let _ = self.reply.take().unwrap().send(result);
     }
 }
