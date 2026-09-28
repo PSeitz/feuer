@@ -156,8 +156,8 @@ checks passed for the changed files.
 
 ## Implemented: best-effort disk scheduling
 
-- A nonblocking queue allows at most 256 pending entries. A byte budget covers at most 64 MiB of queued
-  and active payload together; larger downloads stay memory-only. These limits are internal.
+- A nonblocking queue allows at most 256 pending entries. Queued and active payload bytes are tracked
+  but not limited or charged to the memory-cache capacity.
 - One worker drains up to 64 entries into an explicit immutable batch; there is no batching timer or flush API.
   Queue saturation skips candidates without blocking or failing successful lookups.
 - Queued writes are discarded if their exact memory admission was evicted, replaced, or compacted.

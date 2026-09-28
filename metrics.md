@@ -80,9 +80,9 @@ Use `0.50` or `0.99` for p50 or p99. Percentiles are estimated from the buckets.
 
 | Metric | Type | Labels / meaning |
 |---|---|---|
-| `feuer_disk_population_queue_total` | Counter | `outcome`: `queued`, `queue_full`, `queue_closed`, `byte_budget`, `oversized`, `stale`, `canceled`, `already_covered`, `redundant` |
+| `feuer_disk_population_queue_total` | Counter | `outcome`: `queued`, `queue_full`, `queue_closed`, `stale`, `canceled`, `already_covered`, `redundant` |
 | `feuer_disk_population_queued_entries` | Gauge | Entries waiting to begin population |
-| `feuer_disk_population_pending_bytes` | Gauge | Queued plus active payload bytes charged to the byte budget |
+| `feuer_disk_population_pending_bytes` | Gauge | Queued plus active payload bytes; not limited or charged to the memory-cache capacity |
 | `feuer_disk_population_queue_duration_seconds` | Histogram | Queue admission to dequeue, including entries found stale; excludes entries canceled before dequeue |
 | `feuer_disk_population_total` | Counter | Terminal per-entry batch-insertion outcome: `published`, `already_covered`, `no_capacity`, `stale`, `failed`, `canceled` |
 | `feuer_disk_population_written_entries_total` | Counter | Entries in successfully written shard batches, before publication checks |

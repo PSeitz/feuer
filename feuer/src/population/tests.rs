@@ -8,7 +8,7 @@ fn queue_metrics_cover_admission_pressure_dequeue_and_cancellation() {
     let (registry, backend) = registry();
     let metrics = PopulationQueueMetrics::new(&backend);
     let memory = MemoryCache::new(1024);
-    let (population, mut receiver) = DiskPopulationQueue::channel_with_metrics(1, 8, metrics);
+    let (population, mut receiver) = DiskPopulationQueue::channel_with_metrics(1, metrics);
     enqueue(&population, &memory, "queued");
     enqueue(&population, &memory, "full");
     assert_eq!(
@@ -30,15 +30,7 @@ fn queue_metrics_cover_admission_pressure_dequeue_and_cancellation() {
         1.0
     );
     enqueue(&population, &memory, "queued-again");
-    enqueue(&population, &memory, "budget");
-    assert_eq!(
-        value(
-            &registry,
-            "feuer_disk_population_queue_total",
-            &[("outcome", "byte_budget")]
-        ),
-        1.0
-    );
+    assert_eq!(value(&registry, "feuer_disk_population_pending_bytes", &[]), 8.0);
     drop(active);
     drop(receiver);
     assert_eq!(
@@ -60,16 +52,6 @@ fn queue_metrics_cover_admission_pressure_dequeue_and_cancellation() {
         ),
         1.0
     );
-    let (small, _) = DiskPopulationQueue::channel_with_metrics(1, 3, PopulationQueueMetrics::new(&backend));
-    enqueue(&small, &memory, "oversized");
-    assert_eq!(
-        value(
-            &registry,
-            "feuer_disk_population_queue_total",
-            &[("outcome", "oversized")]
-        ),
-        1.0
-    );
 }
 
 fn enqueue(population: &DiskPopulationQueue, memory: &MemoryCache, key: &str) {
@@ -83,35 +65,22 @@ fn enqueue(population: &DiskPopulationQueue, memory: &MemoryCache, key: &str) {
 }
 
 #[test]
-fn queue_saturation_is_nonblocking_and_bounded_by_entries_and_payload() {
-    for (entries, bytes) in [(1, 16), (8, 6)] {
-        let memory = MemoryCache::new(1024);
-        let (population, mut receiver) = DiskPopulationQueue::channel(entries, bytes);
-        enqueue(&population, &memory, "first");
-        enqueue(&population, &memory, "skipped");
-        assert_eq!(receiver.len(), 1);
-        assert_eq!(population.pending_byte_budget.available_permits(), bytes as usize - 4);
-        // Queue pressure did not reject memory admission or its successful access.
-        let key = "skipped".to_owned();
-        assert_eq!(memory.access_histories().for_key(&key).lock().generation(), 1);
-        assert!(memory.get(&key, ByteRange::new(3, 7).unwrap()).is_some());
-        let active = receiver.try_recv().unwrap();
-        assert_eq!(population.pending_byte_budget.available_permits(), bytes as usize - 4);
-        drop(active);
-        assert_eq!(population.pending_byte_budget.available_permits(), bytes as usize);
-        drop(receiver);
-        enqueue(&population, &memory, "closed");
-        assert_eq!(population.pending_byte_budget.available_permits(), bytes as usize);
-    }
-}
-
-#[test]
-fn oversized_download_is_not_queued() {
+fn queue_saturation_is_nonblocking_and_bounded_by_entries() {
     let memory = MemoryCache::new(1024);
-    let (population, receiver) = DiskPopulationQueue::channel(8, 3);
-    enqueue(&population, &memory, "oversized");
-    assert_eq!(receiver.len(), 0);
-    assert_eq!(population.pending_byte_budget.available_permits(), 3);
+    let (population, mut receiver) = DiskPopulationQueue::channel(1);
+    enqueue(&population, &memory, "first");
+    enqueue(&population, &memory, "skipped");
+    assert_eq!(receiver.len(), 1);
+    // Queue pressure did not reject memory admission or its successful access.
+    let key = "skipped".to_owned();
+    assert_eq!(memory.access_histories().for_key(&key).lock().generation(), 1);
+    assert!(memory.get(&key, ByteRange::new(3, 7).unwrap()).is_some());
+    let active = receiver.try_recv().unwrap();
+    enqueue(&population, &memory, "next");
+    assert_eq!(receiver.len(), 1);
+    drop(active);
+    drop(receiver);
+    enqueue(&population, &memory, "closed");
 }
 
 #[tokio::test]
@@ -127,8 +96,7 @@ async fn queued_eviction_and_readmission_cancel_old_writes_while_live_entries_ba
     .await
     .unwrap();
     let (registry, backend) = registry();
-    let (population, receiver) =
-        DiskPopulationQueue::channel_with_metrics(8, 32, PopulationQueueMetrics::new(&backend));
+    let (population, receiver) = DiskPopulationQueue::channel_with_metrics(8, PopulationQueueMetrics::new(&backend));
     let range = ByteRange::new(3, 7).unwrap();
     for key in ["live-a", "evicted", "readmitted", "live-b"] {
         enqueue(&population, &memory, key);
@@ -139,7 +107,6 @@ async fn queued_eviction_and_readmission_cancel_old_writes_while_live_entries_ba
         "readmitted".to_owned(),
         Download::new(3, Bytes::from_static(b"abcd")).unwrap(),
     );
-    let budget = population.pending_byte_budget.clone();
     drop(population);
     DiskPopulationQueue::run(receiver, memory.clone(), disk.clone()).await;
     assert!(!disk.contains(&"evicted".to_owned(), range));
@@ -155,7 +122,6 @@ async fn queued_eviction_and_readmission_cancel_old_writes_while_live_entries_ba
             1
         );
     }
-    assert_eq!(budget.available_permits(), 32);
     assert_eq!(
         value(&registry, "feuer_disk_population_queue_total", &[("outcome", "stale")]),
         2.0

@@ -61,10 +61,10 @@ requested bytes, and promote those bytes to memory. Corrupt or uncertain reads
 are treated as misses.
 
 Downloads retained in memory are queued for disk without making the lookup wait
-for a write. The queue allows up to 256 entries, batches up to 64 entries, and
-limits queued plus active payload to 64 MiB. Larger downloads remain memory-only.
-Queue pressure or memory eviction can skip a disk write without failing the
-lookup.
+for a write. The queue allows up to 256 entries and batches up to 64 entries.
+Queued plus active payload bytes are tracked but not limited or charged to the
+memory-cache capacity. Queue pressure or memory eviction can skip a disk write
+without failing the lookup.
 
 Disk batches pack entries into immutable 1-MiB chunks. A written chunk is never
 appended to or reused until all entry owners and read guards release it. Reads

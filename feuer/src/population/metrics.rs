@@ -8,8 +8,6 @@ pub(super) enum PopulationQueueOutcome {
     Queued,
     Full,
     Closed,
-    ByteBudget,
-    Oversized,
     Stale,
     Canceled,
     AlreadyCovered,
@@ -18,7 +16,7 @@ pub(super) enum PopulationQueueOutcome {
 
 /// Metrics for population-queue admission, waiting entries, and pending bytes.
 pub(super) struct PopulationQueueMetrics {
-    outcomes: [BoxedCounter; 9],
+    outcomes: [BoxedCounter; 7],
     pub(super) queued_entries: BoxedGauge,
     pub(super) pending_bytes: BoxedGauge,
     pub(super) queue_duration: BoxedHistogram,
@@ -38,7 +36,7 @@ impl PopulationQueueMetrics {
         );
         let bytes = registry.register_gauge_vec(
             "feuer_disk_population_pending_bytes".into(),
-            "Queued plus active population payload bytes charged to the byte budget".into(),
+            "Queued plus active population payload bytes".into(),
             &[],
         );
         let duration = registry.register_histogram_vec_with_buckets(
@@ -52,8 +50,6 @@ impl PopulationQueueMetrics {
                 "queued",
                 "queue_full",
                 "queue_closed",
-                "byte_budget",
-                "oversized",
                 "stale",
                 "canceled",
                 "already_covered",

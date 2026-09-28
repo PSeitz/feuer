@@ -11,18 +11,14 @@ use std::{sync::Arc, time::Instant};
 use feuer_memory::MemoryCache;
 use feuer_storage::DiskRangeCache;
 use feuer_types::{ByteRange, Download, ObjectKey, retention::ObjectAccessHistory};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::mpsc;
 
 const MAX_QUEUED_ENTRIES: usize = 256;
-// Covers queued and active payload together; oversized downloads remain memory-only.
-const MAX_WRITE_BYTES: u32 = 64 << 20;
 const MAX_BATCH_ENTRIES: usize = 64;
 
 /// A bounded queue scheduling best-effort disk population.
 pub(crate) struct DiskPopulationQueue {
     sender: mpsc::Sender<PendingDiskWrite>,
-    pending_byte_budget: Arc<Semaphore>,
-    byte_capacity: u32,
     metrics: Arc<PopulationQueueMetrics>,
 }
 
@@ -32,7 +28,6 @@ struct DiskWriteSource {
     range: ByteRange,
     entry_id: u64,
     _accesses: Arc<ObjectAccessHistory>,
-    pending_bytes_permit: OwnedSemaphorePermit,
     queued_at: Option<Instant>,
     metrics: Arc<PopulationQueueMetrics>,
 }
@@ -52,9 +47,7 @@ impl DiskWriteSource {
 
 impl Drop for DiskWriteSource {
     fn drop(&mut self) {
-        self.metrics
-            .pending_bytes
-            .decrease(self.pending_bytes_permit.num_permits() as u64);
+        self.metrics.pending_bytes.decrease(self.range.len());
         if self.queued_at.is_some() {
             self.metrics.queued_entries.decrease(1);
             self.metrics.record(PopulationQueueOutcome::Canceled);
@@ -64,11 +57,8 @@ impl Drop for DiskWriteSource {
 
 impl DiskPopulationQueue {
     pub(crate) fn with_metrics(memory: Arc<MemoryCache>, disk: DiskRangeCache, registry: &BoxedRegistry) -> Self {
-        let (population, receiver) = Self::channel_with_metrics(
-            MAX_QUEUED_ENTRIES,
-            MAX_WRITE_BYTES,
-            PopulationQueueMetrics::new(registry),
-        );
+        let (population, receiver) =
+            Self::channel_with_metrics(MAX_QUEUED_ENTRIES, PopulationQueueMetrics::new(registry));
         // The worker owns no sender. Dropping the last cache handle closes the queue;
         // submitted writes still finish under storage's detached reservation owner.
         tokio::spawn(Self::run(receiver, memory, disk));
@@ -76,26 +66,17 @@ impl DiskPopulationQueue {
     }
 
     #[cfg(test)]
-    fn channel(entries: usize, bytes: u32) -> (Self, mpsc::Receiver<PendingDiskWrite>) {
+    fn channel(entries: usize) -> (Self, mpsc::Receiver<PendingDiskWrite>) {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
-        Self::channel_with_metrics(entries, bytes, PopulationQueueMetrics::new(&registry))
+        Self::channel_with_metrics(entries, PopulationQueueMetrics::new(&registry))
     }
 
     fn channel_with_metrics(
         entries: usize,
-        bytes: u32,
         metrics: Arc<PopulationQueueMetrics>,
     ) -> (Self, mpsc::Receiver<PendingDiskWrite>) {
         let (sender, receiver) = mpsc::channel(entries);
-        (
-            Self {
-                sender,
-                pending_byte_budget: Arc::new(Semaphore::new(bytes as usize)),
-                byte_capacity: bytes,
-                metrics,
-            },
-            receiver,
-        )
+        (Self { sender, metrics }, receiver)
     }
 
     pub(crate) fn skip_covered(&self) {
@@ -113,15 +94,6 @@ impl DiskPopulationQueue {
         entry_id: u64,
         accesses: Arc<ObjectAccessHistory>,
     ) {
-        if download.bytes().len() as u64 > self.byte_capacity as u64 {
-            self.metrics.record(PopulationQueueOutcome::Oversized);
-            return;
-        }
-        let length = download.bytes().len() as u32;
-        let Ok(pending_bytes_permit) = self.pending_byte_budget.clone().try_acquire_many_owned(length) else {
-            self.metrics.record(PopulationQueueOutcome::ByteBudget);
-            return;
-        };
         let permit = match self.sender.try_reserve() {
             Ok(permit) => permit,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -135,13 +107,12 @@ impl DiskPopulationQueue {
         };
         self.metrics.record(PopulationQueueOutcome::Queued);
         self.metrics.queued_entries.increase(1);
-        self.metrics.pending_bytes.increase(length as u64);
+        self.metrics.pending_bytes.increase(download.downloaded_range().len());
         let source = DiskWriteSource {
             key,
             range: download.downloaded_range(),
             entry_id,
             _accesses: accesses,
-            pending_bytes_permit,
             queued_at: Some(Instant::now()),
             metrics: self.metrics.clone(),
         };
