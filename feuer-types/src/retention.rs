@@ -215,8 +215,23 @@ struct DecayedAccessCount {
 
 impl DecayedAccessCount {
     fn decayed_count(&self, access_clock: u64) -> f64 {
-        self.count
-            * (-(access_clock.saturating_sub(self.observed_at_access) as f64) / *ACCESS_COUNT_HALF_LIFE as f64).exp2()
+        // Age is measured in successful accesses to the same shard, not wall-clock time.
+        // An earlier clock leaves the count unchanged rather than increasing it.
+        let elapsed_accesses = access_clock.saturating_sub(self.observed_at_access);
+        let half_lives_elapsed = elapsed_accesses as f64 / *ACCESS_COUNT_HALF_LIFE as f64;
+
+        // Approximate 2^(-age) through IEEE-754 bits: the exponent gives powers of two,
+        // and the mantissa interpolates between them. Each decay is up to ~6.15% high;
+        // repeated updates can compound that error.
+        let decay_factor = if half_lives_elapsed >= 126.0 {
+            0.0 // Discard negligible counts rather than constructing subnormal floats.
+        } else {
+            let exponent_bias = 127.0;
+            let mantissa_scale = (1u32 << 23) as f64;
+            let float_bits = ((exponent_bias - half_lives_elapsed) * mantissa_scale) as u32;
+            f32::from_bits(float_bits) as f64
+        };
+        self.count * decay_factor
     }
 }
 
@@ -587,7 +602,28 @@ mod tests {
     }
 
     #[test]
-    fn decayed_counts_match_individual_event_weights() {
+    fn approximate_decay_is_monotonic_and_bounded() {
+        let accesses = DecayedAccessCount {
+            count: 1.0,
+            observed_at_access: 1,
+        };
+        assert_eq!(accesses.decayed_count(0), 1.0);
+        let mut previous = 1.0;
+        for sample in 0..=256 {
+            let elapsed_accesses = *ACCESS_COUNT_HALF_LIFE * sample / 64;
+            let actual = accesses.decayed_count(1 + elapsed_accesses);
+            let exact = (-(elapsed_accesses as f64) / *ACCESS_COUNT_HALF_LIFE as f64).exp2();
+            assert!(actual <= previous);
+            assert!(actual >= exact * (1.0 - 1e-7));
+            assert!(actual <= exact * 1.0615);
+            previous = actual;
+        }
+        assert_eq!(accesses.decayed_count(1 + *ACCESS_COUNT_HALF_LIFE * 126), 0.0);
+        assert_eq!(accesses.decayed_count(u64::MAX), 0.0);
+    }
+
+    #[test]
+    fn approximate_decayed_counts_bound_individual_event_weights() {
         let mut history = RangeAccessHistory::default();
         let clocks = [1, 17, 4097, 9001, 20_000];
         for clock in clocks {
@@ -599,7 +635,10 @@ mod tests {
             .sum();
         let actual =
             history.covered_retrieval_cost(range(0, 100), 30_000) / (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 100.0);
-        assert!((actual - expected).abs() < 1e-12);
+        // Each event undergoes at most one decay per recorded access, including the final read.
+        let max_decay_steps = clocks.len() as i32;
+        assert!(actual >= expected * (1.0_f64 - 1e-7).powi(max_decay_steps));
+        assert!(actual <= expected * 1.0615_f64.powi(max_decay_steps));
     }
 
     #[test]
