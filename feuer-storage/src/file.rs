@@ -195,8 +195,8 @@ impl DataFile {
         .await
     }
 
-    /// Writes one complete chunk from ordered parts, zero-filling gaps without
-    /// materializing an intermediate chunk buffer. The usual write cancellation contract applies.
+    /// Writes one complete chunk from parts at aligned offsets starting at zero, without
+    /// an intermediate chunk buffer. Gaps are zero-filled. The usual write cancellation contract applies.
     pub(crate) async fn write_parts(&self, offset: u64, length: usize, parts: &[(usize, Bytes)]) -> DataFileResult<()> {
         self.measure_io(IoOperation::Write, offset, length, async {
             check_range(IoOperation::Write, offset, length as u64, self.state.capacity)?;

@@ -183,14 +183,14 @@ impl IoQueueHandle {
             .into_bytes())
     }
 
-    /// Writes ordered, nonoverlapping parts in one request; unspecified bytes become zero.
+    /// Writes parts at aligned offsets, starting at zero; gaps become zero.
     /// Aligned payload slices are retained directly; only other bytes need a copy.
     pub(crate) async fn write_parts(&self, offset: u64, length: usize, parts: &[(usize, Bytes)]) -> io::Result<()> {
         assert_eq!(self.operation, IoOperation::Write);
         assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         let permits = self.acquire(length).await?;
-        let buffers = IoBuffers::write(length, parts, self.admission.buffer_pool(length))?;
+        let buffers = IoBuffers::write(length, parts)?;
         self.execute_buffers(offset, buffers, 0..length, permits).await?;
         Ok(())
     }
@@ -279,7 +279,7 @@ pub(crate) struct AlignedIoBuffer {
     layout: Layout,
     // Whole-entry reads retain disk ownership even if the waiting caller is canceled.
     read_guards: Vec<DiskRegionReadGuard>,
-    // Results do not keep the queue's pool alive. Idle buffers have an empty Weak.
+    // Results do not keep the read pool alive. Idle buffers and write scratch have an empty Weak.
     idle_buffers: Weak<Mutex<IdleIoBuffers>>,
 }
 
@@ -289,7 +289,6 @@ impl AlignedIoBuffer {
         read_guards: Vec<DiskRegionReadGuard>,
         idle_buffers: &Arc<Mutex<IdleIoBuffers>>,
     ) -> io::Result<Self> {
-        assert!(length > 0);
         let reused = {
             let mut idle = idle_buffers.lock().unwrap();
             let buffer = idle.by_length.get_mut(&length).and_then(Vec::pop);
@@ -302,17 +301,23 @@ impl AlignedIoBuffer {
             }
             buffer
         };
-        if let Some(mut buffer) = reused {
-            // Still initialized, but not zeroed: reads overwrite their destination
-            // before exposing bytes, and writes copy their complete payload.
-            buffer.read_guards = read_guards;
-            buffer.idle_buffers = Arc::downgrade(idle_buffers);
-            return Ok(buffer);
-        }
+        // Reused memory is initialized but not zeroed; reads overwrite it before exposure.
+        let mut buffer = match reused {
+            Some(buffer) => buffer,
+            None => Self::allocate(length)?,
+        };
+        buffer.read_guards = read_guards;
+        buffer.idle_buffers = Arc::downgrade(idle_buffers);
+        Ok(buffer)
+    }
+
+    /// Fresh, zeroed aligned memory, freed rather than pooled when its owner is dropped.
+    fn allocate(length: usize) -> io::Result<Self> {
+        assert!(length > 0);
         let layout = Layout::from_size_align(length, DIRECT_IO_ALIGNMENT_BYTES).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "read buffer length exceeds allocation limit",
+                "I/O buffer length exceeds allocation limit",
             )
         })?;
         // SAFETY: layout is non-zero with a valid power-of-two alignment.
@@ -321,8 +326,8 @@ impl AlignedIoBuffer {
         Ok(Self {
             ptr,
             layout,
-            read_guards,
-            idle_buffers: Arc::downgrade(idle_buffers),
+            read_guards: Vec::new(),
+            idle_buffers: Weak::new(),
         })
     }
 
@@ -388,58 +393,32 @@ enum IoBuffers {
 }
 
 impl IoBuffers {
-    fn write(length: usize, parts: &[(usize, Bytes)], pool: &Arc<Mutex<IdleIoBuffers>>) -> io::Result<Self> {
+    fn write(length: usize, parts: &[(usize, Bytes)]) -> io::Result<Self> {
+        assert_eq!(parts.first().map(|part| part.0), Some(0));
         let mut buffers = Vec::new();
-        let mut copy_start = 0;
-        let mut copy_part = 0;
-        let mut end = 0;
         for (index, (offset, bytes)) in parts.iter().enumerate() {
-            assert!(end <= *offset && *offset <= length && bytes.len() <= length - offset);
-            end = offset + bytes.len();
-            let aligned_length = bytes.len() / DIRECT_IO_ALIGNMENT_BYTES * DIRECT_IO_ALIGNMENT_BYTES;
-            if aligned_length == 0
-                || !offset.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES)
-                || !(bytes.as_ptr() as usize).is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES)
-            {
-                continue;
+            let end = parts.get(index + 1).map_or(length, |part| part.0);
+            assert!(*offset <= end && end <= length && end.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
+            assert!(bytes.len() <= end - offset);
+            let aligned_length = if (bytes.as_ptr() as usize).is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
+                bytes.len() / DIRECT_IO_ALIGNMENT_BYTES * DIRECT_IO_ALIGNMENT_BYTES
+            } else {
+                0
+            };
+            if aligned_length > 0 {
+                buffers.push(bytes.slice(..aligned_length));
             }
-            if copy_start < *offset {
-                buffers.push(Self::copy_parts(copy_start..*offset, &parts[copy_part..index], pool)?);
+            let copy_length = end - offset - aligned_length;
+            if copy_length > 0 {
+                let mut buffer = AlignedIoBuffer::allocate(copy_length)?;
+                buffer.as_mut_slice()[..bytes.len() - aligned_length].copy_from_slice(&bytes[aligned_length..]);
+                buffers.push(buffer.into_bytes());
             }
-            buffers.push(bytes.slice(..aligned_length));
-            copy_start = offset + aligned_length;
-            // Include any unaligned tail of this part in the next copied range.
-            copy_part = index;
-        }
-        if copy_start < length {
-            buffers.push(Self::copy_parts(copy_start..length, &parts[copy_part..], pool)?);
         }
         Ok(Self::Write {
             vectors: Vec::with_capacity(buffers.len()),
             bytes: buffers,
         })
-    }
-
-    fn copy_parts(
-        range: Range<usize>,
-        parts: &[(usize, Bytes)],
-        pool: &Arc<Mutex<IdleIoBuffers>>,
-    ) -> io::Result<Bytes> {
-        let mut buffer = AlignedIoBuffer::new(range.len(), Vec::new(), pool)?;
-        let destination = buffer.as_mut_slice();
-        let mut written = 0;
-        for (offset, bytes) in parts {
-            let start = (*offset).max(range.start);
-            let end = (offset + bytes.len()).min(range.end);
-            if start >= end {
-                continue;
-            }
-            destination[written..start - range.start].fill(0);
-            destination[start - range.start..end - range.start].copy_from_slice(&bytes[start - offset..end - offset]);
-            written = end - range.start;
-        }
-        destination[written..].fill(0);
-        Ok(buffer.into_bytes())
     }
 
     fn submission_entry(&mut self, fd: types::Fd, offset: u64, range: Range<usize>) -> squeue::Entry {

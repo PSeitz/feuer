@@ -79,7 +79,7 @@ struct DiskEntryIndex {
 /// One reserved chunk's metadata and retained payload slices, before its only write.
 struct UnwrittenChunk {
     region: DiskRegion,
-    // Ordered byte positions and contents; gaps are zero-filled by the I/O layer.
+    // Ordered 4-KiB-aligned byte positions and contents; gaps are zero-filled by the I/O layer.
     parts: Vec<(usize, Bytes)>,
     used_bytes: u64,
     metadata_starts: EntryMetadataStartBitmap,

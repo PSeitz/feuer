@@ -13,15 +13,15 @@ fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) 
         .clone()
         .try_acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
         .unwrap();
-    let mut buffer = AlignedIoBuffer::new(length, Vec::new(), queue.admission.buffer_pool(length)).unwrap();
     let buffers = if operation == IoOperation::Write {
+        let mut buffer = AlignedIoBuffer::allocate(length).unwrap();
         buffer.as_mut_slice().fill(0x99);
         IoBuffers::Write {
             bytes: vec![buffer.into_bytes()],
             vectors: Vec::with_capacity(1),
         }
     } else {
-        IoBuffers::Read(buffer)
+        IoBuffers::Read(AlignedIoBuffer::new(length, Vec::new(), queue.admission.buffer_pool(length)).unwrap())
     };
     (
         IoRequest::new(
@@ -650,29 +650,35 @@ fn canceled_read_retains_destination_and_disk_guard_until_completion() {
 #[test]
 fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
     let page = DIRECT_IO_ALIGNMENT_BYTES;
-    let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_WRITES, IoOperation::Write, &IoMetrics::noop());
+    let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_IO, IoOperation::Read, &IoMetrics::noop());
     let pool = admission.buffer_pool(4 * page);
     let mut source = AlignedIoBuffer::new(2 * page, Vec::new(), pool).unwrap();
     source.as_mut_slice().fill(0x77);
     let source = source.into_bytes();
-    let mut dirty = AlignedIoBuffer::new(2 * page, Vec::new(), pool).unwrap();
-    dirty.as_mut_slice().fill(0xff);
-    drop(dirty);
-    let parts = [(0, source.slice(1..page + 1)), (page, source.slice(..page + 17))];
-    let mut buffers = IoBuffers::write(4 * page, &parts, pool).unwrap();
-    buffers.submission_entry(types::Fd(-1), page as u64, page..4 * page);
-    let IoBuffers::Write { bytes, vectors } = buffers else {
-        unreachable!()
-    };
-    assert_eq!(bytes.len(), 3);
-    assert_ne!(bytes[0].as_ptr(), parts[0].1.as_ptr());
-    assert_eq!(bytes[0], parts[0].1);
-    assert_eq!(bytes[1].as_ptr(), source.as_ptr());
-    assert_eq!(bytes[1].len(), page);
-    assert_eq!(&bytes[2][..17], &source[..17]);
-    assert!(bytes[2][17..].iter().all(|&byte| byte == 0));
-    assert_eq!(vectors.len(), 2);
-    assert_eq!(vectors[0].iov_base.cast_const().cast::<u8>(), source.as_ptr());
+    for length in [17, page] {
+        let mut dirty = AlignedIoBuffer::new(2 * page, Vec::new(), pool).unwrap();
+        dirty.as_mut_slice().fill(0xff);
+        drop(dirty);
+        let parts = [(0, source.slice(1..length + 1)), (page, source.slice(..page + 17))];
+        let mut buffers = IoBuffers::write(4 * page, &parts).unwrap();
+        assert_eq!(pool.lock().unwrap().bytes, 2 * page);
+        buffers.submission_entry(types::Fd(-1), page as u64, page..4 * page);
+        let IoBuffers::Write { bytes, vectors } = buffers else {
+            unreachable!()
+        };
+        assert_eq!(bytes.len(), 3);
+        assert_ne!(bytes[0].as_ptr(), parts[0].1.as_ptr());
+        assert_eq!(&bytes[0][..length], parts[0].1);
+        assert!(bytes[0][length..].iter().all(|&byte| byte == 0));
+        assert_eq!(bytes[1].as_ptr(), source.as_ptr());
+        assert_eq!(bytes[1].len(), page);
+        assert_eq!(&bytes[2][..17], &source[..17]);
+        assert!(bytes[2][17..].iter().all(|&byte| byte == 0));
+        assert_eq!(vectors.len(), 2);
+        assert_eq!(vectors[0].iov_base.cast_const().cast::<u8>(), source.as_ptr());
+        drop(bytes);
+        assert_eq!(pool.lock().unwrap().bytes, 2 * page);
+    }
 }
 
 #[test]
