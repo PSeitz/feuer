@@ -11,7 +11,7 @@ use std::{
     fmt,
     hash::{Hash, Hasher},
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::Instant,
 };
 
@@ -22,6 +22,7 @@ use feuer_types::{
         ObjectAccessHistories, ObjectAccessHistory, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates,
     },
 };
+use tokio::sync::OnceCell;
 
 use crate::{
     DataFile, DataFileError, DataFileResult, DiskMetrics, IoMetrics,
@@ -103,8 +104,13 @@ impl EntryMetadataStartBitmap {
     }
 }
 
+/// Verified bytes or failure shared by concurrent reads of one stored entry.
+type EntryReadResult = OnceCell<Result<Bytes, DiskLookupOutcome>>;
+
 /// Disk storage reserved for one object range, with its expected payload checksum.
 struct ObjectRangeDiskStorage {
+    // Only concurrent callers retain the result; the index must not cache payload bytes.
+    read_result: Weak<EntryReadResult>,
     eviction_position: usize,
     publication_id: u64,
     accesses: Arc<ObjectAccessHistory>,
@@ -369,41 +375,64 @@ impl DiskRangeCache {
     }
 
     /// Returns exactly requested bytes from one covering entry, or a miss on any I/O/integrity uncertainty.
-    /// Reads and hashes the whole entry, not neighboring entries or metadata. Results retain no disk ownership.
+    /// Concurrent reads of one stored entry share whole-entry I/O and checksum verification.
+    /// Reads no neighboring entries or metadata. Results retain no disk ownership.
     pub async fn get(&self, key: &ObjectKey, requested: ByteRange) -> Option<Bytes> {
         let started = Instant::now();
         let metrics = &self.disk.metrics;
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
-        let guarded_read = {
-            let index = shard.entry_index.lock().unwrap();
+        let (guarded_read, read_result) = {
+            let mut index = shard.entry_index.lock().unwrap();
             let Some(storage) = index.covering_range(key, requested) else {
                 metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
                 return None;
             };
-            GuardedObjectRangeRead {
-                object_range: storage.object_range,
-                payload_checksum: storage.payload_checksum,
-                payload_regions: storage.payload_regions.iter().map(DiskRegion::read_guard).collect(),
-            }
+            let start = storage.object_range.start();
+            let storage = index.ranges_by_key.get_mut(key).unwrap().get_mut(&start).unwrap();
+            let read_result = storage.read_result.upgrade().unwrap_or_else(|| {
+                let result = Arc::new(OnceCell::new());
+                storage.read_result = Arc::downgrade(&result);
+                result
+            });
+            (
+                GuardedObjectRangeRead {
+                    object_range: storage.object_range,
+                    payload_checksum: storage.payload_checksum,
+                    payload_regions: storage.payload_regions.iter().map(DiskRegion::read_guard).collect(),
+                },
+                read_result,
+            )
         };
-        match guarded_read.read(&self.disk.file, requested).await {
-            Ok(Some(bytes)) => {
+        // If the initializing caller is canceled, OnceCell lets a waiter take over.
+        let result = read_result
+            .get_or_init(|| async {
+                match guarded_read.read(&self.disk.file, guarded_read.object_range).await {
+                    Ok(Some(bytes)) => Ok(bytes),
+                    result => {
+                        let outcome = match result {
+                            Err(error) => {
+                                tracing::warn!(target: "feuer::storage", %error, "disk read failed; entry invalidated");
+                                DiskLookupOutcome::IoError
+                            }
+                            _ => {
+                                tracing::warn!(target: "feuer::storage", "disk integrity check failed; entry invalidated");
+                                DiskLookupOutcome::IntegrityFailure
+                            }
+                        };
+                        shard.entry_index.lock().unwrap().invalidate(key, &guarded_read);
+                        Err(outcome)
+                    }
+                }
+            })
+            .await;
+        match result {
+            Ok(bytes) => {
                 metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
-                Some(bytes)
+                let start = (requested.start() - guarded_read.object_range.start()) as usize;
+                Some(bytes.slice(start..start + requested.len() as usize))
             }
-            result => {
-                let outcome = match result {
-                    Err(error) => {
-                        tracing::warn!(target: "feuer::storage", %error, "disk read failed; entry invalidated");
-                        DiskLookupOutcome::IoError
-                    }
-                    _ => {
-                        tracing::warn!(target: "feuer::storage", "disk integrity check failed; entry invalidated");
-                        DiskLookupOutcome::IntegrityFailure
-                    }
-                };
-                shard.entry_index.lock().unwrap().invalidate(key, &guarded_read);
-                metrics.record_lookup(outcome, started.elapsed());
+            Err(outcome) => {
+                metrics.record_lookup(*outcome, started.elapsed());
                 None
             }
         }
@@ -662,6 +691,7 @@ impl UnwrittenShardBatch {
         self.entries.push((
             key.clone(),
             ObjectRangeDiskStorage {
+                read_result: Weak::new(),
                 eviction_position: 0,
                 publication_id: 0,
                 accesses: accesses.clone(),

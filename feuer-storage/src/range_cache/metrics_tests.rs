@@ -22,6 +22,72 @@ async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache, pr
 }
 
 #[tokio::test]
+async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation() {
+    use std::{future::Future, task::Poll};
+
+    let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
+    let key = "object".to_owned();
+    let source = Download::new(10, Bytes::from_static(b"abcdefgh")).unwrap();
+    cache.insert_batch(vec![(key.clone(), source)]).await.unwrap();
+
+    // Hold initialization pending so both lookups deterministically join the same read.
+    let result = Arc::new(OnceCell::new());
+    {
+        let mut index = cache.disk.shards[0].entry_index.lock().unwrap();
+        index
+            .ranges_by_key
+            .get_mut(&key)
+            .unwrap()
+            .get_mut(&10)
+            .unwrap()
+            .read_result = Arc::downgrade(&result);
+    }
+    let mut initializer = Box::pin(result.get_or_init(std::future::pending));
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(initializer.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    let mut first = Box::pin(cache.get(&key, ByteRange::new(11, 14).unwrap()));
+    let mut second = Box::pin(cache.get(&key, ByteRange::new(15, 18).unwrap()));
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    assert_eq!(Arc::strong_count(&result), 3);
+    let weak = Arc::downgrade(&result);
+    drop(initializer);
+    drop(result);
+
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.unwrap(), Bytes::from_static(b"bcd"));
+    assert_eq!(second.unwrap(), Bytes::from_static(b"fgh"));
+    assert!(weak.upgrade().is_none(), "completed reads must not retain the payload");
+    let reads = || {
+        value(
+            &registry,
+            "feuer_disk_io_total",
+            &[("operation", "read"), ("outcome", "success")],
+        )
+    };
+    assert_eq!(reads(), 1.0);
+    assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", "hit")]), 2.0);
+
+    // A later lookup must issue another read rather than use a hidden memory cache.
+    assert_eq!(
+        cache.get(&key, ByteRange::new(10, 11).unwrap()).await.unwrap(),
+        b"a"[..]
+    );
+    assert_eq!(reads(), 2.0);
+}
+
+#[tokio::test]
 async fn records_population_outcomes_packing_and_index_usage() {
     let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
     let key = "object".to_owned();

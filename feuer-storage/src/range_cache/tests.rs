@@ -1218,6 +1218,7 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
         index.insert(
             "object".to_owned(),
             ObjectRangeDiskStorage {
+                read_result: Weak::new(),
                 eviction_position: 0,
                 publication_id: 0,
                 accesses: ObjectAccessHistories::new(1).for_key(&"object".to_owned()),
