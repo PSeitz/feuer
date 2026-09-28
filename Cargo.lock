@@ -428,6 +428,7 @@ version = "0.23.0-dev"
 dependencies = [
  "bytes",
  "bytesize",
+ "fnv",
  "thiserror",
 ]
 

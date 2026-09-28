@@ -2,13 +2,15 @@
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap, VecDeque, hash_map::DefaultHasher},
+    collections::{HashMap, VecDeque, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     sync::{
         Arc, LazyLock, Mutex, MutexGuard, Weak,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
 };
+
+use fnv::FnvHashMap;
 
 use crate::{ByteRange, ObjectKey, config::read_env_number};
 
@@ -91,6 +93,7 @@ pub struct ObjectAccessHistory {
 
 impl ObjectAccessHistory {
     /// Records exactly one request and advances the shared shard's successful-access clock.
+    /// Distinct requested ranges for an object must not overlap; exact repeats are allowed.
     pub fn record(&self, requested: ByteRange) {
         let mut history = self.lock();
         let clock = self
@@ -196,19 +199,27 @@ impl DecayedAccessCount {
 }
 
 /// Per-range decayed counts for scoring and bounded request events for range trimming.
+/// Distinct requested ranges must not overlap; cached ranges may cover several requests.
 /// Counts are retained until the object's final history owner is released; unlike
 /// trimming events, their number is not capped per object.
 #[derive(Default)]
 pub struct RangeAccessHistory {
     events: VecDeque<RangeAccess>,
     generation: u64,
-    access_counts: BTreeMap<(u64, u64), DecayedAccessCount>,
+    access_count_indices: FnvHashMap<ByteRange, usize>,
+    // Each counter is stored once: indexed for exact matches, scanned for expanded ranges.
+    access_counts: Vec<(ByteRange, DecayedAccessCount)>,
 }
 
 impl RangeAccessHistory {
     fn record(&mut self, range: ByteRange, access_clock: u64) {
         self.generation = self.generation.saturating_add(1);
-        let accesses = self.access_counts.entry((range.start(), range.end())).or_default();
+        let index = *self.access_count_indices.entry(range).or_insert_with(|| {
+            let index = self.access_counts.len();
+            self.access_counts.push((range, DecayedAccessCount::default()));
+            index
+        });
+        let accesses = &mut self.access_counts[index].1;
         accesses.count = accesses.decayed_count(access_clock) + 1.0;
         accesses.observed_at_access = access_clock;
         self.expire(access_clock);
@@ -233,11 +244,16 @@ impl RangeAccessHistory {
     /// Eviction compares this score per payload byte.
     pub fn retention_score(&self, cached_range: ByteRange, access_clock: u64) -> f64 {
         let fixed_retrieval_cost = *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64;
+        if let Some(&index) = self.access_count_indices.get(&cached_range) {
+            // Non-overlapping requests mean an exact match cannot contain another request.
+            return self.access_counts[index].1.decayed_count(access_clock)
+                * (fixed_retrieval_cost + cached_range.len() as f64);
+        }
         self.access_counts
-            .range((cached_range.start(), 0)..(cached_range.end(), 0))
-            .filter(|&(&(_, end), _)| end <= cached_range.end())
-            .map(|(&(start, end), accesses)| {
-                accesses.decayed_count(access_clock) * (fixed_retrieval_cost + (end - start) as f64)
+            .iter()
+            .filter(|(requested, _)| cached_range.contains(*requested))
+            .map(|(requested, accesses)| {
+                accesses.decayed_count(access_clock) * (fixed_retrieval_cost + requested.len() as f64)
             })
             .sum()
     }
@@ -491,6 +507,64 @@ mod tests {
     }
 
     #[test]
+    fn exact_counts_stay_indexed_when_the_vec_grows() {
+        let mut history = RangeAccessHistory::default();
+        let first = range(1000, 1001);
+        history.record(first, 0);
+        for start in (0..256).rev() {
+            history.record(range(start, start + 1), 0);
+        }
+        history.record(first, *ACCESS_COUNT_HALF_LIFE);
+        assert_eq!(history.access_counts.len(), 257);
+        assert_eq!(history.access_count_indices.len(), 257);
+        for (&requested, &index) in &history.access_count_indices {
+            assert_eq!(history.access_counts[index].0, requested);
+        }
+        assert_eq!(
+            history.retention_score(first, *ACCESS_COUNT_HALF_LIFE),
+            (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 1.0) * 1.5
+        );
+    }
+
+    #[test]
+    fn exact_and_expanded_scores_match_non_overlapping_btree_counts() {
+        let mut history = RangeAccessHistory::default();
+        let mut reference = std::collections::BTreeMap::<(u64, u64), DecayedAccessCount>::new();
+        for (index, (start, end)) in [(8, 10), (2, 4), (0, 1), (4, 8), (8, 10), (12, 16), (2, 4)]
+            .into_iter()
+            .enumerate()
+        {
+            let clock = index as u64 * 1024;
+            history.record(range(start, end), clock);
+            let accesses = reference.entry((start, end)).or_default();
+            accesses.count = accesses.decayed_count(clock) + 1.0;
+            accesses.observed_at_access = clock;
+        }
+        for start in 0..18 {
+            for end in start + 1..20 {
+                let expected: f64 = reference
+                    .range((start, 0)..(end, 0))
+                    .filter(|&(&(_, requested_end), _)| requested_end <= end)
+                    .map(|(&(start, end), accesses)| {
+                        accesses.decayed_count(10_000)
+                            * (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + (end - start) as f64)
+                    })
+                    .sum();
+                let actual = history.retention_score(range(start, end), 10_000);
+                // Expanded-range sums follow insertion order rather than sorted range order.
+                assert!(
+                    (actual - expected).abs() <= expected.abs() * 1e-12,
+                    "{start}..{end}: {actual} != {expected}"
+                );
+            }
+        }
+        assert_eq!(
+            RangeAccessHistory::default().retention_score(range(0, 1), 0),
+            0.0
+        );
+    }
+
+    #[test]
     fn other_ranges_do_not_displace_decayed_counts() {
         let mut history = RangeAccessHistory::default();
         history.record(range(0, 1), 0);
@@ -556,6 +630,7 @@ mod tests {
         assert_eq!(history.retention_score(range(3, 5), 0), 0.0);
         assert_eq!(history.retention_score(range(5, 8), 0), 0.0);
 
+        let mut history = RangeAccessHistory::default();
         history.record(range(3, 5), 0);
         history.record(range(5, 8), 0);
         assert_eq!(
@@ -564,9 +639,7 @@ mod tests {
         );
         assert_eq!(
             history.retention_score(range(0, 8), 0),
-            (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 4.0)
-                + (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 2.0)
-                + (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 3.0)
+            (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 2.0) + (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 3.0)
         );
         history.record(range(u64::MAX - 1, u64::MAX), 0);
         assert_eq!(

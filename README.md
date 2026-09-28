@@ -80,10 +80,15 @@ trim a selected entry to previously requested ranges instead of evicting it enti
 
 Both tiers share access history for each object. A successful lookup records its
 requested range once; storing downloaded bytes alone does not count as an access.
+Distinct requested ranges within an object must not overlap; repeating the same
+range is allowed. Downloaded ranges may expand to cover multiple requests.
 Each exact requested range has an access count that decays with a half-life of
 8,192 successful same-shard accesses by default. A cached range receives the decayed retrieval
 cost of every request it fully covers. Counters live until the object's final
 history owner is released; their number is not capped per object.
+Counters are stored once in a Vec, with a HashMap mapping exact request ranges to
+counter indices. Exact cached ranges use a direct lookup; expanded ranges scan
+the Vec for fully contained requests. Both tiers use these same counters.
 
 Range trimming separately retains at most 64 request events per object by default,
 expiring after 262,144 later successful same-shard accesses. Neither history is
