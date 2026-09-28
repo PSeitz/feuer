@@ -66,17 +66,15 @@ impl TieredMemoryDiskCache {
     pub async fn open_with_metrics(config: CacheConfig, registry: &BoxedRegistry) -> Result<Self, DiskRangeCacheError> {
         let memory = Arc::new(
             MemoryCache::with_metrics(config.memory_capacity(), MemoryMetrics::new(registry))
-                .with_reclaim_sample_size(config.reclaim_sample_size())
-                .with_eviction_policy(config.eviction_policy()),
+                .with_reclaim_sample_size(config.reclaim_sample_size()),
         );
-        let disk = DiskRangeCache::open_with_eviction_policy(
+        let disk = DiskRangeCache::open_with_metrics(
             config.directory(),
             config.disk_capacity(),
             IoMetrics::new(registry),
             memory.access_histories(),
             feuer_storage::DiskMetrics::new(registry),
             config.reclaim_sample_size(),
-            config.eviction_policy(),
         )
         .await?;
         let population = DiskPopulationQueue::with_metrics(memory.clone(), disk.clone(), registry);

@@ -1,5 +1,3 @@
-mod s3_fifo;
-
 use std::{sync::Arc, thread};
 
 use bytes::Bytes;
@@ -68,6 +66,53 @@ fn access_history_len(cache: &MemoryCache, key: &ObjectKey) -> usize {
 
 fn candidate_count(cache: &MemoryCache) -> usize {
     cache.shards[0].lock().candidate_count()
+}
+
+#[test]
+fn equal_cost_eviction_uses_entry_age_not_sample_order() {
+    let cache = cache(3);
+    let payload = Download::new(0, Bytes::from_static(b"x")).unwrap();
+    let range = payload.downloaded_range();
+    for key in ["a", "b", "c"] {
+        cache.insert(key.to_owned(), payload.clone());
+    }
+    // Removing the first candidate moves c ahead of the older b in the sample.
+    assert!(cache.remove(&"a".to_owned(), range));
+    cache.insert("d".to_owned(), payload.clone());
+    cache.insert("e".to_owned(), payload);
+    assert!(cache.get(&"b".to_owned(), range).is_none());
+    for key in ["c", "d", "e"] {
+        assert!(cache.get(&key.to_owned(), range).is_some());
+    }
+}
+
+#[test]
+fn reclaim_sampling_advances_past_superseded_ranges() {
+    let cache = cache(4).with_reclaim_sample_size(1);
+    let key = "object".to_owned();
+    for (start, bytes) in [
+        (0, Bytes::from_static(b"a")),
+        (1, Bytes::from_static(b"b")),
+        (2, Bytes::from_static(b"cd")),
+    ] {
+        cache.insert(key.clone(), Download::new(start, bytes).unwrap());
+    }
+    let mut shard = cache.shards[0].lock();
+    let replacement = Bytes::from_static(b"abc");
+    for expected_entries in [3, 3, 2] {
+        assert!(matches!(
+            shard.advance_admission(&key, range(0, 3), &replacement, None, false),
+            AdmissionProgress::Retry
+        ));
+        assert_eq!(shard.entry_count(), expected_entries);
+    }
+    // The partial overlap is eligible; the two fully superseded entries were skipped.
+    assert!(matches!(
+        shard.advance_admission(&key, range(0, 3), &replacement, None, false),
+        AdmissionProgress::Complete(Some(_))
+    ));
+    assert_eq!(shard.entry_count(), 1);
+    assert_eq!(shard.used_bytes(), 3);
 }
 
 #[test]

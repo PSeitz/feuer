@@ -17,8 +17,7 @@ use std::{
 
 use bytes::Bytes;
 use feuer_types::{
-    ByteRange, Download, EvictionPolicy, ObjectKey,
-    eviction::S3Fifo,
+    ByteRange, Download, ObjectKey,
     retention::{
         ObjectAccessHistories, ObjectAccessHistory, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates,
     },
@@ -44,8 +43,7 @@ const MAX_EVICTION_REGIONS: usize = 4096;
 /// Reads verify the whole covering entry, returning only requested bytes. Reuse requires a wholly free chunk.
 /// Full-key hashing selects an independently allocated shard; admission may fail despite space elsewhere.
 ///
-/// Pressure eviction uses sampled retrieval value per payload byte by default,
-/// or byte-weighted S3-FIFO when configured.
+/// Pressure eviction uses sampled retrieval value per payload byte.
 /// **Recovery is not implemented.** Every open starts empty and logs that reset.
 /// The experimental format is neither a persistence guarantee nor a stable on-disk interface.
 #[derive(Clone)]
@@ -74,7 +72,6 @@ struct DiskEntryIndex {
     eviction_candidates: Vec<(ObjectKey, u64)>,
     next_candidate: usize,
     next_publication_id: u64,
-    s3_fifo: Option<S3Fifo>,
     metrics: Arc<DiskMetrics>,
 }
 
@@ -205,29 +202,6 @@ impl DiskRangeCache {
         metrics: Arc<DiskMetrics>,
         reclaim_sample_size: usize,
     ) -> Result<Self, DiskRangeCacheError> {
-        Self::open_with_eviction_policy(
-            directory,
-            capacity,
-            io_metrics,
-            access_histories,
-            metrics,
-            reclaim_sample_size,
-            EvictionPolicy::default(),
-        )
-        .await
-    }
-
-    /// Opens a disk tier with an explicit eviction policy and registered metrics.
-    /// S3-FIFO counts verified disk hits independently of memory accesses.
-    pub async fn open_with_eviction_policy(
-        directory: impl AsRef<Path>,
-        capacity: u64,
-        io_metrics: Arc<IoMetrics>,
-        access_histories: Arc<ObjectAccessHistories>,
-        metrics: Arc<DiskMetrics>,
-        reclaim_sample_size: usize,
-        eviction_policy: EvictionPolicy,
-    ) -> Result<Self, DiskRangeCacheError> {
         assert!(reclaim_sample_size > 0, "reclaim sample size must be greater than zero");
         if capacity < CHUNK_BYTES || capacity > i64::MAX as u64 {
             return Err(DiskRangeCacheError::InvalidCapacity);
@@ -246,15 +220,7 @@ impl DiskRangeCache {
                     metrics.clone(),
                 )
                 .unwrap(),
-                entry_index: Mutex::new({
-                    let mut index = DiskEntryIndex::new(metrics.clone());
-                    if eviction_policy == EvictionPolicy::S3Fifo {
-                        let chunks =
-                            chunk_count * (shard_index + 1) / shard_count - chunk_count * shard_index / shard_count;
-                        index.s3_fifo = Some(S3Fifo::new(chunks * CHUNK_BYTES));
-                    }
-                    index
-                }),
+                entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
             })
             .collect();
         Ok(Self {
@@ -405,30 +371,20 @@ impl DiskRangeCache {
         let started = Instant::now();
         let metrics = &self.disk.metrics;
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
-        let (guarded_read, publication_id) = {
+        let guarded_read = {
             let index = shard.entry_index.lock().unwrap();
             let Some(storage) = index.covering_range(key, requested) else {
                 metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
                 return None;
             };
-            (
-                GuardedObjectRangeRead {
-                    object_range: storage.object_range,
-                    payload_checksum: storage.payload_checksum,
-                    payload_regions: storage.payload_regions.iter().map(DiskRegion::read_guard).collect(),
-                },
-                index.s3_fifo.as_ref().map(|_| storage.publication_id),
-            )
+            GuardedObjectRangeRead {
+                object_range: storage.object_range,
+                payload_checksum: storage.payload_checksum,
+                payload_regions: storage.payload_regions.iter().map(DiskRegion::read_guard).collect(),
+            }
         };
         match guarded_read.read(&self.disk.file, requested).await {
             Ok(Some(bytes)) => {
-                if let Some(publication_id) = publication_id
-                    && let Some(policy) = &mut shard.entry_index.lock().unwrap().s3_fifo
-                {
-                    // IDs are never reused: an intervening eviction/replacement
-                    // cannot credit a newer entry for this read.
-                    policy.record_access(publication_id);
-                }
                 metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
                 Some(bytes)
             }
@@ -464,20 +420,6 @@ impl DiskCacheShard {
             return false;
         }
         *attempts_left -= 1;
-        let DiskEntryIndex {
-            s3_fifo, ranges_by_key, ..
-        } = &mut *index;
-        if let Some(policy) = s3_fifo {
-            if let Some((id, key, range)) = policy.candidate(self.reclaim_sample_size, |key, range| {
-                ranges_by_key[key][&range.start()].region_count() <= *regions_left
-            }) {
-                *regions_left -= ranges_by_key[&key][&range.start()].region_count();
-                policy.evict(id);
-                index.remove(&key, range.start());
-                index.metrics.evictions.increase(1);
-            }
-            return true;
-        }
         let (start, count) = sample_candidates(&mut index.next_candidate, length, self.reclaim_sample_size);
         let mut selected: Option<(usize, f64, u64, u64)> = None;
         for offset in 0..count {
@@ -529,7 +471,6 @@ impl DiskEntryIndex {
             eviction_candidates: Vec::new(),
             next_candidate: 0,
             next_publication_id: 0,
-            s3_fifo: None,
             metrics,
         }
     }
@@ -550,9 +491,6 @@ impl DiskEntryIndex {
             .checked_add(1)
             .expect("disk entry identities exhausted");
         storage.publication_id = self.next_publication_id;
-        if let Some(policy) = &mut self.s3_fifo {
-            policy.insert(storage.publication_id, key.clone(), object_range);
-        }
         storage.eviction_position = self.eviction_candidates.len();
         self.metrics.entries.increase(1);
         self.metrics.payload_bytes.increase(object_range.len());
@@ -566,9 +504,6 @@ impl DiskEntryIndex {
     fn remove(&mut self, key: &str, start: u64) -> Option<ObjectRangeDiskStorage> {
         let entries = self.ranges_by_key.get_mut(key)?;
         let storage = entries.remove(&start)?;
-        if let Some(policy) = &mut self.s3_fifo {
-            policy.remove(storage.publication_id);
-        }
         self.metrics.entries.decrease(1);
         self.metrics.payload_bytes.decrease(storage.object_range.len());
         if entries.is_empty() {

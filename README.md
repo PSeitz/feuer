@@ -74,14 +74,9 @@ does not consume read admission slots. See the
 
 ## Eviction
 
-Both tiers support cost-aware eviction and S3-FIFO. Cost-aware eviction is the
-default.
-
-### Cost-aware
-
-The policy samples entries and evicts the one with the lowest estimated retrieval
-cost saved per retained byte. Memory can also trim a selected entry to previously
-requested ranges instead of evicting it entirely.
+Both tiers use cost-aware eviction. The policy samples entries and evicts the one
+with the lowest estimated retrieval cost saved per retained byte. Memory can also
+trim a selected entry to previously requested ranges instead of evicting it entirely.
 
 Both tiers share access history for each object. A successful lookup records its
 requested range once; storing downloaded bytes alone does not count as an access.
@@ -94,41 +89,24 @@ Range trimming separately retains at most 64 request events per object by defaul
 expiring after 262,144 later successful same-shard accesses. Neither history is
 persisted; metadata is outside payload-capacity accounting.
 
-### S3-FIFO
-
-S3-FIFO uses separate byte-weighted queues for each shard and tier:
-
-- A small FIFO targets 10% of shard capacity. Entries with at least two accesses
-  move to the main FIFO.
-- Main-queue accesses earn up to three second chances. Hits do not reorder entries.
-- Cold entries evicted from the small queue leave key/range records without
-  payload. These records are bounded to 90% of shard capacity in former payload
-  bytes. Matching readmissions go directly to the main queue.
-
-Memory counts successful covering accesses, including the request served by a
-callback download or disk promotion. Disk counts verified disk hits, not memory
-hits. S3-FIFO evicts whole entries and does not trim memory ranges.
-
 ### Configuration
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `FEUER_EVICTION_POLICY` | `cost-aware` | Select `cost-aware` or `s3fifo` for both tiers. |
-| `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Limit candidates examined per eviction decision, or queue-head processing for S3-FIFO. |
+| `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Limit candidates examined per eviction decision. |
 | `FEUER_ACCESS_COUNT_HALF_LIFE` | `8192` | Set cost-aware score decay half-life in successful same-shard accesses. |
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Set the range-trimming history lifetime in successful same-shard accesses. |
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Limit range-trimming request events per object, not decayed scoring counters. |
 | `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed source-request cost added to requested bytes when scoring cost-aware retention. |
 
-`CacheConfig::new` reads the policy and sample size, rejecting invalid values.
-The sample size must be a positive `usize`. Builder methods override valid
-environment settings for an individual cache:
+`CacheConfig::new` reads the sample size, rejecting invalid values.
+The sample size must be a positive `usize`. The builder overrides a valid
+environment setting for an individual cache:
 
 ```rust
-use feuer::{CacheConfig, EvictionPolicy};
+use feuer::CacheConfig;
 
 let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?
-    .with_eviction_policy(EvictionPolicy::S3Fifo)
     .with_reclaim_sample_size(128)?;
 ```
 
@@ -136,28 +114,28 @@ let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?
 including in standalone memory caches and the memory benchmark. It must be a
 positive decimal `u64`; invalid values panic. Smaller values forget historical
 popularity faster; larger values retain it longer. It affects both tiers'
-cost-aware scores, not trimming-history expiration or S3-FIFO counters.
+cost-aware scores, not trimming-history expiration.
 
 The access-age setting is process-wide and read once on first use. It also applies
 to standalone `MemoryCache` instances and the memory benchmark. Set it before
 starting the process. It must be a positive decimal `u64`; invalid values panic.
 `18446744073709551615` effectively disables expiration, and `32768` restores the
 previous default. This setting affects range trimming, not decayed cost-aware
-scores, S3-FIFO counters, or the per-object event cap.
+scores or the per-object event cap.
 
 `FEUER_MAX_ACCESS_EVENTS_PER_KEY` independently sets that history cap. It is also
 process-wide, read once on first use, and applies to standalone memory caches and
 the memory benchmark. Set it to a positive decimal `usize`; invalid values panic.
 For example, `FEUER_MAX_ACCESS_EVENTS_PER_KEY=256` retains up to 256 events per
 object for range trimming. Larger event histories use more metadata memory and
-increase trimming work. This setting does not change decayed scoring counters,
-the eviction sample size, or S3-FIFO counters.
+increase trimming work. This setting does not change decayed scoring counters
+or the eviction sample size.
 
 `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` is also process-wide and read once on first
 use, including in standalone memory caches. It must be a nonnegative decimal
 `u64`; invalid values panic. The default represents 125 ms at 80 MB/s. Set it to
 `0` to score only requested bytes saved per retained byte, without a fixed reward
-for avoiding a request. It affects both tiers' cost-aware scores, not S3-FIFO.
+for avoiding a request. It affects both tiers' cost-aware scores.
 
 ## Metrics
 

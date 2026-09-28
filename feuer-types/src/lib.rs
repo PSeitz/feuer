@@ -6,15 +6,12 @@
 //! dependency cycle.
 
 mod download;
-#[doc(hidden)]
-pub mod eviction;
 mod range;
 
 #[doc(hidden)]
 pub mod retention;
 
 pub use download::{Download, DownloadError};
-pub use eviction::EvictionPolicy;
 pub use range::{ByteRange, InvalidByteRange};
 
 /// The complete UTF-8 identity of one immutable object.

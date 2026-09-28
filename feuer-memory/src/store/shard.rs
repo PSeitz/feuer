@@ -1,9 +1,8 @@
-use std::{cmp::Ordering, collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use bytes::Bytes;
 use feuer_types::{
-    ByteRange, EvictionPolicy, ObjectKey,
-    eviction::S3Fifo,
+    ByteRange, ObjectKey,
     retention::{
         ObjectAccessHistories, ObjectAccessHistory, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates,
     },
@@ -144,13 +143,11 @@ impl ReclaimCandidateRing {
     }
 }
 
-/// A cached range considered for reclaiming memory, with its retrieval cost and retained size.
+/// The cached range selected for reclaiming memory.
 struct ReclaimCandidate {
     object_key: ObjectKey,
     range: ByteRange,
     id: u64,
-    retained_bytes: u64,
-    retrieval_cost: f64,
 }
 
 /// Source payload, plan, and identity for trimming a cached range outside the shard lock.
@@ -218,7 +215,6 @@ pub(super) struct MemoryCacheShard {
     access_histories: Arc<ObjectAccessHistories>,
     next_entry_id: u64,
     candidates: ReclaimCandidateRing,
-    s3_fifo: Option<S3Fifo>,
     metrics: Arc<MemoryMetrics>,
 }
 
@@ -236,17 +232,8 @@ impl MemoryCacheShard {
             access_histories,
             next_entry_id: 0,
             candidates: ReclaimCandidateRing::default(),
-            s3_fifo: None,
             metrics,
         }
-    }
-
-    pub(super) fn set_eviction_policy(&mut self, policy: EvictionPolicy) {
-        assert!(self.entry_count() == 0, "eviction policy must be set before population");
-        self.s3_fifo = match policy {
-            EvictionPolicy::CostAware => None,
-            EvictionPolicy::S3Fifo => Some(S3Fifo::new(self.capacity)),
-        };
     }
 
     pub(super) const fn used_bytes(&self) -> u64 {
@@ -254,15 +241,9 @@ impl MemoryCacheShard {
     }
 
     pub(super) fn get(&mut self, object_key: &ObjectKey, requested_range: ByteRange) -> Option<Bytes> {
-        let (id, bytes) = self.ranges.get_mut(object_key).and_then(|entries| {
-            entries.record_covering_access(requested_range, |entry| {
-                (entry.id, entry.requested_bytes(requested_range))
-            })
-        })?;
-        if let Some(policy) = &mut self.s3_fifo {
-            policy.record_access(id);
-        }
-        Some(bytes)
+        self.ranges.get_mut(object_key).and_then(|entries| {
+            entries.record_covering_access(requested_range, |entry| entry.requested_bytes(requested_range))
+        })
     }
 
     pub(super) fn record_access(&mut self, object_key: &ObjectKey, requested_range: ByteRange) {
@@ -272,11 +253,6 @@ impl MemoryCacheShard {
     fn record_successful_access(&mut self, object_key: &ObjectKey, requested_range: ByteRange) {
         if let Some(entries) = self.ranges.get(object_key) {
             entries.accesses.record(requested_range);
-            if let Some(policy) = &mut self.s3_fifo
-                && let Some(entry) = entries.covering(requested_range)
-            {
-                policy.record_access(entry.id);
-            }
         } else {
             // A successful disk-only lookup still contributes to the shared object's evidence.
             self.access_histories.record_access(object_key, requested_range);
@@ -318,26 +294,17 @@ impl MemoryCacheShard {
             self.metrics.increase_usage(added_bytes, 1);
             self.metrics.record_insert(removal.entry_count != 0);
             if let Some(requested_range) = requested_range {
-                // The fetch is access evidence, not reuse of the newly cached range.
-                // S3-FIFO must keep its initial frequency at zero to filter one-hit ranges.
                 self.ranges[object_key].accesses.record(requested_range);
             }
             return AdmissionProgress::Complete(Some(id));
         }
 
         let Some(candidate) = self.select_reclaim_candidate(object_key, range) else {
-            // Bounded work can end on superseded entries or S3-FIFO second
-            // chances/promotions. Retry after releasing the shard lock.
+            // The sample can contain only superseded entries. Retry after releasing the shard lock.
             return AdmissionProgress::Retry;
         };
-        if self.s3_fifo.is_none()
-            && allow_range_trim
-            && let Some(source) = self.range_trim_source(&candidate)
-        {
+        if allow_range_trim && let Some(source) = self.range_trim_source(&candidate) {
             return AdmissionProgress::Trim(source);
-        }
-        if let Some(policy) = &mut self.s3_fifo {
-            policy.evict(candidate.id);
         }
 
         let removed = self
@@ -356,9 +323,6 @@ impl MemoryCacheShard {
     fn insert_admission(&mut self, object_key: ObjectKey, range: ByteRange, bytes: Bytes) -> u64 {
         self.used_bytes += bytes.len() as u64;
         let id = self.allocate_entry_id();
-        if let Some(policy) = &mut self.s3_fifo {
-            policy.insert(id, object_key.clone(), range);
-        }
         let candidate_slot = self.candidates.register(CachedRangeIdentity {
             object_key: object_key.clone(),
             start: range.start(),
@@ -468,9 +432,6 @@ impl MemoryCacheShard {
         };
 
         self.unregister_candidate(entry.candidate_slot, entry.id);
-        if let Some(policy) = &mut self.s3_fifo {
-            policy.remove(entry.id);
-        }
         if object_is_empty && !preserve_access_history {
             self.ranges.remove(object_key);
         }
@@ -493,27 +454,15 @@ impl MemoryCacheShard {
         entry.candidate_slot = slot;
     }
 
-    /// Advances the configured policy with bounded candidate work.
+    /// Selects the lowest retrieval-cost density from a rotating, bounded sample.
     fn select_reclaim_candidate(
         &mut self,
         admitting_key: &ObjectKey,
         admitting_range: ByteRange,
     ) -> Option<ReclaimCandidate> {
-        if let Some(policy) = &mut self.s3_fifo {
-            let (id, object_key, range) = policy.candidate(self.reclaim_sample_size, |key, range| {
-                key != admitting_key || !admitting_range.contains(range)
-            })?;
-            return Some(ReclaimCandidate {
-                object_key,
-                range,
-                id,
-                retained_bytes: range.len(),
-                retrieval_cost: 0.0,
-            });
-        }
         let (sample_start, sample_count) = self.candidates.sample(self.reclaim_sample_size);
         let candidate_count = self.candidates.entries.len();
-        let mut selected: Option<ReclaimCandidate> = None;
+        let mut selected: Option<(&ObjectKey, &CachedRange, f64)> = None;
 
         for offset in 0..sample_count {
             let candidate = &self.candidates.entries[(sample_start + offset) % candidate_count];
@@ -530,21 +479,27 @@ impl MemoryCacheShard {
                 continue;
             }
 
-            let sampled = ReclaimCandidate {
-                object_key: candidate.object_key.clone(),
-                range: entry.range,
-                id: entry.id,
-                retained_bytes: entry.bytes.len() as u64,
-                retrieval_cost: entries.accesses.covered_retrieval_cost(entry.range),
-            };
-            if selected
-                .as_ref()
-                .is_none_or(|current| compare_retrieval_cost_per_byte(&sampled, current).is_lt())
-            {
-                selected = Some(sampled);
+            let retrieval_cost = entries.accesses.covered_retrieval_cost(entry.range);
+            if selected.is_none_or(|(current_key, current, current_cost)| {
+                compare_cost_per_byte(
+                    retrieval_cost,
+                    entry.bytes.len() as u64,
+                    current_cost,
+                    current.bytes.len() as u64,
+                )
+                .then_with(|| entry.id.cmp(&current.id))
+                .then_with(|| candidate.object_key.cmp(current_key))
+                .then_with(|| entry.range.cmp(&current.range))
+                .is_lt()
+            }) {
+                selected = Some((&candidate.object_key, entry, retrieval_cost));
             }
         }
-        selected
+        selected.map(|(object_key, entry, _)| ReclaimCandidate {
+            object_key: object_key.clone(),
+            range: entry.range,
+            id: entry.id,
+        })
     }
 
     /// Plans range trimming only for the selected candidate, after its grace expires.
@@ -655,19 +610,6 @@ impl MemoryCacheShard {
     pub(super) fn candidate_count(&self) -> usize {
         self.candidates.entries.len()
     }
-}
-
-/// Lower retrieval-value density, then the older entry wins victim selection.
-fn compare_retrieval_cost_per_byte(left: &ReclaimCandidate, right: &ReclaimCandidate) -> Ordering {
-    compare_cost_per_byte(
-        left.retrieval_cost,
-        left.retained_bytes,
-        right.retrieval_cost,
-        right.retained_bytes,
-    )
-    .then_with(|| left.id.cmp(&right.id))
-    .then_with(|| left.object_key.cmp(&right.object_key))
-    .then_with(|| left.range.cmp(&right.range))
 }
 
 impl Drop for MemoryCacheShard {

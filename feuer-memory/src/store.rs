@@ -6,7 +6,7 @@ mod tests;
 use std::{fmt, sync::Arc};
 
 use bytes::Bytes;
-use feuer_types::{ByteRange, Download, EvictionPolicy, ObjectKey, retention::ObjectAccessHistories};
+use feuer_types::{ByteRange, Download, ObjectKey, retention::ObjectAccessHistories};
 use parking_lot::Mutex;
 
 use self::shard::{AdmissionProgress, MemoryCacheShard};
@@ -28,11 +28,10 @@ const MAX_SHARDS: usize = 64;
 /// The configured capacity is divided among independently locked shards. Each
 /// shard evicts locally before insertion. A payload larger than its shard's
 /// target is retained after that shard is emptied, so total usage can exceed the
-/// configured capacity. By default, victims are selected shard-locally by recent
+/// configured capacity. Victims are selected shard-locally by recent
 /// modeled retrieval value per retained byte. A rotating sample selects one victim;
 /// if its observed requests form a useful smaller payload, Feuer trims that victim
-/// outside the shard lock. Optional S3-FIFO eviction uses small/main FIFO queues
-/// and an exact-range ghost history instead, without range trimming.
+/// outside the shard lock.
 pub struct MemoryCache {
     /// Total soft target divided among the shards.
     capacity: u64,
@@ -88,16 +87,7 @@ impl MemoryCache {
         }
     }
 
-    /// Selects the shard-local policy before population. Defaults to cost-aware.
-    /// Panics if any shard already contains entries. S3-FIFO does not trim ranges.
-    pub fn with_eviction_policy(mut self, policy: EvictionPolicy) -> Self {
-        for shard in &mut self.shards {
-            shard.get_mut().set_eviction_policy(policy);
-        }
-        self
-    }
-
-    /// Sets the maximum candidates inspected (or S3-FIFO queue steps) per decision. Panics if zero.
+    /// Sets the maximum candidates inspected per decision. Panics if zero.
     pub fn with_reclaim_sample_size(mut self, sample_size: usize) -> Self {
         assert!(sample_size > 0, "reclaim sample size must be greater than zero");
         for shard in &mut self.shards {
@@ -141,9 +131,8 @@ impl MemoryCache {
     ///
     /// Population and access remain distinct policy events, but sharing one
     /// shard lock prevents an intervening admission from losing the callback's
-    /// attribution. A new entry starts with zero S3-FIFO reuse credits; the request
-    /// still contributes to shared access history. Containment suppression records
-    /// an access to the existing entry, including its S3-FIFO reuse counter.
+    /// attribution. The request contributes to shared access history even when
+    /// an existing entry contains the download.
     /// Returns the new shard-local entry identity, or `None` for a redundant download.
     pub fn insert_and_record(
         &self,
