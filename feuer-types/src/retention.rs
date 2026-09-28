@@ -214,7 +214,7 @@ struct DecayedAccessCount {
 }
 
 impl DecayedAccessCount {
-    fn at(&self, access_clock: u64) -> f64 {
+    fn decayed_count(&self, access_clock: u64) -> f64 {
         self.count
             * (-(access_clock.saturating_sub(self.observed_at_access) as f64) / *ACCESS_COUNT_HALF_LIFE as f64).exp2()
     }
@@ -234,7 +234,7 @@ impl RangeAccessHistory {
     fn record(&mut self, range: ByteRange, access_clock: u64) {
         self.generation = self.generation.saturating_add(1);
         let accesses = self.access_counts.entry((range.start(), range.end())).or_default();
-        accesses.count = accesses.at(access_clock) + 1.0;
+        accesses.count = accesses.decayed_count(access_clock) + 1.0;
         accesses.observed_at_access = access_clock;
         self.expire(access_clock);
         if self.events.len() == *MAX_ACCESS_EVENTS_PER_KEY {
@@ -260,7 +260,9 @@ impl RangeAccessHistory {
         self.access_counts
             .range((cached_range.start(), 0)..(cached_range.end(), 0))
             .filter(|&(&(_, end), _)| end <= cached_range.end())
-            .map(|(&(start, end), accesses)| accesses.at(access_clock) * (fixed_retrieval_cost + (end - start) as f64))
+            .map(|(&(start, end), accesses)| {
+                accesses.decayed_count(access_clock) * (fixed_retrieval_cost + (end - start) as f64)
+            })
             .sum()
     }
 
