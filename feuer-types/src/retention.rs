@@ -3,9 +3,10 @@
 use std::{
     cmp::Ordering,
     collections::{HashMap, VecDeque, hash_map::DefaultHasher},
+    ffi::OsStr,
     hash::{Hash, Hasher},
     sync::{
-        Arc, Mutex, MutexGuard, Weak,
+        Arc, LazyLock, Mutex, MutexGuard, Weak,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
 };
@@ -138,7 +139,21 @@ pub const FIXED_RETRIEVAL_EQUIVALENT_BYTES: u64 = 10_000_000;
 /// Maximum exact access events retained for one object key.
 pub const MAX_ACCESS_EVENTS_PER_KEY: usize = 64;
 /// Maximum same-shard successful-access age that still contributes.
-pub const MAX_ACCESS_AGE_ACCESSES: u64 = 32_768;
+/// Reads `FEUER_MAX_ACCESS_AGE_ACCESSES` once on first use, defaulting to 32,768.
+/// Panics if set to anything other than a positive `u64` integer.
+pub static MAX_ACCESS_AGE_ACCESSES: LazyLock<u64> =
+    LazyLock::new(|| parse_max_access_age(std::env::var_os("FEUER_MAX_ACCESS_AGE_ACCESSES").as_deref()));
+
+fn parse_max_access_age(value: Option<&OsStr>) -> u64 {
+    let Some(value) = value else {
+        return 32_768;
+    };
+    value
+        .to_str()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&value| value > 0)
+        .expect("FEUER_MAX_ACCESS_AGE_ACCESSES must be a positive u64 integer")
+}
 
 /// One exact requested interval and its shard-local observation clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,7 +229,7 @@ impl RangeAccessHistory {
 }
 
 fn is_active(event: RangeAccess, access_clock: u64) -> bool {
-    access_clock.saturating_sub(event.observed_at_access) <= MAX_ACCESS_AGE_ACCESSES
+    access_clock.saturating_sub(event.observed_at_access) <= *MAX_ACCESS_AGE_ACCESSES
 }
 
 #[cfg(test)]
@@ -223,6 +238,45 @@ mod tests {
 
     fn range(start: u64, end: u64) -> ByteRange {
         ByteRange::new(start, end).unwrap()
+    }
+
+    #[test]
+    fn parses_max_access_age() {
+        assert_eq!(parse_max_access_age(None), 32_768);
+        for value in [1, 65_536, 131_072, u64::MAX] {
+            assert_eq!(parse_max_access_age(Some(OsStr::new(&value.to_string()))), value);
+        }
+        for value in ["", "0", "-1", "64k", "1.5", " 65536", "18446744073709551616"] {
+            assert!(std::panic::catch_unwind(|| parse_max_access_age(Some(OsStr::new(value)))).is_err());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(std::panic::catch_unwind(|| parse_max_access_age(Some(OsStr::from_bytes(b"\xff")))).is_err());
+        }
+    }
+
+    #[test]
+    fn access_age_environment_override() {
+        // A fresh process tests environment loading without mutating this test process's environment.
+        if std::env::var_os("FEUER_TEST_ACCESS_AGE_CHILD").is_some() {
+            assert_eq!(*MAX_ACCESS_AGE_ACCESSES, 65_536);
+            let mut history = RangeAccessHistory::default();
+            history.record(range(0, 1), 0);
+            assert!(history.covered_retrieval_cost(range(0, 1), 65_536) > 0);
+            assert_eq!(history.covered_retrieval_cost(range(0, 1), 65_537), 0);
+            assert_eq!(history.active_ranges(65_537).count(), 0);
+            history.record(range(1, 2), 65_537);
+            assert_eq!(history.ranges(), vec![range(1, 2)]);
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "retention::tests::access_age_environment_override"])
+            .env("FEUER_TEST_ACCESS_AGE_CHILD", "1")
+            .env("FEUER_MAX_ACCESS_AGE_ACCESSES", "65536")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
     }
 
     #[test]
@@ -309,15 +363,15 @@ mod tests {
         let expected = 2 * (FIXED_RETRIEVAL_EQUIVALENT_BYTES + requested.len());
         assert_eq!(history.covered_retrieval_cost(cached_range, 0), expected);
         assert_eq!(
-            history.covered_retrieval_cost(cached_range, MAX_ACCESS_AGE_ACCESSES),
+            history.covered_retrieval_cost(cached_range, *MAX_ACCESS_AGE_ACCESSES),
             expected
         );
         assert_eq!(
-            history.covered_retrieval_cost(cached_range, MAX_ACCESS_AGE_ACCESSES + 1),
+            history.covered_retrieval_cost(cached_range, *MAX_ACCESS_AGE_ACCESSES + 1),
             0
         );
 
-        history.record(range(6, 7), MAX_ACCESS_AGE_ACCESSES + 1);
+        history.record(range(6, 7), *MAX_ACCESS_AGE_ACCESSES + 1);
         assert_eq!(history.ranges(), vec![range(6, 7)]);
     }
 

@@ -409,7 +409,7 @@ fn stale_frequency_eventually_expires() {
     for _ in 0..8 {
         cache.record_access(&stale, range(0, 1));
     }
-    for _ in 0..=MAX_ACCESS_AGE_ACCESSES {
+    for _ in 0..=*MAX_ACCESS_AGE_ACCESSES {
         cache.record_access(&clock, range(0, 1));
     }
     cache.record_access(&fresh, range(0, 1));

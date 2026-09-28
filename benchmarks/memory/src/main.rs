@@ -11,7 +11,7 @@ use std::{
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use feuer_memory::MemoryCache;
-use feuer_types::{ByteRange, Download, ObjectKey};
+use feuer_types::{ByteRange, Download, ObjectKey, retention::MAX_ACCESS_AGE_ACCESSES};
 use foyer_memory::{Cache as FoyerCache, CacheBuilder, CostAwareConfig, S3FifoConfig};
 
 const PINNED_FOYER_REVISION: &str = "14c2d88b9d7dd2135bfc723d0967debb59532b4b";
@@ -370,7 +370,8 @@ fn main() -> Result<(), String> {
 
     if args.csv {
         eprintln!(
-            "foyer_revision={PINNED_FOYER_REVISION} foyer_source=https://github.com/PSeitz/foyer foyer_cost_estimator=residence_access_rate foyer_cost_fixed_retrieval={SOURCE_FIXED_EQUIVALENT_BYTES} foyer_cost_sample_size={FOYER_COST_SAMPLE_SIZE} trace={TRACE_FILE} shards={:?} downloaders={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
+            "foyer_revision={PINNED_FOYER_REVISION} foyer_source=https://github.com/PSeitz/foyer foyer_cost_estimator=residence_access_rate foyer_cost_fixed_retrieval={SOURCE_FIXED_EQUIVALENT_BYTES} foyer_cost_sample_size={FOYER_COST_SAMPLE_SIZE} feuer_max_access_age_accesses={} trace={TRACE_FILE} shards={:?} downloaders={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
+            *MAX_ACCESS_AGE_ACCESSES,
             args.shards,
             args.downloaders,
             args.warmup_iterations,
@@ -670,6 +671,7 @@ fn print_human_header(args: &ReplayArgs, workload: &ReplayWorkload) {
     println!("Feuer memory benchmark");
     println!("Trace: {TRACE_FILE} ({} operations)", workload.requests.len());
     println!("Shards: {shards} | Warm-up passes: {}", args.warmup_iterations);
+    println!("Feuer access age: {} same-shard accesses", *MAX_ACCESS_AGE_ACCESSES);
     println!(
         "Expanded: {COALESCING_WINDOW_MILLIS}-ms coalescing within {} | Whole below {}",
         format_decimal_bytes(workload.download_config.coalescing_distance_bytes),

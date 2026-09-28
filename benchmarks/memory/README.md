@@ -28,7 +28,8 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
 
 - `feuer-value-density`: `MemoryCache` with bounded exact access evidence
   valued at one modeled source request plus its requested bytes. Evidence
-  expires after 32,768 later successful same-shard accesses. Sampled eviction
+  expires after 32,768 later successful same-shard accesses by default
+  (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this limit). Sampled eviction
   compares active retrieval value per retained byte. After a
   64-successful-access grace, pressure trims the selected victim to its observed
   request ranges when useful.
@@ -87,6 +88,16 @@ raw bytes or units accepted by `--capacity`; for example:
 COALESCING_DISTANCE_BYTES=5MB WHOLE_SPLIT_THRESHOLD_BYTES=8MiB \
   cargo run --release -p feuer-memory-bench -- --capacity 1GiB
 ```
+
+To change Feuer's cost-aware evidence lifetime without rebuilding:
+
+```bash
+FEUER_MAX_ACCESS_AGE_ACCESSES=65536 cargo run --release -p feuer-memory-bench -- \
+  --capacity 1GiB --shards 1 --downloader exact --warmup-iterations 1
+```
+
+The limit counts same-shard successful accesses, not milliseconds. This setting
+does not change either Foyer policy or the 64-requests-per-object history cap.
 
 To measure a cache warmed by one complete trace iteration, add
 `--warmup-iterations 1`. Warm-up traffic is excluded from the reported rates

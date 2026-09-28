@@ -35,21 +35,13 @@ fn callback_misses_do_not_promote_one_hit_ranges() {
     let cache = s3_cache(30);
     let hot = "hot".to_owned();
     let requested = range(0, 1);
-    cache.insert_and_record(
-        hot.clone(),
-        download(range(0, 10), Bytes::from(vec![1; 10])),
-        requested,
-    );
+    cache.insert_and_record(hot.clone(), download(range(0, 10), Bytes::from(vec![1; 10])), requested);
     assert_eq!(accessed_ranges(&cache, &hot), vec![requested]);
     cache.get(&hot, range(5, 6)).unwrap();
     for key in ["a", "b", "c", "d", "e"] {
         let key = key.to_owned();
         assert!(cache.get(&key, requested).is_none());
-        cache.insert_and_record(
-            key.clone(),
-            download(range(0, 10), Bytes::from(vec![1; 10])),
-            requested,
-        );
+        cache.insert_and_record(key.clone(), download(range(0, 10), Bytes::from(vec![1; 10])), requested);
         assert_eq!(accessed_ranges(&cache, &key), vec![requested]);
     }
     assert_eq!(cache.used_bytes(), 30);

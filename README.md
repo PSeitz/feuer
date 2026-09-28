@@ -102,6 +102,19 @@ or disk eviction decision. `CacheConfig::new` reads this variable, defaulting to
 that cache. With S3-FIFO, this limits queue-head processing per decision instead of sampled candidates;
 memory retries after promotions or second chances, while disk retains its per-batch work limits.
 
+### Cost-aware access age
+
+Set `FEUER_MAX_ACCESS_AGE_ACCESSES=65536` to retain request evidence for up to
+65,536 later successful accesses to the same shard. The default is 32,768.
+The shared memory/disk history reads this process-wide setting once on first use;
+it also applies to standalone `MemoryCache` and the memory benchmark. Set it before
+starting the process. A set value must be a positive decimal `u64`; invalid values
+panic. `18446744073709551615` effectively disables age expiration.
+
+This changes cost-aware scoring and range-trimming evidence, not S3-FIFO counters
+or the separate limit of 64 recorded requests per object. Entries can still be
+evicted under capacity pressure.
+
 ## Metrics
 
 `TieredMemoryDiskCache::open_with_metrics(config, &registry).await` accepts a
