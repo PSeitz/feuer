@@ -432,7 +432,7 @@ impl DiskCacheShard {
             if entry.region_count() > *regions_left {
                 continue;
             }
-            let value = entry.accesses.covered_retrieval_cost(entry.object_range);
+            let value = entry.accesses.retention_score(entry.object_range);
             let payload_bytes = entry.object_range.len();
             if selected.is_none_or(|(_, current_value, current_bytes, current_id)| {
                 compare_cost_per_byte(value, payload_bytes, current_value, current_bytes)

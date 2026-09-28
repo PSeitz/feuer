@@ -442,16 +442,16 @@ async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
     for _ in 0..3 {
         histories.record_access(&key, range(0, 1));
     }
-    let original_cost = evidence.covered_retrieval_cost(range(0, 100));
+    let original_cost = evidence.retention_score(range(0, 100));
     assert!(original_cost > 0.0);
-    assert_eq!(evidence.covered_retrieval_cost(range(200, 300)), 0.0);
+    assert_eq!(evidence.retention_score(range(200, 300)), 0.0);
     // Successful lookups are recorded explicitly; raw storage reads/population do not double-count.
     assert!(cache.get(&key, range(0, 1)).await.is_some());
     assert_eq!(evidence.lock().generation(), 3);
     for _ in 0..*ACCESS_COUNT_HALF_LIFE {
         histories.record_access(&key, range(200, 201));
     }
-    assert_eq!(evidence.covered_retrieval_cost(range(0, 100)), original_cost * 0.5);
+    assert_eq!(evidence.retention_score(range(0, 100)), original_cost * 0.5);
     assert!(cache.insert("new".to_owned(), download(0, 1)).await.unwrap());
     assert!(cache.get(&key, range(0, 1)).await.is_none());
     assert!(cache.get(&key, range(200, 201)).await.is_some());

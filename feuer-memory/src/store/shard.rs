@@ -479,7 +479,7 @@ impl MemoryCacheShard {
                 continue;
             }
 
-            let retrieval_cost = entries.accesses.covered_retrieval_cost(entry.range);
+            let retrieval_cost = entries.accesses.retention_score(entry.range);
             if selected.is_none_or(|(current_key, current, current_cost)| {
                 compare_cost_per_byte(
                     retrieval_cost,
