@@ -112,20 +112,71 @@ fn aligned_buffer_pool_matches_sizes_and_bounds_idle_memory() {
 }
 
 #[test]
+fn io_buffer_pool_capacities_follow_environment() {
+    // A child process avoids changing the environment of concurrent tests.
+    if let Ok(expected_small) = std::env::var("FEUER_TEST_IO_BUFFER_POOLS_CHILD") {
+        let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_IO);
+        let expected = [expected_small.parse::<usize>().unwrap(), 8192, 5 * 1024 * 1024 * 1024];
+        for (pool, capacity) in admission.idle_buffers.iter().zip(expected) {
+            assert_eq!(pool.lock().unwrap().capacity, capacity);
+            drop(AlignedIoBuffer::new(DIRECT_IO_ALIGNMENT_BYTES, Vec::new(), pool).unwrap());
+            let retained = if capacity >= DIRECT_IO_ALIGNMENT_BYTES {
+                DIRECT_IO_ALIGNMENT_BYTES
+            } else {
+                0
+            };
+            assert_eq!(pool.lock().unwrap().bytes, retained);
+        }
+        return;
+    }
+    for (small_capacity, expected) in [
+        ("0", Some(0)),
+        ("1024", Some(1024)),
+        ("1KiB", Some(1024)),
+        ("1KB", Some(1000)),
+        ("1.5 MiB", Some(1572864)),
+        ("2mb", Some(2000000)),
+        ("invalid", None),
+        ("-1", None),
+        ("18446744073709551616", None),
+    ] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "uring::tests::io_buffer_pool_capacities_follow_environment",
+                "--nocapture",
+            ])
+            .env("FEUER_TEST_IO_BUFFER_POOLS_CHILD", expected.unwrap_or(0).to_string())
+            .env("FEUER_SMALL_IO_BUFFER_POOL_BYTES", small_capacity)
+            .env("FEUER_MEDIUM_IO_BUFFER_POOL_BYTES", "8KiB")
+            .env("FEUER_LARGE_IO_BUFFER_POOL_BYTES", "5GiB")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), expected.is_some(), "{output:?}");
+        if expected.is_none() {
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("FEUER_SMALL_IO_BUFFER_POOL_BYTES must be a number >= 0 fitting usize")
+            );
+        }
+    }
+}
+
+#[test]
 fn small_medium_and_large_buffer_pools_have_independent_budgets() {
     let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_IO);
     let mib = 1024 * 1024;
-    for (length, index, capacity) in [
-        (DIRECT_IO_ALIGNMENT_BYTES, 0, 128 * mib),
-        (mib, 0, 128 * mib),
-        (mib + DIRECT_IO_ALIGNMENT_BYTES, 1, 256 * mib),
-        (10 * mib - DIRECT_IO_ALIGNMENT_BYTES, 1, 256 * mib),
-        (10 * mib, 2, 1024 * mib),
-        (20 * mib, 2, 1024 * mib),
+    for (length, index) in [
+        (DIRECT_IO_ALIGNMENT_BYTES, 0),
+        (mib, 0),
+        (mib + DIRECT_IO_ALIGNMENT_BYTES, 1),
+        (10 * mib - DIRECT_IO_ALIGNMENT_BYTES, 1),
+        (10 * mib, 2),
+        (20 * mib, 2),
     ] {
         let pool = admission.buffer_pool(length);
         assert!(Arc::ptr_eq(pool, &admission.idle_buffers[index]));
-        assert_eq!(pool.lock().unwrap().capacity, capacity);
+        assert_eq!(pool.lock().unwrap().capacity, IDLE_IO_BUFFER_CAPACITIES[index]);
     }
     for length in [DIRECT_IO_ALIGNMENT_BYTES, 2 * mib, 10 * mib] {
         let pool = admission.buffer_pool(length);

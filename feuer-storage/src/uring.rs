@@ -9,7 +9,7 @@ use std::{
     ops::Range,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     ptr::NonNull,
-    sync::{Arc, Mutex, Weak, mpsc},
+    sync::{Arc, LazyLock, Mutex, Weak, mpsc},
     thread::{self, JoinHandle},
 };
 
@@ -36,7 +36,17 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;
 // outside this budget. A read into an existing buffer charges only its I/O slice.
 const MAX_IO_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 // Per-queue idle allocations, separate from active I/O and caller-owned results.
-const IDLE_IO_BUFFER_CAPACITIES: [usize; 3] = [128 * 1024 * 1024, 256 * 1024 * 1024, 1024 * 1024 * 1024];
+// Read once on first use; zero disables retention for that size class.
+static IDLE_IO_BUFFER_CAPACITIES: LazyLock<[usize; 3]> = LazyLock::new(|| {
+    [
+        ("FEUER_SMALL_IO_BUFFER_POOL_BYTES", 128 * 1024 * 1024),
+        ("FEUER_MEDIUM_IO_BUFFER_POOL_BYTES", 256 * 1024 * 1024),
+        ("FEUER_LARGE_IO_BUFFER_POOL_BYTES", 1024 * 1024 * 1024),
+    ]
+    .map(|(name, default)| {
+        feuer_types::config::read_env_number(name, default, 0).unwrap_or_else(|error| panic!("{error}"))
+    })
+});
 
 #[cfg(test)]
 mod tests;

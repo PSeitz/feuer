@@ -98,6 +98,9 @@ persisted; metadata is outside payload-capacity accounting.
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Set the range-trimming history lifetime in successful same-shard accesses. |
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Limit range-trimming request events per object, not decayed scoring counters. |
 | `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed source-request cost added to requested bytes when scoring cost-aware retention. |
+| `FEUER_SMALL_IO_BUFFER_POOL_BYTES` | `134217728` (128 MiB) | Maximum idle allocation bytes per I/O queue for buffers up to 1 MiB. |
+| `FEUER_MEDIUM_IO_BUFFER_POOL_BYTES` | `268435456` (256 MiB) | Maximum idle allocation bytes per I/O queue for buffers larger than 1 MiB and smaller than 10 MiB. |
+| `FEUER_LARGE_IO_BUFFER_POOL_BYTES` | `1073741824` (1 GiB) | Maximum idle allocation bytes per I/O queue for buffers of 10 MiB or larger. |
 
 All numeric environment settings above use the same `bytesize` parser. They accept
 plain integers and suffixes such as `512MiB`, `5GiB`, `1.5 GiB`, or `5GB`.
@@ -142,6 +145,15 @@ use, including in standalone memory caches. It must be nonnegative and fit
 `u64`; invalid values panic. The default represents 125 ms at 80 MB/s. Set it to
 `0` to score only requested bytes saved per retained byte, without a fixed reward
 for avoiding a request. It affects both tiers' cost-aware scores.
+
+The I/O buffer pool settings are process-wide and read once on first use. Values
+must be nonnegative and fit `usize`; invalid values panic. For example,
+`FEUER_LARGE_IO_BUFFER_POOL_BYTES=5GiB` sets the large-buffer limit to 5 GiB.
+Set `0` to disable idle retention for a size class. Read and write queues each have
+their own three pools, so the combined idle limit per disk cache is twice the sum of
+these settings. Active buffers and caller-owned results are outside these limits.
+Larger limits retain more allocations for exact-size reuse; allocations are freed
+when their pool is full or destroyed.
 
 ## Metrics
 
