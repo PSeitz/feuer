@@ -105,7 +105,8 @@ memory retries after promotions or second chances, while disk retains its per-ba
 ### Cost-aware access age
 
 Set `FEUER_MAX_ACCESS_AGE_ACCESSES=65536` to retain request evidence for up to
-65,536 later successful accesses to the same shard. The default is 32,768.
+65,536 later successful accesses to the same shard. The default is 262,144.
+Set `FEUER_MAX_ACCESS_AGE_ACCESSES=32768` to restore the previous default.
 The shared memory/disk history reads this process-wide setting once on first use;
 it also applies to standalone `MemoryCache` and the memory benchmark. Set it before
 starting the process. A set value must be a positive decimal `u64`; invalid values

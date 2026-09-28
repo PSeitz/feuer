@@ -139,14 +139,14 @@ pub const FIXED_RETRIEVAL_EQUIVALENT_BYTES: u64 = 10_000_000;
 /// Maximum exact access events retained for one object key.
 pub const MAX_ACCESS_EVENTS_PER_KEY: usize = 64;
 /// Maximum same-shard successful-access age that still contributes.
-/// Reads `FEUER_MAX_ACCESS_AGE_ACCESSES` once on first use, defaulting to 32,768.
+/// Reads `FEUER_MAX_ACCESS_AGE_ACCESSES` once on first use, defaulting to 262,144.
 /// Panics if set to anything other than a positive `u64` integer.
 pub static MAX_ACCESS_AGE_ACCESSES: LazyLock<u64> =
     LazyLock::new(|| parse_max_access_age(std::env::var_os("FEUER_MAX_ACCESS_AGE_ACCESSES").as_deref()));
 
 fn parse_max_access_age(value: Option<&OsStr>) -> u64 {
     let Some(value) = value else {
-        return 32_768;
+        return 262_144;
     };
     value
         .to_str()
@@ -242,8 +242,8 @@ mod tests {
 
     #[test]
     fn parses_max_access_age() {
-        assert_eq!(parse_max_access_age(None), 32_768);
-        for value in [1, 65_536, 131_072, u64::MAX] {
+        assert_eq!(parse_max_access_age(None), 262_144);
+        for value in [1, 32_768, 65_536, 131_072, 262_144, u64::MAX] {
             assert_eq!(parse_max_access_age(Some(OsStr::new(&value.to_string()))), value);
         }
         for value in ["", "0", "-1", "64k", "1.5", " 65536", "18446744073709551616"] {

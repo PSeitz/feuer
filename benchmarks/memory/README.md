@@ -28,7 +28,7 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
 
 - `feuer-value-density`: `MemoryCache` with bounded exact access evidence
   valued at one modeled source request plus its requested bytes. Evidence
-  expires after 32,768 later successful same-shard accesses by default
+  expires after 262,144 later successful same-shard accesses by default
   (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this limit). Sampled eviction
   compares active retrieval value per retained byte. After a
   64-successful-access grace, pressure trims the selected victim to its observed

@@ -1,7 +1,8 @@
 # Memory-only comparison
 
 Run on 2026-08-10. See [`README.md`](README.md) for workload and accounting
-definitions.
+definitions. These historical results used a 32,768-access history age; the current default is
+262,144. Set `FEUER_MAX_ACCESS_AGE_ACCESSES=32768` to use the recorded age when rerunning.
 
 ## Configuration
 
@@ -194,7 +195,7 @@ values favor the simplified policy.
 | Warm | 16 | -0.01 pp | +0.98 pp | +3.79 pp | -0.01 pp | +0.82 pp |
 | Warm | 64 | 0.00 pp | +0.07 pp | +0.48 pp | 0.00 pp | +0.06 pp |
 
-Feuer's existing 32,768-access lifetime is deliberately documented rather than
-presented as a final aging model. It remains same-shard-traffic-dependent. The
+The 32,768-access lifetime used in these runs is documented rather than
+presented as a final aging model. Aging remains same-shard-traffic-dependent. The
 local exact-key Foyer policy above does not inherit this cutoff; replacing it in
 Feuer's range-aware evidence model remains separate work.

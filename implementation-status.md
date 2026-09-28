@@ -38,8 +38,9 @@ Reopening still starts with an empty disk index: recovery is not implemented.
 
 ### Memory retention and compaction
 
-- Each key retains at most 64 exact, repeated access events. Events expire after 32,768 later successful
-  same-shard accesses. Both tiers use the shared history and cost calculation in `feuer-types::retention`.
+- Each key retains at most 64 exact, repeated access events. Events expire after 262,144 later successful
+  same-shard accesses by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this). Both tiers use the shared
+  history and cost calculation in `feuer-types::retention`.
   Evidence survives memory eviction while disk entries or active population retain it; releasing the final
   owner removes the weak registry record. Histories are volatile, not persisted. Wall-clock aging is not
   implemented.
