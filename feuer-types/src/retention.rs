@@ -191,7 +191,21 @@ struct RangeAccess {
 }
 
 /// Half-life of access counts, in successful accesses to the same shard.
-pub const ACCESS_COUNT_HALF_LIFE: u64 = 4096;
+/// Reads `FEUER_ACCESS_COUNT_HALF_LIFE` once on first use, defaulting to 8192.
+/// Panics unless set to a positive `u64` integer.
+pub static ACCESS_COUNT_HALF_LIFE: LazyLock<u64> =
+    LazyLock::new(|| parse_access_count_half_life(std::env::var_os("FEUER_ACCESS_COUNT_HALF_LIFE").as_deref()));
+
+fn parse_access_count_half_life(value: Option<&OsStr>) -> u64 {
+    let Some(value) = value else {
+        return 8192;
+    };
+    value
+        .to_str()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&value| value > 0)
+        .expect("FEUER_ACCESS_COUNT_HALF_LIFE must be a positive u64 integer")
+}
 
 #[derive(Default)]
 struct DecayedAccessCount {
@@ -202,7 +216,7 @@ struct DecayedAccessCount {
 impl DecayedAccessCount {
     fn at(&self, access_clock: u64) -> f64 {
         self.count
-            * (-(access_clock.saturating_sub(self.observed_at_access) as f64) / ACCESS_COUNT_HALF_LIFE as f64).exp2()
+            * (-(access_clock.saturating_sub(self.observed_at_access) as f64) / *ACCESS_COUNT_HALF_LIFE as f64).exp2()
     }
 }
 
@@ -391,6 +405,32 @@ mod tests {
     }
 
     #[test]
+    fn access_count_half_life_environment_override() {
+        // Separate processes avoid mutating the environment or reusing an initialized LazyLock.
+        if let Ok(value) = std::env::var("FEUER_TEST_HALF_LIFE_CHILD") {
+            let half_life = value.parse::<u64>().unwrap();
+            assert_eq!(*ACCESS_COUNT_HALF_LIFE, half_life);
+            let mut history = RangeAccessHistory::default();
+            history.record(range(0, 1), 0);
+            let cost = history.covered_retrieval_cost(range(0, 1), 0);
+            assert_eq!(history.covered_retrieval_cost(range(0, 1), half_life), cost * 0.5);
+            return;
+        }
+        for half_life in [1, 256, 65_536, u64::MAX] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "retention::tests::access_count_half_life_environment_override",
+                ])
+                .env("FEUER_TEST_HALF_LIFE_CHILD", half_life.to_string())
+                .env("FEUER_ACCESS_COUNT_HALF_LIFE", half_life.to_string())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
+
+    #[test]
     fn parses_max_access_age() {
         assert_eq!(parse_max_access_age(None), 262_144);
         for value in [1, 32_768, 65_536, 131_072, 262_144, u64::MAX] {
@@ -516,16 +556,16 @@ mod tests {
         history.record(requested, 0);
         assert_eq!(history.covered_retrieval_cost(cached_range, 0), cost);
         assert_eq!(
-            history.covered_retrieval_cost(cached_range, ACCESS_COUNT_HALF_LIFE),
+            history.covered_retrieval_cost(cached_range, *ACCESS_COUNT_HALF_LIFE),
             cost * 0.5
         );
-        history.record(requested, ACCESS_COUNT_HALF_LIFE);
+        history.record(requested, *ACCESS_COUNT_HALF_LIFE);
         assert_eq!(
-            history.covered_retrieval_cost(cached_range, ACCESS_COUNT_HALF_LIFE),
+            history.covered_retrieval_cost(cached_range, *ACCESS_COUNT_HALF_LIFE),
             cost * 1.5
         );
         assert_eq!(
-            history.covered_retrieval_cost(cached_range, ACCESS_COUNT_HALF_LIFE * 2),
+            history.covered_retrieval_cost(cached_range, *ACCESS_COUNT_HALF_LIFE * 2),
             cost * 0.75
         );
     }
@@ -553,7 +593,7 @@ mod tests {
         }
         let expected: f64 = clocks
             .into_iter()
-            .map(|clock| (-((30_000 - clock) as f64) / ACCESS_COUNT_HALF_LIFE as f64).exp2())
+            .map(|clock| (-((30_000 - clock) as f64) / *ACCESS_COUNT_HALF_LIFE as f64).exp2())
             .sum();
         let actual =
             history.covered_retrieval_cost(range(0, 100), 30_000) / (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 100.0);

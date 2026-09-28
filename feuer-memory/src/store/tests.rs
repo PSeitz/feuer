@@ -409,7 +409,7 @@ fn stale_frequency_decays_below_recent_accesses() {
     for _ in 0..8 {
         cache.record_access(&stale, range(0, 1));
     }
-    for _ in 0..ACCESS_COUNT_HALF_LIFE * 4 {
+    for _ in 0..*ACCESS_COUNT_HALF_LIFE * 4 {
         cache.record_access(&clock, range(0, 1));
     }
     cache.record_access(&fresh, range(0, 1));

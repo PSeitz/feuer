@@ -27,7 +27,7 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
 ## Compared engines
 
 - `feuer-value-density`: `MemoryCache` with independent exact-range access counts
-  decaying with a 4,096-successful-same-shard-access half-life. Sampled eviction
+  decaying with an 8,192-successful-same-shard-access half-life by default. Sampled eviction
   compares decayed retrieval value per retained byte, crediting requests fully
   covered by each cached range. Bounded event history is used only for trimming. After a
   64-successful-access grace, pressure trims the selected victim to its observed

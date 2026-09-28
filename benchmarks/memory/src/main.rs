@@ -375,7 +375,8 @@ fn main() -> Result<(), String> {
 
     if args.csv {
         eprintln!(
-            "foyer_revision={PINNED_FOYER_REVISION} foyer_source=https://github.com/PSeitz/foyer foyer_cost_estimator=residence_access_rate foyer_cost_fixed_retrieval={SOURCE_FIXED_EQUIVALENT_BYTES} foyer_cost_sample_size={FOYER_COST_SAMPLE_SIZE} feuer_cost_estimator=decayed_frequency feuer_cost_half_life_accesses={ACCESS_COUNT_HALF_LIFE} feuer_max_access_age_accesses={} feuer_max_access_events_per_key={} feuer_fixed_retrieval_equivalent_bytes={} trace={TRACE_FILE} shards={:?} downloaders={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
+            "foyer_revision={PINNED_FOYER_REVISION} foyer_source=https://github.com/PSeitz/foyer foyer_cost_estimator=residence_access_rate foyer_cost_fixed_retrieval={SOURCE_FIXED_EQUIVALENT_BYTES} foyer_cost_sample_size={FOYER_COST_SAMPLE_SIZE} feuer_cost_estimator=decayed_frequency feuer_cost_half_life_accesses={} feuer_max_access_age_accesses={} feuer_max_access_events_per_key={} feuer_fixed_retrieval_equivalent_bytes={} trace={TRACE_FILE} shards={:?} downloaders={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
+            *ACCESS_COUNT_HALF_LIFE,
             *MAX_ACCESS_AGE_ACCESSES,
             *MAX_ACCESS_EVENTS_PER_KEY,
             *FIXED_RETRIEVAL_EQUIVALENT_BYTES,
@@ -678,7 +679,10 @@ fn print_human_header(args: &ReplayArgs, workload: &ReplayWorkload) {
     println!("Feuer memory benchmark");
     println!("Trace: {TRACE_FILE} ({} operations)", workload.requests.len());
     println!("Shards: {shards} | Warm-up passes: {}", args.warmup_iterations);
-    println!("Feuer cost-aware half-life: {ACCESS_COUNT_HALF_LIFE} same-shard accesses");
+    println!(
+        "Feuer cost-aware half-life: {} same-shard accesses",
+        *ACCESS_COUNT_HALF_LIFE
+    );
     println!("Feuer trimming age: {} same-shard accesses", *MAX_ACCESS_AGE_ACCESSES);
     println!(
         "Feuer trimming history: {} events per object",

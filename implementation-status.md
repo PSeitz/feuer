@@ -38,8 +38,8 @@ Reopening still starts with an empty disk index: recovery is not implemented.
 
 ### Memory retention and compaction
 
-- Cost-aware scoring uses independent exact-range access counts with a 4,096-successful-same-shard-access
-  half-life. Both tiers share the history and cost calculation in `feuer-types::retention`.
+- Cost-aware scoring uses independent exact-range access counts with an 8,192-successful-same-shard-access
+  half-life by default. Both tiers share the history and cost calculation in `feuer-types::retention`.
   Separately, range trimming retains at most 64 repeated events per object by default
   (`FEUER_MAX_ACCESS_EVENTS_PER_KEY`), expiring after 262,144 same-shard accesses
   (`FEUER_MAX_ACCESS_AGE_ACCESSES`). These limits do not truncate scoring counters.

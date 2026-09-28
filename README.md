@@ -86,7 +86,7 @@ requested ranges instead of evicting it entirely.
 Both tiers share access history for each object. A successful lookup records its
 requested range once; storing downloaded bytes alone does not count as an access.
 Each exact requested range has an access count that decays with a half-life of
-4,096 successful same-shard accesses. A cached range receives the decayed retrieval
+8,192 successful same-shard accesses by default. A cached range receives the decayed retrieval
 cost of every request it fully covers. Counters live until the object's final
 history owner is released; their number is not capped per object.
 
@@ -115,6 +115,7 @@ hits. S3-FIFO evicts whole entries and does not trim memory ranges.
 | --- | --- | --- |
 | `FEUER_EVICTION_POLICY` | `cost-aware` | Select `cost-aware` or `s3fifo` for both tiers. |
 | `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Limit candidates examined per eviction decision, or queue-head processing for S3-FIFO. |
+| `FEUER_ACCESS_COUNT_HALF_LIFE` | `8192` | Set cost-aware score decay half-life in successful same-shard accesses. |
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Set the range-trimming history lifetime in successful same-shard accesses. |
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Limit range-trimming request events per object, not decayed scoring counters. |
 | `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed source-request cost added to requested bytes when scoring cost-aware retention. |
@@ -130,6 +131,12 @@ let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?
     .with_eviction_policy(EvictionPolicy::S3Fifo)
     .with_reclaim_sample_size(128)?;
 ```
+
+`FEUER_ACCESS_COUNT_HALF_LIFE` is process-wide and read once on first use,
+including in standalone memory caches and the memory benchmark. It must be a
+positive decimal `u64`; invalid values panic. Smaller values forget historical
+popularity faster; larger values retain it longer. It affects both tiers'
+cost-aware scores, not trimming-history expiration or S3-FIFO counters.
 
 The access-age setting is process-wide and read once on first use. It also applies
 to standalone `MemoryCache` instances and the memory benchmark. Set it before
