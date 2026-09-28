@@ -13,19 +13,19 @@ fn victim(policy: &mut S3Fifo, work: usize) -> Option<u64> {
 }
 
 #[test]
-fn small_filters_one_hit_ranges_and_promotes_reused_ranges() {
+fn small_filters_unaccessed_ranges_and_promotes_after_one_access() {
     let mut policy = S3Fifo::new(100);
     insert(&mut policy, 1, "hot", 20);
-    insert(&mut policy, 2, "one-hit", 20);
+    insert(&mut policy, 2, "cold", 20);
     policy.record_access(1);
-    policy.record_access(1);
-    policy.record_access(2);
     assert_eq!(victim(&mut policy, 1), None); // Promotion is one bounded step.
     assert!(!policy.residents[&1].in_small);
-    assert_eq!(policy.residents[&1].frequency, 0);
+    assert_eq!(policy.residents[&1].frequency, 1);
     assert_eq!(policy.small_bytes, 20);
     assert_eq!(victim(&mut policy, 1), Some(2));
     policy.evict(2);
+    assert_eq!(victim(&mut policy, 1), None); // Preserved credit gives a second chance.
+    assert_eq!(policy.residents[&1].frequency, 0);
     assert_eq!(victim(&mut policy, 1), Some(1));
     policy.evict(1);
     assert_eq!(policy.ghosts.len(), 1); // Main eviction creates no ghost.
@@ -94,7 +94,8 @@ fn tiny_capacities_and_oversized_entries_can_be_evicted() {
         insert(&mut policy, 1, "large", 100);
         policy.record_access(1);
         policy.record_access(1);
-        assert_eq!(victim(&mut policy, 2), Some(1));
+        assert_eq!(victim(&mut policy, 3), None); // Promotion and two second chances.
+        assert_eq!(victim(&mut policy, 1), Some(1));
         policy.evict(1);
         assert!(policy.residents.is_empty());
         assert!(policy.ghosts.is_empty());

@@ -120,20 +120,19 @@ impl S3Fifo {
             let (&position, &id) = queue.first_key_value()?;
             let entry = self.residents.get_mut(&id).unwrap();
             let eligible = eligible(&entry.key, entry.range);
-            if eligible && ((from_small && entry.frequency < 2) || (!from_small && entry.frequency == 0)) {
+            if eligible && entry.frequency == 0 {
                 return Some((id, entry.key.clone(), entry.range));
             }
             // Finish this queue's eviction even across bounded calls. Ineligible
             // heads instead give the other queue a turn to prevent starvation.
             self.next_small = Some(if eligible { from_small } else { !from_small });
-            // Hot small entries enter main with a fresh counter. Main entries
+            // Hot small entries enter main keeping their counter. Main entries
             // get one FIFO rotation per frequency credit, up to three.
             if from_small {
                 self.small.remove(&position);
                 if eligible {
                     self.small_bytes -= entry.range.len();
                     entry.in_small = false;
-                    entry.frequency = 0;
                 }
             } else {
                 self.main.remove(&position);
