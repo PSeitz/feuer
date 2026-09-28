@@ -13,8 +13,8 @@ use rustc_hash::FxHashMap;
 use super::range_trim::{RangeTrimPlan, plan_range_trim};
 use crate::MemoryMetrics;
 
-/// Successful shard-local accesses allowed before a cached range can be trimmed.
-pub(super) const RANGE_TRIM_GRACE_ACCESSES: u64 = 64;
+/// Minimum successful same-shard accesses since admission before payload compaction is allowed.
+pub(super) const MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION: u64 = 64;
 
 /// One retained downloaded range.
 struct CachedRange {
@@ -560,7 +560,7 @@ impl MemoryCacheShard {
             .expect("a selected pressure candidate must identify a live entry");
         let history = entries.accesses.lock();
         let access_clock = entries.accesses.clock();
-        if access_clock.saturating_sub(entry.admitted_at_access) < RANGE_TRIM_GRACE_ACCESSES {
+        if access_clock.saturating_sub(entry.admitted_at_access) < MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
             return None;
         }
         let plan = plan_range_trim(entry.range, history.active_ranges(access_clock))?;

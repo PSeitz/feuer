@@ -96,7 +96,7 @@ fn superseded_small_entries_do_not_starve_main_eviction() {
 fn s3_fifo_evicts_whole_ranges_instead_of_trimming_and_retains_oversized_downloads() {
     let cache = s3_cache(100);
     insert(&cache, "hot", 100);
-    for _ in 0..RANGE_TRIM_GRACE_ACCESSES {
+    for _ in 0..MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
         cache.get(&"hot".to_owned(), range(0, 1)).unwrap();
     }
     insert(&cache, "new", 10);

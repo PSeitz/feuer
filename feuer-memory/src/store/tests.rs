@@ -10,7 +10,7 @@ use feuer_types::{
 
 use super::{
     MemoryCache,
-    shard::{AdmissionProgress, RANGE_TRIM_GRACE_ACCESSES},
+    shard::{AdmissionProgress, MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION},
     shard_capacity_for,
 };
 use crate::MemoryMetrics;
@@ -448,7 +448,7 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
     let returned = cache.get(&key, range(2, 4)).unwrap();
     assert_eq!(returned, Bytes::from_static(b"cd"));
     assert_eq!(returned.as_ptr(), original.slice(2..).as_ptr());
-    for _ in 1..RANGE_TRIM_GRACE_ACCESSES {
+    for _ in 1..MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
         cache.record_access(&key, range(2, 4));
     }
     populate(&cache, incoming, download(range(0, 2), Bytes::from_static(b"xy")));
@@ -475,7 +475,7 @@ fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
     );
     cache.record_access(&key, range(1, 3));
     cache.record_access(&key, range(7, 9));
-    for _ in 2..RANGE_TRIM_GRACE_ACCESSES {
+    for _ in 2..MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
         cache.record_access(&key, range(1, 3));
     }
 
@@ -499,7 +499,7 @@ fn range_trim_waits_for_pressure_and_adds_no_access() {
     populate(&cache, key.clone(), download(range(0, 16), original.clone()));
 
     let returned = cache.get(&key, range(4, 8)).unwrap();
-    for _ in 1..RANGE_TRIM_GRACE_ACCESSES {
+    for _ in 1..MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
         cache.record_access(&key, range(4, 8));
     }
 
@@ -541,7 +541,7 @@ fn copied_range_trim_is_revalidated_before_publication_and_can_fall_back() {
         download(range(0, 10), Bytes::from_static(b"abcdefghij")),
         range(2, 4),
     );
-    for _ in 1..RANGE_TRIM_GRACE_ACCESSES {
+    for _ in 1..MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
         cache.record_access(&key, range(2, 4));
     }
 

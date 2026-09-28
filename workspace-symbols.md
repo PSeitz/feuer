@@ -11,11 +11,29 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 - Syntax inventory, not an LSP `workspace/symbol` search or a type-check. Macro expansions and import/re-export aliases are not expanded.
 - Function parameters appear in signatures; this is not a complete list of every identifier or pattern binding.
 - Names are qualified by their source parent where rust-analyzer provides one; locations distinguish duplicate names.
-- This is a snapshot of the current source symbols for naming review.
+- This is a syntax snapshot with subsequent focused updates, not an automatically refreshed symbol index.
 
 ## Naming review
 
 Each type below was described from its fields, construction, and use before choosing its name. The description is the naming test: every substantive word in the chosen name must refer to something in that description. A retained name is a decision, not an exemption for public APIs or conventional terminology. Associated items, fields, variants, constants, parameters, and local bindings were checked in source order in all 22 files; the complete symbol list follows this review. Every listed symbol has a review decision; a renamed parent's unchanged members are marked **Keep**, with the new parent visible in their qualified names. Symbols introduced or replaced by the subsequent storage update are marked separately below.
+
+### Focused follow-up: payload-compaction thresholds
+
+This follow-up reviews the two requested constants and their directly related symbols. It does not
+repeat the earlier whole-workspace review. Descriptions precede the naming decisions:
+
+| What it represents or does | Existing name | Decision / chosen name |
+| --- | --- | --- |
+| Minimum successful same-shard accesses since admission before payload compaction is allowed | `RANGE_TRIM_GRACE_ACCESSES` | `MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION` |
+| Minimum percentage of source payload bytes that payload compaction must save | `MIN_RECLAIM_DIVISOR` | `MIN_PAYLOAD_COMPACTION_SAVINGS_PERCENT` |
+| A plan to trim a cached range: source range, retained ranges, and retained byte count | `RangeTrimPlan` | Keep |
+| Plans which requested byte ranges to retain when trimming a cached range | `plan_range_trim` | Keep |
+| Number of payload bytes reclaimed by the range-trimming plan | `RangeTrimPlan::reclaimed_bytes` | Keep |
+
+The thresholds remain **64 accesses** and **25% savings**. Savings are now expressed directly as
+percent rather than a denominator of 4. The calculation uses `u128` intermediates to preserve
+upward rounding without overflowing for `u64` payload sizes. The first threshold restricts
+payload compaction, not eviction. All production and test references use the new names.
 
 ### Types, one by one
 
@@ -379,7 +397,7 @@ This inventory reflects the later change to caller-owned I/O conflict prevention
 
 | Line | Kind | Name / source parent | Signature or type | Review decision |
 | ---: | --- | --- | --- | --- |
-| [4](feuer-memory/src/store/range_trim.rs#L4) | Const | `MIN_RECLAIM_DIVISOR` | `u64` | Keep |
+| [4](feuer-memory/src/store/range_trim.rs#L4) | Const | `MIN_PAYLOAD_COMPACTION_SAVINGS_PERCENT` | `u64` | Replace `MIN_RECLAIM_DIVISOR` with percent; see focused follow-up |
 | [8](feuer-memory/src/store/range_trim.rs#L8) | Struct | `RangeTrimPlan` | — | Rename from `CompactionPlan` |
 | [9](feuer-memory/src/store/range_trim.rs#L9) | Field | `RangeTrimPlan::source_range` | `ByteRange` | Rename from `source` |
 | [10](feuer-memory/src/store/range_trim.rs#L10) | Field | `RangeTrimPlan::retained_ranges` | `Vec<ByteRange>` | Rename from `retained` |
@@ -413,7 +431,7 @@ This inventory reflects the later change to caller-owned I/O conflict prevention
 
 | Line | Kind | Name / source parent | Signature or type | Review decision |
 | ---: | --- | --- | --- | --- |
-| [14](feuer-memory/src/store/shard.rs#L14) | Const | `RANGE_TRIM_GRACE_ACCESSES` | `u64` | Rename from `COMPACTION_GRACE_ACCESSES` |
+| [17](feuer-memory/src/store/shard.rs#L17) | Const | `MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION` | `u64` | Rename from `RANGE_TRIM_GRACE_ACCESSES`; see focused follow-up |
 | [16](feuer-memory/src/store/shard.rs#L16) | Const | `RECLAIM_SAMPLE_SIZE` | `usize` | Rename from `PRESSURE_SAMPLE_SIZE` |
 | [19](feuer-memory/src/store/shard.rs#L19) | Struct | `CachedRange` | — | Keep |
 | [21](feuer-memory/src/store/shard.rs#L21) | Field | `CachedRange::id` | `u64` | Keep |

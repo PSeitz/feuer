@@ -1,7 +1,7 @@
 use feuer_types::ByteRange;
 
-/// Copy only when the plan releases at least one quarter of its source.
-const MIN_RECLAIM_DIVISOR: u64 = 4;
+/// Minimum percentage of source payload bytes that payload compaction must save.
+const MIN_PAYLOAD_COMPACTION_SAVINGS_PERCENT: u64 = 25;
 
 /// A plan to trim a cached range: its source, retained ranges, and retained byte count.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,7 +58,9 @@ pub(super) fn plan_range_trim(
     }
     let retained_bytes = grouped.iter().map(|range| range.len()).sum();
     let reclaimed_bytes = source_range.len() - retained_bytes;
-    if reclaimed_bytes < source_range.len().div_ceil(MIN_RECLAIM_DIVISOR) {
+    let minimum_saved_bytes =
+        (u128::from(source_range.len()) * u128::from(MIN_PAYLOAD_COMPACTION_SAVINGS_PERCENT)).div_ceil(100);
+    if u128::from(reclaimed_bytes) < minimum_saved_bytes {
         return None;
     }
 
@@ -102,6 +104,17 @@ mod tests {
         let plan = plan_range_trim(range(0, 16), [range(2, 5), range(5, 9)]).unwrap();
 
         assert_eq!(plan.retained_ranges(), &[range(2, 9)]);
+    }
+
+    #[test]
+    fn payload_compaction_savings_round_up_without_overflow() {
+        for (source_bytes, minimum_saved_bytes) in [(9, 3), (u64::MAX, 1_u64 << 62)] {
+            let source = range(0, source_bytes);
+            let retained_end = source_bytes - minimum_saved_bytes;
+            assert!(plan_range_trim(source, [range(0, retained_end + 1)]).is_none());
+            let plan = plan_range_trim(source, [range(0, retained_end)]).unwrap();
+            assert_eq!(plan.reclaimed_bytes(), minimum_saved_bytes);
+        }
     }
 
     #[test]
