@@ -318,7 +318,9 @@ impl MemoryCacheShard {
             self.metrics.increase_usage(added_bytes, 1);
             self.metrics.record_insert(removal.entry_count != 0);
             if let Some(requested_range) = requested_range {
-                self.record_successful_access(object_key, requested_range);
+                // The fetch is access evidence, not reuse of the newly cached range.
+                // S3-FIFO must keep its initial frequency at zero to filter one-hit ranges.
+                self.ranges[object_key].accesses.record(requested_range);
             }
             return AdmissionProgress::Complete(Some(id));
         }

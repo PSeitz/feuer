@@ -141,7 +141,9 @@ impl MemoryCache {
     ///
     /// Population and access remain distinct policy events, but sharing one
     /// shard lock prevents an intervening admission from losing the callback's
-    /// attribution. Containment suppression still records the access.
+    /// attribution. A new entry starts with zero S3-FIFO reuse credits; the request
+    /// still contributes to shared access history. Containment suppression records
+    /// an access to the existing entry, including its S3-FIFO reuse counter.
     /// Returns the new shard-local entry identity, or `None` for a redundant download.
     pub fn insert_and_record(
         &self,
