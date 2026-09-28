@@ -35,7 +35,6 @@ operations; use the public lookup counters to measure caller-visible behavior.
 | `feuer_disk_chunks` | Gauge | `state`: `free`, `reserved`, `quarantined`; each chunk is 1 MiB |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
-| `feuer_disk_evictions_total` | Counter | Entries removed by capacity pressure, excluding replacement and invalidation |
 | `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`; payload and whole-chunk bytes of successfully written shard batches, before publication |
 
 Disk read errors and integrity failures still behave as cache misses; metrics
@@ -59,6 +58,38 @@ successful writes later discarded at publication. Raw disk-I/O byte counters
 still include successful writes from partially failed batches. Existing read-I/O
 byte counters measure completed DataFile read lengths, not alignment padding or
 individual kernel submissions.
+
+## Insertions that trigger eviction
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `feuer_memory_eviction_triggering_insertions_total` | Counter | Completed memory insertion attempts that evicted at least one entry under capacity pressure |
+| `feuer_disk_eviction_triggering_insertions_total` | Counter | Terminal disk insertion attempts that evicted at least one entry under capacity pressure |
+
+Each incoming entry counts at most once, even if it evicts several entries.
+Replacement, invalidation, memory compaction and eviction searches that remove
+nothing do not count. Disk attribution is per entry, not per batch: an entry
+that fits into a chunk allocated by an earlier batch member does not inherit
+that member's evictions. An attempt still counts if it evicts entries but is
+later skipped, fails or is canceled.
+
+Percentage of memory insertion attempts that trigger eviction:
+
+```promql
+100 * sum(rate(feuer_memory_eviction_triggering_insertions_total[5m]))
+  / sum(rate(feuer_memory_operations_total{operation=~"insert|replace|redundant"}[5m]))
+```
+
+Percentage of disk insertion attempts that trigger eviction:
+
+```promql
+100 * sum(rate(feuer_disk_eviction_triggering_insertions_total[5m]))
+  / sum(rate(feuer_disk_population_total[5m]))
+```
+
+Both denominators include redundant/already-covered attempts. Disk attempts
+start at batch submission, not queue admission. The percentage is undefined
+when there are no attempts in the window.
 
 ## Disk read sizes
 
@@ -107,7 +138,7 @@ completion release their counts along with the associated payload budget.
 ## Existing metrics
 
 - `feuer_memory_operations_total{operation}`: `insert`, `replace`, `redundant`,
-  `remove`, `evict`, `compact`. Internal access/hit/miss counters are not emitted;
+  `remove`, `compact`. Internal access/hit/miss counters are not emitted;
   use public lookup counters for hit ratios.
 - `feuer_memory_payload_bytes`, `feuer_memory_entries`,
   `feuer_memory_compacted_payload_bytes_total`.

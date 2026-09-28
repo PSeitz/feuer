@@ -69,6 +69,29 @@ fn candidate_count(cache: &MemoryCache) -> usize {
 }
 
 #[test]
+fn eviction_triggering_insertions_count_once_per_attempt_not_per_victim() {
+    use crate::test_metrics::{registry, value};
+
+    let (registry, backend) = registry();
+    let cache = MemoryCache::with_shard_count(4, MemoryMetrics::new(&backend), 1);
+    let triggering = || value(&registry, "feuer_memory_eviction_triggering_insertions_total", &[]);
+    let operation = |label| value(&registry, "feuer_memory_operations_total", &[("operation", label)]);
+    for key in ["first", "second"] {
+        cache.insert(key.into(), Download::new(0, Bytes::from_static(b"ab")).unwrap());
+    }
+    assert_eq!(triggering(), 0.0);
+    // Both residents must be evicted, but only one insertion triggered them.
+    cache.insert("large".into(), Download::new(0, Bytes::from_static(b"abcd")).unwrap());
+    assert_eq!(cache.entry_count(), 1);
+    assert_eq!(triggering(), 1.0);
+    // Containment and replacement are not pressure evictions.
+    cache.insert("large".into(), Download::new(0, Bytes::from_static(b"ab")).unwrap());
+    cache.insert("large".into(), Download::new(0, Bytes::from_static(b"abcde")).unwrap());
+    assert_eq!(triggering(), 1.0);
+    assert_eq!(operation("insert") + operation("replace") + operation("redundant"), 5.0);
+}
+
+#[test]
 fn equal_cost_eviction_uses_entry_age_not_sample_order() {
     let cache = cache(3);
     let payload = Download::new(0, Bytes::from_static(b"x")).unwrap();
@@ -102,7 +125,7 @@ fn reclaim_sampling_advances_past_superseded_ranges() {
     for expected_entries in [3, 3, 2] {
         assert!(matches!(
             shard.advance_admission(&key, range(0, 3), &replacement, None, false),
-            AdmissionProgress::Retry
+            AdmissionProgress::Retry | AdmissionProgress::Evicted
         ));
         assert_eq!(shard.entry_count(), expected_entries);
     }
@@ -484,7 +507,8 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
     );
     assert!(early_pressure.get(&early_key, range(2, 4)).is_none());
 
-    let cache = cache(10);
+    let (registry, backend) = crate::test_metrics::registry();
+    let cache = MemoryCache::with_shard_count(10, MemoryMetrics::new(&backend), 1);
     let key = ObjectKey::from("download");
     let incoming = ObjectKey::from("incoming");
     let original = Bytes::from_static(b"abcdefghij");
@@ -500,6 +524,10 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
 
     assert_eq!(cache.used_bytes(), 4);
     assert_eq!(cache.entry_count(), 2);
+    assert_eq!(
+        crate::test_metrics::value(&registry, "feuer_memory_eviction_triggering_insertions_total", &[]),
+        0.0
+    );
     assert_eq!(returned, Bytes::from_static(b"cd"));
     let retained = cache.get(&key, range(2, 4)).unwrap();
     assert_eq!(retained, Bytes::from_static(b"cd"));
@@ -616,7 +644,7 @@ fn copied_range_trim_is_revalidated_before_publication_and_can_fall_back() {
     let step = cache.shards[0]
         .lock()
         .advance_admission(&incoming, range(0, 2), &incoming_bytes, None, false);
-    assert!(matches!(step, AdmissionProgress::Retry));
+    assert!(matches!(step, AdmissionProgress::Evicted));
     assert_eq!(cache.used_bytes(), 0, "fallback pressure may evict but cannot starve");
 }
 

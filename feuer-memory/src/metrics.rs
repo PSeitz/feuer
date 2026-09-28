@@ -11,7 +11,7 @@ pub struct MemoryMetrics {
     replace: BoxedCounter,
     redundant: BoxedCounter,
     remove: BoxedCounter,
-    evict: BoxedCounter,
+    pub(crate) eviction_triggering_insertions: BoxedCounter,
     trim: BoxedCounter,
     trimmed_payload_bytes: BoxedCounter,
     payload_bytes: BoxedGauge,
@@ -31,6 +31,11 @@ impl MemoryMetrics {
             "feuer_memory_operations_total".into(),
             "Operations completed by Feuer's in-memory range tier".into(),
             &["operation"],
+        );
+        let eviction_triggering_insertions = registry.register_counter_vec(
+            "feuer_memory_eviction_triggering_insertions_total".into(),
+            "Completed insertion attempts that evicted at least one entry under capacity pressure".into(),
+            &[],
         );
         let trimmed_payload_bytes = registry.register_counter_vec(
             "feuer_memory_compacted_payload_bytes_total".into(),
@@ -54,7 +59,7 @@ impl MemoryMetrics {
             replace: operation("replace"),
             redundant: operation("redundant"),
             remove: operation("remove"),
-            evict: operation("evict"),
+            eviction_triggering_insertions: eviction_triggering_insertions.counter(&[]),
             trim: operation("compact"),
             trimmed_payload_bytes: trimmed_payload_bytes.counter(&[]),
             payload_bytes: payload_bytes.gauge(&[]),
@@ -76,10 +81,6 @@ impl MemoryMetrics {
 
     pub(crate) fn record_remove(&self) {
         self.remove.increase(1);
-    }
-
-    pub(crate) fn record_evictions(&self, count: u64) {
-        self.evict.increase(count);
     }
 
     pub(crate) fn record_range_trim(&self, reclaimed_bytes: u64) {
@@ -114,7 +115,6 @@ mod tests {
         metrics.record_insert(false);
         metrics.record_redundant();
         metrics.increase_usage(17, 1);
-        metrics.record_evictions(1);
         metrics.record_range_trim(3);
         metrics.decrease_usage(17, 1);
     }

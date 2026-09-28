@@ -199,9 +199,10 @@ pub(super) struct RangeTrimReplacement {
     retained_payloads: Vec<(ByteRange, Bytes)>,
 }
 
-/// Progress after a bounded admission attempt: complete, retry, or trim before retrying.
+/// Progress after a bounded admission action, distinguishing eviction from a retry without removal.
 pub(super) enum AdmissionProgress {
     Complete(Option<u64>),
+    Evicted,
     Retry,
     Trim(RangeTrimSource),
 }
@@ -316,8 +317,7 @@ impl MemoryCacheShard {
             )
             .expect("a sampled pressure candidate cannot disappear while its shard is locked");
         self.metrics.decrease_usage(removed, 1);
-        self.metrics.record_evictions(1);
-        AdmissionProgress::Retry
+        AdmissionProgress::Evicted
     }
 
     fn insert_admission(&mut self, object_key: ObjectKey, range: ByteRange, bytes: Bytes) -> u64 {

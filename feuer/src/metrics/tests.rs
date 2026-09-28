@@ -2,7 +2,7 @@ use super::*;
 use crate::test_metrics::{registry, value};
 
 #[test]
-fn memory_operations_exclude_access_hit_and_miss_counters() {
+fn memory_operations_exclude_access_hit_miss_and_victim_counters() {
     let (registry, backend) = registry();
     let _metrics = feuer_memory::MemoryMetrics::new(&backend);
     let family = registry
@@ -10,14 +10,11 @@ fn memory_operations_exclude_access_hit_and_miss_counters() {
         .into_iter()
         .find(|family| family.name() == "feuer_memory_operations_total")
         .unwrap();
-    assert_eq!(family.get_metric().len(), 6);
+    assert_eq!(family.get_metric().len(), 5);
     assert!(family.get_metric().iter().all(|metric| {
         metric.get_label().iter().any(|label| {
             label.name() == "operation"
-                && matches!(
-                    label.value(),
-                    "insert" | "replace" | "redundant" | "remove" | "evict" | "compact"
-                )
+                && matches!(label.value(), "insert" | "replace" | "redundant" | "remove" | "compact")
         })
     }));
 }

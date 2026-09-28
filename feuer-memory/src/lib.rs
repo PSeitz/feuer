@@ -7,6 +7,9 @@
 
 mod metrics;
 mod store;
+#[cfg(test)]
+#[path = "../../test_support/metrics.rs"]
+mod test_metrics;
 
 pub use metrics::MemoryMetrics;
 pub use store::MemoryCache;

@@ -27,13 +27,13 @@ pub struct DiskMetrics {
     lookup_count: [BoxedCounter; 4],
     hit_duration: BoxedHistogram,
     population: [BoxedCounter; 6],
+    eviction_triggering_insertions: BoxedCounter,
     pub(crate) written_entries: BoxedCounter,
     pub(crate) free_chunks: BoxedGauge,
     pub(crate) reserved_chunks: BoxedGauge,
     pub(crate) quarantined_chunks: BoxedGauge,
     pub(crate) payload_bytes: BoxedGauge,
     pub(crate) entries: BoxedGauge,
-    pub(crate) evictions: BoxedCounter,
     pub(crate) packed_payload_bytes: BoxedCounter,
     pub(crate) packed_chunk_bytes: BoxedCounter,
 }
@@ -57,6 +57,11 @@ impl DiskMetrics {
             "Terminal outcomes of entries submitted to disk batch insertion".into(),
             &["outcome"],
         );
+        let eviction_triggering_insertions = registry.register_counter_vec(
+            "feuer_disk_eviction_triggering_insertions_total".into(),
+            "Terminal insertion attempts that evicted at least one entry under capacity pressure".into(),
+            &[],
+        );
         let written = registry.register_counter_vec(
             "feuer_disk_population_written_entries_total".into(),
             "Entries in successfully written shard batches, whether published or discarded".into(),
@@ -74,11 +79,6 @@ impl DiskMetrics {
         );
         let entries =
             registry.register_gauge_vec("feuer_disk_entries".into(), "Indexed disk range entries".into(), &[]);
-        let evictions = registry.register_counter_vec(
-            "feuer_disk_evictions_total".into(),
-            "Disk entries removed by capacity pressure, not necessarily freeing a chunk".into(),
-            &[],
-        );
         let packed = registry.register_counter_vec(
             "feuer_disk_batch_bytes_total".into(),
             "Payload and whole-chunk bytes in successfully written shard batches before publication".into(),
@@ -97,13 +97,13 @@ impl DiskMetrics {
                 "canceled",
             ]
             .map(|label| population.counter(&[label.into()])),
+            eviction_triggering_insertions: eviction_triggering_insertions.counter(&[]),
             written_entries: written.counter(&[]),
             free_chunks: chunks.gauge(&["free".into()]),
             reserved_chunks: chunks.gauge(&["reserved".into()]),
             quarantined_chunks: chunks.gauge(&["quarantined".into()]),
             payload_bytes: payload.gauge(&[]),
             entries: entries.gauge(&[]),
-            evictions: evictions.counter(&[]),
             packed_payload_bytes: packed.counter(&["payload".into()]),
             packed_chunk_bytes: packed.counter(&["chunk".into()]),
         })
@@ -127,6 +127,7 @@ impl DiskMetrics {
 pub(crate) struct PopulationAttempt {
     metrics: Arc<DiskMetrics>,
     outcome: PopulationOutcome,
+    pub(crate) evicted: bool,
 }
 
 impl PopulationAttempt {
@@ -134,6 +135,7 @@ impl PopulationAttempt {
         Self {
             metrics,
             outcome: PopulationOutcome::Canceled,
+            evicted: false,
         }
     }
 
@@ -145,6 +147,9 @@ impl PopulationAttempt {
 impl Drop for PopulationAttempt {
     fn drop(&mut self) {
         self.metrics.population[self.outcome as usize].increase(1);
+        if self.evicted {
+            self.metrics.eviction_triggering_insertions.increase(1);
+        }
     }
 }
 

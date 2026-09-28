@@ -303,6 +303,7 @@ impl DiskRangeCache {
                             // Preserve the object's evidence even if pressure removes its last existing entry.
                             let accesses = disk.access_histories.for_key(&key);
                             let previous_entries = batch.entries.len();
+                            let previous_regions_left = regions_left;
                             while let Err(chunks_needed) = batch.push(&shard.allocator, &key, &download, &accesses) {
                                 // Evicting cannot help an entry that exceeds the capacity left by this batch.
                                 if chunks_needed > shard.allocator.chunk_capacity - batch.chunks.len() as u64
@@ -311,6 +312,8 @@ impl DiskRangeCache {
                                     break;
                                 }
                             }
+                            // Only actual removals consume the region budget; sampling alone does not.
+                            attempt.evicted = regions_left != previous_regions_left;
                             if batch.entries.len() != previous_entries {
                                 publication_tokens.push((token, attempt));
                             } else {
@@ -443,7 +446,6 @@ impl DiskCacheShard {
             let (key, start) = index.eviction_candidates[position].clone();
             *regions_left -= index.ranges_by_key[&key][&start].region_count();
             index.remove(&key, start);
-            index.metrics.evictions.increase(1);
         }
         true
     }

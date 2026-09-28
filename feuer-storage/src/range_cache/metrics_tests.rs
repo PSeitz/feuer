@@ -87,6 +87,52 @@ async fn records_population_outcomes_packing_and_index_usage() {
 }
 
 #[tokio::test]
+async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
+    let (_directory, cache, registry) = measured_cache(CHUNK_BYTES).await;
+    let triggering = || value(&registry, "feuer_disk_eviction_triggering_insertions_total", &[]);
+    cache
+        .insert_batch(vec![("first".into(), download(4)), ("second".into(), download(4))])
+        .await
+        .unwrap();
+    assert_eq!(triggering(), 0.0);
+    cache
+        .insert_batch(vec![("third".into(), download(4)), ("fourth".into(), download(4))])
+        .await
+        .unwrap();
+    // The first incoming entry evicts both old chunk owners. Its batch neighbor evicts nothing.
+    assert!(!cache.contains(&"first".into(), ByteRange::new(0, 1).unwrap()));
+    assert!(!cache.contains(&"second".into(), ByteRange::new(0, 1).unwrap()));
+    assert_eq!(triggering(), 1.0);
+    assert_eq!(
+        value(&registry, "feuer_disk_population_total", &[("outcome", "published")]),
+        4.0
+    );
+    cache.insert_batch(vec![("third".into(), download(4))]).await.unwrap();
+    assert_eq!(triggering(), 1.0);
+
+    // Evictions still count when a read guard prevents reuse and insertion fails.
+    let guard =
+        cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key["third"][&0].payload_regions[0].read_guard();
+    assert_eq!(
+        cache.insert_batch(vec![("blocked".into(), download(4))]).await.unwrap(),
+        0
+    );
+    assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
+    assert_eq!(triggering(), 2.0);
+    assert_eq!(
+        value(&registry, "feuer_disk_population_total", &[("outcome", "no_capacity")]),
+        1.0
+    );
+    // No victims remain, so an unsuccessful eviction search must not count.
+    cache
+        .insert_batch(vec![("still-blocked".into(), download(4))])
+        .await
+        .unwrap();
+    assert_eq!(triggering(), 2.0);
+    drop(guard);
+}
+
+#[tokio::test]
 async fn distinguishes_integrity_failures_from_io_errors_and_removes_index_usage() {
     let (directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
     let request = ByteRange::new(0, 1).unwrap();
@@ -132,7 +178,10 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
     let (_directory, mut cache, registry) = measured_cache(CHUNK_BYTES).await;
     cache.insert_batch(vec![("first".into(), download(4))]).await.unwrap();
     cache.insert_batch(vec![("second".into(), download(4))]).await.unwrap();
-    assert_eq!(value(&registry, "feuer_disk_evictions_total", &[]), 1.0);
+    assert_eq!(
+        value(&registry, "feuer_disk_eviction_triggering_insertions_total", &[]),
+        1.0
+    );
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
     // As in the existing write-failure test, let allocation exceed the actual file.
     let disk = Arc::get_mut(&mut cache.disk).unwrap();
@@ -164,7 +213,13 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
 fn abandoned_population_attempts_count_once_as_canceled() {
     let (registry, backend) = registry();
     let metrics = DiskMetrics::new(&backend);
-    drop(PopulationAttempt::new(metrics.clone()));
+    let mut canceled = PopulationAttempt::new(metrics.clone());
+    canceled.evicted = true;
+    drop(canceled);
+    assert_eq!(
+        value(&registry, "feuer_disk_eviction_triggering_insertions_total", &[]),
+        1.0
+    );
     let mut finished = PopulationAttempt::new(metrics);
     finished.set_outcome(PopulationOutcome::Published);
     drop(finished);

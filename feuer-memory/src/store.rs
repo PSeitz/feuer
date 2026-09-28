@@ -38,6 +38,7 @@ pub struct MemoryCache {
     /// Independently locked partitions selected by complete object identity.
     shards: Box<[Mutex<MemoryCacheShard>]>,
     access_histories: Arc<ObjectAccessHistories>,
+    metrics: Arc<MemoryMetrics>,
 }
 
 impl fmt::Debug for MemoryCache {
@@ -84,6 +85,7 @@ impl MemoryCache {
             capacity,
             shards,
             access_histories,
+            metrics,
         }
     }
 
@@ -168,6 +170,7 @@ impl MemoryCache {
     ) -> Option<u64> {
         let shard_index = self.shard_index(&object_key);
         let mut allow_range_trim = true;
+        let mut evicted = false;
         loop {
             let step = self.shards[shard_index].lock().advance_admission(
                 &object_key,
@@ -177,7 +180,13 @@ impl MemoryCache {
                 allow_range_trim,
             );
             match step {
-                AdmissionProgress::Complete(id) => return id,
+                AdmissionProgress::Complete(id) => {
+                    if evicted {
+                        self.metrics.eviction_triggering_insertions.increase(1);
+                    }
+                    return id;
+                }
+                AdmissionProgress::Evicted => evicted = true,
                 AdmissionProgress::Retry => continue,
                 AdmissionProgress::Trim(source) => {
                     // Payload copying is deliberately outside the shard lock.

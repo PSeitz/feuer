@@ -22,5 +22,9 @@ mixtrics = { workspace = true }
 parking_lot = { workspace = true }
 rustc-hash = { workspace = true }
 
+[dev-dependencies]
+mixtrics = { workspace = true, features = ["prometheus"] }
+prometheus = { workspace = true }
+
 [lints]
 workspace = true
