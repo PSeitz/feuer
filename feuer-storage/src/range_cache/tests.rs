@@ -1123,6 +1123,21 @@ fn abandoned_chunk_write_owner_quarantines_shared_storage() {
 }
 
 #[tokio::test]
+async fn reads_30_mib_payloads_across_metadata_gaps_and_trims_final_padding() {
+    for length in [30 * CHUNK_BYTES as usize, 30 * CHUNK_BYTES as usize + 17] {
+        let (_directory, cache) = open_test_cache(32 * CHUNK_BYTES).await;
+        let key = "large read".to_owned();
+        let source = download(7, length);
+        assert!(cache.insert(key.clone(), source.clone()).await.unwrap());
+        let bytes = cache.get(&key, source.downloaded_range()).await.unwrap();
+        assert_eq!(bytes, source.bytes());
+        // Results own only memory, not disk regions or the cache itself.
+        drop(cache);
+        assert_eq!(bytes, source.bytes());
+    }
+}
+
+#[tokio::test]
 async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
     let (_directory, cache) = open_test_cache(104 * CHUNK_BYTES).await;
     let key = "large object".to_owned();
@@ -1130,6 +1145,7 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
     assert!(cache.insert(key.clone(), source.clone()).await.unwrap());
     let boundary = 3 + CHUNK_BYTES - METADATA_PAGE_BYTES as u64;
     for request in [
+        source.downloaded_range(),
         range(7, 33),
         range(boundary - 3, boundary + 13),
         range(source.downloaded_range().end() - 17, source.downloaded_range().end()),

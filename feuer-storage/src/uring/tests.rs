@@ -2,7 +2,7 @@ use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
 
 use super::*;
 
-type IoResultReceiver = oneshot::Receiver<io::Result<Bytes>>;
+type IoResultReceiver = oneshot::Receiver<io::Result<AlignedIoBuffer>>;
 
 fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) -> (IoRequest, IoResultReceiver) {
     let (reply, receive) = oneshot::channel();
@@ -13,21 +13,19 @@ fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) 
         .clone()
         .try_acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
         .unwrap();
-    let payload = if operation == IoOperation::Write {
-        vec![0x99; length]
-    } else {
-        vec![]
-    };
+    let mut buffer = AlignedIoBuffer::new(length, Vec::new()).unwrap();
+    if operation == IoOperation::Write {
+        buffer.as_mut_slice().fill(0x99);
+    }
     (
         IoRequest::new(
             operation,
             offset,
-            length,
-            &payload,
+            buffer,
+            0..length,
             reply,
             (request_permit, buffer_memory_permit),
-        )
-        .unwrap(),
+        ),
         receive,
     )
 }
@@ -48,7 +46,7 @@ fn queue() -> IoQueue {
     let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
     let (_, receiver) = mpsc::sync_channel(MAX_IN_FLIGHT_IO); // disconnected: run() will drain and exit
     IoQueue {
-        admission: Arc::new(IoAdmissionBudgets::new()),
+        admission: Arc::new(IoAdmissionBudgets::new(MAX_IN_FLIGHT_IO)),
         ring: IoUring::new(MAX_IN_FLIGHT_IO as u32).unwrap(),
         file: Some(Arc::new(file)),
         directory_lock: Some(Arc::new(tempfile::tempfile().unwrap())),
@@ -162,11 +160,13 @@ async fn read_worker_progresses_with_write_admission_exhausted_and_after_write_s
         .execute(0, DIRECT_IO_ALIGNMENT_BYTES, &[0x99; DIRECT_IO_ALIGNMENT_BYTES])
         .await
         .unwrap();
+    assert_eq!(read_queue.admission.request_slots.available_permits(), 64);
+    assert_eq!(write_queue.admission.request_slots.available_permits(), 8);
     let _requests = write_queue
         .admission
         .request_slots
         .clone()
-        .acquire_many_owned(MAX_IN_FLIGHT_IO as u32)
+        .acquire_many_owned(MAX_IN_FLIGHT_WRITES as u32)
         .await
         .unwrap();
     let _buffer_memory = write_queue
@@ -228,7 +228,7 @@ fn canceled_submitted_write_retains_resources() {
     read_queue.pending.push_back(read);
     read_queue.run().unwrap();
     assert_eq!(
-        &reply.try_recv().unwrap().unwrap()[..],
+        reply.try_recv().unwrap().unwrap().as_ref(),
         &[0x99; DIRECT_IO_ALIGNMENT_BYTES]
     );
 }
@@ -255,7 +255,7 @@ fn finished_read_transfers_buffer_ownership() {
     assert!(!read.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
     read.finish(Ok(()));
 
-    let bytes = reply.try_recv().unwrap().unwrap();
+    let bytes = reply.try_recv().unwrap().unwrap().into_bytes();
     assert_eq!(bytes.as_ptr(), ptr);
     assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
     assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
@@ -269,6 +269,50 @@ fn finished_read_transfers_buffer_ownership() {
     drop(queue);
     assert_eq!(slice.as_ptr(), ptr.wrapping_add(1));
     assert_eq!(&slice[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES - 1]);
+}
+
+#[tokio::test]
+async fn reads_into_consecutive_slices_without_reallocating() {
+    let queue = queue();
+    let file = queue.file.as_ref().unwrap();
+    let lock = queue.directory_lock.as_ref().unwrap();
+    let read = IoQueueHandle::new(file.clone(), lock.clone(), IoOperation::Read).unwrap();
+    let write = IoQueueHandle::new(file.clone(), lock.clone(), IoOperation::Write).unwrap();
+    let page = DIRECT_IO_ALIGNMENT_BYTES;
+    write.execute(0, page, &vec![0x99; page]).await.unwrap();
+    write.execute((2 * page) as u64, page, &vec![0x77; page]).await.unwrap();
+    let mut buffer = AlignedIoBuffer::new(3 * page, Vec::new()).unwrap();
+    buffer.as_mut_slice().fill(0x55);
+    let address = buffer.ptr.as_ptr() as usize;
+    buffer = read.read_into(0, buffer, 0..page).await.unwrap();
+    assert_eq!(buffer.ptr.as_ptr() as usize, address);
+    buffer = read.read_into((2 * page) as u64, buffer, page..2 * page).await.unwrap();
+    let bytes = buffer.into_bytes();
+    assert_eq!(bytes.as_ptr() as usize, address);
+    assert_eq!(&bytes[..page], &vec![0x99; page]);
+    assert_eq!(&bytes[page..2 * page], &vec![0x77; page]);
+    assert_eq!(&bytes[2 * page..], &vec![0x55; page]);
+}
+
+#[test]
+fn canceled_read_retains_destination_and_disk_guard_until_completion() {
+    use crate::allocation::{CHUNK_BYTES, DiskChunkAllocator};
+    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
+    let region = allocator.reserve_chunks(1).unwrap().pop().unwrap();
+    let mut queue = queue();
+    let (mut read, reply) = request(&queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    read.io_buffer = AlignedIoBuffer::new(2 * DIRECT_IO_ALIGNMENT_BYTES, vec![region.read_guard()]).unwrap();
+    read.destination = DIRECT_IO_ALIGNMENT_BYTES..2 * DIRECT_IO_ALIGNMENT_BYTES;
+    drop(region);
+    queue.pending.push_back(read);
+    queue.schedule();
+    queue.ring.submit_and_wait(1).unwrap();
+    drop(reply);
+    queue.schedule();
+    assert_eq!(allocator.available_bytes(), 0);
+    assert!(queue.active[0].is_some());
+    queue.run().unwrap();
+    assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
 }
 
 #[test]

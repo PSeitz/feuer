@@ -804,29 +804,12 @@ impl GuardedObjectRangeRead {
     async fn read(&self, file: &DataFile, requested: ByteRange) -> DataFileResult<Option<Bytes>> {
         let start = requested.start() - self.object_range.start();
         let end = requested.end() - self.object_range.start();
-        let length = requested.len() as usize;
-        let mut output = Vec::new();
-        output
-            .try_reserve_exact(length)
-            .map_err(|source| DataFileError::Allocation { length, source })?;
-        let mut checksum = blake3::Hasher::new();
-        let mut consumed = 0;
-        for region in &self.payload_regions {
-            let disk_range = region.range();
-            let length = (disk_range.end - disk_range.start).min(self.object_range.len() - consumed);
-            let bytes = file.read_at(disk_range.start, length as usize).await?;
-            checksum.update(&bytes);
-            let copy_start = start.saturating_sub(consumed).min(length) as usize;
-            let copy_end = end.saturating_sub(consumed).min(length) as usize;
-            output.extend_from_slice(&bytes[copy_start..copy_end]);
-            consumed += length;
-        }
-        if consumed != self.object_range.len()
-            || output.len() != requested.len() as usize
-            || checksum.finalize() != self.payload_checksum
-        {
+        let bytes = file
+            .read_regions(self.payload_regions.clone(), self.object_range.len() as usize)
+            .await?;
+        if blake3::hash(&bytes) != self.payload_checksum {
             return Ok(None);
         }
-        Ok(Some(Bytes::from(output)))
+        Ok(Some(bytes.slice(start as usize..end as usize)))
     }
 }

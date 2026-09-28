@@ -1,7 +1,9 @@
 use std::{
     fmt,
     fs::{File, OpenOptions, create_dir_all},
+    future::Future,
     io,
+    ops::Range,
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,7 +15,7 @@ use fs4::fs_std::FileExt as LockFileExt;
 use tokio::runtime::Handle;
 use tracing::{Instrument, Span, field};
 
-use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, uring};
+use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, allocation::DiskRegionReadGuard, uring};
 
 const DATA_FILE_NAME: &str = "data";
 const LOCK_FILE_NAME: &str = ".feuer.lock";
@@ -28,11 +30,11 @@ struct DataFileState {
 
 /// One exclusively owned, fixed-capacity Linux direct-I/O payload file.
 ///
-/// Reads and writes have separate io_uring rings and worker threads, each allowing
-/// up to 64 operations. Each queue schedules in arrival order without checking for
-/// conflicts. Submission order does not guarantee completion order.
-/// Admission reserves 64 requests and 64 MiB of aligned I/O buffers for each of
-/// reads and writes.
+/// Reads and writes have separate io_uring rings and worker threads, admitting
+/// up to 64 reads and 8 writes. Each queue schedules in arrival order without
+/// checking for conflicts. Submission order does not guarantee completion order.
+/// Each queue budgets 64 MiB of active I/O slices. Read destinations are
+/// allocated separately and are not bounded by that budget.
 ///
 /// # Caller-owned concurrency and cancellation
 ///
@@ -128,7 +130,30 @@ impl DataFile {
     /// Callers must prevent writes to the aligned byte range while this read
     /// depends on its contents; see [`DataFile`]'s concurrency contract.
     pub async fn read_at(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
-        self.execute_measured(IoOperation::Read, offset, length, &[]).await
+        self.measure_io(IoOperation::Read, offset, length, async {
+            check_range(IoOperation::Read, offset, length as u64, self.state.capacity)?;
+            if length == 0 {
+                return Ok(Bytes::new());
+            }
+            let alignment = uring::DIRECT_IO_ALIGNMENT_BYTES as u64;
+            let padding = offset % alignment;
+            let range = offset - padding..(offset + length as u64).next_multiple_of(alignment);
+            let bytes = self.read_aligned_ranges(&[range], Vec::new()).await?;
+            Ok(bytes.slice(padding as usize..padding as usize + length))
+        })
+        .await
+    }
+
+    /// Reads payload regions into one buffer, omitting metadata gaps and final padding.
+    pub(crate) async fn read_regions(&self, regions: Vec<DiskRegionReadGuard>, length: usize) -> DataFileResult<Bytes> {
+        let ranges: Vec<_> = regions.iter().map(DiskRegionReadGuard::range).collect();
+        let offset = ranges.first().map_or(0, |range| range.start);
+        self.measure_io(IoOperation::Read, offset, length, async {
+            let bytes = self.read_aligned_ranges(&ranges, regions).await?;
+            assert_eq!(bytes.len(), length.next_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
+            Ok(bytes.slice(..length))
+        })
+        .await
     }
 
     /// Writes complete 4096-byte-aligned blocks.
@@ -145,17 +170,35 @@ impl DataFile {
     pub async fn write_at(&self, offset: u64, bytes: &Bytes) -> DataFileResult<()> {
         assert!(offset.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64));
         assert!(bytes.len().is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
-        self.execute_measured(IoOperation::Write, offset, bytes.len(), bytes)
-            .await
-            .map(|_| ())
+        self.measure_io(IoOperation::Write, offset, bytes.len(), async {
+            check_range(IoOperation::Write, offset, bytes.len() as u64, self.state.capacity)?;
+            for (index, payload) in bytes.chunks(uring::MAX_IO_CHUNK_BYTES).enumerate() {
+                self.state
+                    .write_queue
+                    .execute(
+                        offset + (index * uring::MAX_IO_CHUNK_BYTES) as u64,
+                        payload.len(),
+                        payload,
+                    )
+                    .await
+                    .map_err(|source| DataFileError::Io {
+                        operation: IoOperation::Write,
+                        path: self.state.data_path.clone(),
+                        source,
+                    })?;
+            }
+            Ok(Bytes::new())
+        })
+        .await
+        .map(|_| ())
     }
 
-    async fn execute_measured(
+    async fn measure_io(
         &self,
         operation: IoOperation,
         offset: u64,
         length: usize,
-        payload: &[u8],
+        execute: impl Future<Output = DataFileResult<Bytes>>,
     ) -> DataFileResult<Bytes> {
         let started = Instant::now();
         let observed_bytes = u64::try_from(length).unwrap_or(u64::MAX);
@@ -169,70 +212,46 @@ impl DataFile {
             error_kind = field::Empty,
             duration_seconds = field::Empty,
         );
-        let result = self
-            .execute_chunks(operation, offset, length, payload)
-            .instrument(span.clone())
-            .await;
+        let result = execute.instrument(span.clone()).await;
         let elapsed = started.elapsed();
         self.metrics.record(operation, observed_bytes, elapsed, result.is_ok());
         record_span_outcome(&span, elapsed, &result);
         result
     }
 
-    async fn execute_chunks(
+    async fn read_aligned_ranges(
         &self,
-        operation: IoOperation,
-        offset: u64,
-        length: usize,
-        payload: &[u8],
+        ranges: &[Range<u64>],
+        guards: Vec<DiskRegionReadGuard>,
     ) -> DataFileResult<Bytes> {
-        let length_u64 = u64::try_from(length).map_err(|_| DataFileError::LengthOverflow { operation, length })?;
-        check_range(operation, offset, length_u64, self.state.capacity)?;
+        let operation = IoOperation::Read;
+        let mut length = 0usize;
+        for range in ranges {
+            check_range(operation, range.start, range.end - range.start, self.state.capacity)?;
+            length = length
+                .checked_add((range.end - range.start) as usize)
+                .ok_or(DataFileError::LengthOverflow { operation, length })?;
+        }
         let io_error = |source| DataFileError::Io {
             operation,
             path: self.state.data_path.clone(),
             source,
         };
-        let mut read_bytes = Vec::new();
-        if operation == IoOperation::Read
-            && length > uring::MAX_IO_CHUNK_BYTES - offset as usize % uring::DIRECT_IO_ALIGNMENT_BYTES
-        {
-            read_bytes
-                .try_reserve_exact(length)
-                .map_err(|source| DataFileError::Allocation { length, source })?;
-        }
-        let mut completed_bytes = 0;
-        while completed_bytes < length {
-            let chunk_offset = offset + completed_bytes as u64;
-            let data_offset_in_buffer = chunk_offset as usize % uring::DIRECT_IO_ALIGNMENT_BYTES;
-            let chunk_length = (length - completed_bytes).min(uring::MAX_IO_CHUNK_BYTES - data_offset_in_buffer);
-            let aligned_offset = chunk_offset - data_offset_in_buffer as u64;
-            let aligned_length =
-                (data_offset_in_buffer + chunk_length).next_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES);
-            let chunk_payload = if operation == IoOperation::Write {
-                &payload[completed_bytes..completed_bytes + chunk_length]
-            } else {
-                &[]
-            };
-            let queue = if operation == IoOperation::Read {
-                &self.state.read_queue
-            } else {
-                &self.state.write_queue
-            };
-            let bytes = queue
-                .execute(aligned_offset, aligned_length, chunk_payload)
-                .await
-                .map_err(io_error)?;
-            if operation == IoOperation::Read {
-                let bytes = bytes.slice(data_offset_in_buffer..data_offset_in_buffer + chunk_length);
-                if chunk_length == length {
-                    return Ok(bytes);
-                }
-                read_bytes.extend_from_slice(&bytes);
+        let mut buffer = uring::AlignedIoBuffer::new(length, guards).map_err(io_error)?;
+        let mut destination = 0;
+        for range in ranges {
+            for offset in (range.start..range.end).step_by(uring::MAX_IO_CHUNK_BYTES) {
+                let count = (range.end - offset).min(uring::MAX_IO_CHUNK_BYTES as u64) as usize;
+                buffer = self
+                    .state
+                    .read_queue
+                    .read_into(offset, buffer, destination..destination + count)
+                    .await
+                    .map_err(io_error)?;
+                destination += count;
             }
-            completed_bytes += chunk_length;
         }
-        Ok(Bytes::from(read_bytes))
+        Ok(buffer.into_bytes())
     }
 }
 

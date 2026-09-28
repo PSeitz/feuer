@@ -194,6 +194,12 @@ pub(super) struct DiskRegionReadGuard {
     region: DiskRegion,
 }
 
+impl Clone for DiskRegionReadGuard {
+    fn clone(&self) -> Self {
+        self.region.read_guard()
+    }
+}
+
 impl DiskRegionReadGuard {
     pub(super) fn range(&self) -> Range<u64> {
         self.region.range()

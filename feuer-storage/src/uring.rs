@@ -6,6 +6,7 @@ use std::{
     collections::VecDeque,
     fs::File,
     io,
+    ops::Range,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     ptr::NonNull,
     sync::{Arc, mpsc},
@@ -16,7 +17,7 @@ use bytes::Bytes;
 use io_uring::{IoUring, opcode, squeue, types};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
-use crate::IoOperation;
+use crate::{IoOperation, allocation::DiskRegionReadGuard};
 
 // Buffer addresses, physical offsets, and I/O lengths use this alignment.
 // Opening verifies that the filesystem's direct-I/O requirements divide it.
@@ -24,10 +25,15 @@ pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = 4096;
 // Maximum physical bytes per chunk, including alignment padding. DataFile
 // reduces the logical chunk size when its starting offset is unaligned.
 pub(crate) const MAX_IO_CHUNK_BYTES: usize = 1024 * 1024;
-// Maximum admitted and in-flight operations per queue. Reads and writes each have their own ring.
+// Maximum ring capacity; reads admit 64 requests, writes admit fewer below.
 const MAX_IN_FLIGHT_IO: usize = 64;
+// Local-SSD benchmarks saturated 1-MiB writes at QD8. QD64 added no write-only
+// throughput, but raised write p99 from 4.6 to 47 ms and worsened small-read latency.
+// See benchmarks/ssd/uring-20260928/REPORT.md.
+const MAX_IN_FLIGHT_WRITES: usize = 8;
 // Per-queue I/O buffer memory budget: MAX_IN_FLIGHT_IO full-size aligned buffers.
-// Caller inputs and buffers transferred to completed read results are outside this budget.
+// Caller inputs, caller-provided read destinations, and completed results are
+// outside this budget. A read into an existing buffer charges only its I/O slice.
 const MAX_IO_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 
 #[cfg(test)]
@@ -56,9 +62,9 @@ struct IoAdmissionBudgets {
 }
 
 impl IoAdmissionBudgets {
-    fn new() -> Self {
+    fn new(max_in_flight: usize) -> Self {
         Self {
-            request_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_IO)),
+            request_slots: Arc::new(Semaphore::new(max_in_flight)),
             buffer_memory: Arc::new(Semaphore::new(MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES)),
         }
     }
@@ -66,12 +72,12 @@ impl IoAdmissionBudgets {
 
 impl IoQueueHandle {
     pub(crate) fn new(file: Arc<File>, directory_lock: Arc<File>, operation: IoOperation) -> io::Result<Self> {
-        let thread_name = match operation {
-            IoOperation::Read => "feuer-read-io",
-            IoOperation::Write => "feuer-write-io",
+        let (thread_name, max_in_flight) = match operation {
+            IoOperation::Read => ("feuer-read-io", MAX_IN_FLIGHT_IO),
+            IoOperation::Write => ("feuer-write-io", MAX_IN_FLIGHT_WRITES),
             _ => unreachable!("queue only supports reads and writes"),
         };
-        let ring = IoUring::new(MAX_IN_FLIGHT_IO as u32)?;
+        let ring = IoUring::new(max_in_flight as u32)?;
         // SAFETY: eventfd has no pointer arguments and returns a new owned fd.
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if fd < 0 {
@@ -79,8 +85,8 @@ impl IoQueueHandle {
         }
         // SAFETY: fd was just created and has no other owner.
         let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
-        let (sender, receiver) = mpsc::sync_channel(MAX_IN_FLIGHT_IO);
-        let admission = Arc::new(IoAdmissionBudgets::new());
+        let (sender, receiver) = mpsc::sync_channel(max_in_flight);
+        let admission = Arc::new(IoAdmissionBudgets::new(max_in_flight));
         let mut queue = IoQueue {
             admission: admission.clone(),
             ring,
@@ -89,7 +95,7 @@ impl IoQueueHandle {
             wake_fd: wake_fd.clone(),
             receiver,
             pending: VecDeque::new(),
-            active: (0..MAX_IN_FLIGHT_IO).map(|_| None).collect(),
+            active: (0..max_in_flight).map(|_| None).collect(),
         };
         let thread = thread::Builder::new().name(thread_name.into()).spawn(move || {
             if let Err(error) = queue.run() {
@@ -105,7 +111,7 @@ impl IoQueueHandle {
         })
     }
 
-    pub(crate) async fn execute(&self, offset: u64, length: usize, payload: &[u8]) -> io::Result<Bytes> {
+    async fn acquire(&self, length: usize) -> io::Result<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
         let request_permit = self
             .admission
             .request_slots
@@ -120,15 +126,44 @@ impl IoQueueHandle {
             .acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
             .await
             .map_err(|_| queue_stopped_error())?;
+        Ok((request_permit, buffer_memory_permit))
+    }
+
+    pub(crate) async fn execute(&self, offset: u64, length: usize, payload: &[u8]) -> io::Result<Bytes> {
+        let permits = self.acquire(length).await?;
+        let mut buffer = AlignedIoBuffer::new(length, Vec::new())?;
+        if self.operation == IoOperation::Write {
+            buffer.as_mut_slice().copy_from_slice(payload);
+        }
+        let buffer = self.execute_buffer(offset, buffer, 0..length, permits).await?;
+        Ok(if self.operation == IoOperation::Read {
+            buffer.into_bytes()
+        } else {
+            Bytes::new()
+        })
+    }
+
+    /// Transfers exclusive buffer ownership to the queue until this slice completes.
+    pub(crate) async fn read_into(
+        &self,
+        offset: u64,
+        buffer: AlignedIoBuffer,
+        destination: Range<usize>,
+    ) -> io::Result<AlignedIoBuffer> {
+        assert_eq!(self.operation, IoOperation::Read);
+        let permits = self.acquire(destination.len()).await?;
+        self.execute_buffer(offset, buffer, destination, permits).await
+    }
+
+    async fn execute_buffer(
+        &self,
+        offset: u64,
+        buffer: AlignedIoBuffer,
+        destination: Range<usize>,
+        permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
+    ) -> io::Result<AlignedIoBuffer> {
         let (reply, receive) = oneshot::channel();
-        let request = IoRequest::new(
-            self.operation,
-            offset,
-            length,
-            payload,
-            reply,
-            (request_permit, buffer_memory_permit),
-        )?;
+        let request = IoRequest::new(self.operation, offset, buffer, destination, reply, permits);
         // All queued + active requests hold a permit, so this cannot wait for space.
         self.sender
             .as_ref()
@@ -155,20 +190,38 @@ fn queue_stopped_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "io_uring queue stopped")
 }
 
-struct AlignedIoBuffer {
+pub(crate) struct AlignedIoBuffer {
     // Owned, aligned allocation whose address stays stable while the kernel uses it.
     ptr: NonNull<u8>,
     // Allocation size/alignment for slice bounds and matching deallocation.
     layout: Layout,
+    // Whole-entry reads retain disk ownership even if the waiting caller is canceled.
+    read_guards: Vec<DiskRegionReadGuard>,
 }
 
 impl AlignedIoBuffer {
-    fn new(length: usize) -> io::Result<Self> {
-        let layout = Layout::from_size_align(length, DIRECT_IO_ALIGNMENT_BYTES).unwrap();
+    pub(crate) fn new(length: usize, read_guards: Vec<DiskRegionReadGuard>) -> io::Result<Self> {
+        assert!(length > 0);
+        let layout = Layout::from_size_align(length, DIRECT_IO_ALIGNMENT_BYTES).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "read buffer length exceeds allocation limit",
+            )
+        })?;
         // SAFETY: layout is non-zero with a valid power-of-two alignment.
         let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
             .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "direct I/O buffer allocation failed"))?;
-        Ok(Self { ptr, layout })
+        Ok(Self {
+            ptr,
+            layout,
+            read_guards,
+        })
+    }
+
+    pub(crate) fn into_bytes(mut self) -> Bytes {
+        // No I/O owns the buffer now; returned bytes must not retain disk regions.
+        self.read_guards.clear();
+        Bytes::from_owner(self)
     }
 
     fn as_mut_slice(&mut self) -> &mut [u8] {
@@ -204,10 +257,12 @@ struct IoRequest {
     offset: u64,
     // Aligned memory for disk reads/writes; kept alive until I/O completes.
     io_buffer: AlignedIoBuffer,
+    // Disjoint destination slice within the exclusively owned allocation.
+    destination: Range<usize>,
     // Bytes completed, allowing aligned short-I/O continuations.
     completed_bytes: usize,
     // Caller result channel; taken on finish/failure, also detects cancellation.
-    reply: Option<oneshot::Sender<io::Result<Bytes>>>,
+    reply: Option<oneshot::Sender<io::Result<AlignedIoBuffer>>>,
     // Holds request admission until this request is dropped.
     _request_permit: OwnedSemaphorePermit,
     // Holds the I/O buffer memory charge until this request is dropped.
@@ -218,35 +273,40 @@ impl IoRequest {
     fn new(
         operation: IoOperation,
         offset: u64,
-        length: usize,
-        payload: &[u8],
-        reply: oneshot::Sender<io::Result<Bytes>>,
+        io_buffer: AlignedIoBuffer,
+        destination: Range<usize>,
+        reply: oneshot::Sender<io::Result<AlignedIoBuffer>>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
-    ) -> io::Result<Self> {
+    ) -> Self {
         assert!(offset.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES as u64));
+        assert!(destination.start.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
+        let length = destination.len();
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
-        assert!(length > 0);
-        let mut io_buffer = AlignedIoBuffer::new(length)?;
-        if operation == IoOperation::Write {
-            io_buffer.as_mut_slice().copy_from_slice(payload);
-        }
-        Ok(Self {
+        assert!(!destination.is_empty() && destination.end <= io_buffer.layout.size());
+        assert!(destination.len() <= MAX_IO_CHUNK_BYTES);
+        Self {
             operation,
             offset,
             io_buffer,
+            destination,
             completed_bytes: 0,
             reply: Some(reply),
             _request_permit: permits.0,
             _buffer_memory_permit: permits.1,
-        })
+        }
     }
 
     fn submission_entry(&mut self, fd: i32, slot: usize) -> squeue::Entry {
         let fd = types::Fd(fd);
         // SAFETY: completed_bytes is within io_buffer. The request owns this memory
         // in its active slot until the completion is consumed.
-        let ptr = unsafe { self.io_buffer.ptr.as_ptr().add(self.completed_bytes) };
-        let length = (self.io_buffer.layout.size() - self.completed_bytes) as u32;
+        let ptr = unsafe {
+            self.io_buffer
+                .ptr
+                .as_ptr()
+                .add(self.destination.start + self.completed_bytes)
+        };
+        let length = (self.destination.len() - self.completed_bytes) as u32;
         let offset = self.offset + self.completed_bytes as u64;
         let entry = if self.operation == IoOperation::Read {
             opcode::Read::new(fd, ptr, length).offset(offset).build()
@@ -265,11 +325,11 @@ impl IoRequest {
             return Err(io::Error::from_raw_os_error(-result));
         }
         let count = result as usize;
-        if count == 0 || count > self.io_buffer.layout.size() - self.completed_bytes {
+        if count == 0 || count > self.destination.len() - self.completed_bytes {
             return Err(self.incomplete_io_error());
         }
         self.completed_bytes += count;
-        if self.completed_bytes != self.io_buffer.layout.size() {
+        if self.completed_bytes != self.destination.len() {
             // An unaligned remainder cannot be resubmitted with O_DIRECT.
             if !self.completed_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
                 return Err(self.incomplete_io_error());
@@ -291,13 +351,7 @@ impl IoRequest {
     }
 
     fn finish(mut self, result: io::Result<()>) {
-        let result = result.map(|()| {
-            if self.operation == IoOperation::Read {
-                Bytes::from_owner(self.io_buffer)
-            } else {
-                Bytes::new()
-            }
-        });
+        let result = result.map(|()| self.io_buffer);
         let _ = self.reply.take().unwrap().send(result);
     }
 }
@@ -389,7 +443,7 @@ impl IoQueue {
             .unwrap()
             .submission_entry(self.file.as_ref().unwrap().as_raw_fd(), slot);
         // SAFETY: all referenced resources are owned by the active slot through completion.
-        // At most MAX_IN_FLIGHT_IO slots exist, each with at most one submitted or queued SQE.
+        // The ring is sized for all active slots, each with at most one submitted or queued SQE.
         unsafe {
             self.ring
                 .submission()
