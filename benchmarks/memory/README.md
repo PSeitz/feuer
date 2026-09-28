@@ -26,11 +26,10 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
 
 ## Compared engines
 
-- `feuer-value-density`: `MemoryCache` with bounded exact access evidence
-  valued at one modeled source request plus its requested bytes. Evidence
-  expires after 262,144 later successful same-shard accesses by default
-  (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this limit). Sampled eviction
-  compares active retrieval value per retained byte. After a
+- `feuer-value-density`: `MemoryCache` with independent exact-range access counts
+  decaying with a 4,096-successful-same-shard-access half-life. Sampled eviction
+  compares decayed retrieval value per retained byte, crediting requests fully
+  covered by each cached range. Bounded event history is used only for trimming. After a
   64-successful-access grace, pressure trims the selected victim to its observed
   request ranges when useful.
 - `foyer-native-exact-key`: requested ranges are native Foyer keys. The
@@ -89,7 +88,7 @@ COALESCING_DISTANCE_BYTES=5MB WHOLE_SPLIT_THRESHOLD_BYTES=8MiB \
   cargo run --release -p feuer-memory-bench -- --capacity 1GiB
 ```
 
-To change Feuer's cost-aware evidence lifetime without rebuilding:
+To change Feuer's range-trimming evidence lifetime without rebuilding:
 
 ```bash
 FEUER_MAX_ACCESS_AGE_ACCESSES=65536 cargo run --release -p feuer-memory-bench -- \
@@ -105,7 +104,8 @@ FEUER_MAX_ACCESS_EVENTS_PER_KEY=256 cargo run --release -p feuer-memory-bench --
 ```
 
 Both history settings are read once per process and do not change either Foyer
-policy. Larger histories increase metadata memory and scoring work.
+policy or Feuer's decayed scoring counters. Larger event histories increase
+metadata memory and range-trimming work.
 
 `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` changes Feuer's fixed per-request scoring
 credit (default `10000000`). It is read once per process and accepts nonnegative

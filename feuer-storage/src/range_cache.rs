@@ -479,7 +479,7 @@ impl DiskCacheShard {
             return true;
         }
         let (start, count) = sample_candidates(&mut index.next_candidate, length, self.reclaim_sample_size);
-        let mut selected: Option<(usize, u64, u64, u64)> = None;
+        let mut selected: Option<(usize, f64, u64, u64)> = None;
         for offset in 0..count {
             let position = (start + offset) % length;
             let (key, range_start) = &index.eviction_candidates[position];

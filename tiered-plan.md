@@ -200,7 +200,9 @@ can replace a cached larger download with smaller cached payloads biased toward 
 unrequested cache memory.
 
 Compaction is pressure-driven. Policy samples at most 64 cached ranges and selects the one with the lowest recent
-retrieval value per retained byte. Exact events are bounded to 64 per object by default
+retrieval value per retained byte, using independent exact-range access counts with a half-life of
+4,096 successful same-shard accesses. Counters live with the object's history and are not capped per object.
+For range trimming only, exact events are bounded to 64 per object by default
 (`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this) and expire after 262,144 later successful
 same-shard accesses by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this).
 Once its grace of 64 successful same-shard accesses expires, that same
@@ -209,7 +211,8 @@ evicted.
 Compacted replacements use only observed requests, merge only overlapping or adjacent intervals, preserve gaps,
 create no access, and cannot affect lookup results or caller-held slices.
 
-Lookup and access recording must not scan every live shard entry. Victim selection has bounded work and metadata;
+Lookup and access recording must not scan every live shard entry. Victim selection samples a bounded number
+of entries; scoring work depends on the distinct requested ranges each candidate covers;
 copies made outside the metadata lock require generation revalidation.
 
 ## 7. Best-effort disk population

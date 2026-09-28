@@ -22,8 +22,8 @@ const MAX_SHARDS: usize = 64;
 /// from disjoint ranges. A lookup succeeds only when one retained range covers
 /// the exact request and returns a [`Bytes`] slice containing only those
 /// requested bytes. The result can share the retained allocation and never
-/// holds an entry guard. A bounded, age-limited history of exact accesses is recorded
-/// separately from downloaded-range population.
+/// holds an entry guard. Decayed access counts and bounded range-trimming history
+/// are recorded separately from downloaded-range population.
 ///
 /// The configured capacity is divided among independently locked shards. Each
 /// shard evicts locally before insertion. A payload larger than its shard's

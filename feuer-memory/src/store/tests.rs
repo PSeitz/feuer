@@ -5,7 +5,7 @@ use std::{sync::Arc, thread};
 use bytes::Bytes;
 use feuer_types::{
     ByteRange, Download, ObjectKey,
-    retention::{MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY},
+    retention::{ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_EVENTS_PER_KEY},
 };
 
 use super::{
@@ -397,7 +397,7 @@ fn retention_credit_is_projected_only_onto_the_requested_interval() {
 }
 
 #[test]
-fn stale_frequency_eventually_expires() {
+fn stale_frequency_decays_below_recent_accesses() {
     let cache = cache(3);
     let stale = ObjectKey::from("stale");
     let fresh = ObjectKey::from("fresh");
@@ -409,7 +409,7 @@ fn stale_frequency_eventually_expires() {
     for _ in 0..8 {
         cache.record_access(&stale, range(0, 1));
     }
-    for _ in 0..=*MAX_ACCESS_AGE_ACCESSES {
+    for _ in 0..ACCESS_COUNT_HALF_LIFE * 4 {
         cache.record_access(&clock, range(0, 1));
     }
     cache.record_access(&fresh, range(0, 1));

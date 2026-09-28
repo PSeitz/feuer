@@ -150,7 +150,7 @@ struct ReclaimCandidate {
     range: ByteRange,
     id: u64,
     retained_bytes: u64,
-    retrieval_cost: u64,
+    retrieval_cost: f64,
 }
 
 /// Source payload, plan, and identity for trimming a cached range outside the shard lock.
@@ -508,7 +508,7 @@ impl MemoryCacheShard {
                 range,
                 id,
                 retained_bytes: range.len(),
-                retrieval_cost: 0,
+                retrieval_cost: 0.0,
             });
         }
         let (sample_start, sample_count) = self.candidates.sample(self.reclaim_sample_size);

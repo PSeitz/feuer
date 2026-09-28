@@ -38,15 +38,17 @@ Reopening still starts with an empty disk index: recovery is not implemented.
 
 ### Memory retention and compaction
 
-- Each key retains at most 64 exact, repeated access events by default
-  (`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this). Events expire after 262,144 later successful
-  same-shard accesses by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this). Both tiers use the shared
-  history and cost calculation in `feuer-types::retention`.
+- Cost-aware scoring uses independent exact-range access counts with a 4,096-successful-same-shard-access
+  half-life. Both tiers share the history and cost calculation in `feuer-types::retention`.
+  Separately, range trimming retains at most 64 repeated events per object by default
+  (`FEUER_MAX_ACCESS_EVENTS_PER_KEY`), expiring after 262,144 same-shard accesses
+  (`FEUER_MAX_ACCESS_AGE_ACCESSES`). These limits do not truncate scoring counters.
   Evidence survives memory eviction while disk entries or active population retain it; releasing the final
   owner removes the weak registry record. Histories are volatile, not persisted. Wall-clock aging is not
   implemented.
-- Each event contributes 10,000,000 fixed-cost-equivalent bytes plus its requested bytes. Only cached ranges
-  covering the exact event receive credit.
+- Decayed counts weight the sum of fixed-cost-equivalent bytes (default 10,000,000,
+  configurable via `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES`) and requested bytes. Only cached ranges
+  covering the exact request receive credit. Counter metadata is not capped per object.
 - A dense rotating candidate ring supplies a shared sample of at most 64 live entries per pressure decision.
   The victim has the lowest retrieval value per retained byte, with monotonic entry identity breaking ties.
   Registration and removal are constant-work and leave no stale candidate backlog.
