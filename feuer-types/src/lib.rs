@@ -5,6 +5,9 @@
 //! components exchange exact object identities and byte ranges without a
 //! dependency cycle.
 
+#[doc(hidden)]
+pub mod config;
+
 mod download;
 mod range;
 

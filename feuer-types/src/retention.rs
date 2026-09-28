@@ -3,7 +3,6 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, VecDeque, hash_map::DefaultHasher},
-    ffi::OsStr,
     hash::{Hash, Hasher},
     sync::{
         Arc, LazyLock, Mutex, MutexGuard, Weak,
@@ -11,7 +10,7 @@ use std::{
     },
 };
 
-use crate::{ByteRange, ObjectKey};
+use crate::{ByteRange, ObjectKey, config::read_env_number};
 
 /// Default maximum entries inspected in one retention-policy sample.
 pub const RECLAIM_SAMPLE_SIZE: usize = 64;
@@ -137,52 +136,22 @@ impl Drop for ObjectAccessHistory {
 
 /// Fixed source-request cost as equivalent transferred bytes; zero scores only bytes.
 /// Reads `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` once on first use, defaulting to
-/// 10,000,000 (125 ms at 80 MB/s). Panics unless set to a nonnegative `u64` integer.
+/// 10,000,000 (125 ms at 80 MB/s). Accepts size suffixes; panics unless the value fits `u64`.
 pub static FIXED_RETRIEVAL_EQUIVALENT_BYTES: LazyLock<u64> = LazyLock::new(|| {
-    parse_fixed_retrieval_equivalent_bytes(std::env::var_os("FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES").as_deref())
+    read_env_number("FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES", 10_000_000, 0).unwrap_or_else(|error| panic!("{error}"))
 });
 /// Maximum exact access events retained for range trimming for one object key.
 /// Reads `FEUER_MAX_ACCESS_EVENTS_PER_KEY` once on first use, defaulting to 64.
-/// Panics if set to anything other than a positive `usize` integer.
-pub static MAX_ACCESS_EVENTS_PER_KEY: LazyLock<usize> =
-    LazyLock::new(|| parse_max_access_events_per_key(std::env::var_os("FEUER_MAX_ACCESS_EVENTS_PER_KEY").as_deref()));
+/// Accepts size suffixes as multipliers; panics unless the result is positive and fits `usize`.
+pub static MAX_ACCESS_EVENTS_PER_KEY: LazyLock<usize> = LazyLock::new(|| {
+    read_env_number("FEUER_MAX_ACCESS_EVENTS_PER_KEY", 64, 1).unwrap_or_else(|error| panic!("{error}"))
+});
 /// Maximum same-shard successful-access age that still contributes to range trimming.
 /// Reads `FEUER_MAX_ACCESS_AGE_ACCESSES` once on first use, defaulting to 262,144.
-/// Panics if set to anything other than a positive `u64` integer.
-pub static MAX_ACCESS_AGE_ACCESSES: LazyLock<u64> =
-    LazyLock::new(|| parse_max_access_age(std::env::var_os("FEUER_MAX_ACCESS_AGE_ACCESSES").as_deref()));
-
-fn parse_fixed_retrieval_equivalent_bytes(value: Option<&OsStr>) -> u64 {
-    let Some(value) = value else {
-        return 10_000_000;
-    };
-    value
-        .to_str()
-        .and_then(|value| value.parse::<u64>().ok())
-        .expect("FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES must be a nonnegative u64 integer")
-}
-
-fn parse_max_access_events_per_key(value: Option<&OsStr>) -> usize {
-    let Some(value) = value else {
-        return 64;
-    };
-    value
-        .to_str()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .expect("FEUER_MAX_ACCESS_EVENTS_PER_KEY must be a positive usize integer")
-}
-
-fn parse_max_access_age(value: Option<&OsStr>) -> u64 {
-    let Some(value) = value else {
-        return 262_144;
-    };
-    value
-        .to_str()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|&value| value > 0)
-        .expect("FEUER_MAX_ACCESS_AGE_ACCESSES must be a positive u64 integer")
-}
+/// Accepts size suffixes as multipliers; panics unless the result is positive and fits `u64`.
+pub static MAX_ACCESS_AGE_ACCESSES: LazyLock<u64> = LazyLock::new(|| {
+    read_env_number("FEUER_MAX_ACCESS_AGE_ACCESSES", 262_144, 1).unwrap_or_else(|error| panic!("{error}"))
+});
 
 /// One exact requested interval and its shard-local observation clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,20 +162,10 @@ struct RangeAccess {
 
 /// Half-life of access counts, in successful accesses to the same shard.
 /// Reads `FEUER_ACCESS_COUNT_HALF_LIFE` once on first use, defaulting to 8192.
-/// Panics unless set to a positive `u64` integer.
-pub static ACCESS_COUNT_HALF_LIFE: LazyLock<u64> =
-    LazyLock::new(|| parse_access_count_half_life(std::env::var_os("FEUER_ACCESS_COUNT_HALF_LIFE").as_deref()));
-
-fn parse_access_count_half_life(value: Option<&OsStr>) -> u64 {
-    let Some(value) = value else {
-        return 8192;
-    };
-    value
-        .to_str()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|&value| value > 0)
-        .expect("FEUER_ACCESS_COUNT_HALF_LIFE must be a positive u64 integer")
-}
+/// Accepts size suffixes as multipliers; panics unless the result is positive and fits `u64`.
+pub static ACCESS_COUNT_HALF_LIFE: LazyLock<u64> = LazyLock::new(|| {
+    read_env_number("FEUER_ACCESS_COUNT_HALF_LIFE", 8192, 1).unwrap_or_else(|error| panic!("{error}"))
+});
 
 #[derive(Default)]
 struct DecayedAccessCount {
@@ -322,30 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_fixed_retrieval_equivalent_bytes() {
-        assert_eq!(parse_fixed_retrieval_equivalent_bytes(None), 10_000_000);
-        for value in [0, 1, 1_000_000, 10_000_000, u64::MAX] {
-            assert_eq!(
-                parse_fixed_retrieval_equivalent_bytes(Some(OsStr::new(&value.to_string()))),
-                value
-            );
-        }
-        for value in ["", "-1", "1MB", "1.5", " 1", "1 ", "18446744073709551616"] {
-            assert!(
-                std::panic::catch_unwind(|| parse_fixed_retrieval_equivalent_bytes(Some(OsStr::new(value)))).is_err()
-            );
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            assert!(
-                std::panic::catch_unwind(|| parse_fixed_retrieval_equivalent_bytes(Some(OsStr::from_bytes(b"\xff"))))
-                    .is_err()
-            );
-        }
-    }
-
-    #[test]
     fn fixed_retrieval_cost_environment_override() {
         // Separate processes exercise environment loading without mutating this process's environment.
         if let Ok(value) = std::env::var("FEUER_TEST_FIXED_RETRIEVAL_CHILD") {
@@ -370,29 +305,6 @@ mod tests {
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{output:?}");
-        }
-    }
-
-    #[test]
-    fn parses_max_access_events_per_key() {
-        assert_eq!(parse_max_access_events_per_key(None), 64);
-        for value in [1, 16, 64, 256, 1024, usize::MAX] {
-            assert_eq!(
-                parse_max_access_events_per_key(Some(OsStr::new(&value.to_string()))),
-                value
-            );
-        }
-        for value in ["", "0", "-1", "64k", "1.5", " 256", "256 "] {
-            assert!(std::panic::catch_unwind(|| parse_max_access_events_per_key(Some(OsStr::new(value)))).is_err());
-        }
-        let overflow = (usize::MAX as u128 + 1).to_string();
-        assert!(std::panic::catch_unwind(|| parse_max_access_events_per_key(Some(OsStr::new(&overflow)))).is_err());
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            assert!(
-                std::panic::catch_unwind(|| parse_max_access_events_per_key(Some(OsStr::from_bytes(b"\xff")))).is_err()
-            );
         }
     }
 
@@ -435,33 +347,22 @@ mod tests {
             assert_eq!(history.retention_score(range(0, 1), half_life), cost * 0.5);
             return;
         }
-        for half_life in [1, 256, 65_536, u64::MAX] {
+        for (setting, half_life) in [
+            ("1", 1),
+            ("256", 256),
+            ("64KiB", 65_536),
+            ("18446744073709551615", u64::MAX),
+        ] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
                     "retention::tests::access_count_half_life_environment_override",
                 ])
                 .env("FEUER_TEST_HALF_LIFE_CHILD", half_life.to_string())
-                .env("FEUER_ACCESS_COUNT_HALF_LIFE", half_life.to_string())
+                .env("FEUER_ACCESS_COUNT_HALF_LIFE", setting)
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{output:?}");
-        }
-    }
-
-    #[test]
-    fn parses_max_access_age() {
-        assert_eq!(parse_max_access_age(None), 262_144);
-        for value in [1, 32_768, 65_536, 131_072, 262_144, u64::MAX] {
-            assert_eq!(parse_max_access_age(Some(OsStr::new(&value.to_string()))), value);
-        }
-        for value in ["", "0", "-1", "64k", "1.5", " 65536", "18446744073709551616"] {
-            assert!(std::panic::catch_unwind(|| parse_max_access_age(Some(OsStr::new(value)))).is_err());
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            assert!(std::panic::catch_unwind(|| parse_max_access_age(Some(OsStr::from_bytes(b"\xff")))).is_err());
         }
     }
 
@@ -482,7 +383,7 @@ mod tests {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "retention::tests::access_age_environment_override"])
             .env("FEUER_TEST_ACCESS_AGE_CHILD", "1")
-            .env("FEUER_MAX_ACCESS_AGE_ACCESSES", "65536")
+            .env("FEUER_MAX_ACCESS_AGE_ACCESSES", "64KiB")
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");

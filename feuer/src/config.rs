@@ -1,9 +1,6 @@
-use std::{
-    ffi::OsStr,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
-use feuer_types::retention::RECLAIM_SAMPLE_SIZE;
+use feuer_types::{config::read_env_number, retention::RECLAIM_SAMPLE_SIZE};
 use thiserror::Error;
 
 /// Explicit capacities and location for one Feuer cache.
@@ -24,7 +21,8 @@ impl CacheConfig {
     /// Creates a cache configuration with no implicit capacity defaults.
     ///
     /// Reads `FEUER_RECLAIM_SAMPLE_SIZE` for the eviction candidate limit, defaulting
-    /// to 64 when unset. A set value must be a positive `usize` integer.
+    /// to 64 when unset. Accepts size suffixes as multipliers (e.g. `1KiB` for 1024);
+    /// the result must be positive and fit `usize`.
     pub fn new(
         directory: impl Into<PathBuf>,
         disk_capacity: u64,
@@ -41,7 +39,8 @@ impl CacheConfig {
             directory: directory.into(),
             disk_capacity,
             memory_capacity,
-            reclaim_sample_size: parse_reclaim_sample_size(std::env::var_os("FEUER_RECLAIM_SAMPLE_SIZE").as_deref())?,
+            reclaim_sample_size: read_env_number("FEUER_RECLAIM_SAMPLE_SIZE", RECLAIM_SAMPLE_SIZE, 1)
+                .map_err(|_| CacheConfigError::InvalidReclaimSampleSize)?,
         })
     }
 
@@ -76,17 +75,6 @@ impl CacheConfig {
     }
 }
 
-fn parse_reclaim_sample_size(value: Option<&OsStr>) -> Result<usize, CacheConfigError> {
-    let Some(value) = value else {
-        return Ok(RECLAIM_SAMPLE_SIZE);
-    };
-    value
-        .to_str()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .ok_or(CacheConfigError::InvalidReclaimSampleSize)
-}
-
 /// An invalid Feuer configuration.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum CacheConfigError {
@@ -98,7 +86,7 @@ pub enum CacheConfigError {
     InvalidMemoryCapacity,
     /// The eviction candidate limit must be a positive integer that fits in `usize`.
     #[error(
-        "reclaim sample size must be a positive usize integer; check FEUER_RECLAIM_SAMPLE_SIZE or the explicit setting"
+        "reclaim sample size must be a positive number fitting usize; check FEUER_RECLAIM_SAMPLE_SIZE (e.g. 1KiB) or the explicit setting"
     )]
     InvalidReclaimSampleSize,
 }
@@ -108,27 +96,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_reclaim_sample_size() {
-        assert_eq!(parse_reclaim_sample_size(None), Ok(64));
-        for value in [1, 32, 128, usize::MAX] {
-            assert_eq!(
-                parse_reclaim_sample_size(Some(OsStr::new(&value.to_string()))),
-                Ok(value)
-            );
+    fn reclaim_sample_size_environment_override() {
+        if let Ok(expected) = std::env::var("FEUER_TEST_RECLAIM_SAMPLE_CHILD") {
+            let result = CacheConfig::new("cache", 1, 1).map(|config| config.reclaim_sample_size());
+            let expected = expected
+                .parse::<usize>()
+                .map_err(|_| CacheConfigError::InvalidReclaimSampleSize);
+            assert_eq!(result, expected);
+            return;
         }
-        for value in ["", "0", "-1", "abc", "1.5", " 64", "18446744073709551616"] {
-            assert_eq!(
-                parse_reclaim_sample_size(Some(OsStr::new(value))),
-                Err(CacheConfigError::InvalidReclaimSampleSize)
-            );
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            assert_eq!(
-                parse_reclaim_sample_size(Some(OsStr::from_bytes(b"\xff"))),
-                Err(CacheConfigError::InvalidReclaimSampleSize)
-            );
+        for (value, expected) in [("1KiB", "1024"), ("0", "error"), ("bad", "error")] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "config::tests::reclaim_sample_size_environment_override"])
+                .env("FEUER_TEST_RECLAIM_SAMPLE_CHILD", expected)
+                .env("FEUER_RECLAIM_SAMPLE_SIZE", value)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
         }
     }
 

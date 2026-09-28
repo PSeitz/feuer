@@ -2,7 +2,6 @@
 
 use std::{
     collections::HashMap,
-    env::{self, VarError},
     fs,
     path::Path,
     time::{Duration, Instant},
@@ -13,6 +12,7 @@ use clap::{Parser, ValueEnum};
 use feuer_memory::MemoryCache;
 use feuer_types::{
     ByteRange, Download, ObjectKey,
+    config::{parse_config_number, read_env_number},
     retention::{
         ACCESS_COUNT_HALF_LIFE, FIXED_RETRIEVAL_EQUIVALENT_BYTES, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY,
     },
@@ -93,10 +93,11 @@ struct DownloadExpansionConfig {
 impl DownloadExpansionConfig {
     fn from_env() -> Result<Self, String> {
         Ok(Self {
-            coalescing_distance_bytes: byte_count_from_env(COALESCING_DISTANCE_ENV, DEFAULT_COALESCING_DISTANCE_BYTES)?,
-            whole_split_threshold_bytes: byte_count_from_env(
+            coalescing_distance_bytes: read_env_number(COALESCING_DISTANCE_ENV, DEFAULT_COALESCING_DISTANCE_BYTES, 0)?,
+            whole_split_threshold_bytes: read_env_number(
                 WHOLE_SPLIT_THRESHOLD_ENV,
                 DEFAULT_WHOLE_SPLIT_THRESHOLD_BYTES,
+                0,
             )?,
         })
     }
@@ -925,43 +926,9 @@ fn ratio(numerator: u64, denominator: u64) -> f64 {
     }
 }
 
-fn byte_count_from_env(name: &str, default: u64) -> Result<u64, String> {
-    let value = match env::var(name) {
-        Ok(value) => value,
-        Err(VarError::NotPresent) => return Ok(default),
-        Err(VarError::NotUnicode(_)) => return Err(format!("{name} is not valid Unicode")),
-    };
-    let bytes = parse_byte_count(&value).map_err(|error| format!("invalid {name}: {error}"))?;
-    u64::try_from(bytes).map_err(|_| format!("{name} does not fit u64"))
-}
-
 fn parse_byte_count_usize(value: &str) -> Result<usize, String> {
-    let bytes = parse_byte_count(value)?;
-    usize::try_from(bytes).map_err(|_| "byte count does not fit usize".to_owned())
-}
-
-fn parse_byte_count(value: &str) -> Result<u128, String> {
-    let value = value.trim();
-    let split = value
-        .find(|character: char| !character.is_ascii_digit())
-        .unwrap_or(value.len());
-    let number: u128 = value[..split]
-        .parse()
-        .map_err(|error| format!("invalid byte count: {error}"))?;
-    let suffix = value[split..].trim().to_ascii_lowercase();
-    let multiplier = match suffix.as_str() {
-        "" | "b" => 1_u128,
-        "kib" => 1_u128 << 10,
-        "mib" => 1_u128 << 20,
-        "gib" => 1_u128 << 30,
-        "kb" => 1_000,
-        "mb" => 1_000_000,
-        "gb" => 1_000_000_000,
-        _ => return Err(format!("unsupported byte suffix {suffix:?}")),
-    };
-    number
-        .checked_mul(multiplier)
-        .ok_or_else(|| "byte count overflowed".to_owned())
+    parse_config_number(value.trim().as_ref(), 0)
+        .ok_or_else(|| format!("byte count must fit usize (e.g. 512MiB): {value:?}"))
 }
 
 #[cfg(test)]
@@ -1248,8 +1215,8 @@ mod tests {
 
     #[test]
     fn environment_byte_counts_accept_documented_units() {
-        assert_eq!(parse_byte_count("1MB").unwrap(), 1_000_000);
-        assert_eq!(parse_byte_count("8MiB").unwrap(), 8 << 20);
+        assert_eq!(parse_byte_count_usize("1MB").unwrap(), 1_000_000);
+        assert_eq!(parse_byte_count_usize("8MiB").unwrap(), 8 << 20);
     }
 
     #[test]

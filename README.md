@@ -99,6 +99,12 @@ persisted; metadata is outside payload-capacity accounting.
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Limit range-trimming request events per object, not decayed scoring counters. |
 | `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed source-request cost added to requested bytes when scoring cost-aware retention. |
 
+All numeric environment settings above use the same `bytesize` parser. They accept
+plain integers and suffixes such as `512MiB`, `5GiB`, `1.5 GiB`, or `5GB`.
+Binary suffixes (`KiB`, `MiB`, `GiB`) use powers of 1024; decimal suffixes
+(`KB`, `MB`, `GB`) use powers of 1000. Suffixes act as multipliers for count
+settings too: `FEUER_ACCESS_COUNT_HALF_LIFE=8KiB` means 8192 accesses.
+
 `CacheConfig::new` reads the sample size, rejecting invalid values.
 The sample size must be a positive `usize`. The builder overrides a valid
 environment setting for an individual cache:
@@ -112,27 +118,27 @@ let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?
 
 `FEUER_ACCESS_COUNT_HALF_LIFE` is process-wide and read once on first use,
 including in standalone memory caches and the memory benchmark. It must be a
-positive decimal `u64`; invalid values panic. Smaller values forget historical
+positive value fitting `u64`; invalid values panic. Smaller values forget historical
 popularity faster; larger values retain it longer. It affects both tiers'
 cost-aware scores, not trimming-history expiration.
 
 The access-age setting is process-wide and read once on first use. It also applies
 to standalone `MemoryCache` instances and the memory benchmark. Set it before
-starting the process. It must be a positive decimal `u64`; invalid values panic.
+starting the process. It must be positive and fit `u64`; invalid values panic.
 `18446744073709551615` effectively disables expiration, and `32768` restores the
 previous default. This setting affects range trimming, not decayed cost-aware
 scores or the per-object event cap.
 
 `FEUER_MAX_ACCESS_EVENTS_PER_KEY` independently sets that history cap. It is also
 process-wide, read once on first use, and applies to standalone memory caches and
-the memory benchmark. Set it to a positive decimal `usize`; invalid values panic.
+the memory benchmark. Set it to a positive value fitting `usize`; invalid values panic.
 For example, `FEUER_MAX_ACCESS_EVENTS_PER_KEY=256` retains up to 256 events per
 object for range trimming. Larger event histories use more metadata memory and
 increase trimming work. This setting does not change decayed scoring counters
 or the eviction sample size.
 
 `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` is also process-wide and read once on first
-use, including in standalone memory caches. It must be a nonnegative decimal
+use, including in standalone memory caches. It must be nonnegative and fit
 `u64`; invalid values panic. The default represents 125 ms at 80 MB/s. Set it to
 `0` to score only requested bytes saved per retained byte, without a fixed reward
 for avoiding a request. It affects both tiers' cost-aware scores.
