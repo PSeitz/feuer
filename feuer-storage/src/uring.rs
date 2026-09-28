@@ -3,13 +3,13 @@
 
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     fs::File,
     io,
     ops::Range,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     ptr::NonNull,
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, Weak, mpsc},
     thread::{self, JoinHandle},
 };
 
@@ -35,6 +35,8 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;
 // Caller inputs, caller-provided read destinations, and completed results are
 // outside this budget. A read into an existing buffer charges only its I/O slice.
 const MAX_IO_BUFFER_BYTES: usize = 64 * 1024 * 1024;
+// Per-queue idle allocations, separate from active I/O and caller-owned results.
+const IDLE_IO_BUFFER_CAPACITIES: [usize; 3] = [128 * 1024 * 1024, 256 * 1024 * 1024, 1024 * 1024 * 1024];
 
 #[cfg(test)]
 mod tests;
@@ -59,6 +61,7 @@ struct IoAdmissionBudgets {
     // Aligned I/O buffer memory budget: each permit covers 4 KiB.
     // Acquired before allocating the buffer.
     buffer_memory: Arc<Semaphore>,
+    idle_buffers: [Arc<Mutex<IdleIoBuffers>>; 3],
 }
 
 impl IoAdmissionBudgets {
@@ -66,7 +69,19 @@ impl IoAdmissionBudgets {
         Self {
             request_slots: Arc::new(Semaphore::new(max_in_flight)),
             buffer_memory: Arc::new(Semaphore::new(MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES)),
+            idle_buffers: IDLE_IO_BUFFER_CAPACITIES.map(|capacity| Arc::new(Mutex::new(IdleIoBuffers::new(capacity)))),
         }
+    }
+
+    fn buffer_pool(&self, length: usize) -> &Arc<Mutex<IdleIoBuffers>> {
+        let index = if length <= MAX_IO_CHUNK_BYTES {
+            0
+        } else if length < 10 * 1024 * 1024 {
+            1
+        } else {
+            2
+        };
+        &self.idle_buffers[index]
     }
 }
 
@@ -129,9 +144,17 @@ impl IoQueueHandle {
         Ok((request_permit, buffer_memory_permit))
     }
 
+    pub(crate) fn allocate_buffer(
+        &self,
+        length: usize,
+        read_guards: Vec<DiskRegionReadGuard>,
+    ) -> io::Result<AlignedIoBuffer> {
+        AlignedIoBuffer::new(length, read_guards, self.admission.buffer_pool(length))
+    }
+
     pub(crate) async fn execute(&self, offset: u64, length: usize, payload: &[u8]) -> io::Result<Bytes> {
         let permits = self.acquire(length).await?;
-        let mut buffer = AlignedIoBuffer::new(length, Vec::new())?;
+        let mut buffer = self.allocate_buffer(length, Vec::new())?;
         if self.operation == IoOperation::Write {
             buffer.as_mut_slice().copy_from_slice(payload);
         }
@@ -190,6 +213,23 @@ fn queue_stopped_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "io_uring queue stopped")
 }
 
+/// Idle aligned buffers indexed by allocation size, with a separate byte budget per pool.
+struct IdleIoBuffers {
+    by_length: BTreeMap<usize, Vec<AlignedIoBuffer>>,
+    bytes: usize,
+    capacity: usize,
+}
+
+impl IdleIoBuffers {
+    fn new(capacity: usize) -> Self {
+        Self {
+            by_length: BTreeMap::new(),
+            bytes: 0,
+            capacity,
+        }
+    }
+}
+
 pub(crate) struct AlignedIoBuffer {
     // Owned, aligned allocation whose address stays stable while the kernel uses it.
     ptr: NonNull<u8>,
@@ -197,11 +237,35 @@ pub(crate) struct AlignedIoBuffer {
     layout: Layout,
     // Whole-entry reads retain disk ownership even if the waiting caller is canceled.
     read_guards: Vec<DiskRegionReadGuard>,
+    // Results do not keep the queue's pool alive. Idle buffers have an empty Weak.
+    idle_buffers: Weak<Mutex<IdleIoBuffers>>,
 }
 
 impl AlignedIoBuffer {
-    pub(crate) fn new(length: usize, read_guards: Vec<DiskRegionReadGuard>) -> io::Result<Self> {
+    fn new(
+        length: usize,
+        read_guards: Vec<DiskRegionReadGuard>,
+        idle_buffers: &Arc<Mutex<IdleIoBuffers>>,
+    ) -> io::Result<Self> {
         assert!(length > 0);
+        let reused = {
+            let mut idle = idle_buffers.lock().unwrap();
+            let buffer = idle.by_length.get_mut(&length).and_then(Vec::pop);
+            if buffer.is_some() {
+                idle.bytes -= length;
+                if idle.by_length[&length].is_empty() {
+                    idle.by_length.remove(&length);
+                }
+            }
+            buffer
+        };
+        if let Some(mut buffer) = reused {
+            // Still initialized, but not zeroed: reads overwrite their destination
+            // before exposing bytes, and writes copy their complete payload.
+            buffer.read_guards = read_guards;
+            buffer.idle_buffers = Arc::downgrade(idle_buffers);
+            return Ok(buffer);
+        }
         let layout = Layout::from_size_align(length, DIRECT_IO_ALIGNMENT_BYTES).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -215,6 +279,7 @@ impl AlignedIoBuffer {
             ptr,
             layout,
             read_guards,
+            idle_buffers: Arc::downgrade(idle_buffers),
         })
     }
 
@@ -244,6 +309,24 @@ unsafe impl Send for AlignedIoBuffer {}
 
 impl Drop for AlignedIoBuffer {
     fn drop(&mut self) {
+        // Dropping an abandoned I/O result must release disk ownership even when memory is pooled.
+        self.read_guards.clear();
+        if let Some(idle_buffers) = self.idle_buffers.upgrade() {
+            let mut idle = idle_buffers.lock().unwrap();
+            let length = self.layout.size();
+            if length <= idle.capacity - idle.bytes {
+                // Transfer allocation ownership to the pool. Its empty Weak ensures that
+                // destroying the pool frees this allocation instead of returning it again.
+                idle.by_length.entry(length).or_default().push(Self {
+                    ptr: self.ptr,
+                    layout: self.layout,
+                    read_guards: Vec::new(),
+                    idle_buffers: Weak::new(),
+                });
+                idle.bytes += length;
+                return;
+            }
+        }
         // SAFETY: the matching allocation remains owned, and no kernel operation references it.
         unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
     }

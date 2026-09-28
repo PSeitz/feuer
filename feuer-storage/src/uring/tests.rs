@@ -13,7 +13,7 @@ fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) 
         .clone()
         .try_acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
         .unwrap();
-    let mut buffer = AlignedIoBuffer::new(length, Vec::new()).unwrap();
+    let mut buffer = AlignedIoBuffer::new(length, Vec::new(), queue.admission.buffer_pool(length)).unwrap();
     if operation == IoOperation::Write {
         buffer.as_mut_slice().fill(0x99);
     }
@@ -54,6 +54,122 @@ fn queue() -> IoQueue {
         receiver,
         pending: VecDeque::new(),
         active: (0..MAX_IN_FLIGHT_IO).map(|_| None).collect(),
+    }
+}
+
+#[test]
+fn aligned_buffer_returns_to_pool_only_after_last_bytes_reference() {
+    let page = DIRECT_IO_ALIGNMENT_BYTES;
+    let pool = Arc::new(Mutex::new(IdleIoBuffers::new(2 * page)));
+    let mut buffer = AlignedIoBuffer::new(page, Vec::new(), &pool).unwrap();
+    buffer.as_mut_slice().fill(0x99);
+    let address = buffer.ptr.as_ptr();
+    let bytes = buffer.into_bytes();
+    let slice = bytes.slice(1..);
+    drop(bytes);
+    assert_eq!(pool.lock().unwrap().bytes, 0);
+    let other = AlignedIoBuffer::new(page, Vec::new(), &pool).unwrap();
+    assert_ne!(other.ptr.as_ptr(), address);
+    assert_eq!(&slice[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES - 1]);
+    drop(slice);
+    assert_eq!(pool.lock().unwrap().bytes, page);
+    let reused = AlignedIoBuffer::new(page, Vec::new(), &pool).unwrap();
+    assert_eq!(reused.ptr.as_ptr(), address);
+    assert_eq!(pool.lock().unwrap().bytes, 0);
+    assert!(pool.lock().unwrap().by_length.is_empty());
+    // Outstanding results remain valid and do not keep the pool alive.
+    let weak = Arc::downgrade(&pool);
+    let bytes = reused.into_bytes();
+    drop(other);
+    drop(pool);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
+    drop(bytes);
+}
+
+#[test]
+fn aligned_buffer_pool_matches_sizes_and_bounds_idle_memory() {
+    let page = DIRECT_IO_ALIGNMENT_BYTES;
+    let pool = Arc::new(Mutex::new(IdleIoBuffers::new(3 * page)));
+    let small = AlignedIoBuffer::new(page, Vec::new(), &pool).unwrap();
+    let address = small.ptr.as_ptr();
+    drop(small);
+    let larger = AlignedIoBuffer::new(2 * page, Vec::new(), &pool).unwrap();
+    assert_ne!(larger.ptr.as_ptr(), address);
+    assert_eq!(pool.lock().unwrap().bytes, page);
+    drop(larger);
+    assert_eq!(pool.lock().unwrap().bytes, 3 * page);
+    // These unmatched allocations cannot fit in the full pool.
+    drop(AlignedIoBuffer::new(3 * page, Vec::new(), &pool).unwrap());
+    drop(AlignedIoBuffer::new(4 * page, Vec::new(), &pool).unwrap());
+    assert_eq!(pool.lock().unwrap().bytes, 3 * page);
+    assert_eq!(pool.lock().unwrap().by_length.len(), 2);
+    let reused = AlignedIoBuffer::new(page, Vec::new(), &pool).unwrap();
+    assert_eq!(reused.ptr.as_ptr(), address);
+    assert_eq!(pool.lock().unwrap().bytes, 2 * page);
+    drop(reused);
+    assert_eq!(pool.lock().unwrap().bytes, 3 * page);
+}
+
+#[test]
+fn small_medium_and_large_buffer_pools_have_independent_budgets() {
+    let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_IO);
+    let mib = 1024 * 1024;
+    for (length, index, capacity) in [
+        (DIRECT_IO_ALIGNMENT_BYTES, 0, 128 * mib),
+        (mib, 0, 128 * mib),
+        (mib + DIRECT_IO_ALIGNMENT_BYTES, 1, 256 * mib),
+        (10 * mib - DIRECT_IO_ALIGNMENT_BYTES, 1, 256 * mib),
+        (10 * mib, 2, 1024 * mib),
+        (20 * mib, 2, 1024 * mib),
+    ] {
+        let pool = admission.buffer_pool(length);
+        assert!(Arc::ptr_eq(pool, &admission.idle_buffers[index]));
+        assert_eq!(pool.lock().unwrap().capacity, capacity);
+    }
+    for length in [DIRECT_IO_ALIGNMENT_BYTES, 2 * mib, 10 * mib] {
+        let pool = admission.buffer_pool(length);
+        // Exercise each independent cap without allocating gigabytes for the test.
+        pool.lock().unwrap().capacity = length;
+        let first = AlignedIoBuffer::new(length, Vec::new(), pool).unwrap();
+        let second = AlignedIoBuffer::new(length, Vec::new(), pool).unwrap();
+        let address = first.ptr.as_ptr();
+        drop(first);
+        drop(second);
+        assert_eq!(pool.lock().unwrap().bytes, length);
+        let reused = AlignedIoBuffer::new(length, Vec::new(), pool).unwrap();
+        assert_eq!(reused.ptr.as_ptr(), address);
+    }
+    assert_eq!(
+        admission.idle_buffers[0].lock().unwrap().bytes,
+        DIRECT_IO_ALIGNMENT_BYTES
+    );
+    assert_eq!(admission.idle_buffers[1].lock().unwrap().bytes, 2 * mib);
+    assert_eq!(admission.idle_buffers[2].lock().unwrap().bytes, 10 * mib);
+}
+
+#[test]
+fn pooled_buffers_release_read_guards() {
+    use crate::allocation::{CHUNK_BYTES, DiskChunkAllocator};
+
+    let page = DIRECT_IO_ALIGNMENT_BYTES;
+    let pool = Arc::new(Mutex::new(IdleIoBuffers::new(page)));
+    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
+    for return_bytes in [false, true] {
+        let region = allocator.reserve_chunks(1).unwrap().pop().unwrap();
+        let buffer = AlignedIoBuffer::new(page, vec![region.read_guard()], &pool).unwrap();
+        drop(region);
+        assert_eq!(allocator.available_bytes(), 0);
+        if return_bytes {
+            let bytes = buffer.into_bytes();
+            assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
+            drop(bytes);
+        } else {
+            drop(buffer);
+        }
+        assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
+        assert_eq!(pool.lock().unwrap().bytes, page);
+        assert!(pool.lock().unwrap().by_length[&page][0].read_guards.is_empty());
     }
 }
 
@@ -281,7 +397,7 @@ async fn reads_into_consecutive_slices_without_reallocating() {
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     write.execute(0, page, &vec![0x99; page]).await.unwrap();
     write.execute((2 * page) as u64, page, &vec![0x77; page]).await.unwrap();
-    let mut buffer = AlignedIoBuffer::new(3 * page, Vec::new()).unwrap();
+    let mut buffer = read.allocate_buffer(3 * page, Vec::new()).unwrap();
     buffer.as_mut_slice().fill(0x55);
     let address = buffer.ptr.as_ptr() as usize;
     buffer = read.read_into(0, buffer, 0..page).await.unwrap();
@@ -301,7 +417,13 @@ fn canceled_read_retains_destination_and_disk_guard_until_completion() {
     let region = allocator.reserve_chunks(1).unwrap().pop().unwrap();
     let mut queue = queue();
     let (mut read, reply) = request(&queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
-    read.io_buffer = AlignedIoBuffer::new(2 * DIRECT_IO_ALIGNMENT_BYTES, vec![region.read_guard()]).unwrap();
+    read.io_buffer = AlignedIoBuffer::new(
+        2 * DIRECT_IO_ALIGNMENT_BYTES,
+        vec![region.read_guard()],
+        queue.admission.buffer_pool(2 * DIRECT_IO_ALIGNMENT_BYTES),
+    )
+    .unwrap();
+    let address = read.io_buffer.ptr.as_ptr();
     read.destination = DIRECT_IO_ALIGNMENT_BYTES..2 * DIRECT_IO_ALIGNMENT_BYTES;
     drop(region);
     queue.pending.push_back(read);
@@ -311,8 +433,28 @@ fn canceled_read_retains_destination_and_disk_guard_until_completion() {
     queue.schedule();
     assert_eq!(allocator.available_bytes(), 0);
     assert!(queue.active[0].is_some());
+    assert!(
+        !queue
+            .admission
+            .buffer_pool(2 * DIRECT_IO_ALIGNMENT_BYTES)
+            .lock()
+            .unwrap()
+            .by_length
+            .contains_key(&(2 * DIRECT_IO_ALIGNMENT_BYTES))
+    );
     queue.run().unwrap();
     assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
+    assert_eq!(
+        queue
+            .admission
+            .buffer_pool(2 * DIRECT_IO_ALIGNMENT_BYTES)
+            .lock()
+            .unwrap()
+            .by_length[&(2 * DIRECT_IO_ALIGNMENT_BYTES)][0]
+            .ptr
+            .as_ptr(),
+        address
+    );
 }
 
 #[test]

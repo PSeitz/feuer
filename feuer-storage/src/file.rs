@@ -34,7 +34,11 @@ struct DataFileState {
 /// up to 64 reads and 8 writes. Each queue schedules in arrival order without
 /// checking for conflicts. Submission order does not guarantee completion order.
 /// Each queue budgets 64 MiB of active I/O slices. Read destinations are
-/// allocated separately and are not bounded by that budget.
+/// allocated separately and are not bounded by that budget. Each queue has
+/// separate pools for idle aligned buffers: up to 128 MiB for buffers <=1 MiB,
+/// 256 MiB for buffers >1 MiB and <10 MiB, and 1024 MiB for buffers >=10 MiB.
+/// Buffers become available for same-sized reuse after the last result reference
+/// is dropped; these limits exclude active buffers and caller-owned results.
 ///
 /// # Caller-owned concurrency and cancellation
 ///
@@ -237,7 +241,11 @@ impl DataFile {
             path: self.state.data_path.clone(),
             source,
         };
-        let mut buffer = uring::AlignedIoBuffer::new(length, guards).map_err(io_error)?;
+        let mut buffer = self
+            .state
+            .read_queue
+            .allocate_buffer(length, guards)
+            .map_err(io_error)?;
         let mut destination = 0;
         for range in ranges {
             for offset in (range.start..range.end).step_by(uring::MAX_IO_CHUNK_BYTES) {
@@ -428,6 +436,28 @@ mod tests {
             std::fs::metadata(directory.join(DATA_FILE_NAME)).unwrap().len(),
             CAPACITY
         );
+    }
+
+    #[tokio::test]
+    async fn disk_reads_reuse_released_buffers_and_overwrite_old_contents() {
+        let temp = tempdir().unwrap();
+        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
+        let length = 2 * uring::DIRECT_IO_ALIGNMENT_BYTES;
+        file.write_at(0, &Bytes::from(vec![0x55; length])).await.unwrap();
+        let bytes = file.read_at(0, length).await.unwrap();
+        let address = bytes.as_ptr();
+        let slice = bytes.slice(1..);
+        drop(bytes);
+        file.write_at(0, &Bytes::from(vec![0x99; length])).await.unwrap();
+        let other = file.read_at(0, length).await.unwrap();
+        assert_ne!(other.as_ptr(), address);
+        assert_eq!(&slice[..], &vec![0x55; length - 1]);
+        drop(slice);
+        let reused = file.read_at(0, length).await.unwrap();
+        assert_eq!(reused.as_ptr(), address);
+        assert_eq!(&reused[..], &vec![0x99; length]);
+        drop(file);
+        assert_eq!(reused, other);
     }
 
     #[tokio::test]
