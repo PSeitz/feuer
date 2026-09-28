@@ -1,0 +1,1 @@
+{"read_bytes":1048576,"read_qd":32,"result":{"cpu_pct":125.719435435,"read":{"MB_s":3001.5488,"completed":57250,"iops":2862.5,"p50_us":6223,"p95_us":10575,"p99_us":11135},"seconds":20,"write":{"MB_s":756.1805823999999,"completed":14423,"iops":721.15,"p50_us":6147,"p95_us":10647,"p99_us":11159}},"write_qd":8}

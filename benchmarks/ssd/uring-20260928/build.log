@@ -1,0 +1,126 @@
+    Updating crates.io index
+     Locking 50 packages to latest Rust 1.98.0 compatible versions
+ Downloading crates ...
+  Downloaded adler2 v2.0.1
+  Downloaded byteorder v1.5.0
+  Downloaded crossbeam-channel v0.5.17
+  Downloaded crc32fast v1.5.2
+  Downloaded futures-core v0.3.34
+  Downloaded futures-macro v0.3.34
+  Downloaded base64 v0.22.1
+  Downloaded futures-io v0.3.34
+  Downloaded thiserror v2.0.21
+  Downloaded futures-sink v0.3.34
+  Downloaded futures-task v0.3.34
+  Downloaded unicode-ident v1.0.26
+  Downloaded thiserror-impl v2.0.21
+  Downloaded futures-channel v0.3.34
+  Downloaded miniz_oxide v0.9.1
+  Downloaded num-traits v0.2.19
+  Downloaded simd-adler32 v0.3.10
+  Downloaded crossbeam-utils v0.8.23
+  Downloaded flate2 v1.1.10
+  Downloaded futures-executor v0.3.34
+  Downloaded futures v0.3.34
+  Downloaded nom v8.0.0
+  Downloaded futures-util v0.3.34
+  Downloaded zlib-rs v0.6.8
+  Downloaded syn v3.0.6
+  Downloaded hdrhistogram v7.6.0
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling memchr v2.8.3
+   Compiling pin-project-lite v0.2.17
+   Compiling crossbeam-utils v0.8.23
+   Compiling cfg-if v1.0.5
+   Compiling autocfg v1.5.1
+   Compiling futures-core v0.3.34
+   Compiling futures-sink v0.3.34
+   Compiling crc32fast v1.5.2
+   Compiling zmij v1.0.23
+   Compiling adler2 v2.0.1
+   Compiling futures-task v0.3.34
+   Compiling libc v0.2.189
+   Compiling slab v0.4.12
+   Compiling serde_core v1.0.229
+   Compiling simd-adler32 v0.3.10
+   Compiling futures-io v0.3.34
+   Compiling thiserror v2.0.21
+   Compiling serde_json v1.0.151
+   Compiling once_cell v1.21.4
+   Compiling io-uring v0.7.15
+   Compiling base64 v0.22.1
+   Compiling bitflags v2.13.2
+   Compiling itoa v1.0.18
+   Compiling byteorder v1.5.0
+   Compiling bytes v1.12.1
+   Compiling futures-channel v0.3.34
+   Compiling miniz_oxide v0.9.1
+   Compiling tracing-core v0.1.36
+   Compiling num-traits v0.2.19
+   Compiling nom v8.0.0
+   Compiling flate2 v1.1.10
+   Compiling crossbeam-channel v0.5.17
+   Compiling syn v3.0.6
+   Compiling syn v2.0.119
+   Compiling hdrhistogram v7.6.0
+   Compiling futures-macro v0.3.34
+   Compiling tokio-macros v2.7.2
+   Compiling thiserror-impl v2.0.21
+   Compiling tokio v1.53.1
+   Compiling futures-util v0.3.34
+   Compiling tracing-attributes v0.1.31
+   Compiling tracing v0.1.44
+   Compiling futures-executor v0.3.34
+   Compiling futures v0.3.34
+   Compiling feuer-uring-bench v0.1.0 (/home/ubuntu/ssd-bench-results/feuer-uring-20260928/benchmarks/ssd/uring-20260928)
+warning: enum `DataFileErrorKind` is never used
+  --> src/../../../../feuer-storage/src/error.rs:48:10
+   |
+48 | pub enum DataFileErrorKind {
+   |          ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `as_str` is never used
+  --> src/../../../../feuer-storage/src/error.rs:65:18
+   |
+63 | impl DataFileErrorKind {
+   | ---------------------- method in this implementation
+64 |     /// Returns the stable bounded label used by traces and metrics.
+65 |     pub const fn as_str(self) -> &'static str {
+   |                  ^^^^^^
+
+warning: enum `DataFileError` is never used
+  --> src/../../../../feuer-storage/src/error.rs:86:10
+   |
+86 | pub enum DataFileError {
+   |          ^^^^^^^^^^^^^
+
+warning: methods `kind` and `operation` are never used
+   --> src/../../../../feuer-storage/src/error.rs:158:18
+    |
+156 | impl DataFileError {
+    | ------------------ methods in this implementation
+157 |     /// Returns the stable category of this error.
+158 |     pub const fn kind(&self) -> DataFileErrorKind {
+    |                  ^^^^
+...
+170 |     pub const fn operation(&self) -> IoOperation {
+    |                  ^^^^^^^^^
+
+warning: type alias `DataFileResult` is never used
+   --> src/../../../../feuer-storage/src/error.rs:186:10
+    |
+186 | pub type DataFileResult<T> = std::result::Result<T, DataFileError>;
+    |          ^^^^^^^^^^^^^^
+
+warning: constant `MAX_IO_CHUNK_BYTES` is never used
+  --> src/../../../../feuer-storage/src/uring.rs:26:18
+   |
+26 | pub(crate) const MAX_IO_CHUNK_BYTES: usize = 1024 * 1024;
+   |                  ^^^^^^^^^^^^^^^^^^
+
+warning: `feuer-uring-bench` (bin "feuer-uring-bench") generated 6 warnings
+    Finished `release` profile [optimized] target(s) in 5.65s

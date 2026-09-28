@@ -1,0 +1,240 @@
+diff --git a/README.md b/README.md
+index d4b1859..f0fb544 100644
+--- a/README.md
++++ b/README.md
+@@ -102,6 +102,19 @@ or disk eviction decision. `CacheConfig::new` reads this variable, defaulting to
+ that cache. With S3-FIFO, this limits queue-head processing per decision instead of sampled candidates;
+ memory retries after promotions or second chances, while disk retains its per-batch work limits.
+ 
++### Cost-aware access age
++
++Set `FEUER_MAX_ACCESS_AGE_ACCESSES=65536` to retain request evidence for up to
++65,536 later successful accesses to the same shard. The default is 32,768.
++The shared memory/disk history reads this process-wide setting once on first use;
++it also applies to standalone `MemoryCache` and the memory benchmark. Set it before
++starting the process. A set value must be a positive decimal `u64`; invalid values
++panic. `18446744073709551615` effectively disables age expiration.
++
++This changes cost-aware scoring and range-trimming evidence, not S3-FIFO counters
++or the separate limit of 64 recorded requests per object. Entries can still be
++evicted under capacity pressure.
++
+ ## Metrics
+ 
+ `TieredMemoryDiskCache::open_with_metrics(config, &registry).await` accepts a
+diff --git a/benchmarks/memory/README.md b/benchmarks/memory/README.md
+index 2139891..ada586d 100644
+--- a/benchmarks/memory/README.md
++++ b/benchmarks/memory/README.md
+@@ -28,7 +28,8 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
+ 
+ - `feuer-value-density`: `MemoryCache` with bounded exact access evidence
+   valued at one modeled source request plus its requested bytes. Evidence
+-  expires after 32,768 later successful same-shard accesses. Sampled eviction
++  expires after 32,768 later successful same-shard accesses by default
++  (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this limit). Sampled eviction
+   compares active retrieval value per retained byte. After a
+   64-successful-access grace, pressure trims the selected victim to its observed
+   request ranges when useful.
+@@ -88,6 +89,16 @@ COALESCING_DISTANCE_BYTES=5MB WHOLE_SPLIT_THRESHOLD_BYTES=8MiB \
+   cargo run --release -p feuer-memory-bench -- --capacity 1GiB
+ ```
+ 
++To change Feuer's cost-aware evidence lifetime without rebuilding:
++
++```bash
++FEUER_MAX_ACCESS_AGE_ACCESSES=65536 cargo run --release -p feuer-memory-bench -- \
++  --capacity 1GiB --shards 1 --downloader exact --warmup-iterations 1
++```
++
++The limit counts same-shard successful accesses, not milliseconds. This setting
++does not change either Foyer policy or the 64-requests-per-object history cap.
++
+ To measure a cache warmed by one complete trace iteration, add
+ `--warmup-iterations 1`. Warm-up traffic is excluded from the reported rates
+ and elapsed time. Coalescing uses trace lookahead rather than sleeping, so its
+diff --git a/benchmarks/memory/src/main.rs b/benchmarks/memory/src/main.rs
+index 21aafcc..bc25e38 100644
+--- a/benchmarks/memory/src/main.rs
++++ b/benchmarks/memory/src/main.rs
+@@ -11,7 +11,7 @@ use std::{
+ use bytes::Bytes;
+ use clap::{Parser, ValueEnum};
+ use feuer_memory::MemoryCache;
+-use feuer_types::{ByteRange, Download, ObjectKey};
++use feuer_types::{ByteRange, Download, ObjectKey, retention::MAX_ACCESS_AGE_ACCESSES};
+ use foyer_memory::{Cache as FoyerCache, CacheBuilder, CostAwareConfig, S3FifoConfig};
+ 
+ const PINNED_FOYER_REVISION: &str = "14c2d88b9d7dd2135bfc723d0967debb59532b4b";
+@@ -370,7 +370,8 @@ fn main() -> Result<(), String> {
+ 
+     if args.csv {
+         eprintln!(
+-            "foyer_revision={PINNED_FOYER_REVISION} foyer_source=https://github.com/PSeitz/foyer foyer_cost_estimator=residence_access_rate foyer_cost_fixed_retrieval={SOURCE_FIXED_EQUIVALENT_BYTES} foyer_cost_sample_size={FOYER_COST_SAMPLE_SIZE} trace={TRACE_FILE} shards={:?} downloaders={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
++            "foyer_revision={PINNED_FOYER_REVISION} foyer_source=https://github.com/PSeitz/foyer foyer_cost_estimator=residence_access_rate foyer_cost_fixed_retrieval={SOURCE_FIXED_EQUIVALENT_BYTES} foyer_cost_sample_size={FOYER_COST_SAMPLE_SIZE} feuer_max_access_age_accesses={} trace={TRACE_FILE} shards={:?} downloaders={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
++            *MAX_ACCESS_AGE_ACCESSES,
+             args.shards,
+             args.downloaders,
+             args.warmup_iterations,
+@@ -670,6 +671,7 @@ fn print_human_header(args: &ReplayArgs, workload: &ReplayWorkload) {
+     println!("Feuer memory benchmark");
+     println!("Trace: {TRACE_FILE} ({} operations)", workload.requests.len());
+     println!("Shards: {shards} | Warm-up passes: {}", args.warmup_iterations);
++    println!("Feuer access age: {} same-shard accesses", *MAX_ACCESS_AGE_ACCESSES);
+     println!(
+         "Expanded: {COALESCING_WINDOW_MILLIS}-ms coalescing within {} | Whole below {}",
+         format_decimal_bytes(workload.download_config.coalescing_distance_bytes),
+diff --git a/feuer-memory/src/store/tests.rs b/feuer-memory/src/store/tests.rs
+index f3e2fc3..8c5642f 100644
+--- a/feuer-memory/src/store/tests.rs
++++ b/feuer-memory/src/store/tests.rs
+@@ -409,7 +409,7 @@ fn stale_frequency_eventually_expires() {
+     for _ in 0..8 {
+         cache.record_access(&stale, range(0, 1));
+     }
+-    for _ in 0..=MAX_ACCESS_AGE_ACCESSES {
++    for _ in 0..=*MAX_ACCESS_AGE_ACCESSES {
+         cache.record_access(&clock, range(0, 1));
+     }
+     cache.record_access(&fresh, range(0, 1));
+diff --git a/feuer-memory/src/store/tests/s3_fifo.rs b/feuer-memory/src/store/tests/s3_fifo.rs
+index 25c8e82..bec506f 100644
+--- a/feuer-memory/src/store/tests/s3_fifo.rs
++++ b/feuer-memory/src/store/tests/s3_fifo.rs
+@@ -35,21 +35,13 @@ fn callback_misses_do_not_promote_one_hit_ranges() {
+     let cache = s3_cache(30);
+     let hot = "hot".to_owned();
+     let requested = range(0, 1);
+-    cache.insert_and_record(
+-        hot.clone(),
+-        download(range(0, 10), Bytes::from(vec![1; 10])),
+-        requested,
+-    );
++    cache.insert_and_record(hot.clone(), download(range(0, 10), Bytes::from(vec![1; 10])), requested);
+     assert_eq!(accessed_ranges(&cache, &hot), vec![requested]);
+     cache.get(&hot, range(5, 6)).unwrap();
+     for key in ["a", "b", "c", "d", "e"] {
+         let key = key.to_owned();
+         assert!(cache.get(&key, requested).is_none());
+-        cache.insert_and_record(
+-            key.clone(),
+-            download(range(0, 10), Bytes::from(vec![1; 10])),
+-            requested,
+-        );
++        cache.insert_and_record(key.clone(), download(range(0, 10), Bytes::from(vec![1; 10])), requested);
+         assert_eq!(accessed_ranges(&cache, &key), vec![requested]);
+     }
+     assert_eq!(cache.used_bytes(), 30);
+diff --git a/feuer-types/src/retention.rs b/feuer-types/src/retention.rs
+index 50389b5..f08c926 100644
+--- a/feuer-types/src/retention.rs
++++ b/feuer-types/src/retention.rs
+@@ -3,9 +3,10 @@
+ use std::{
+     cmp::Ordering,
+     collections::{HashMap, VecDeque, hash_map::DefaultHasher},
++    ffi::OsStr,
+     hash::{Hash, Hasher},
+     sync::{
+-        Arc, Mutex, MutexGuard, Weak,
++        Arc, LazyLock, Mutex, MutexGuard, Weak,
+         atomic::{AtomicU64, Ordering as AtomicOrdering},
+     },
+ };
+@@ -138,7 +139,21 @@ pub const FIXED_RETRIEVAL_EQUIVALENT_BYTES: u64 = 10_000_000;
+ /// Maximum exact access events retained for one object key.
+ pub const MAX_ACCESS_EVENTS_PER_KEY: usize = 64;
+ /// Maximum same-shard successful-access age that still contributes.
+-pub const MAX_ACCESS_AGE_ACCESSES: u64 = 32_768;
++/// Reads `FEUER_MAX_ACCESS_AGE_ACCESSES` once on first use, defaulting to 32,768.
++/// Panics if set to anything other than a positive `u64` integer.
++pub static MAX_ACCESS_AGE_ACCESSES: LazyLock<u64> =
++    LazyLock::new(|| parse_max_access_age(std::env::var_os("FEUER_MAX_ACCESS_AGE_ACCESSES").as_deref()));
++
++fn parse_max_access_age(value: Option<&OsStr>) -> u64 {
++    let Some(value) = value else {
++        return 32_768;
++    };
++    value
++        .to_str()
++        .and_then(|value| value.parse::<u64>().ok())
++        .filter(|&value| value > 0)
++        .expect("FEUER_MAX_ACCESS_AGE_ACCESSES must be a positive u64 integer")
++}
+ 
+ /// One exact requested interval and its shard-local observation clock.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -214,7 +229,7 @@ impl RangeAccessHistory {
+ }
+ 
+ fn is_active(event: RangeAccess, access_clock: u64) -> bool {
+-    access_clock.saturating_sub(event.observed_at_access) <= MAX_ACCESS_AGE_ACCESSES
++    access_clock.saturating_sub(event.observed_at_access) <= *MAX_ACCESS_AGE_ACCESSES
+ }
+ 
+ #[cfg(test)]
+@@ -225,6 +240,45 @@ mod tests {
+         ByteRange::new(start, end).unwrap()
+     }
+ 
++    #[test]
++    fn parses_max_access_age() {
++        assert_eq!(parse_max_access_age(None), 32_768);
++        for value in [1, 65_536, 131_072, u64::MAX] {
++            assert_eq!(parse_max_access_age(Some(OsStr::new(&value.to_string()))), value);
++        }
++        for value in ["", "0", "-1", "64k", "1.5", " 65536", "18446744073709551616"] {
++            assert!(std::panic::catch_unwind(|| parse_max_access_age(Some(OsStr::new(value)))).is_err());
++        }
++        #[cfg(unix)]
++        {
++            use std::os::unix::ffi::OsStrExt;
++            assert!(std::panic::catch_unwind(|| parse_max_access_age(Some(OsStr::from_bytes(b"\xff")))).is_err());
++        }
++    }
++
++    #[test]
++    fn access_age_environment_override() {
++        // A fresh process tests environment loading without mutating this test process's environment.
++        if std::env::var_os("FEUER_TEST_ACCESS_AGE_CHILD").is_some() {
++            assert_eq!(*MAX_ACCESS_AGE_ACCESSES, 65_536);
++            let mut history = RangeAccessHistory::default();
++            history.record(range(0, 1), 0);
++            assert!(history.covered_retrieval_cost(range(0, 1), 65_536) > 0);
++            assert_eq!(history.covered_retrieval_cost(range(0, 1), 65_537), 0);
++            assert_eq!(history.active_ranges(65_537).count(), 0);
++            history.record(range(1, 2), 65_537);
++            assert_eq!(history.ranges(), vec![range(1, 2)]);
++            return;
++        }
++        let output = std::process::Command::new(std::env::current_exe().unwrap())
++            .args(["--exact", "retention::tests::access_age_environment_override"])
++            .env("FEUER_TEST_ACCESS_AGE_CHILD", "1")
++            .env("FEUER_MAX_ACCESS_AGE_ACCESSES", "65536")
++            .output()
++            .unwrap();
++        assert!(output.status.success(), "{output:?}");
++    }
++
+     #[test]
+     fn owners_share_evidence_and_release_registry_state() {
+         let histories = ObjectAccessHistories::new(1);
+@@ -309,15 +363,15 @@ mod tests {
+         let expected = 2 * (FIXED_RETRIEVAL_EQUIVALENT_BYTES + requested.len());
+         assert_eq!(history.covered_retrieval_cost(cached_range, 0), expected);
+         assert_eq!(
+-            history.covered_retrieval_cost(cached_range, MAX_ACCESS_AGE_ACCESSES),
++            history.covered_retrieval_cost(cached_range, *MAX_ACCESS_AGE_ACCESSES),
+             expected
+         );
+         assert_eq!(
+-            history.covered_retrieval_cost(cached_range, MAX_ACCESS_AGE_ACCESSES + 1),
++            history.covered_retrieval_cost(cached_range, *MAX_ACCESS_AGE_ACCESSES + 1),
+             0
+         );
+ 
+-        history.record(range(6, 7), MAX_ACCESS_AGE_ACCESSES + 1);
++        history.record(range(6, 7), *MAX_ACCESS_AGE_ACCESSES + 1);
+         assert_eq!(history.ranges(), vec![range(6, 7)]);
+     }
+ 
