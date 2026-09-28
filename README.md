@@ -85,7 +85,7 @@ requested ranges instead of evicting it entirely.
 
 Both tiers share access history for each object. A successful lookup records its
 requested range once; storing downloaded bytes alone does not count as an access.
-History retains at most 64 requests per object. Each request expires after
+History retains at most 64 requests per object by default. Each request expires after
 262,144 later successful accesses to the same shard, not after a wall-clock
 interval. History is not persisted.
 
@@ -111,6 +111,8 @@ hits. S3-FIFO evicts whole entries and does not trim memory ranges.
 | `FEUER_EVICTION_POLICY` | `cost-aware` | Select `cost-aware` or `s3fifo` for both tiers. |
 | `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Limit candidates examined per eviction decision, or queue-head processing for S3-FIFO. |
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Set the cost-aware history lifetime in successful same-shard accesses. |
+| `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Limit recorded request events per object, shared by both tiers. |
+| `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed source-request cost added to requested bytes when scoring cost-aware retention. |
 
 `CacheConfig::new` reads the policy and sample size, rejecting invalid values.
 The sample size must be a positive `usize`. Builder methods override valid
@@ -128,8 +130,22 @@ The access-age setting is process-wide and read once on first use. It also appli
 to standalone `MemoryCache` instances and the memory benchmark. Set it before
 starting the process. It must be a positive decimal `u64`; invalid values panic.
 `18446744073709551615` effectively disables expiration, and `32768` restores the
-previous default. This setting does not affect S3-FIFO counters, the 64-request
+previous default. This setting does not affect S3-FIFO counters, the per-object
 history cap, or eviction under capacity pressure.
+
+`FEUER_MAX_ACCESS_EVENTS_PER_KEY` independently sets that history cap. It is also
+process-wide, read once on first use, and applies to standalone memory caches and
+the memory benchmark. Set it to a positive decimal `usize`; invalid values panic.
+For example, `FEUER_MAX_ACCESS_EVENTS_PER_KEY=256` retains up to 256 events per
+object. Larger histories use more metadata memory and increase scoring work;
+metadata is not included in payload-capacity accounting. This setting does not
+change the eviction sample size or S3-FIFO counters.
+
+`FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` is also process-wide and read once on first
+use, including in standalone memory caches. It must be a nonnegative decimal
+`u64`; invalid values panic. The default represents 125 ms at 80 MB/s. Set it to
+`0` to score only requested bytes saved per retained byte, without a fixed reward
+for avoiding a request. It affects both tiers' cost-aware scores, not S3-FIFO.
 
 ## Metrics
 

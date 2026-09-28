@@ -96,8 +96,29 @@ FEUER_MAX_ACCESS_AGE_ACCESSES=65536 cargo run --release -p feuer-memory-bench --
   --capacity 1GiB --shards 1 --downloader exact --warmup-iterations 1
 ```
 
-The limit counts same-shard successful accesses, not milliseconds. This setting
-does not change either Foyer policy or the 64-requests-per-object history cap.
+The limit counts same-shard successful accesses, not milliseconds. It does not
+change the per-object history cap. To change that cap independently (default 64):
+
+```bash
+FEUER_MAX_ACCESS_EVENTS_PER_KEY=256 cargo run --release -p feuer-memory-bench -- \
+  --capacity 1GiB --shards 1 --downloader exact --warmup-iterations 1
+```
+
+Both history settings are read once per process and do not change either Foyer
+policy. Larger histories increase metadata memory and scoring work.
+
+`FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` changes Feuer's fixed per-request scoring
+credit (default `10000000`). It is read once per process and accepts nonnegative
+`u64` integers, including `0` for bytes-only scoring. For example:
+
+```bash
+FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES=0 FEUER_MAX_ACCESS_EVENTS_PER_KEY=256 \
+  cargo run --release -p feuer-memory-bench -- \
+  --capacity 1GiB --shards 1 --downloader exact --warmup-iterations 1
+```
+
+This setting does not change Foyer's scoring configuration or the benchmark's
+reported source-cost model, which both retain the fixed 10,000,000-byte cost.
 
 To measure a cache warmed by one complete trace iteration, add
 `--warmup-iterations 1`. Warm-up traffic is excluded from the reported rates

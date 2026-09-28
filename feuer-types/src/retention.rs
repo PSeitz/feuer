@@ -134,15 +134,43 @@ impl Drop for ObjectAccessHistory {
     }
 }
 
-/// Target 125-ms source-request cost at 80 MB/s, as equivalent transferred bytes.
-pub const FIXED_RETRIEVAL_EQUIVALENT_BYTES: u64 = 10_000_000;
+/// Fixed source-request cost as equivalent transferred bytes; zero scores only bytes.
+/// Reads `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` once on first use, defaulting to
+/// 10,000,000 (125 ms at 80 MB/s). Panics unless set to a nonnegative `u64` integer.
+pub static FIXED_RETRIEVAL_EQUIVALENT_BYTES: LazyLock<u64> = LazyLock::new(|| {
+    parse_fixed_retrieval_equivalent_bytes(std::env::var_os("FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES").as_deref())
+});
 /// Maximum exact access events retained for one object key.
-pub const MAX_ACCESS_EVENTS_PER_KEY: usize = 64;
+/// Reads `FEUER_MAX_ACCESS_EVENTS_PER_KEY` once on first use, defaulting to 64.
+/// Panics if set to anything other than a positive `usize` integer.
+pub static MAX_ACCESS_EVENTS_PER_KEY: LazyLock<usize> =
+    LazyLock::new(|| parse_max_access_events_per_key(std::env::var_os("FEUER_MAX_ACCESS_EVENTS_PER_KEY").as_deref()));
 /// Maximum same-shard successful-access age that still contributes.
 /// Reads `FEUER_MAX_ACCESS_AGE_ACCESSES` once on first use, defaulting to 262,144.
 /// Panics if set to anything other than a positive `u64` integer.
 pub static MAX_ACCESS_AGE_ACCESSES: LazyLock<u64> =
     LazyLock::new(|| parse_max_access_age(std::env::var_os("FEUER_MAX_ACCESS_AGE_ACCESSES").as_deref()));
+
+fn parse_fixed_retrieval_equivalent_bytes(value: Option<&OsStr>) -> u64 {
+    let Some(value) = value else {
+        return 10_000_000;
+    };
+    value
+        .to_str()
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES must be a nonnegative u64 integer")
+}
+
+fn parse_max_access_events_per_key(value: Option<&OsStr>) -> usize {
+    let Some(value) = value else {
+        return 64;
+    };
+    value
+        .to_str()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .expect("FEUER_MAX_ACCESS_EVENTS_PER_KEY must be a positive usize integer")
+}
 
 fn parse_max_access_age(value: Option<&OsStr>) -> u64 {
     let Some(value) = value else {
@@ -176,7 +204,7 @@ impl RangeAccessHistory {
     fn record(&mut self, range: ByteRange, access_clock: u64) {
         self.generation = self.generation.saturating_add(1);
         self.expire(access_clock);
-        if self.events.len() == MAX_ACCESS_EVENTS_PER_KEY {
+        if self.events.len() == *MAX_ACCESS_EVENTS_PER_KEY {
             self.events.pop_front();
         }
         self.events.push_back(RangeAccess {
@@ -195,10 +223,11 @@ impl RangeAccessHistory {
 
     /// Sums modeled source retrieval cost for active requests covered by a cached range.
     pub fn covered_retrieval_cost(&self, cached_range: ByteRange, access_clock: u64) -> u64 {
+        let fixed_retrieval_cost = *FIXED_RETRIEVAL_EQUIVALENT_BYTES;
         self.events
             .iter()
             .filter(|event| is_active(**event, access_clock) && cached_range.contains(event.range))
-            .map(|event| FIXED_RETRIEVAL_EQUIVALENT_BYTES.saturating_add(event.range.len()))
+            .map(|event| fixed_retrieval_cost.saturating_add(event.range.len()))
             .fold(0, u64::saturating_add)
     }
 
@@ -238,6 +267,108 @@ mod tests {
 
     fn range(start: u64, end: u64) -> ByteRange {
         ByteRange::new(start, end).unwrap()
+    }
+
+    #[test]
+    fn parses_fixed_retrieval_equivalent_bytes() {
+        assert_eq!(parse_fixed_retrieval_equivalent_bytes(None), 10_000_000);
+        for value in [0, 1, 1_000_000, 10_000_000, u64::MAX] {
+            assert_eq!(
+                parse_fixed_retrieval_equivalent_bytes(Some(OsStr::new(&value.to_string()))),
+                value
+            );
+        }
+        for value in ["", "-1", "1MB", "1.5", " 1", "1 ", "18446744073709551616"] {
+            assert!(
+                std::panic::catch_unwind(|| parse_fixed_retrieval_equivalent_bytes(Some(OsStr::new(value)))).is_err()
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(
+                std::panic::catch_unwind(|| parse_fixed_retrieval_equivalent_bytes(Some(OsStr::from_bytes(b"\xff"))))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_retrieval_cost_environment_override() {
+        // Separate processes exercise environment loading without mutating this process's environment.
+        if let Ok(value) = std::env::var("FEUER_TEST_FIXED_RETRIEVAL_CHILD") {
+            let fixed_cost = value.parse::<u64>().unwrap();
+            assert_eq!(*FIXED_RETRIEVAL_EQUIVALENT_BYTES, fixed_cost);
+            let mut history = RangeAccessHistory::default();
+            history.record(range(0, 4), 0);
+            history.record(range(0, 4), 0);
+            assert_eq!(
+                history.covered_retrieval_cost(range(0, 8), 0),
+                fixed_cost.saturating_add(4).saturating_mul(2)
+            );
+            assert_eq!(history.covered_retrieval_cost(range(4, 8), 0), 0);
+            return;
+        }
+        for fixed_cost in [0, 1_000_000, 10_000_000, u64::MAX] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "retention::tests::fixed_retrieval_cost_environment_override"])
+                .env("FEUER_TEST_FIXED_RETRIEVAL_CHILD", fixed_cost.to_string())
+                .env("FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES", fixed_cost.to_string())
+                .env("FEUER_MAX_ACCESS_EVENTS_PER_KEY", "64")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
+
+    #[test]
+    fn parses_max_access_events_per_key() {
+        assert_eq!(parse_max_access_events_per_key(None), 64);
+        for value in [1, 16, 64, 256, 1024, usize::MAX] {
+            assert_eq!(
+                parse_max_access_events_per_key(Some(OsStr::new(&value.to_string()))),
+                value
+            );
+        }
+        for value in ["", "0", "-1", "64k", "1.5", " 256", "256 "] {
+            assert!(std::panic::catch_unwind(|| parse_max_access_events_per_key(Some(OsStr::new(value)))).is_err());
+        }
+        let overflow = (usize::MAX as u128 + 1).to_string();
+        assert!(std::panic::catch_unwind(|| parse_max_access_events_per_key(Some(OsStr::new(&overflow)))).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            assert!(
+                std::panic::catch_unwind(|| parse_max_access_events_per_key(Some(OsStr::from_bytes(b"\xff")))).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn access_event_limit_environment_override() {
+        // Separate processes avoid mutating the environment or reusing an initialized LazyLock.
+        if let Ok(value) = std::env::var("FEUER_TEST_ACCESS_EVENTS_CHILD") {
+            let limit = value.parse::<usize>().unwrap();
+            assert_eq!(*MAX_ACCESS_EVENTS_PER_KEY, limit);
+            let mut history = RangeAccessHistory::default();
+            for index in 0..limit + 3 {
+                history.record(range(index as u64, index as u64 + 1), 0);
+            }
+            assert_eq!(history.len(), limit);
+            assert_eq!(history.ranges()[0], range(3, 4));
+            assert_eq!(history.ranges()[limit - 1], range(limit as u64 + 2, limit as u64 + 3));
+            assert_eq!(history.covered_retrieval_cost(range(0, 1), 0), 0);
+            return;
+        }
+        for limit in [1, 256] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "retention::tests::access_event_limit_environment_override"])
+                .env("FEUER_TEST_ACCESS_EVENTS_CHILD", limit.to_string())
+                .env("FEUER_MAX_ACCESS_EVENTS_PER_KEY", limit.to_string())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
     }
 
     #[test]
@@ -338,8 +469,9 @@ mod tests {
     fn bounds_events_without_coalescing_repeated_ranges() {
         let repeated = range(10, 20);
         let mut history = RangeAccessHistory::default();
-        for index in 0..MAX_ACCESS_EVENTS_PER_KEY + 3 {
-            let requested = if index >= MAX_ACCESS_EVENTS_PER_KEY {
+        let limit = *MAX_ACCESS_EVENTS_PER_KEY;
+        for index in 0..limit + 3 {
+            let requested = if index >= limit {
                 repeated
             } else {
                 range(index as u64, index as u64 + 1)
@@ -347,9 +479,10 @@ mod tests {
             history.record(requested, 0);
         }
 
-        assert_eq!(history.len(), MAX_ACCESS_EVENTS_PER_KEY);
-        assert_eq!(history.ranges()[MAX_ACCESS_EVENTS_PER_KEY - 3..], [repeated; 3]);
-        assert_eq!(history.ranges()[0], range(3, 4));
+        assert_eq!(history.len(), limit);
+        let mut expected: Vec<_> = (3..limit).map(|index| range(index as u64, index as u64 + 1)).collect();
+        expected.extend(std::iter::repeat_n(repeated, limit.min(3)));
+        assert_eq!(history.ranges(), expected);
     }
 
     #[test]
@@ -360,7 +493,9 @@ mod tests {
         history.record(requested, 0);
         history.record(requested, 0);
 
-        let expected = 2 * (FIXED_RETRIEVAL_EQUIVALENT_BYTES + requested.len());
+        let expected = (*FIXED_RETRIEVAL_EQUIVALENT_BYTES)
+            .saturating_add(requested.len())
+            .saturating_mul(2);
         assert_eq!(history.covered_retrieval_cost(cached_range, 0), expected);
         assert_eq!(
             history.covered_retrieval_cost(cached_range, *MAX_ACCESS_AGE_ACCESSES),
@@ -382,7 +517,7 @@ mod tests {
 
         assert_eq!(
             history.covered_retrieval_cost(range(0, 8), 0),
-            FIXED_RETRIEVAL_EQUIVALENT_BYTES + 4
+            (*FIXED_RETRIEVAL_EQUIVALENT_BYTES).saturating_add(4)
         );
         assert_eq!(history.covered_retrieval_cost(range(3, 5), 0), 0);
         assert_eq!(history.covered_retrieval_cost(range(5, 8), 0), 0);

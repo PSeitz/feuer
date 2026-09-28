@@ -319,14 +319,14 @@ fn access_history_is_bounded_and_preserves_repeated_exact_requests() {
     let key = ObjectKey::from("object");
     populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
 
-    for _ in 0..MAX_ACCESS_EVENTS_PER_KEY + 17 {
+    for _ in 0..*MAX_ACCESS_EVENTS_PER_KEY + 17 {
         cache.record_access(&key, range(0, 1));
     }
 
-    assert_eq!(access_history_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
+    assert_eq!(access_history_len(&cache, &key), *MAX_ACCESS_EVENTS_PER_KEY);
     assert_eq!(
         accessed_ranges(&cache, &key),
-        vec![range(0, 1); MAX_ACCESS_EVENTS_PER_KEY]
+        vec![range(0, 1); *MAX_ACCESS_EVENTS_PER_KEY]
     );
 }
 
@@ -460,7 +460,10 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
     assert_eq!(retained, Bytes::from_static(b"cd"));
     assert_ne!(retained.as_ptr(), original.slice(2..).as_ptr());
     assert!(cache.get(&key, range(0, 1)).is_none());
-    assert_eq!(access_history_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
+    assert_eq!(
+        access_history_len(&cache, &key),
+        (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION as usize + 1)
+    );
     assert!(accessed_ranges(&cache, &key).iter().all(|seen| *seen == range(2, 4)));
 }
 
@@ -504,7 +507,8 @@ fn range_trim_waits_for_pressure_and_adds_no_access() {
     }
 
     assert_eq!(cache.used_bytes(), 16);
-    assert_eq!(access_history_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
+    let history_len = (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION as usize);
+    assert_eq!(access_history_len(&cache, &key), history_len);
     populate(
         &cache,
         ObjectKey::from("pressure"),
@@ -512,7 +516,7 @@ fn range_trim_waits_for_pressure_and_adds_no_access() {
     );
 
     assert_eq!(cache.used_bytes(), 5);
-    assert_eq!(access_history_len(&cache, &key), MAX_ACCESS_EVENTS_PER_KEY);
+    assert_eq!(access_history_len(&cache, &key), history_len);
     assert_eq!(returned, Bytes::from_static(b"efgh"));
     let retained = cache.get(&key, range(4, 8)).unwrap();
     assert_eq!(retained, returned);

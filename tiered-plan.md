@@ -200,8 +200,9 @@ can replace a cached larger download with smaller cached payloads biased toward 
 unrequested cache memory.
 
 Compaction is pressure-driven. Policy samples at most 64 cached ranges and selects the one with the lowest recent
-retrieval value per retained byte. Exact events are bounded to 64 per object and expire after 262,144
-later successful same-shard accesses by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this).
+retrieval value per retained byte. Exact events are bounded to 64 per object by default
+(`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this) and expire after 262,144 later successful
+same-shard accesses by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this).
 Once its grace of 64 successful same-shard accesses expires, that same
 victim is trimmed when its observed requests can release at least one quarter of its payload; otherwise it is
 evicted.
