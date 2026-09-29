@@ -39,7 +39,7 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;
 // Caller inputs, caller-provided read destinations, and completed results are
 // outside this budget. A read into an existing buffer charges only its I/O slice.
 const MAX_IO_BUFFER_BYTES: usize = 64 * 1024 * 1024;
-// Per-queue idle allocations, separate from active I/O and caller-owned results.
+// Read-queue idle allocations, separate from active I/O and caller-owned results.
 // Read once on first use; zero disables retention for that size class.
 static IDLE_IO_BUFFER_CAPACITIES: LazyLock<[usize; 3]> = LazyLock::new(|| {
     [
@@ -75,7 +75,8 @@ struct IoAdmissionBudgets {
     // Aligned I/O buffer memory budget: each permit covers 4 KiB.
     // Acquired before allocating the buffer.
     buffer_memory: Arc<Semaphore>,
-    idle_buffers: [Arc<Mutex<IdleIoBuffers>>; 3],
+    // Writes retain input slices or use unpooled scratch buffers.
+    idle_buffers: Option<[Arc<Mutex<IdleIoBuffers>>; 3]>,
 }
 
 impl IoAdmissionBudgets {
@@ -83,11 +84,13 @@ impl IoAdmissionBudgets {
         Self {
             request_slots: Arc::new(Semaphore::new(max_in_flight)),
             buffer_memory: Arc::new(Semaphore::new(MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES)),
-            idle_buffers: std::array::from_fn(|pool_index| {
-                Arc::new(Mutex::new(IdleIoBuffers::new(
-                    IDLE_IO_BUFFER_CAPACITIES[pool_index],
-                    metrics.buffer_pools(operation)[pool_index].clone(),
-                )))
+            idle_buffers: (operation == IoOperation::Read).then(|| {
+                std::array::from_fn(|pool_index| {
+                    Arc::new(Mutex::new(IdleIoBuffers::new(
+                        IDLE_IO_BUFFER_CAPACITIES[pool_index],
+                        metrics.read_buffer_pools[pool_index].clone(),
+                    )))
+                })
             }),
         }
     }
@@ -100,7 +103,7 @@ impl IoAdmissionBudgets {
         } else {
             2
         };
-        &self.idle_buffers[pool_index]
+        &self.idle_buffers.as_ref().expect("only reads use buffer pools")[pool_index]
     }
 }
 
@@ -388,10 +391,10 @@ impl Drop for AlignedIoBuffer {
                 });
                 idle.bytes += length;
                 idle.metrics.idle_bytes.increase(length as u64);
-                idle.metrics.retained.increase(1);
+                idle.metrics.returned.increase(1);
                 return;
             }
-            idle.metrics.discarded.increase(1);
+            idle.metrics.dropped.increase(1);
         }
         // SAFETY: the matching allocation remains owned, and no kernel operation references it.
         unsafe { dealloc(self.ptr.as_ptr(), self.layout) };

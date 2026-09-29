@@ -85,9 +85,9 @@ have no per-object cap and live until the last history owner is released.
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Trimming history lifetime in successful same-shard accesses. |
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Trimming events retained per key. |
 | `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed request cost in equivalent bytes. `0` scores bytes only. |
-| `FEUER_SMALL_IO_BUFFER_POOL_BYTES` | `128MiB` | Idle buffer budget per queue, allocations ≤ 1 MiB. |
-| `FEUER_MEDIUM_IO_BUFFER_POOL_BYTES` | `256MiB` | Idle buffer budget per queue, allocations > 1 MiB and < 10 MiB. |
-| `FEUER_LARGE_IO_BUFFER_POOL_BYTES` | `1GiB` | Idle buffer budget per queue, allocations ≥ 10 MiB. |
+| `FEUER_SMALL_IO_BUFFER_POOL_BYTES` | `128MiB` | Idle buffer budget per read queue, allocations ≤ 1 MiB. |
+| `FEUER_MEDIUM_IO_BUFFER_POOL_BYTES` | `256MiB` | Idle buffer budget per read queue, allocations > 1 MiB and < 10 MiB. |
+| `FEUER_LARGE_IO_BUFFER_POOL_BYTES` | `1GiB` | Idle buffer budget per read queue, allocations ≥ 10 MiB. |
 
 Values accept integers or size suffixes such as `8KiB`, `1.5 GiB`, and `5GB`.
 Binary suffixes use powers of 1024 and decimal suffixes use powers of 1000.

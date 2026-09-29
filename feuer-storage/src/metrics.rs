@@ -9,8 +9,8 @@ use crate::IoOperation;
 pub(crate) struct IoBufferPoolMetrics {
     pub(crate) idle_bytes: BoxedGauge,
     pub(crate) capacity_bytes: BoxedGauge,
-    pub(crate) retained: BoxedCounter,
-    pub(crate) discarded: BoxedCounter,
+    pub(crate) returned: BoxedCounter,
+    pub(crate) dropped: BoxedCounter,
 }
 
 struct IoOperationMetrics {
@@ -18,7 +18,6 @@ struct IoOperationMetrics {
     error: BoxedCounter,
     bytes: BoxedCounter,
     success_duration: BoxedHistogram,
-    buffer_pools: [Arc<IoBufferPoolMetrics>; 3],
 }
 
 impl fmt::Debug for IoOperationMetrics {
@@ -37,6 +36,7 @@ pub struct IoMetrics {
     read: IoOperationMetrics,
     write: IoOperationMetrics,
     read_size: BoxedHistogram,
+    pub(crate) read_buffer_pools: [Arc<IoBufferPoolMetrics>; 3],
 }
 
 impl IoMetrics {
@@ -68,18 +68,18 @@ impl IoMetrics {
 
         let idle_bytes = registry.register_gauge_vec(
             "feuer_io_buffer_pool_idle_bytes".into(),
-            "Idle aligned I/O buffer bytes available for reuse".into(),
-            &["operation", "pool"],
+            "Idle aligned read buffer bytes available for reuse".into(),
+            &["pool"],
         );
         let capacity_bytes = registry.register_gauge_vec(
             "feuer_io_buffer_pool_capacity_bytes".into(),
-            "Live I/O buffer pools' configured idle byte capacity".into(),
-            &["operation", "pool"],
+            "Live read buffer pools' configured idle byte capacity".into(),
+            &["pool"],
         );
         let returns = registry.register_counter_vec(
             "feuer_io_buffer_pool_returns_total".into(),
-            "Buffers returned to live I/O pools, retained or discarded due to insufficient idle capacity".into(),
-            &["operation", "pool", "outcome"],
+            "Released buffers returned to live read pools or dropped due to insufficient idle capacity".into(),
+            &["pool", "outcome"],
         );
 
         let operation_metrics = |label: &'static str| IoOperationMetrics {
@@ -87,29 +87,21 @@ impl IoMetrics {
             error: operations.counter(&[label.into(), "error".into()]),
             bytes: bytes.counter(&[label.into()]),
             success_duration: duration.histogram(&[label.into(), "success".into()]),
-            buffer_pools: ["small", "medium", "large"].map(|pool| {
-                Arc::new(IoBufferPoolMetrics {
-                    idle_bytes: idle_bytes.gauge(&[label.into(), pool.into()]),
-                    capacity_bytes: capacity_bytes.gauge(&[label.into(), pool.into()]),
-                    retained: returns.counter(&[label.into(), pool.into(), "retained".into()]),
-                    discarded: returns.counter(&[label.into(), pool.into(), "discarded".into()]),
-                })
-            }),
         };
 
         Arc::new(Self {
             read: operation_metrics(IoOperation::Read.as_str()),
             write: operation_metrics(IoOperation::Write.as_str()),
             read_size: read_size.histogram(&[]),
+            read_buffer_pools: ["small", "medium", "large"].map(|pool| {
+                Arc::new(IoBufferPoolMetrics {
+                    idle_bytes: idle_bytes.gauge(&[pool.into()]),
+                    capacity_bytes: capacity_bytes.gauge(&[pool.into()]),
+                    returned: returns.counter(&[pool.into(), "returned".into()]),
+                    dropped: returns.counter(&[pool.into(), "dropped".into()]),
+                })
+            }),
         })
-    }
-
-    pub(crate) fn buffer_pools(&self, operation: IoOperation) -> &[Arc<IoBufferPoolMetrics>; 3] {
-        match operation {
-            IoOperation::Read => &self.read.buffer_pools,
-            IoOperation::Write => &self.write.buffer_pools,
-            _ => unreachable!("buffer pools only support reads and writes"),
-        }
     }
 
     pub(crate) fn record(&self, operation: IoOperation, bytes: u64, elapsed: Duration, success: bool) {
