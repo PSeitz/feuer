@@ -23,7 +23,7 @@ feuer-types = { workspace = true }
 fs4 = { workspace = true, features = ["sync"] }
 mixtrics = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

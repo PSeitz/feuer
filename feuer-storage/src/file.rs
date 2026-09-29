@@ -35,9 +35,10 @@ struct DataFileState {
 /// One exclusively owned, fixed-capacity Linux direct-I/O payload file.
 ///
 /// Reads and writes have separate io_uring rings and worker threads, admitting
-/// up to 64 reads and 8 writes. Each queue schedules in arrival order without
-/// checking for conflicts. Submission order does not guarantee completion order.
-/// Each queue budgets 64 MiB of active I/O slices. 
+/// up to 64 reads and 8 writes. Foreground reads precede pending recovery reads;
+/// otherwise queues schedule in arrival order without checking for conflicts.
+/// Submission order does not guarantee completion order.
+/// Each queue budgets 64 MiB of active I/O slices.
 ///
 /// # Caller-owned concurrency and cancellation
 ///
@@ -156,6 +157,32 @@ impl DataFile {
             let bytes = self.read_aligned_ranges(&ranges, regions).await?;
             assert_eq!(bytes.len(), length.next_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
             Ok(bytes.slice(..length))
+        })
+        .await
+    }
+
+    /// Recovery issues only one metadata read at a time. It does not queue for admission ahead of
+    /// foreground reads, and its guard prevents concurrent population from overwriting this page.
+    pub(crate) async fn read_recovery_page(&self, region: &DiskRegion, address: u64) -> DataFileResult<Bytes> {
+        let length = uring::DIRECT_IO_ALIGNMENT_BYTES;
+        let page = region.slice(address..address + length as u64);
+        self.measure_io(IoOperation::Read, address, length, async {
+            loop {
+                let result = self
+                    .state
+                    .read_queue
+                    .try_read_recovery_page(page.read_guard())
+                    .await
+                    .map_err(|source| DataFileError::Io {
+                        operation: IoOperation::Read,
+                        path: self.state.data_path.clone(),
+                        source,
+                    })?;
+                if let Some(bytes) = result {
+                    return Ok(bytes);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
         })
         .await
     }

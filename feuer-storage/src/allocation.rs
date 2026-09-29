@@ -25,6 +25,8 @@ struct DiskChunkAvailability {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
     free_chunk_count_by_start: BTreeMap<u64, u64>,
     available_chunks: u64,
+    // Sticky during recovery, including chunks freed after population or recovery claimed them.
+    recovery_claims: Option<(u64, Vec<u64>)>,
     metrics: Arc<DiskMetrics>,
 }
 
@@ -35,10 +37,23 @@ impl DiskChunkAvailability {
         if chunk_count > 1 {
             self.free_chunk_count_by_start.insert(first_chunk + 1, chunk_count - 1);
         }
+        self.mark_claimed(first_chunk);
+        self.account_reservation();
+        first_chunk
+    }
+
+    fn account_reservation(&mut self) {
         self.available_chunks -= 1;
         self.metrics.free_chunks.decrease(1);
         self.metrics.allocated_chunks.increase(1);
-        first_chunk
+    }
+
+    fn mark_claimed(&mut self, chunk: u64) {
+        if let Some((start, words)) = &mut self.recovery_claims
+            && let Some(word) = words.get_mut(((chunk - *start) / 64) as usize)
+        {
+            *word |= 1 << ((chunk - *start) % 64);
+        }
     }
 
     fn release_chunk(&mut self, chunk_number: u64) {
@@ -110,8 +125,52 @@ impl DiskChunkAllocator {
                     (disk_range.end - disk_range.start) / CHUNK_BYTES,
                 )]),
                 available_chunks: (disk_range.end - disk_range.start) / CHUNK_BYTES,
+                recovery_claims: None,
                 metrics,
             })),
+        })
+    }
+
+    /// Must run before exposing the allocator to population. Only the startup scan needs these bits.
+    pub(super) fn start_recovery(&self, start: u64, end: u64) {
+        self.free.lock().unwrap().recovery_claims = Some((
+            start / CHUNK_BYTES,
+            vec![0; ((end - start) / CHUNK_BYTES).div_ceil(64) as usize],
+        ));
+    }
+
+    pub(super) fn finish_recovery(&self) {
+        self.free.lock().unwrap().recovery_claims = None;
+    }
+
+    /// Reserves an old chunk for inspection without marking it claimed. The reservation prevents
+    /// population from overwriting metadata during I/O. Previously claimed chunks never recover again.
+    pub(super) fn reserve_for_recovery(&self, chunk: u64) -> Option<DiskRegion> {
+        let mut free = self.free.lock().unwrap();
+        let (start, words) = free.recovery_claims.as_ref()?;
+        let relative = chunk.checked_sub(*start)?;
+        if words.get((relative / 64) as usize)? & (1 << (relative % 64)) != 0 {
+            return None;
+        }
+        let (&run_start, &count) = free.free_chunk_count_by_start.range(..=chunk).next_back()?;
+        if chunk >= run_start + count {
+            return None;
+        }
+        free.free_chunk_count_by_start.remove(&run_start);
+        if chunk > run_start {
+            free.free_chunk_count_by_start.insert(run_start, chunk - run_start);
+        }
+        if chunk + 1 < run_start + count {
+            free.free_chunk_count_by_start
+                .insert(chunk + 1, run_start + count - chunk - 1);
+        }
+        free.account_reservation();
+        Some(DiskRegion {
+            range: chunk * CHUNK_BYTES..(chunk + 1) * CHUNK_BYTES,
+            reservation: Arc::new(ChunkReservation {
+                free: self.free.clone(),
+                chunk_number: chunk,
+            }),
         })
     }
 
@@ -164,6 +223,15 @@ impl DiskRegion {
             range,
             reservation: self.reservation.clone(),
         }
+    }
+
+    /// Prevents this chunk's old contents from being recovered again after its owners release it.
+    pub(super) fn mark_recovered(&self) {
+        self.reservation
+            .free
+            .lock()
+            .unwrap()
+            .mark_claimed(self.reservation.chunk_number);
     }
 
     pub(super) fn read_guard(&self) -> DiskRegionReadGuard {

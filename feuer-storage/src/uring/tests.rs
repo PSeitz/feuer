@@ -549,6 +549,72 @@ fn canceled_submitted_write_retains_resources() {
 }
 
 #[test]
+fn foreground_reads_are_submitted_before_queued_recovery_reads() {
+    let mut queue = queue();
+    let (mut recovery, mut recovery_reply) = request(&queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    recovery.recovery = true;
+    let (foreground, mut foreground_reply) = request(
+        &queue,
+        IoOperation::Read,
+        DIRECT_IO_ALIGNMENT_BYTES as u64,
+        DIRECT_IO_ALIGNMENT_BYTES,
+    );
+    queue.pending.push_back(recovery);
+    queue.pending.push_back(foreground);
+    queue.queue_pending_requests();
+    assert!(!queue.active[0].as_ref().unwrap().recovery);
+    assert!(queue.active[1].as_ref().unwrap().recovery);
+    queue.process_requests_until_disconnected().unwrap();
+    foreground_reply.try_recv().unwrap().unwrap();
+    recovery_reply.try_recv().unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn recovery_does_not_wait_for_or_allocate_ahead_of_foreground_admission() {
+    let queue = queue();
+    let handle = IoQueueHandle::new(
+        queue.file.as_ref().unwrap().clone(),
+        queue.directory_lock.as_ref().unwrap().clone(),
+        IoOperation::Read,
+        &IoMetrics::noop(),
+    )
+    .unwrap();
+    let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
+    let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
+    let page = chunk.slice(0..DIRECT_IO_ALIGNMENT_BYTES as u64);
+    for budget in [&handle.admission.request_slots, &handle.admission.buffer_memory] {
+        let permits = budget
+            .clone()
+            .acquire_many_owned(budget.available_permits() as u32)
+            .await
+            .unwrap();
+        let read = handle.try_read_recovery_page(page.read_guard());
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), read)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_none());
+        assert!(
+            handle
+                .admission
+                .buffer_pool(DIRECT_IO_ALIGNMENT_BYTES)
+                .lock()
+                .unwrap()
+                .by_length
+                .is_empty()
+        );
+        drop(permits);
+    }
+    assert!(
+        handle
+            .try_read_recovery_page(page.read_guard())
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
 fn discarded_queued_requests_never_reach_the_ring() {
     let mut queue = queue();
     let (request, reply) = request(&queue, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);

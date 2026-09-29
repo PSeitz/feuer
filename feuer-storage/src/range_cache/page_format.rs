@@ -1,7 +1,7 @@
-//! Experimental v3 metadata pages. Payload has no page headers: its whole-entry checksum lives in entry metadata.
+//! Experimental v4 metadata pages. Payload has no page headers: its whole-entry checksum lives in entry metadata.
 //! Each entry metadata page carries the checksum of the complete entry metadata, including its key and mappings.
 //! Page checksums additionally bind tag, address, ordinal, links and contents.
-//! Completion is not persistence; there is deliberately no recovery decoder yet.
+//! Chunk metadata binds a cache generation and batch ID; completion is not persistence.
 
 use bytes::Bytes;
 use feuer_types::ByteRange;
@@ -13,10 +13,11 @@ use crate::allocation::DiskRegion;
 pub(super) const METADATA_PAGE_BYTES: usize = 4096;
 const PAGE_HEADER_BYTES: usize = 96;
 pub(super) const PAGE_CONTENT_BYTES: usize = METADATA_PAGE_BYTES - PAGE_HEADER_BYTES;
-pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES03";
-pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX03";
+pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES04";
+pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX04";
+pub(super) const CHUNK_METADATA_CONTENT_BYTES: usize = 64;
 
-/// Content checksum covers the complete entry metadata, or the chunk metadata page's 32-byte bitmap of entry metadata starts.
+/// Content checksum covers complete entry metadata, or the chunk's bitmap and identities.
 pub(super) fn encode_page(
     page: &mut [u8],
     page_tag: &[u8; 8],
@@ -39,7 +40,6 @@ pub(super) fn encode_page(
     page[..32].copy_from_slice(checksum.as_bytes());
 }
 
-#[cfg(test)] // Metadata is decoded only by format tests until recovery is implemented.
 pub(super) fn validate_page<'a>(
     page: &'a [u8],
     page_tag: &[u8; 8],
@@ -62,7 +62,7 @@ pub(super) fn validate_page<'a>(
     ))
 }
 
-/// Content length, key length, exact object range, region count, payload checksum, physical ranges, full key.
+/// Content length, key length, exact object range, region count, payload checksum, physical ranges, full key, batch ID.
 /// All integers are little-endian u64s. Page links describe the entry metadata's own allocations.
 /// The payload checksum covers exactly the entry bytes in region order, excluding final alignment padding.
 pub(super) fn encode_entry_metadata(
@@ -70,8 +70,9 @@ pub(super) fn encode_entry_metadata(
     object_range: ByteRange,
     payload_regions: &[DiskRegion],
     payload_checksum: &blake3::Hash,
+    batch_id: &[u8; 16],
 ) -> Bytes {
-    let length = 72 + 16 * payload_regions.len() + key.len();
+    let length = 88 + 16 * payload_regions.len() + key.len();
     let mut bytes = Vec::with_capacity(length);
     for value in [
         length as u64,
@@ -89,5 +90,6 @@ pub(super) fn encode_entry_metadata(
         bytes.extend_from_slice(&disk_range.end.to_le_bytes());
     }
     bytes.extend_from_slice(key.as_bytes());
+    bytes.extend_from_slice(batch_id);
     Bytes::from(bytes)
 }

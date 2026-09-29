@@ -3,16 +3,16 @@ use std::{future::Future, task::Poll, time::Duration};
 
 // Keep single-entry scenarios concise while exercising the explicit batch API.
 impl DiskRangeCache {
-    async fn insert(&self, key: ObjectKey, download: Download) -> Result<bool, DiskRangeCacheError> {
+    pub(super) async fn insert(&self, key: ObjectKey, download: Download) -> Result<bool, DiskRangeCacheError> {
         self.insert_batch(vec![(key, download)]).await.map(|count| count == 1)
     }
 }
 
-fn range(start: u64, end: u64) -> ByteRange {
+pub(super) fn range(start: u64, end: u64) -> ByteRange {
     ByteRange::new(start, end).unwrap()
 }
 
-fn download(start: u64, length: usize) -> Download {
+pub(super) fn download(start: u64, length: usize) -> Download {
     Download::new(
         start,
         Bytes::from(
@@ -24,7 +24,7 @@ fn download(start: u64, length: usize) -> Download {
     .unwrap()
 }
 
-async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache) {
+pub(super) async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache) {
     let directory = tempfile::tempdir().unwrap();
     let cache = DiskRangeCache::open(directory.path(), capacity, IoMetrics::noop())
         .await
@@ -32,7 +32,10 @@ async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache) {
     (directory, cache)
 }
 
-fn entry_disk_ranges(cache: &DiskRangeCache, key: &str) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
+pub(super) fn entry_disk_ranges(
+    cache: &DiskRangeCache,
+    key: &str,
+) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
     let index = cache.disk.shards[cache.disk.shard_index_for_key(key)]
         .entry_index
         .lock()
@@ -155,7 +158,7 @@ async fn mixed_batch_groups_small_entries_and_records_every_metadata_start() {
         let (_, contents) = page_format::validate_page(
             &page,
             page_format::CHUNK_METADATA_PAGE_TAG,
-            blake3::hash(&starts.bitmap).as_bytes(),
+            page[32..64].try_into().unwrap(),
             address,
             address / CHUNK_BYTES,
         )
@@ -730,7 +733,10 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
     .unwrap();
     assert_eq!(next_entry_metadata_page_address, 0);
     let bit_index = ((entry_metadata_start_address - chunk_address) / METADATA_PAGE_BYTES as u64) as usize;
-    assert_eq!(blake3::hash(&entry_metadata_starts[..32]).as_bytes(), &bitmap_checksum);
+    assert_eq!(
+        blake3::hash(&entry_metadata_starts[..page_format::CHUNK_METADATA_CONTENT_BYTES]).as_bytes(),
+        &bitmap_checksum
+    );
     assert_ne!(entry_metadata_starts[bit_index / 8] & (1 << (bit_index % 8)), 0);
     assert_eq!(entry_metadata_starts[0] & 1, 0);
     let head = cache
@@ -763,7 +769,7 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
     }
     assert_eq!(address, 0);
     let integer = |offset| u64::from_le_bytes(entry_metadata_bytes[offset..offset + 8].try_into().unwrap());
-    assert_eq!(integer(0) as usize, 72 + payload.len() * 16 + key.len());
+    assert_eq!(integer(0) as usize, 88 + payload.len() * 16 + key.len());
     assert_eq!(
         blake3::hash(&entry_metadata_bytes[..integer(0) as usize]).as_bytes(),
         &entry_metadata_checksum
@@ -778,7 +784,7 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
         assert_eq!(integer(80 + index * 16), region.end);
     }
     assert_eq!(
-        &entry_metadata_bytes[72 + payload.len() * 16..integer(0) as usize],
+        &entry_metadata_bytes[72 + payload.len() * 16..integer(0) as usize - 16],
         key.as_bytes()
     );
 }
@@ -1070,11 +1076,12 @@ async fn a_short_read_is_a_miss_not_unverified_bytes() {
 
 #[tokio::test]
 async fn failed_chunk_write_releases_the_batch_without_publication() {
-    let (_directory, mut cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     // First chunk succeeds, second is outside the real file. Even the complete small entry
     // in the first chunk must remain unpublished when its shard's batch fails.
-    Arc::get_mut(&mut cache.disk).unwrap().shards[0].allocator =
-        DiskChunkAllocator::for_disk_range(0..3 * CHUNK_BYTES).unwrap();
+    let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
+    disk.shards[0].allocator = DiskChunkAllocator::for_disk_range(0..3 * CHUNK_BYTES).unwrap();
+    let cache = DiskRangeCache { disk: Arc::new(disk) };
     assert!(matches!(
         cache
             .insert_batch(vec![
@@ -1174,7 +1181,7 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
 }
 
 #[tokio::test]
-async fn shards_are_disjoint_and_reopening_intentionally_starts_empty() {
+async fn shards_are_disjoint_and_recover_independently() {
     let (directory, cache) = open_test_cache(256 * CHUNK_BYTES).await;
     assert_eq!(cache.disk.shards.len(), 2);
     let keys: Vec<_> = (0..2)
@@ -1197,14 +1204,19 @@ async fn shards_are_disjoint_and_reopening_intentionally_starts_empty() {
     assert!(first.last().unwrap().end <= 128 * CHUNK_BYTES);
     assert!(second[0].start >= 128 * CHUNK_BYTES);
     let returned = cache.get(&keys[0], range(0, 100)).await.unwrap();
+    cache.disk.save_recovery_ends().unwrap();
     drop(cache);
     let reopened = DiskRangeCache::open(directory.path(), 256 * CHUNK_BYTES, IoMetrics::noop())
         .await
         .unwrap();
+    recovery::tests::wait_for_recovery(&reopened).await;
     for key in &keys {
-        assert!(reopened.get(key, range(0, 1)).await.is_none());
+        assert_eq!(
+            reopened.get(key, range(0, 100)).await.unwrap(),
+            download(0, 100).bytes()
+        );
     }
-    assert!(reopened.insert(keys[0].clone(), download(0, 100)).await.unwrap());
+    assert!(!reopened.insert(keys[0].clone(), download(0, 100)).await.unwrap());
     assert_eq!(returned, download(0, 100).bytes());
 }
 

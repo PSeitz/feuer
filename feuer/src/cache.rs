@@ -33,7 +33,7 @@ struct CacheState {
 ///
 /// Lookups check memory, then integrity-checked disk, then the per-call callback.
 /// Disk population is bounded and best-effort. Opening requires Linux direct I/O
-/// and io_uring. Recovery is not implemented: every open starts with an empty disk index.
+/// and io_uring. Background recovery adds disk entries incrementally without gating lookups or population.
 #[derive(Clone)]
 pub struct TieredMemoryDiskCache {
     state: Arc<CacheState>,
@@ -52,7 +52,7 @@ impl TieredMemoryDiskCache {
     /// Opens an exclusively locked disk cache and starts its best-effort writer.
     /// Disk capacity must be a positive multiple of 1 MiB. Requires a Tokio runtime,
     /// usable io_uring and direct I/O; no memory-only or buffered fallback is used.
-    /// Existing disk entries are not recovered yet.
+    /// Existing disk entries recover incrementally in the background while lookups and population proceed.
     #[cfg(target_os = "linux")]
     pub async fn open(config: CacheConfig) -> Result<Self, DiskRangeCacheError> {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);

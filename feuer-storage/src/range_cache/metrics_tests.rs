@@ -241,7 +241,7 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
 
 #[tokio::test]
 async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_published() {
-    let (_directory, mut cache, registry) = measured_cache(CHUNK_BYTES).await;
+    let (_directory, cache, registry) = measured_cache(CHUNK_BYTES).await;
     cache.insert_batch(vec![("first".into(), download(4))]).await.unwrap();
     cache.insert_batch(vec![("second".into(), download(4))]).await.unwrap();
     assert_eq!(
@@ -250,9 +250,10 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
     );
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
     // As in the existing write-failure test, let allocation exceed the actual file.
-    let disk = Arc::get_mut(&mut cache.disk).unwrap();
+    let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
     disk.shards[0].entry_index.lock().unwrap().remove("second", 0);
     disk.shards[0].allocator = DiskChunkAllocator::with_metrics(0..3 * CHUNK_BYTES, disk.metrics.clone()).unwrap();
+    let cache = DiskRangeCache { disk: Arc::new(disk) };
     assert!(
         cache
             .insert_batch(vec![

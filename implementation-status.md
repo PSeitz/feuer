@@ -8,14 +8,15 @@ contract. This document records what exists and what remains to build.
 The public cache now connects **memory → integrity-checked disk → callback**. The fallible asynchronous
 `TieredMemoryDiskCache::open` opens the configured directory using Linux direct I/O and io_uring, with no
 silent fallback. A bounded worker batches retained downloads into the experimental `DiskRangeCache`.
-Reopening still starts with an empty disk index: recovery is not implemented.
+Reopening starts bounded background recovery, publishing entries incrementally alongside reads and population.
+The recovery additions cross-compile for Linux; real io_uring execution and device-crash testing remain outstanding.
 
 | Area | Implemented | Remaining |
 | --- | --- | --- |
-| `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, bounded batched population, typed callback and validation errors | I/O mode selection, recovery, tier-aware retention tuning |
+| `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, bounded batched population, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range, internal shared access evidence and value comparison | None for the current public type boundary |
 | `feuer-memory` | Sharded covering-range index, bounded exact access evidence shared with disk, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
-| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, experimental sharded `DiskRangeCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, guarded whole-chunk reuse and bounded value-aware entry eviction | Recovery, buffered mode, retention-policy evaluation, comparative allocator measurements |
+| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, experimental sharded `DiskRangeCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, guarded whole-chunk reuse and bounded value-aware entry eviction | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
 
 ## Implemented behavior
@@ -113,15 +114,15 @@ This is a raw I/O layer, not a disk cache or population queue. Disk storage and 
 ## In progress: disk range-cache prototype
 
 [`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) specifies the experimental layout and
-remaining crash/recovery questions. `DiskRangeCache::insert_batch` groups smaller entries together within each
+background recovery and remaining crash testing. `DiskRangeCache::insert_batch` groups smaller entries together within each
 shard, assembles whole chunks including entry metadata and chunk metadata, writes each chunk once, and then
 publishes after containment revalidation. Partial final chunks are finalized too. Later batches cannot fill them. Full keys and exact
 object ranges map to ordered physical regions. Payload bytes have no interleaved headers. Entry metadata stores
 one BLAKE3 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
 entry while copying only requested bytes into the result. It does not read neighboring entries or metadata.
 
-Independent shards have their own allocator and range-index lock. The allocator tracks only coalesced free
-whole-chunk runs. There is no persistent bitmap map or async index-write lock. Written chunks remain immutable.
+Independent shards have their own allocator and range-index lock. The allocator tracks coalesced free
+whole-chunk runs and temporary recovery-claim bitmaps. There is no persistent bitmap map or async index-write lock. Written chunks remain immutable.
 All entry owners, queued writes, and read guards must release a chunk before reuse. Queued writes retain
 chunk ownership through completion despite caller cancellation. Failed batches release chunks normally.
 Publication is not transactional across shards. Callers bound batch memory and concurrency.
@@ -130,8 +131,8 @@ Entries within a batch share 1-MiB chunks with 4-KiB-aligned storage only when e
 and metadata fit inside that chunk. Multi-chunk entries own their chunks exclusively, including unused tails. Small entries use at least 4 KiB of payload
 plus 4 KiB of metadata inside their batch's chunks. Metadata pages are not shared between entries. A single-entry
 batch costs at least one chunk. Removed entries leave holes that cannot be reused individually.
-The v3 format uses a checksum over the complete entry metadata and a bitmap of entry metadata starts,
-without write IDs or generation counters.
+The v4 format checksums complete entry metadata and records a bitmap of entry metadata starts.
+Cache generations isolate resets; batch IDs reject metadata referencing chunks reused by another batch.
 Read invalidation compares expected payload checksums. Discarding a newer identical copy is an allowed miss.
 Pressure eviction samples up to 64 live entries and selects the lowest recent retrieval value per payload
 byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.
@@ -140,7 +141,9 @@ remain indexed and may keep a partially empty chunk unavailable. No eviction met
 Each shard batch is limited to 64 sampled decisions and 4,096 removed region references. Guarded or active
 storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
 disk cache to a memory cache's evidence. Public tier orchestration now uses it.
-Reopening deliberately starts empty and logs the reset. Recovery remains unimplemented.
+Recovery scans up to saved per-shard ends and publishes validated entries incrementally. Population can
+claim unscanned chunks; foreground reads take priority over scan I/O. Layout changes start a new cache
+generation and log a cold reset. See the prototype document for checkpoint and validation details.
 No comparative layout/performance claim is established.
 
 The range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
@@ -150,7 +153,8 @@ bounded value-aware entry eviction, shared evidence across tiers, payload-only s
 concurrent eviction/reads,
 fragmented chunks and whole-entry
 validation of 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable.
-Unrelated entries and metadata are not loaded. On `m8g-32cpu-local-ssd`, all 71 storage tests and all 135 workspace tests passed with real direct I/O
+Unrelated entries and metadata are not loaded. Before background recovery was added, on `m8g-32cpu-local-ssd`,
+all 71 storage tests and all 135 workspace tests passed with real direct I/O
 and io_uring on the local ext4 SSD. Workspace Clippy passed with warnings denied. Formatting and whitespace
 checks passed for the changed files.
 
@@ -212,8 +216,8 @@ permanently excluded by the design.
 
 - Extend current memory-identity publication checks when tier-aware retention policy is implemented.
 - Validate the versioned metadata format and whole-entry BLAKE3 checksums against injected crash and reuse cases.
-- Recover a safe subset after process and machine crashes. Test corruption and torn state.
-- Automatically reset unsupported persistent formats and log the reset.
+- Exercise incremental recovery and generation resets on real Linux direct I/O and io_uring.
+- Validate recovery after process and machine crashes, beyond metadata corruption and reuse tests.
 
 ### Tier-aware policy and hardening
 

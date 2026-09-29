@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod metrics_tests;
 mod page_format;
+mod recovery;
 #[cfg(test)]
 mod tests;
 
@@ -11,7 +12,10 @@ use std::{
     fmt,
     hash::{Hash, Hasher},
     path::Path,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -45,7 +49,7 @@ const MAX_EVICTION_REGIONS: usize = 4096;
 /// Full-key hashing selects an independently allocated shard; admission may fail despite space elsewhere.
 ///
 /// Pressure eviction uses sampled retrieval value per payload byte.
-/// **Recovery is not implemented.** Every open starts empty and logs that reset.
+/// Recovery publishes old entries incrementally alongside foreground reads and population.
 /// The experimental format is neither a persistence guarantee nor a stable on-disk interface.
 #[derive(Clone)]
 pub struct DiskRangeCache {
@@ -58,6 +62,7 @@ struct DiskRangeCacheState {
     shards: Box<[DiskCacheShard]>,
     access_histories: Arc<ObjectAccessHistories>,
     metrics: Arc<DiskMetrics>,
+    recovery: recovery::RecoveryState,
 }
 
 /// An independently allocated disk-cache shard with live range lookup.
@@ -65,6 +70,7 @@ struct DiskCacheShard {
     reclaim_sample_size: usize,
     allocator: DiskChunkAllocator,
     entry_index: Mutex<DiskEntryIndex>,
+    written_end: AtomicU64,
 }
 
 /// Disk entries indexed by object key and range start, with dense rotating eviction candidates.
@@ -88,6 +94,8 @@ struct UnwrittenChunk {
 /// Entries and their chunk contents prepared for one shard's batch write.
 #[derive(Default)]
 struct UnwrittenShardBatch {
+    // Recovery may combine chunks only when they were written by the same batch.
+    batch_id: [u8; 16],
     chunks: Vec<UnwrittenChunk>,
     entries: Vec<(ObjectKey, ObjectRangeDiskStorage)>,
 }
@@ -141,6 +149,9 @@ pub enum DiskRangeCacheError {
     /// The task that owns a population failed; queued writes retain their chunks until completion.
     #[error("disk population task failed: {0}")]
     PopulationTaskFailed(#[source] tokio::task::JoinError),
+    /// The small recovery inventory could not be initialized or durably reset.
+    #[error("opening disk recovery state failed: {0}")]
+    RecoveryState(#[source] std::io::Error),
 }
 
 impl fmt::Debug for DiskRangeCache {
@@ -153,8 +164,8 @@ impl fmt::Debug for DiskRangeCache {
 }
 
 impl DiskRangeCache {
-    /// Opens an exclusively locked, fixed-capacity file and starts with an empty cache.
-    /// Existing entries are neither recovered nor cleared. This is not a durable reset protocol.
+    /// Opens an exclusively locked, fixed-capacity file and starts background recovery.
+    /// Reads and population are immediately available; recovered entries appear incrementally.
     pub async fn open(
         directory: impl AsRef<Path>,
         capacity: u64,
@@ -203,30 +214,41 @@ impl DiskRangeCache {
             return Err(DiskRangeCacheError::InvalidCapacity);
         }
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
-        let file = DataFile::open(directory, capacity, io_metrics).await?;
-        tracing::warn!(target: "feuer::storage", "disk range cache prototype starts empty; recovery is not implemented");
-        let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
-        let chunk_count = capacity / CHUNK_BYTES;
+        let directory = directory.as_ref().to_path_buf();
+        let file = DataFile::open(&directory, capacity, io_metrics).await?;
+        let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
+        let lock_owner = file.clone();
+        let (recovery, ends) = tokio::task::spawn_blocking(move || {
+            let _lock_owner = lock_owner;
+            recovery::RecoveryState::open(&directory, capacity, num_shards)
+        })
+        .await
+        .map_err(|error| DiskRangeCacheError::RecoveryState(std::io::Error::other(error)))?
+        .map_err(DiskRangeCacheError::RecoveryState)?;
         let shards = (0..num_shards)
-            .map(|shard_index| DiskCacheShard {
-                reclaim_sample_size,
-                allocator: DiskChunkAllocator::with_metrics(
-                    (chunk_count * shard_index / num_shards) * CHUNK_BYTES
-                        ..(chunk_count * (shard_index + 1) / num_shards) * CHUNK_BYTES,
-                    metrics.clone(),
-                )
-                .unwrap(),
-                entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
+            .map(|shard_index| {
+                let range = recovery::shard_range(capacity, num_shards, shard_index);
+                let allocator = DiskChunkAllocator::with_metrics(range.clone(), metrics.clone()).unwrap();
+                if ends[shard_index] > range.start {
+                    allocator.start_recovery(range.start, ends[shard_index]);
+                }
+                DiskCacheShard {
+                    reclaim_sample_size,
+                    allocator,
+                    entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
+                    written_end: AtomicU64::new(ends[shard_index]),
+                }
             })
             .collect();
-        Ok(Self {
-            disk: Arc::new(DiskRangeCacheState {
-                file,
-                shards,
-                access_histories,
-                metrics,
-            }),
-        })
+        let disk = Arc::new(DiskRangeCacheState {
+            file,
+            shards,
+            access_histories,
+            metrics,
+            recovery,
+        });
+        disk.start_background_tasks(ends);
+        Ok(Self { disk })
     }
 
     /// Shared evidence for recording successful lookups, once, outside raw storage operations.
@@ -284,7 +306,10 @@ impl DiskRangeCache {
                 let mut published_entries = 0;
                 for (shard, mut downloads) in disk.shards.iter().zip(downloads_by_shard) {
                     downloads.sort_by_key(|(_, download, _, _)| download.bytes().len());
-                    let mut batch = UnwrittenShardBatch::default();
+                    let mut batch = UnwrittenShardBatch {
+                        batch_id: disk.recovery.next_batch_id(),
+                        ..Default::default()
+                    };
                     let mut publication_tokens = Vec::new();
                     let mut attempts_left = MAX_EVICTION_ATTEMPTS;
                     let mut regions_left = MAX_EVICTION_REGIONS;
@@ -321,7 +346,10 @@ impl DiskRangeCache {
                             attempt.set_outcome(PopulationOutcome::AlreadyCovered);
                         }
                     }
-                    let entries = match batch.write_chunks(&disk.file, &disk.metrics).await {
+                    let entries = match batch
+                        .write_chunks(&disk.file, &disk.metrics, &disk.recovery.generation, &shard.written_end)
+                        .await
+                    {
                         Ok(entries) => entries,
                         Err(error) => {
                             for (_, attempt) in &mut publication_tokens {
@@ -618,7 +646,7 @@ impl UnwrittenShardBatch {
         let chunk_data_bytes = CHUNK_BYTES - METADATA_PAGE_BYTES as u64;
         let payload_region_count = aligned_payload_bytes.div_ceil(chunk_data_bytes);
         let metadata_bytes =
-            metadata_storage_bytes(72 + 16 * payload_region_count as usize + key.len()).ok_or(u64::MAX)?;
+            metadata_storage_bytes(88 + 16 * payload_region_count as usize + key.len()).ok_or(u64::MAX)?;
         let entry_bytes = aligned_payload_bytes + metadata_bytes;
         let free_tail_bytes = self.chunks.last().map_or(0, |chunk| CHUNK_BYTES - chunk.used_bytes);
         // Never split an entry across a shared chunk boundary, even if only metadata would spill.
@@ -656,7 +684,8 @@ impl UnwrittenShardBatch {
             payload_offset = payload_end;
         }
         let payload_checksum = blake3::hash(bytes);
-        let contents = page_format::encode_entry_metadata(key, object_range, &payload_regions, &payload_checksum);
+        let contents =
+            page_format::encode_entry_metadata(key, object_range, &payload_regions, &payload_checksum, &self.batch_id);
         let (entry_metadata_regions, first_metadata_chunk) =
             self.reserve_entry_regions(&mut chunk_index, metadata_bytes);
         self.chunks[first_metadata_chunk]
@@ -742,18 +771,24 @@ impl UnwrittenShardBatch {
         mut self,
         file: &DataFile,
         metrics: &DiskMetrics,
+        generation: &[u8; 16],
+        written_end: &AtomicU64,
     ) -> Result<Vec<(ObjectKey, ObjectRangeDiskStorage)>, DiskRangeCacheError> {
         for chunk in &mut self.chunks {
             let address = chunk.region.range().start;
             let mut page = vec![0; METADATA_PAGE_BYTES];
+            let mut contents = [0; page_format::CHUNK_METADATA_CONTENT_BYTES];
+            contents[..32].copy_from_slice(&chunk.metadata_starts.bitmap);
+            contents[32..48].copy_from_slice(generation);
+            contents[48..64].copy_from_slice(&self.batch_id);
             page_format::encode_page(
                 &mut page,
                 page_format::CHUNK_METADATA_PAGE_TAG,
-                blake3::hash(&chunk.metadata_starts.bitmap).as_bytes(),
+                blake3::hash(&contents).as_bytes(),
                 address,
                 address / CHUNK_BYTES,
                 0,
-                &chunk.metadata_starts.bitmap,
+                &contents,
             );
             chunk.parts[0].1 = Bytes::from(page);
             if let Err(error) = file
@@ -763,6 +798,7 @@ impl UnwrittenShardBatch {
                 tracing::warn!(target: "feuer::storage", %error, "batch write failed");
                 return Err(error.into());
             }
+            written_end.fetch_max(address + CHUNK_BYTES, Ordering::Relaxed);
         }
         metrics.written_entries.increase(self.entries.len() as u64);
         metrics

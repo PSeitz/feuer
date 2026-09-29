@@ -194,6 +194,46 @@ impl IoQueueHandle {
             .into_bytes())
     }
 
+    /// One low-priority metadata read. Never joins the foreground admission waiters or allocates
+    /// a buffer without permits. The scanner retries later when foreground traffic owns the budget.
+    pub(crate) async fn try_read_recovery_page(&self, region: DiskRegionReadGuard) -> io::Result<Option<Bytes>> {
+        let length = DIRECT_IO_ALIGNMENT_BYTES;
+        let offset = region.range().start;
+        assert_eq!(region.range().end - offset, length as u64);
+        if self.admission.request_slots.is_closed() {
+            return Err(queue_stopped_error());
+        }
+        let Ok(request_permit) = self.admission.request_slots.clone().try_acquire_owned() else {
+            return Ok(None);
+        };
+        let Ok(buffer_permit) = self.admission.buffer_memory.clone().try_acquire_owned() else {
+            return Ok(None);
+        };
+        let buffer = self.allocate_buffer(length, vec![region])?;
+        let (reply, receive) = oneshot::channel();
+        let mut request = IoRequest::new(
+            offset,
+            IoBuffers::Read(buffer),
+            0..length,
+            reply,
+            (request_permit, buffer_permit),
+        );
+        request.recovery = true;
+        self.sender
+            .as_ref()
+            .unwrap()
+            .try_send(request)
+            .map_err(|_| queue_stopped_error())?;
+        wake_queue(&self.wake_fd);
+        Ok(Some(
+            receive
+                .await
+                .map_err(|_| queue_stopped_error())??
+                .into_read()
+                .into_bytes(),
+        ))
+    }
+
     /// Writes parts at aligned offsets, starting at zero; gaps become zero.
     /// Aligned payload slices are retained directly; only other bytes need a copy.
     pub(crate) async fn write_parts(
@@ -500,6 +540,8 @@ struct IoRequest {
     completed_bytes: usize,
     // Caller result channel; taken on finish/failure, also detects cancellation.
     reply: Option<oneshot::Sender<io::Result<IoBuffers>>>,
+    // Foreground reads precede recovery reads that have not been submitted yet.
+    recovery: bool,
     // Holds request admission until this request is dropped.
     _request_permit: OwnedSemaphorePermit,
     // Holds the I/O buffer memory charge until this request is dropped.
@@ -529,6 +571,7 @@ impl IoRequest {
             destination,
             completed_bytes: 0,
             reply: Some(reply),
+            recovery: false,
             _request_permit: permits.0,
             _buffer_memory_permit: permits.1,
         }
@@ -662,7 +705,8 @@ impl IoQueue {
             if self.active[slot].is_some() {
                 continue;
             }
-            let Some(request) = self.pending.pop_front() else {
+            let position = self.pending.iter().position(|request| !request.recovery).unwrap_or(0);
+            let Some(request) = self.pending.remove(position) else {
                 break;
             };
             self.active[slot] = Some(request);

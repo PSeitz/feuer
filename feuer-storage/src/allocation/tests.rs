@@ -3,6 +3,56 @@ use crate::test_metrics::{registry, value};
 use std::sync::Barrier;
 
 #[test]
+fn recovery_claims_survive_release_but_inspection_alone_does_not_claim_a_chunk() {
+    let allocator = DiskChunkAllocator::for_disk_range(3 * CHUNK_BYTES..7 * CHUNK_BYTES).unwrap();
+    allocator.start_recovery(3 * CHUNK_BYTES, 7 * CHUNK_BYTES);
+    let inspected = allocator.reserve_for_recovery(5).unwrap();
+    assert_eq!(inspected.range(), 5 * CHUNK_BYTES..6 * CHUNK_BYTES);
+    assert!(allocator.reserve_for_recovery(5).is_none());
+    let populated = allocator.reserve_chunks(1).unwrap().pop().unwrap();
+    assert_eq!(populated.range().start, 3 * CHUNK_BYTES);
+    drop(populated);
+    assert!(allocator.reserve_for_recovery(3).is_none());
+    drop(inspected);
+    let recovered = allocator.reserve_for_recovery(5).unwrap();
+    recovered.mark_recovered();
+    let guard = recovered.read_guard();
+    drop(recovered);
+    assert_eq!(allocator.available_bytes(), 3 * CHUNK_BYTES);
+    drop(guard);
+    assert_eq!(allocator.available_bytes(), 4 * CHUNK_BYTES);
+    assert!(allocator.reserve_for_recovery(5).is_none());
+    // All split free runs coalesce again; claims only exclude recovery, never new allocation.
+    let all = allocator.reserve_chunks(4).unwrap();
+    assert_eq!(
+        all.iter().map(|region| region.range().start).collect::<Vec<_>>(),
+        (3..7).map(|chunk| chunk * CHUNK_BYTES).collect::<Vec<_>>()
+    );
+    drop(all);
+    allocator.finish_recovery();
+    assert!(allocator.reserve_for_recovery(4).is_none());
+}
+
+#[test]
+fn population_and_recovery_cannot_reserve_the_same_chunk_concurrently() {
+    for _ in 0..100 {
+        let allocator = DiskChunkAllocator::new(CHUNK_BYTES).unwrap();
+        allocator.start_recovery(0, CHUNK_BYTES);
+        let barrier = Arc::new(Barrier::new(2));
+        let writer = allocator.clone();
+        let writer_barrier = barrier.clone();
+        let task = std::thread::spawn(move || {
+            writer_barrier.wait();
+            writer.reserve_chunks(1)
+        });
+        barrier.wait();
+        let recovered = allocator.reserve_for_recovery(0);
+        let populated = task.join().unwrap();
+        assert_ne!(recovered.is_some(), populated.is_some());
+    }
+}
+
+#[test]
 fn capacity_metrics_follow_whole_chunk_ownership_and_allocator_drop() {
     let (registry, backend) = registry();
     let metrics = DiskMetrics::new(&backend);

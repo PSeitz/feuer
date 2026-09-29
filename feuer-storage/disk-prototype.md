@@ -3,8 +3,8 @@
 Experimental `DiskRangeCache`, connected to public tiered lookup and bounded background population.
 [tiered-plan.md](../tiered-plan.md) remains authoritative.
 
-**Every open starts empty. Recovery is not implemented.** Old on-disk metadata is not cleared.
-This is not a durable reset protocol.
+**Open starts background recovery without waiting for the scan.** Recovered entries become readable
+incrementally while ordinary reads and population continue.
 
 ## Layout and ownership
 
@@ -65,18 +65,36 @@ for readers or writers. There is no relocation or cleaning.
 
 ## Metadata and recovery
 
-`src/range_cache/page_format.rs` defines the experimental v3 format. Linked entry metadata pages
-store the full key, object range, ordered payload regions, and payload checksum. Each page has a
-checksum, and each chain carries a checksum of the complete entry metadata.
+`src/range_cache/page_format.rs` defines the experimental v4 format. Linked entry metadata pages
+store the full key, object range, ordered payload regions, payload checksum, and batch ID. Each page has
+a checksum, and each chain carries a checksum of the complete entry metadata. Chunk metadata records
+the cache generation and batch ID, binding an entry to the batch that wrote all its chunks.
 
 Each chunk metadata page contains a bitmap of metadata starts at 4-KiB-aligned offsets. These are
 recovery candidates, not live-entry or free-space bits. Removal does not update the bitmap.
 Whole-chunk reuse replaces it.
 
-**Chunk writes are neither atomic nor durability barriers.** Recovery must validate metadata chains,
-mappings, and ownership conflicts rather than trust bitmap bits. Acceptance rules for torn writes,
-missing payload, and reused addresses remain unresolved and may require format or persistence changes.
-Current runtime tests do not establish crash guarantees.
+`recovery-ends` is a small checksummed file containing the layout, cache generation, and one scan end
+per shard. Growing ends are checkpointed by atomic replacement every ten seconds; stale ends may omit
+recent writes. Recovery snapshots those ends at open and stops there, regardless of new population.
+Missing, invalid, or incompatible inventory resets the cache generation and logs a cold start. The reset
+is synchronized before serving; old-generation chunks cannot reappear on later restarts. No payload
+synchronization or final checkpoint on close is promised.
+
+The allocator records chunks claimed during recovery, even if their owners later release them. Population
+may claim unscanned chunks immediately. Recovery reserves only chunks being inspected, validates their
+metadata chains, generation, batch IDs, mappings, and ownership, then publishes without displacing indexed
+ranges. Shared-chunk entries retain shared ownership; multi-chunk entries reserve every chunk exclusively.
+Inspection alone does not permanently claim a chunk. These temporary claim bitmaps disappear after the scan.
+Metadata chains larger than 16 MiB are skipped to bound decoder memory and work.
+
+The scan issues one 4-KiB read at a time. It retries admission rather than queueing ahead of foreground
+waiters, and pending foreground requests precede pending scan requests. Index locks never span scan I/O.
+Already-submitted scan I/O can still contend for the device.
+
+**Chunk writes are neither atomic nor durability barriers.** Bad metadata is skipped. Payload integrity is
+checked on every disk hit, including recovered hits; missing or torn payload becomes a miss. Real device
+power-loss testing is still required before claiming crash hardening.
 
 ## Validation and remaining work
 
@@ -87,7 +105,9 @@ mkdir -p /mnt/local-ssd/<isolated-test-directory>
 TMPDIR=/mnt/local-ssd/<isolated-test-directory> cargo test --locked -p feuer-storage
 ```
 
-Reopen tests assert an empty reset, not recovery. Device power-loss and torn-persistence tests remain
-outstanding, along with buffered mode and tier-aware retention tuning.
+Tests cover incremental recovery, concurrent allocation claims, stale scan ends, generation resets,
+metadata corruption, reused multi-chunk addresses, and foreground I/O priority. Real Linux execution of
+the new recovery tests and device power-loss testing remain outstanding, along with buffered mode and
+tier-aware retention tuning.
 Measure chunk utilization, metadata overhead, read/write amplification, and retention quality before
 selecting this layout over alternatives.

@@ -3,7 +3,7 @@
 //! The current public boundary provides exact requested byte ranges, opaque
 //! object identities, a soft-capacity memory tier, integrity-checked disk hits,
 //! bounded best-effort disk population, and per-call asynchronous download callbacks.
-//! Opening a cache requires Linux direct I/O and io_uring. Recovery is not implemented.
+//! Opening requires Linux direct I/O and io_uring. Disk recovery runs incrementally in the background.
 
 mod cache;
 mod config;
