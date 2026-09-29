@@ -405,8 +405,8 @@ impl DiskRangeCache {
                                 DiskLookupOutcome::IoError
                             }
                             _ => {
-                                tracing::warn!(target: "feuer::storage", "disk integrity check failed; entry invalidated");
-                                DiskLookupOutcome::IntegrityFailure
+                                tracing::warn!(target: "feuer::storage", "disk checksum failed; entry invalidated");
+                                DiskLookupOutcome::ChecksumFailed
                             }
                         };
                         shard.entry_index.lock().unwrap().invalidate(key, &guarded_read);

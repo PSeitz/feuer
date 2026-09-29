@@ -199,7 +199,7 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
 }
 
 #[tokio::test]
-async fn distinguishes_integrity_failures_from_io_errors_and_removes_index_usage() {
+async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage() {
     let (directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
     let request = ByteRange::new(0, 1).unwrap();
     let key = "corrupt".to_owned();
@@ -218,7 +218,7 @@ async fn distinguishes_integrity_failures_from_io_errors_and_removes_index_usage
         value(
             &registry,
             "feuer_disk_lookup_total",
-            &[("outcome", "integrity_failure")]
+            &[("outcome", "checksum_failed")]
         ),
         1.0
     );

@@ -3,8 +3,7 @@
 On Linux, use `TieredMemoryDiskCache::open_with_metrics(config, &registry).await`
 with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup,
 memory, disk I/O, range-cache and population metrics in that registry.
-`open(config)` keeps the no-op default. Feuer does not install an exporter;
-the application owns the registry and its export endpoint.
+Feuer does not install an exporter, the application owns the registry and its export endpoint.
 
 All labels below have fixed values. Object keys, paths and caller-defined cache
 names are not labels. Multiple caches using the same registry aggregate their
@@ -30,14 +29,14 @@ operations; use the public lookup counters to measure caller-visible behavior.
 
 | Metric | Type | Labels / meaning |
 |---|---|---|
-| `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `integrity_failure` |
+| `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `checksum_failed` |
 | `feuer_disk_lookup_duration_seconds` | Histogram | `outcome`: `hit`; includes whole-entry reading, checksum verification and copying |
 | `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`; each chunk is 1 MiB |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
 | `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`; payload and whole-chunk bytes of successfully written shard batches, before publication |
 
-Disk read errors and integrity failures still behave as cache misses; metrics
+Disk read errors and checksum failures still behave as cache misses; metrics
 make those distinct from absent entries. `contains()` does not count as a lookup.
 
 Chunk states are disjoint. Reserved chunks remain reserved until **all entry

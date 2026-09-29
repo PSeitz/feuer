@@ -7,7 +7,7 @@ pub(crate) enum DiskLookupOutcome {
     Hit,
     Absent,
     IoError,
-    IntegrityFailure,
+    ChecksumFailed,
 }
 
 #[derive(Clone, Copy)]
@@ -42,7 +42,7 @@ impl DiskMetrics {
     pub fn new(registry: &BoxedRegistry) -> Arc<Self> {
         let lookups = registry.register_counter_vec(
             "feuer_disk_lookup_total".into(),
-            "Completed disk range lookups; errors and integrity failures are returned as misses".into(),
+            "Completed disk range lookups; errors and checksum failures are returned as misses".into(),
             &["outcome"],
         );
         let duration = registry.register_histogram_vec_with_buckets(
@@ -83,7 +83,7 @@ impl DiskMetrics {
             "Payload and whole-chunk bytes in successfully written shard batches before publication".into(),
             &["kind"],
         );
-        let outcomes = ["hit", "absent", "io_error", "integrity_failure"];
+        let outcomes = ["hit", "absent", "io_error", "checksum_failed"];
         Arc::new(Self {
             lookup_count: outcomes.map(|label| lookups.counter(&[label.into()])),
             hit_duration: duration.histogram(&["hit".into()]),
@@ -164,7 +164,7 @@ mod tests {
             (DiskLookupOutcome::Hit, "hit"),
             (DiskLookupOutcome::Absent, "absent"),
             (DiskLookupOutcome::IoError, "io_error"),
-            (DiskLookupOutcome::IntegrityFailure, "integrity_failure"),
+            (DiskLookupOutcome::ChecksumFailed, "checksum_failed"),
         ] {
             metrics.record_lookup(outcome, Duration::from_micros(10));
             assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", label)]), 1.0);
