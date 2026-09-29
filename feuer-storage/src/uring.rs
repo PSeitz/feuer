@@ -29,13 +29,13 @@ pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = 4096;
 // Maximum physical bytes per chunk, including alignment padding. DataFile
 // reduces the logical chunk size when its starting offset is unaligned.
 pub(crate) const MAX_IO_CHUNK_BYTES: usize = 1024 * 1024;
-// Maximum ring capacity; reads admit 64 requests, writes admit fewer below.
-const MAX_IN_FLIGHT_IO: usize = 64;
+// Maximum number of admitted read requests.
+const MAX_IN_FLIGHT_READS: usize = 64;
 // Local-SSD benchmarks saturated 1-MiB writes at QD8. QD64 added no write-only
 // throughput, but raised write p99 from 4.6 to 47 ms and worsened small-read latency.
 // See benchmarks/ssd/uring-20260928/REPORT.md.
 const MAX_IN_FLIGHT_WRITES: usize = 8;
-// Per-queue I/O buffer memory budget: MAX_IN_FLIGHT_IO full-size aligned buffers.
+// Per-queue I/O buffer memory budget: 64 full-size aligned buffers.
 // Caller inputs, caller-provided read destinations, and completed results are
 // outside this budget. A read into an existing buffer charges only its I/O slice.
 const MAX_IO_BUFFER_BYTES: usize = 64 * 1024 * 1024;
@@ -112,7 +112,7 @@ impl IoQueueHandle {
         metrics: &IoMetrics,
     ) -> io::Result<Self> {
         let (thread_name, max_in_flight) = match operation {
-            IoOperation::Read => ("feuer-read-io", MAX_IN_FLIGHT_IO),
+            IoOperation::Read => ("feuer-read-io", MAX_IN_FLIGHT_READS),
             IoOperation::Write => ("feuer-write-io", MAX_IN_FLIGHT_WRITES),
             _ => unreachable!("queue only supports reads and writes"),
         };
@@ -596,7 +596,7 @@ struct IoQueue {
 impl IoQueue {
     fn run(&mut self) -> io::Result<()> {
         let mut disconnected = false;
-        let mut completions = Vec::with_capacity(MAX_IN_FLIGHT_IO);
+        let mut completions = Vec::with_capacity(self.active.len());
         loop {
             completions.extend(self.ring.completion().map(|cqe| (cqe.user_data(), cqe.result())));
             for (slot, result) in completions.drain(..) {

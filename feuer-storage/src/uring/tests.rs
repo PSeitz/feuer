@@ -50,20 +50,20 @@ fn queue() -> IoQueue {
     assert!(fd >= 0);
     // SAFETY: fd was just created and has no other owner.
     let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
-    let (_, receiver) = mpsc::sync_channel(MAX_IN_FLIGHT_IO); // disconnected: run() will drain and exit
+    let (_, receiver) = mpsc::sync_channel(MAX_IN_FLIGHT_READS); // disconnected: run() will drain and exit
     IoQueue {
         admission: Arc::new(IoAdmissionBudgets::new(
-            MAX_IN_FLIGHT_IO,
+            MAX_IN_FLIGHT_READS,
             IoOperation::Read,
             &IoMetrics::noop(),
         )),
-        ring: IoUring::new(MAX_IN_FLIGHT_IO as u32).unwrap(),
+        ring: IoUring::new(MAX_IN_FLIGHT_READS as u32).unwrap(),
         file: Some(Arc::new(file)),
         directory_lock: Some(Arc::new(tempfile::tempfile().unwrap())),
         wake_fd,
         receiver,
         pending: VecDeque::new(),
-        active: (0..MAX_IN_FLIGHT_IO).map(|_| None).collect(),
+        active: (0..MAX_IN_FLIGHT_READS).map(|_| None).collect(),
     }
 }
 
@@ -228,7 +228,7 @@ fn io_buffer_pool_capacities_follow_environment() {
     if let Ok(expected_small) = std::env::var("FEUER_TEST_IO_BUFFER_POOLS_CHILD") {
         let (registry, backend) = crate::test_metrics::registry();
         let metrics = IoMetrics::new(&backend);
-        let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_IO, IoOperation::Read, &metrics);
+        let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_READS, IoOperation::Read, &metrics);
         for (index, name) in ["small", "medium", "large"].into_iter().enumerate() {
             assert_eq!(
                 crate::test_metrics::value(
@@ -287,7 +287,7 @@ fn io_buffer_pool_capacities_follow_environment() {
 
 #[test]
 fn small_medium_and_large_buffer_pools_have_independent_budgets() {
-    let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_IO, IoOperation::Read, &IoMetrics::noop());
+    let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_READS, IoOperation::Read, &IoMetrics::noop());
     let mib = 1024 * 1024;
     for (length, index) in [
         (DIRECT_IO_ALIGNMENT_BYTES, 0),
@@ -364,7 +364,7 @@ fn full_ring_does_not_block_the_other_direction() {
         other_queue.directory_lock = full_queue.directory_lock.clone();
         let mut full_replies = Vec::new();
         let mut other_replies = Vec::new();
-        for i in 0..MAX_IN_FLIGHT_IO {
+        for i in 0..MAX_IN_FLIGHT_READS {
             let (request, reply) = request(
                 &full_queue,
                 operation,
@@ -376,38 +376,38 @@ fn full_ring_does_not_block_the_other_direction() {
         }
         full_queue.schedule();
         full_queue.ring.submit().unwrap();
-        assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_IO);
+        assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
         assert_eq!(full_queue.admission.request_slots.available_permits(), 0);
         assert!(full_queue.admission.request_slots.clone().try_acquire_owned().is_err());
 
-        for i in 0..MAX_IN_FLIGHT_IO {
+        for i in 0..MAX_IN_FLIGHT_READS {
             // Use disjoint physical pages on the same backing file.
             let (request, reply) = request(
                 &other_queue,
                 other_operation,
-                ((MAX_IN_FLIGHT_IO + i) * DIRECT_IO_ALIGNMENT_BYTES) as u64,
+                ((MAX_IN_FLIGHT_READS + i) * DIRECT_IO_ALIGNMENT_BYTES) as u64,
                 DIRECT_IO_ALIGNMENT_BYTES,
             );
             other_queue.pending.push_back(request);
             other_replies.push(reply);
         }
         other_queue.schedule();
-        assert_eq!(other_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_IO);
-        assert_eq!(other_queue.ring.submission().len(), MAX_IN_FLIGHT_IO);
+        assert_eq!(other_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
+        assert_eq!(other_queue.ring.submission().len(), MAX_IN_FLIGHT_READS);
         assert!(other_queue.pending.is_empty());
         // Complete an entire ring without processing any completions on the full queue.
         other_queue.run().unwrap();
         for mut reply in other_replies {
             reply.try_recv().unwrap().unwrap();
         }
-        assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_IO);
+        assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
         full_queue.run().unwrap();
         for mut reply in full_replies {
             reply.try_recv().unwrap().unwrap();
         }
         for queue in [&full_queue, &other_queue] {
             assert!(queue.active.iter().all(Option::is_none));
-            assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
+            assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
             assert_eq!(
                 queue.admission.buffer_memory.available_permits(),
                 MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
@@ -422,19 +422,19 @@ fn full_write_admission_and_buffers_leave_full_read_capacity() {
     let read_queue = queue();
     let mut writes = Vec::new();
     let mut reads = Vec::new();
-    for _ in 0..MAX_IN_FLIGHT_IO {
+    for _ in 0..MAX_IN_FLIGHT_READS {
         writes.push(request(&write_queue, IoOperation::Write, 0, MAX_IO_CHUNK_BYTES));
     }
     assert_eq!(write_queue.admission.request_slots.available_permits(), 0);
     assert_eq!(write_queue.admission.buffer_memory.available_permits(), 0);
-    for _ in 0..MAX_IN_FLIGHT_IO {
+    for _ in 0..MAX_IN_FLIGHT_READS {
         reads.push(request(&read_queue, IoOperation::Read, 0, MAX_IO_CHUNK_BYTES));
     }
     assert_eq!(read_queue.admission.request_slots.available_permits(), 0);
     assert_eq!(read_queue.admission.buffer_memory.available_permits(), 0);
     drop((reads, writes));
     for queue in [&read_queue, &write_queue] {
-        assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
+        assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
         assert_eq!(
             queue.admission.buffer_memory.available_permits(),
             MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
@@ -510,14 +510,14 @@ fn canceled_submitted_write_retains_resources() {
     queue.schedule();
     assert!(allocator.reserve_chunks(1).is_none());
     assert!(queue.active[0].is_some());
-    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO - 1);
+    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS - 1);
     assert_eq!(
         queue.admission.buffer_memory.available_permits(),
         MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES - 1
     );
     queue.run().unwrap();
     assert!(queue.active.iter().all(Option::is_none));
-    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
+    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
     assert_eq!(
         queue.admission.buffer_memory.available_permits(),
         MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
@@ -548,7 +548,7 @@ fn discarded_queued_requests_never_reach_the_ring() {
     assert!(queue.pending.is_empty());
     assert!(queue.active.iter().all(Option::is_none));
     assert!(queue.ring.submission().is_empty());
-    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
+    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
 }
 
 #[test]
@@ -566,7 +566,7 @@ fn finished_read_transfers_buffer_ownership() {
     let bytes = reply.try_recv().unwrap().unwrap().into_read().into_bytes();
     assert_eq!(bytes.as_ptr(), ptr);
     assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
-    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO);
+    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
     assert_eq!(
         queue.admission.buffer_memory.available_permits(),
         MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
@@ -659,7 +659,7 @@ fn canceled_read_retains_destination_and_disk_guard_until_completion() {
 #[test]
 fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
     let page = DIRECT_IO_ALIGNMENT_BYTES;
-    let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_IO, IoOperation::Read, &IoMetrics::noop());
+    let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_READS, IoOperation::Read, &IoMetrics::noop());
     let pool = admission.buffer_pool(4 * page);
     let mut source = AlignedIoBuffer::new(2 * page, Vec::new(), pool).unwrap();
     source.as_mut_slice().fill(0x77);
