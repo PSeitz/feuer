@@ -637,7 +637,7 @@ impl UnwrittenShardBatch {
             let regions = allocator.reserve_chunks(new_chunk_count).ok_or(new_chunk_count)?;
             self.chunks.extend(regions.into_iter().map(|region| UnwrittenChunk {
                 region,
-                // The discovery page is filled after all entry positions are known.
+                // The chunk metadata page is filled after all entry positions are known.
                 parts: vec![(0, Bytes::new())],
                 used_bytes: METADATA_PAGE_BYTES as u64,
                 metadata_starts: EntryMetadataStartBitmap::default(),
@@ -737,7 +737,7 @@ impl UnwrittenShardBatch {
         (regions, first_chunk_index)
     }
 
-    /// Finalizes discovery metadata and writes all chunks before returning entries for publication.
+    /// Finalizes chunk metadata and writes all chunks before returning entries for publication.
     async fn write_chunks(
         mut self,
         file: &DataFile,

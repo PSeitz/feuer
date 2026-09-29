@@ -6,7 +6,7 @@ Implement only what the stated requirements need. Do not add features, abstracti
 
 # Disk chunks
 
-A written chunk is immutable until all entry owners and read guards release it. Explicit batches group small entries into chunks and finalize payload, metadata, and discovery bitmaps before writing. Do not append to written chunks or reuse individual entry holes.
+A written chunk is immutable until all entry owners and read guards release it. Explicit batches group small entries into chunks and finalize payload, entry metadata, and chunk metadata before writing. Do not append to written chunks or reuse individual entry holes.
 
 # Naming
 

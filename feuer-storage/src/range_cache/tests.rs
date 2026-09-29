@@ -373,7 +373,7 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
     }
     histories.record_access(&cold, range(0, 1));
     histories.record_access(&other, range(0, 1));
-    // Corrupt discovery metadata: entry-wise eviction must not read it at all.
+    // Corrupt chunk metadata: entry-wise eviction must not read it at all.
     cache
         .disk
         .file
@@ -828,7 +828,7 @@ async fn metadata_only_chunks_remain_owned_until_the_entry_is_removed() {
 #[tokio::test]
 async fn entry_metadata_space_is_charged_and_failed_reservations_roll_back() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    // Fill all space after the discovery page, leaving no room for entry metadata.
+    // Fill all space after the chunk metadata page, leaving no room for entry metadata.
     assert!(
         !cache
             .insert(

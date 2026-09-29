@@ -114,7 +114,7 @@ This is a raw I/O layer, not a disk cache or population queue. Disk storage and 
 
 [`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) specifies the experimental layout and
 remaining crash/recovery questions. `DiskRangeCache::insert_batch` groups smaller entries together within each
-shard, assembles whole chunks including entry metadata and discovery bitmaps, writes each chunk once, and then
+shard, assembles whole chunks including entry metadata and chunk metadata, writes each chunk once, and then
 publishes after containment revalidation. Partial final chunks are finalized too. Later batches cannot fill them. Full keys and exact
 object ranges map to ordered physical regions. Payload bytes have no interleaved headers. Entry metadata stores
 one BLAKE3 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
@@ -145,7 +145,7 @@ No comparative layout/performance claim is established.
 
 The range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
 cancellation, corruption/reused payload, partial batch failure, metadata-only chunks, disjoint shards,
-mixed-size packing, exclusive multi-chunk ownership, finalized discovery bitmaps, whole-chunk ownership/reuse,
+mixed-size packing, exclusive multi-chunk ownership, finalized chunk metadata, whole-chunk ownership/reuse,
 bounded value-aware entry eviction, shared evidence across tiers, payload-only scoring, mixed-size churn,
 concurrent eviction/reads,
 fragmented chunks and whole-entry

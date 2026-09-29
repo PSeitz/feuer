@@ -250,7 +250,7 @@ whose result is discarded no longer needs unchanged disk contents, but its submi
 survive until completion. The I/O layer owns that buffer lifetime.
 
 The current disk design packs explicit batches of variable-length entries into immutable 1-MiB chunks,
-grouping smaller entries together. Each chunk's payload, metadata and discovery bitmap are finalized before
+grouping smaller entries together. Each chunk's payload, entry metadata and chunk metadata are finalized before
 its only write. Later batches cannot append to it or reuse holes left by removed entries. A chunk becomes
 reusable only after all entry owners and read guards release it. Partially filled final chunks consume their
 full capacity. Payload starts and allocated lengths are rounded to 4 KiB. Small entries consume at least
