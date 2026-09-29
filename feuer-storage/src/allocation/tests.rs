@@ -3,7 +3,7 @@ use crate::test_metrics::{registry, value};
 use std::sync::Barrier;
 
 #[test]
-fn capacity_metrics_follow_whole_chunk_ownership_quarantine_and_allocator_drop() {
+fn capacity_metrics_follow_whole_chunk_ownership_and_allocator_drop() {
     let (registry, backend) = registry();
     let metrics = DiskMetrics::new(&backend);
     let allocator = DiskChunkAllocator::with_metrics(0..2 * CHUNK_BYTES, metrics.clone()).unwrap();
@@ -11,21 +11,20 @@ fn capacity_metrics_follow_whole_chunk_ownership_quarantine_and_allocator_drop()
     let chunks = |state| value(&registry, "feuer_disk_chunks", &[("state", state)]);
     assert_eq!(chunks("free"), 3.0);
     let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
-    assert_eq!(chunks("reserved"), 1.0);
+    assert_eq!(chunks("allocated"), 1.0);
     let reader = chunk.read_guard();
     drop(chunk);
     assert_eq!(chunks("free"), 2.0);
     drop(reader);
     assert_eq!(chunks("free"), 3.0);
-    assert_eq!(chunks("reserved"), 0.0);
+    assert_eq!(chunks("allocated"), 0.0);
     let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
     let same_chunk = chunk.slice(chunk.range());
-    chunk.quarantine();
-    same_chunk.quarantine();
-    assert_eq!(chunks("quarantined"), 1.0);
-    assert_eq!(chunks("reserved"), 0.0);
+    drop(chunk);
+    assert_eq!(chunks("allocated"), 1.0);
+    drop(same_chunk);
+    assert_eq!(chunks("allocated"), 0.0);
     drop(allocator);
-    assert_eq!(chunks("quarantined"), 0.0);
     assert_eq!(chunks("free"), 1.0);
     drop(other);
     assert_eq!(chunks("free"), 0.0);
@@ -136,18 +135,6 @@ fn reuse_waits_for_all_concurrent_readers() {
     assert!(allocator.reserve_chunks(1).is_none());
     drop(final_reader);
     assert_all_chunks_free(&allocator, CHUNK_BYTES);
-}
-
-#[test]
-fn quarantining_any_region_prevents_reuse_of_its_entire_chunk() {
-    let allocator = DiskChunkAllocator::new(CHUNK_BYTES).unwrap();
-    let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
-    let first = chunk.slice(1..2);
-    let second = chunk.slice(2..3);
-    first.quarantine();
-    drop((chunk, second));
-    assert!(allocator.reserve_chunks(1).is_none());
-    assert_eq!(allocator.available_bytes(), 0);
 }
 
 #[test]

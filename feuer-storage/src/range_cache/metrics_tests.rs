@@ -125,7 +125,7 @@ async fn records_population_outcomes_packing_and_index_usage() {
         value(&registry, "feuer_disk_population_written_entries_total", &[]),
         3.0
     );
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "reserved")]), 1.0);
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 1.0);
     assert_eq!(
         cache
             .insert_batch(vec![("oversized".into(), download(4 * CHUNK_BYTES as usize))])
@@ -147,7 +147,7 @@ async fn records_population_outcomes_packing_and_index_usage() {
     for name in ["feuer_disk_entries", "feuer_disk_payload_bytes"] {
         assert_eq!(value(&registry, name, &[]), 0.0);
     }
-    for state in ["free", "reserved", "quarantined"] {
+    for state in ["free", "allocated"] {
         assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", state)]), 0.0);
     }
 }
@@ -271,8 +271,8 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
         2.0
     );
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "quarantined")]), 3.0);
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "reserved")]), 0.0);
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 3.0);
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 0.0);
 }
 
 #[test]

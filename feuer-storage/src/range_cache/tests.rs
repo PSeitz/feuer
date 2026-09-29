@@ -1066,7 +1066,7 @@ async fn a_short_read_is_a_miss_not_unverified_bytes() {
 }
 
 #[tokio::test]
-async fn failed_chunk_write_quarantines_the_batch_without_publication() {
+async fn failed_chunk_write_releases_the_batch_without_publication() {
     let (_directory, mut cache) = open_test_cache(CHUNK_BYTES).await;
     // First chunk succeeds, second is outside the real file. Even the complete small entry
     // in the first chunk must remain unpublished when its shard's batch fails.
@@ -1083,13 +1083,13 @@ async fn failed_chunk_write_quarantines_the_batch_without_publication() {
     ));
     assert!(cache.get(&"small".to_owned(), range(0, 1)).await.is_none());
     assert!(cache.get(&"large".to_owned(), range(0, 1)).await.is_none());
-    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 0);
+    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 3 * CHUNK_BYTES);
     let chunk_metadata_page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
     assert_eq!(&chunk_metadata_page[88..96], page_format::CHUNK_METADATA_PAGE_TAG);
 }
 
 #[test]
-fn abandoned_chunk_write_owner_quarantines_shared_storage() {
+fn chunk_write_owner_holds_shared_storage_until_released() {
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
     let mut batch = UnwrittenShardBatch::default();
     let histories = ObjectAccessHistories::new(1);
@@ -1109,16 +1109,15 @@ fn abandoned_chunk_write_owner_quarantines_shared_storage() {
             &histories.for_key(&"b".to_owned()),
         )
         .unwrap();
-    let unfinished = UnfinishedChunkWrites(
-        batch
-            .chunks
-            .iter()
-            .map(|chunk| chunk.region.slice(chunk.region.range()))
-            .collect(),
-    );
-    drop(unfinished);
+    let owners: Vec<_> = batch
+        .chunks
+        .iter()
+        .map(|chunk| chunk.region.slice(chunk.region.range()))
+        .collect();
     drop(batch);
     assert_eq!(allocator.available_bytes(), 0);
+    drop(owners);
+    assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
 }
 
 #[tokio::test]

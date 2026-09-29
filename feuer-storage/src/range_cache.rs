@@ -122,17 +122,6 @@ struct ObjectRangeDiskStorage {
     entry_metadata_regions: Vec<DiskRegion>,
 }
 
-/// Whole chunks retained through batch I/O; errors or unexpected task drops quarantine them.
-struct UnfinishedChunkWrites(Vec<DiskRegion>);
-
-impl Drop for UnfinishedChunkWrites {
-    fn drop(&mut self) {
-        for region in self.0.drain(..) {
-            region.quarantine();
-        }
-    }
-}
-
 /// A guarded object-range read, with the expected checksum and all payload regions.
 struct GuardedObjectRangeRead {
     object_range: ByteRange,
@@ -149,7 +138,7 @@ pub enum DiskRangeCacheError {
     /// Raw storage failed.
     #[error(transparent)]
     DataFile(#[from] DataFileError),
-    /// The task that owns a population failed; unfinished writes remain quarantined.
+    /// The task that owns a population failed; queued writes retain their chunks until completion.
     #[error("disk population task failed: {0}")]
     PopulationTaskFailed(#[source] tokio::task::JoinError),
 }
@@ -734,12 +723,6 @@ impl UnwrittenShardBatch {
         file: &DataFile,
         metrics: &DiskMetrics,
     ) -> Result<Vec<(ObjectKey, ObjectRangeDiskStorage)>, DiskRangeCacheError> {
-        let mut unfinished = UnfinishedChunkWrites(
-            self.chunks
-                .iter()
-                .map(|chunk| chunk.region.slice(chunk.region.range()))
-                .collect(),
-        );
         for chunk in &mut self.chunks {
             let address = chunk.region.range().start;
             let mut page = vec![0; METADATA_PAGE_BYTES];
@@ -753,12 +736,14 @@ impl UnwrittenShardBatch {
                 &chunk.metadata_starts.bitmap,
             );
             chunk.parts[0].1 = Bytes::from(page);
-            if let Err(error) = file.write_parts(address, CHUNK_BYTES as usize, &chunk.parts).await {
-                tracing::warn!(target: "feuer::storage", %error, "batch write failed; chunks quarantined");
+            if let Err(error) = file
+                .write_parts(chunk.region.slice(chunk.region.range()), &chunk.parts)
+                .await
+            {
+                tracing::warn!(target: "feuer::storage", %error, "batch write failed");
                 return Err(error.into());
             }
         }
-        unfinished.0.clear();
         metrics.written_entries.increase(self.entries.len() as u64);
         metrics
             .packed_payload_bytes

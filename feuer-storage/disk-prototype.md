@@ -36,9 +36,9 @@ and entries that cannot fit are skipped. Publication is not transactional across
 publication check. The public tier uses this to hold the memory shard lock while validating the original
 admission identity and publishing, so stale writes cannot become visible.
 
-A detached task retains reservations through I/O despite caller cancellation. A write error or
-unexpected drop during I/O quarantines every chunk in that shard's batch, including completed and
-not-yet-submitted writes.
+Each queued write retains its chunk ownership through completion despite caller cancellation.
+Failed or abandoned batches release their chunks once all owners and in-flight I/O release them.
+An abnormal queue failure retains active I/O resources when completion cannot be established.
 
 Callers must bound batch size and concurrency. Complete chunk buffers are outside the raw I/O
 queue's memory budget and are copied again into aligned direct-I/O buffers.

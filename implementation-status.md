@@ -122,8 +122,8 @@ entry while copying only requested bytes into the result. It does not read neigh
 
 Independent shards have their own allocator and range-index lock. The allocator tracks only coalesced free
 whole-chunk runs. There is no persistent bitmap map or async index-write lock. Written chunks remain immutable;
-all entry owners and read guards must release a chunk before reuse. Detached writer tasks retain reservations
-despite caller cancellation; write errors or abandoned owners during I/O quarantine the shard's batch chunks.
+all entry owners, queued writes, and read guards must release a chunk before reuse. Queued writes retain
+chunk ownership through completion despite caller cancellation; failed batches release chunks normally.
 Publication is not transactional across shards. Callers bound batch memory and concurrency.
 
 Entries within a batch share 1-MiB chunks with 4-KiB-aligned storage only when each entry's complete payload
@@ -184,7 +184,7 @@ The isolated validation checkout is `/mnt/local-ssd/feuer-tiered.iB2JNA`.
   and integrity outcomes, population admission/skip/terminal outcomes, queue pressure/wait time,
   chunk capacity states, indexed payload/entries, pressure eviction and byte-weighted batch packing.
 - Queue and capacity gauges follow ownership, including canceled work, detached writes, read guards,
-  quarantine and cache shutdown. See [`metrics.md`](metrics.md) for exact accounting semantics.
+  write failure and cache shutdown. See [`metrics.md`](metrics.md) for exact accounting semantics.
 - Validation on macOS: portable Feuer/memory/types tests pass; Linux workspace all-target checks and Clippy
   pass. New Linux metric integration tests are compile-checked but have not been executed on this host.
 

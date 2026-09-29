@@ -3,10 +3,7 @@
 use std::{
     collections::BTreeMap,
     ops::Range,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use crate::DiskMetrics;
@@ -28,7 +25,6 @@ struct DiskChunkAvailability {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
     free_chunk_count_by_start: BTreeMap<u64, u64>,
     available_chunks: u64,
-    quarantined_chunks: u64,
     metrics: Arc<DiskMetrics>,
 }
 
@@ -40,7 +36,7 @@ impl DiskChunkAvailability {
         }
         self.available_chunks -= 1;
         self.metrics.free_chunks.decrease(1);
-        self.metrics.reserved_chunks.increase(1);
+        self.metrics.allocated_chunks.increase(1);
         start
     }
 
@@ -65,15 +61,14 @@ impl DiskChunkAvailability {
         self.free_chunk_count_by_start.insert(start, count);
         self.available_chunks += 1;
         self.metrics.free_chunks.increase(1);
-        self.metrics.reserved_chunks.decrease(1);
+        self.metrics.allocated_chunks.decrease(1);
     }
 }
 
 impl Drop for DiskChunkAvailability {
     fn drop(&mut self) {
-        // The last reservation has gone; only free or quarantined chunks remain.
+        // The last reservation has gone; only free chunks remain.
         self.metrics.free_chunks.decrease(self.available_chunks);
-        self.metrics.quarantined_chunks.decrease(self.quarantined_chunks);
     }
 }
 
@@ -112,7 +107,6 @@ impl DiskChunkAllocator {
                     (disk_range.end - disk_range.start) / CHUNK_BYTES,
                 )]),
                 available_chunks: (disk_range.end - disk_range.start) / CHUNK_BYTES,
-                quarantined_chunks: 0,
                 metrics,
             })),
         })
@@ -133,7 +127,6 @@ impl DiskChunkAllocator {
                         state: Arc::new(ChunkReservation {
                             free: self.free.clone(),
                             chunk,
-                            reusable: AtomicBool::new(true),
                         }),
                     }
                 })
@@ -154,7 +147,6 @@ pub(super) struct DiskRegion {
 struct ChunkReservation {
     free: Arc<Mutex<DiskChunkAvailability>>,
     chunk: u64,
-    reusable: AtomicBool,
 }
 
 impl DiskRegion {
@@ -174,16 +166,6 @@ impl DiskRegion {
     pub(super) fn read_guard(&self) -> DiskRegionReadGuard {
         DiskRegionReadGuard {
             region: self.slice(self.range()),
-        }
-    }
-
-    /// Unknown write completion forbids reuse of the entire chunk for this allocator's lifetime.
-    pub(super) fn quarantine(self) {
-        if self.state.reusable.swap(false, Ordering::Relaxed) {
-            let mut free = self.state.free.lock().unwrap();
-            free.quarantined_chunks += 1;
-            free.metrics.reserved_chunks.decrease(1);
-            free.metrics.quarantined_chunks.increase(1);
         }
     }
 }
@@ -208,9 +190,7 @@ impl DiskRegionReadGuard {
 
 impl Drop for ChunkReservation {
     fn drop(&mut self) {
-        if *self.reusable.get_mut() {
-            self.free.lock().unwrap().release_chunk(self.chunk);
-        }
+        self.free.lock().unwrap().release_chunk(self.chunk);
     }
 }
 

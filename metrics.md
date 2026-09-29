@@ -32,7 +32,7 @@ operations; use the public lookup counters to measure caller-visible behavior.
 |---|---|---|
 | `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `integrity_failure` |
 | `feuer_disk_lookup_duration_seconds` | Histogram | `outcome`: `hit`; includes whole-entry reading, checksum verification and copying |
-| `feuer_disk_chunks` | Gauge | `state`: `free`, `reserved`, `quarantined`; each chunk is 1 MiB |
+| `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`; each chunk is 1 MiB |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
 | `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`; payload and whole-chunk bytes of successfully written shard batches, before publication |

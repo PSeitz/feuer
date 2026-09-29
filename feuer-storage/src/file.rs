@@ -15,7 +15,11 @@ use fs4::fs_std::FileExt as LockFileExt;
 use tokio::runtime::Handle;
 use tracing::{Instrument, Span, field};
 
-use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, allocation::DiskRegionReadGuard, uring};
+use crate::{
+    DataFileError, DataFileResult, IoMetrics, IoOperation,
+    allocation::{DiskRegion, DiskRegionReadGuard},
+    uring,
+};
 
 const DATA_FILE_NAME: &str = "data";
 const LOCK_FILE_NAME: &str = ".feuer.lock";
@@ -182,7 +186,12 @@ impl DataFile {
                 let end = (start + uring::MAX_IO_CHUNK_BYTES).min(bytes.len());
                 self.state
                     .write_queue
-                    .write_parts(offset + start as u64, end - start, &[(0, bytes.slice(start..end))])
+                    .write_parts(
+                        offset + start as u64,
+                        end - start,
+                        &[(0, bytes.slice(start..end))],
+                        None,
+                    )
                     .await
                     .map_err(|source| DataFileError::Io {
                         operation: IoOperation::Write,
@@ -196,13 +205,16 @@ impl DataFile {
     }
 
     /// Writes one complete chunk from parts at aligned offsets starting at zero, without
-    /// an intermediate chunk buffer. Gaps are zero-filled. The usual write cancellation contract applies.
-    pub(crate) async fn write_parts(&self, offset: u64, length: usize, parts: &[(usize, Bytes)]) -> DataFileResult<()> {
+    /// an intermediate chunk buffer. Gaps are zero-filled. The queue retains the region until completion.
+    pub(crate) async fn write_parts(&self, region: DiskRegion, parts: &[(usize, Bytes)]) -> DataFileResult<()> {
+        let range = region.range();
+        let offset = range.start;
+        let length = (range.end - range.start) as usize;
         self.measure_io(IoOperation::Write, offset, length, async {
             check_range(IoOperation::Write, offset, length as u64, self.state.capacity)?;
             self.state
                 .write_queue
-                .write_parts(offset, length, parts)
+                .write_parts(offset, length, parts, Some(region))
                 .await
                 .map_err(|source| DataFileError::Io {
                     operation: IoOperation::Write,

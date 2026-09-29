@@ -19,6 +19,7 @@ fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) 
         IoBuffers::Write {
             bytes: vec![buffer.into_bytes()],
             vectors: Vec::with_capacity(1),
+            _region: None,
         }
     } else {
         IoBuffers::Read(AlignedIoBuffer::new(length, Vec::new(), queue.admission.buffer_pool(length)).unwrap())
@@ -453,6 +454,7 @@ async fn read_worker_progresses_with_write_admission_exhausted_and_after_write_s
             0,
             DIRECT_IO_ALIGNMENT_BYTES,
             &[(0, Bytes::from(vec![0x99; DIRECT_IO_ALIGNMENT_BYTES]))],
+            None,
         )
         .await
         .unwrap();
@@ -495,13 +497,18 @@ async fn read_worker_progresses_with_write_admission_exhausted_and_after_write_s
 #[test]
 fn canceled_submitted_write_retains_resources() {
     let mut queue = queue();
-    let (write, reply) = request(&queue, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
+    let (mut write, reply) = request(&queue, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    if let IoBuffers::Write { _region: region, .. } = &mut write.buffers {
+        *region = allocator.reserve_chunks(1).unwrap().pop();
+    }
     queue.pending.push_back(write);
     queue.schedule();
     // The write has reached the kernel, but its completion is not yet processed.
     queue.ring.submit_and_wait(1).unwrap();
     drop(reply);
     queue.schedule();
+    assert!(allocator.reserve_chunks(1).is_none());
     assert!(queue.active[0].is_some());
     assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_IO - 1);
     assert_eq!(
@@ -515,6 +522,8 @@ fn canceled_submitted_write_retains_resources() {
         queue.admission.buffer_memory.available_permits(),
         MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
     );
+
+    assert_eq!(allocator.available_bytes(), MAX_IO_CHUNK_BYTES as u64);
 
     // Only read/reuse the region after completion, not after dropping the receiver.
     let mut read_queue = self::queue();
@@ -579,11 +588,11 @@ async fn reads_into_consecutive_slices_without_reallocating() {
     let write = IoQueueHandle::new(file.clone(), lock.clone(), IoOperation::Write, &IoMetrics::noop()).unwrap();
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     write
-        .write_parts(0, page, &[(0, Bytes::from(vec![0x99; page]))])
+        .write_parts(0, page, &[(0, Bytes::from(vec![0x99; page]))], None)
         .await
         .unwrap();
     write
-        .write_parts((2 * page) as u64, page, &[(0, Bytes::from(vec![0x77; page]))])
+        .write_parts((2 * page) as u64, page, &[(0, Bytes::from(vec![0x77; page]))], None)
         .await
         .unwrap();
     let mut buffer = read.allocate_buffer(3 * page, Vec::new()).unwrap();
@@ -660,10 +669,10 @@ fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
         dirty.as_mut_slice().fill(0xff);
         drop(dirty);
         let parts = [(0, source.slice(1..length + 1)), (page, source.slice(..page + 17))];
-        let mut buffers = IoBuffers::write(4 * page, &parts).unwrap();
+        let mut buffers = IoBuffers::write(4 * page, &parts, None).unwrap();
         assert_eq!(pool.lock().unwrap().bytes, 2 * page);
         buffers.submission_entry(types::Fd(-1), page as u64, page..4 * page);
-        let IoBuffers::Write { bytes, vectors } = buffers else {
+        let IoBuffers::Write { bytes, vectors, .. } = buffers else {
             unreachable!()
         };
         assert_eq!(bytes.len(), 3);

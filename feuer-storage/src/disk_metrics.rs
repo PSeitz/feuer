@@ -30,8 +30,7 @@ pub struct DiskMetrics {
     eviction_triggering_insertions: BoxedCounter,
     pub(crate) written_entries: BoxedCounter,
     pub(crate) free_chunks: BoxedGauge,
-    pub(crate) reserved_chunks: BoxedGauge,
-    pub(crate) quarantined_chunks: BoxedGauge,
+    pub(crate) allocated_chunks: BoxedGauge,
     pub(crate) payload_bytes: BoxedGauge,
     pub(crate) entries: BoxedGauge,
     pub(crate) packed_payload_bytes: BoxedCounter,
@@ -69,7 +68,7 @@ impl DiskMetrics {
         );
         let chunks = registry.register_gauge_vec(
             "feuer_disk_chunks".into(),
-            "Live allocator capacity in 1-MiB chunks; reserved includes owners and read guards".into(),
+            "Live allocator capacity in 1-MiB chunks; allocated includes owners and read guards".into(),
             &["state"],
         );
         let payload = registry.register_gauge_vec(
@@ -100,8 +99,7 @@ impl DiskMetrics {
             eviction_triggering_insertions: eviction_triggering_insertions.counter(&[]),
             written_entries: written.counter(&[]),
             free_chunks: chunks.gauge(&["free".into()]),
-            reserved_chunks: chunks.gauge(&["reserved".into()]),
-            quarantined_chunks: chunks.gauge(&["quarantined".into()]),
+            allocated_chunks: chunks.gauge(&["allocated".into()]),
             payload_bytes: payload.gauge(&[]),
             entries: entries.gauge(&[]),
             packed_payload_bytes: packed.counter(&["payload".into()]),
