@@ -9,13 +9,13 @@ Generated with `rust-analyzer 0.3.2929-standalone (7ea2b259ca 2026-06-07)` using
 - Includes tests, examples, the memory benchmark, and inactive `cfg` branches (including Linux-only storage code).
 - Excludes the separate `foyer/` workspace, external dependencies, and generated build output.
 - Syntax inventory, not an LSP `workspace/symbol` search or a type-check. Macro expansions and import/re-export aliases are not expanded.
-- Function parameters appear in signatures; this is not a complete list of every identifier or pattern binding.
-- Names are qualified by their source parent where rust-analyzer provides one; locations distinguish duplicate names.
+- Function parameters appear in signatures. This is not a complete list of every identifier or pattern binding.
+- Names are qualified by their source parent where rust-analyzer provides one. Locations distinguish duplicate names.
 - This is a syntax snapshot with subsequent focused updates, not an automatically refreshed symbol index.
 
 ## Naming review
 
-Each type below was described from its fields, construction, and use before choosing its name. The description is the naming test: every substantive word in the chosen name must refer to something in that description. A retained name is a decision, not an exemption for public APIs or conventional terminology. Associated items, fields, variants, constants, parameters, and local bindings were checked in source order in all 22 files; the complete symbol list follows this review. Every listed symbol has a review decision; a renamed parent's unchanged members are marked **Keep**, with the new parent visible in their qualified names. Symbols introduced or replaced by the subsequent storage update are marked separately below.
+Each type below was described from its fields, construction, and use before choosing its name. The description is the naming test: every substantive word in the chosen name must refer to something in that description. A retained name is a decision, not an exemption for public APIs or conventional terminology. Associated items, fields, variants, constants, parameters, and local bindings were checked in source order in all 22 files. The complete symbol list follows this review. Every listed symbol has a review decision. A renamed parent's unchanged members are marked **Keep**, with the new parent visible in their qualified names. Symbols introduced or replaced by the subsequent storage update are marked separately below.
 
 ### Focused follow-up: payload-compaction thresholds
 
@@ -37,7 +37,7 @@ payload compaction, not eviction. All production and test references use the new
 
 ### Types, one by one
 
-The first column describes the represented data or responsibility; the other columns record the previous and chosen names. **Keep** means the existing name expresses that description in its containing module/type. These are naming changes only; no compatibility aliases or new runtime types are introduced.
+The first column describes the represented data or responsibility. The other columns record the previous and chosen names. **Keep** means the existing name expresses that description in its containing module/type. These are naming changes only. No compatibility aliases or new runtime types are introduced.
 
 | What it represents | Previous name | Decision / chosen name |
 | --- | --- | --- |
@@ -105,20 +105,20 @@ The first column describes the represented data or responsibility; the other col
 ### Other symbols
 
 - Range trimming is named consistently across its module, planner, admission progress variant, publication method, grace constant, tests, and internal metric handles. It copies retained subranges rather than packing unrelated cache entries. Published metric names and operation labels retain their existing spelling.
-- Range-trim plans distinguish `source_range` and `retained_ranges`; copied replacements distinguish `retained_payloads`. Snapshot generations are `object_generation`, because any access or structural change for that object invalidates publication, not just changes to the source entry.
+- Range-trim plans distinguish `source_range` and `retained_ranges`. Copied replacements distinguish `retained_payloads`. Snapshot generations are `object_generation`, because any access or structural change for that object invalidates publication, not just changes to the source entry.
 - Access-clock observations use `observed_at_access` and `admitted_at_access`, not timestamp-like `*_at` names. No wall-clock time is involved.
-- `covered_retrieval_cost` sums modeled source cost for requests wholly covered by a cached range. Candidate `retrieval_cost` and `compare_retrieval_cost_per_byte` describe the actual selection quantity; byte-normalized comparison parameters distinguish cost from payload size.
+- `covered_retrieval_cost` sums modeled source cost for requests wholly covered by a cached range. Candidate `retrieval_cost` and `compare_retrieval_cost_per_byte` describe the actual selection quantity. Byte-normalized comparison parameters distinguish cost from payload size.
 - Removed/superseded usage uses `payload_bytes` and `entry_count`, not fields that could be mistaken for payload buffers or entry collections. Admission arithmetic uses `used_bytes_without_superseded` and `max_existing_bytes`: the existing bytes still charged after removing superseded ranges, and the maximum allowed before adding the incoming payload.
-- Memory insertion's shared implementation is `admit_download`, not `insert_inner`. Admission advancement is `advance_admission`; the result is progress, not an already-executed action to be repeated blindly. Covering-access recording is `record_covering_access`.
-- I/O admission semaphores are `request_slots` and `staging_pages`. The latter counts alignment-sized pages, not buffers or bytes. `_staging_pages_permit` holds that charge; it is not a disk-region read guard.
+- Memory insertion's shared implementation is `admit_download`, not `insert_inner`. Admission advancement is `advance_admission`. The result is progress, not an already-executed action to be repeated blindly. Covering-access recording is `record_covering_access`.
+- I/O admission semaphores are `request_slots` and `staging_pages`. The latter counts alignment-sized pages, not buffers or bytes. `_staging_pages_permit` holds that charge. It is not a disk-region read guard.
 - I/O ownership names identify `directory_lock` and `wake_fd`. `reading_phase` distinguishes an RMW request's current direction from its caller's write operation. `queue_stopped_error` and `incomplete_io_error` identify their error conditions. Queue tests call their queue `queue`, not `driver`.
-- The data-file measurement wrapper is `execute_measured`; its bounded-chunk implementation is `execute_chunks`. Alignment validation is `check_direct_io_alignment`. Chunk input and accumulated output are `chunk_payload` and `read_bytes`.
+- The data-file measurement wrapper is `execute_measured`. Its bounded-chunk implementation is `execute_chunks`. Alignment validation is `check_direct_io_alignment`. Chunk input and accumulated output are `chunk_payload` and `read_bytes`.
 - Benchmark trace entries are consistently `request` / `requests`, not recorded successful accesses. Requests use `requested_range`, planned downloads use `downloaded_range`, and pending/coalesced requests preserve `trace_index`. The Foyer adapter names its `key_range` and `eviction_policy`. No simulated download is renamed to imply it contains payload bytes before population.
 - Byte parsers/printers distinguish `parse_byte_count_usize` from the u128 parser and `format_binary_bytes` from decimal formatting. The I/O smoke benchmark names its read-space byte limit, measured case, read size, and CPU percentage explicitly.
-- Retained API operations (`new`, `get`, `insert`, `remove`, `open`, `read_at`, `write_at`, `capacity`, `used_bytes`, `into_parts`) name their action/data in their containing type. Range `start`/`end` remain endpoints, `len` remains length, and range predicates describe actual containment/overlap. Error variants identify their actual rejection/failure conditions; their containing renamed types supply the subject.
-- Retained constants state a concrete limit, unit, path, revision, environment key, or output header. Retained test functions state their scenario/assertion. Test fixture helpers (`range`, `cache`, `download`, `request`) name the value they construct; single-scope fixtures such as `hot`, `cold`, `incoming`, `first`, and `second` describe their role in that test.
+- Retained API operations (`new`, `get`, `insert`, `remove`, `open`, `read_at`, `write_at`, `capacity`, `used_bytes`, `into_parts`) name their action/data in their containing type. Range `start`/`end` remain endpoints, `len` remains length, and range predicates describe actual containment/overlap. Error variants identify their actual rejection/failure conditions. Their containing renamed types supply the subject.
+- Retained constants state a concrete limit, unit, path, revision, environment key, or output header. Retained test functions state their scenario/assertion. Test fixture helpers (`range`, `cache`, `download`, `request`) name the value they construct. Single-scope fixtures such as `hot`, `cold`, `incoming`, `first`, and `second` describe their role in that test.
 - Retained locals such as `range`, `bytes`, `entry`, `key`, `offset`, `index`, `count`, `source`, `result`, and `error` have an immediate, single referent in their block. Endpoint differences remain `start`/`end` where immediately used to slice the corresponding payload. Type variables, standard trait methods, `main`, and imported library APIs are not given project-specific replacement names.
-- Re-export-only modules and imports were also checked. `LockFileExt` distinguishes file-lock methods from other file extension traits; `FoyerCache` distinguishes the imported Foyer implementation from Feuer's memory cache. Neither is a locally defined runtime type.
+- Re-export-only modules and imports were also checked. `LockFileExt` distinguishes file-lock methods from other file extension traits. `FoyerCache` distinguishes the imported Foyer implementation from Feuer's memory cache. Neither is a locally defined runtime type.
 
 No reserved disk-region or read-guard types exist yet. Future implementations must use `DiskRegion` and `DiskRegionReadGuard` as required by `AGENTS.md`. The separate `foyer/` workspace is unchanged.
 
@@ -130,10 +130,10 @@ Public source-level renames: `Config` → `CacheConfig`, `ConfigError` → `Cach
 
 This inventory reflects the later change to caller-owned I/O conflict prevention, not just the naming-only snapshot:
 
-- Removed `IoRequest::conflicts` and the queue's overlap scan. `IoQueue::schedule` now fills free slots in arrival order; callers must prevent conflicting access to aligned byte ranges.
+- Removed `IoRequest::conflicts` and the queue's overlap scan. `IoQueue::schedule` now fills free slots in arrival order. Callers must prevent conflicting access to aligned byte ranges.
 - Replaced the overlap-blocking test with `canceled_submitted_rmw_retains_resources_and_still_writes`, checking that abandoning a result does not release an active write's resources or stop its write phase.
 - Changed the mixed-I/O test to `concurrent_mixed_io_with_caller_serialized_same_page_rmw`, with caller-side synchronization for shared pages.
-- Symbols added or replaced by these test changes are marked **Storage update** rather than being presented as naming-only changes. Removed symbols no longer appear in the current inventory; counts and source locations have been refreshed.
+- Symbols added or replaced by these test changes are marked **Storage update** rather than being presented as naming-only changes. Removed symbols no longer appear in the current inventory. Counts and source locations have been refreshed.
 
 ## Counts
 
@@ -397,7 +397,7 @@ This inventory reflects the later change to caller-owned I/O conflict prevention
 
 | Line | Kind | Name / source parent | Signature or type | Review decision |
 | ---: | --- | --- | --- | --- |
-| [4](feuer-memory/src/store/range_trim.rs#L4) | Const | `MIN_PAYLOAD_COMPACTION_SAVINGS_PERCENT` | `u64` | Replace `MIN_RECLAIM_DIVISOR` with percent; see focused follow-up |
+| [4](feuer-memory/src/store/range_trim.rs#L4) | Const | `MIN_PAYLOAD_COMPACTION_SAVINGS_PERCENT` | `u64` | Replace `MIN_RECLAIM_DIVISOR` with percent. See focused follow-up |
 | [8](feuer-memory/src/store/range_trim.rs#L8) | Struct | `RangeTrimPlan` | — | Rename from `CompactionPlan` |
 | [9](feuer-memory/src/store/range_trim.rs#L9) | Field | `RangeTrimPlan::source_range` | `ByteRange` | Rename from `source` |
 | [10](feuer-memory/src/store/range_trim.rs#L10) | Field | `RangeTrimPlan::retained_ranges` | `Vec<ByteRange>` | Rename from `retained` |
@@ -431,7 +431,7 @@ This inventory reflects the later change to caller-owned I/O conflict prevention
 
 | Line | Kind | Name / source parent | Signature or type | Review decision |
 | ---: | --- | --- | --- | --- |
-| [17](feuer-memory/src/store/shard.rs#L17) | Const | `MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION` | `u64` | Rename from `RANGE_TRIM_GRACE_ACCESSES`; see focused follow-up |
+| [17](feuer-memory/src/store/shard.rs#L17) | Const | `MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION` | `u64` | Rename from `RANGE_TRIM_GRACE_ACCESSES`. See focused follow-up |
 | [16](feuer-memory/src/store/shard.rs#L16) | Const | `RECLAIM_SAMPLE_SIZE` | `usize` | Rename from `PRESSURE_SAMPLE_SIZE` |
 | [19](feuer-memory/src/store/shard.rs#L19) | Struct | `CachedRange` | — | Keep |
 | [21](feuer-memory/src/store/shard.rs#L21) | Field | `CachedRange::id` | `u64` | Keep |

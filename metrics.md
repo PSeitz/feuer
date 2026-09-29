@@ -7,15 +7,15 @@ Feuer does not install an exporter, the application owns the registry and its ex
 
 All labels below have fixed values. Object keys, paths and caller-defined cache
 names are not labels. Multiple caches using the same registry aggregate their
-counters and gauges; use separate registries if they must be distinguished.
+counters and gauges. Use separate registries if they must be distinguished.
 
 ## Public lookups and callbacks
 
 | Metric | Type | Labels / meaning |
 |---|---|---|
 | `feuer_lookup_total` | Counter | `outcome`: `memory_hit`, `disk_hit`, `callback`, `callback_error`, `invalid_download` |
-| `feuer_lookup_duration_seconds` | Histogram | `outcome`: `memory_hit`, `disk_hit`, `callback`; entire successful lookup, including callback work and synchronous population scheduling |
-| `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`; exact requested bytes successfully returned |
+| `feuer_lookup_duration_seconds` | Histogram | `outcome`: `memory_hit`, `disk_hit`, `callback`. Entire successful lookup, including callback work and synchronous population scheduling |
+| `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`. Exact requested bytes successfully returned |
 
 Lookup outcomes count completed operations, not canceled futures. Duration
 histograms record successful lookups only. A non-covering callback result is an
@@ -23,27 +23,27 @@ histograms record successful lookups only. A non-covering callback result is an
 
 Use lookup counters for request-weighted hit ratios and lookup byte counters for
 byte-weighted hit ratios. Memory-tier counters also include internal memory
-operations; use the public lookup counters to measure caller-visible behavior.
+operations. Use the public lookup counters to measure caller-visible behavior.
 
 ## Disk lookups, capacity and packing
 
 | Metric | Type | Labels / meaning |
 |---|---|---|
 | `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `checksum_failed` |
-| `feuer_disk_lookup_duration_seconds` | Histogram | `outcome`: `hit`; includes whole-entry reading, checksum verification and copying |
-| `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`; each chunk is 1 MiB |
+| `feuer_disk_lookup_duration_seconds` | Histogram | `outcome`: `hit`. Includes whole-entry reading, checksum verification and copying |
+| `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`. Each chunk is 1 MiB |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
-| `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`; payload and whole-chunk bytes of successfully written shard batches, before publication |
+| `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`. Payload and whole-chunk bytes of successfully written shard batches, before publication |
 
-Disk read errors and checksum failures still behave as cache misses; metrics
+Disk read errors and checksum failures still behave as cache misses. Metrics
 make those distinct from absent entries. `contains()` does not count as a lookup.
 
 Chunk states are disjoint. Reserved chunks remain reserved until **all entry
-owners and read guards release them**; eviction does not necessarily free a
+owners and read guards release them**. Eviction does not necessarily free a
 chunk. Quarantined chunks cannot be reused during that allocator's lifetime.
-Gauges are removed when their owners disappear, including on cache shutdown;
-detached writes can outlive the last public cache handle.
+Gauges are removed when their owners disappear, including on cache shutdown.
+Detached writes can outlive the last public cache handle.
 
 `reserved * 1 MiB - indexed payload bytes` measures capacity unavailable for
 indexed payload, including metadata, padding, partially dead chunks, active
@@ -115,7 +115,7 @@ All metrics below have `operation` (`read`, `write`) and `pool`
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `feuer_io_buffer_pool_idle_bytes` | Gauge | Bytes retained for reuse; excludes active buffers and caller-owned results |
+| `feuer_io_buffer_pool_idle_bytes` | Gauge | Bytes retained for reuse, excluding active buffers and caller-owned results |
 | `feuer_io_buffer_pool_capacity_bytes` | Gauge | Configured idle-byte limit of live pools, including environment overrides |
 | `feuer_io_buffer_pool_returns_total` | Counter | Returned buffers with `outcome`: `retained` or `discarded` (insufficient idle-byte capacity) |
 
@@ -134,7 +134,7 @@ All metrics below have `operation` (`read`, `write`) and `pool`
 ```
 
 These queries combine read/write queues. Use `by (operation, pool)` instead to
-show them separately. Utilization is undefined for zero capacity; discard
+show them separately. Utilization is undefined for zero capacity. Discard
 percentage is undefined when no buffers return during the window.
 
 Buffers return only after their last owner releases them. A zero-capacity pool
@@ -149,15 +149,15 @@ registry. The direct-read check during file opening also uses the read pool.
 |---|---|---|
 | `feuer_disk_population_queue_total` | Counter | `outcome`: `queued`, `queue_full`, `queue_closed`, `stale`, `canceled`, `already_covered`, `redundant` |
 | `feuer_disk_population_queued_entries` | Gauge | Entries waiting to begin population |
-| `feuer_disk_population_pending_bytes` | Gauge | Queued plus active payload bytes; not limited or charged to the memory-cache capacity |
-| `feuer_disk_population_queue_duration_seconds` | Histogram | Queue admission to dequeue, including entries found stale; excludes entries canceled before dequeue |
+| `feuer_disk_population_pending_bytes` | Gauge | Queued plus active payload bytes, not limited or charged to the memory-cache capacity |
+| `feuer_disk_population_queue_duration_seconds` | Histogram | Queue admission to dequeue, including entries found stale. Excludes entries canceled before dequeue |
 | `feuer_disk_population_total` | Counter | Terminal per-entry batch-insertion outcome: `published`, `already_covered`, `no_capacity`, `stale`, `failed`, `canceled` |
 | `feuer_disk_population_written_entries_total` | Counter | Entries in successfully written shard batches, before publication checks |
 
 Queue and storage counters describe different stages: do not sum all their
 values as a total number of population attempts. `queued` is admission, not a
 terminal outcome. Queue `already_covered` means disk already covers the callback
-download; `redundant` means memory declined a contained download. Queue `stale`
+download. `redundant` means memory declined a contained download. Queue `stale`
 means the original memory admission expired before writing. Storage `stale`
 means it expired before publication, after writing.
 
@@ -174,8 +174,8 @@ completion release their counts along with the associated payload budget.
 ## Existing metrics
 
 - `feuer_memory_operations_total{operation}`: `insert`, `replace`, `redundant`,
-  `remove`, `compact`. Internal access/hit/miss counters are not emitted;
-  use public lookup counters for hit ratios.
+  `remove`, `compact`. Internal access/hit/miss counters are not emitted.
+  Use public lookup counters for hit ratios.
 - `feuer_memory_payload_bytes`, `feuer_memory_entries`,
   `feuer_memory_compacted_payload_bytes_total`.
 - `feuer_disk_io_total{operation,outcome}`: operations `read` and `write`,

@@ -17,7 +17,7 @@ tracking which bytes are actually requested so unused prefetched data does not h
 broader download may still be retained on disk for future subrange reads.
 
 Feuer is a performance layer, not authoritative storage. The application owns object identity, source access,
-and download coordination; Feuer owns cache retention, range lookup, integrity-checked disk reads, and
+and download coordination. Feuer owns cache retention, range lookup, integrity-checked disk reads, and
 best-effort recovery.
 
 Its central result contract is:
@@ -69,7 +69,7 @@ pub struct Download {
 ```
 
 On a cache miss, Feuer invokes that lookup's callback. The application download manager owns debouncing,
-downloaded-range selection, source work, and source-memory bounds; Feuer does not coordinate or retry
+downloaded-range selection, source work, and source-memory bounds. Feuer does not coordinate or retry
 callbacks.
 
 `Download::new` derives the downloaded range as
@@ -95,13 +95,13 @@ subrange result. Caller-held results are outside cache-capacity accounting and m
 alive after cache eviction.
 
 A disk hit reads and verifies the whole covering entry using its expected checksum, then returns only the
-requested bytes. A subrange lookup may therefore read a complete larger download; packing independent entries
+requested bytes. A subrange lookup may therefore read a complete larger download. Packing independent entries
 in one allocation chunk does not require reading the neighboring entries. Returned disk results do not retain
 disk storage, allocation guards, or file mappings.
 
 Every successful lookup appends its exact requested range once to the accessed ranges for its complete cache
-key. Accessed ranges are independent of the downloaded or cached range that happened to satisfy the lookup;
-policy and compaction may project them onto currently cached ranges. Download insertion, replacement, and
+key. Accessed ranges are independent of the downloaded or cached range that happened to satisfy the lookup.
+Policy and compaction may project them onto currently cached ranges. Download insertion, replacement, and
 redundant-population suppression create no accesses.
 
 When application callbacks share one source download, every successful waiter still contributes its own
@@ -111,20 +111,20 @@ accessed range, while Feuer caches at most the downloaded ranges selected by its
 
 Policy and implementation choices should reflect the target workload:
 
-- one immutable object does not exceed available RAM in practical deployments;
-- data columns are at most about 40 MiB, but can have a wide size distribution;
-- dictionary lookups and headers are typically 4 KiB or smaller; and
+- one immutable object does not exceed available RAM in practical deployments.
+- data columns are at most about 40 MiB, but can have a wide size distribution.
+- dictionary lookups and headers are typically 4 KiB or smaller.
 - posting lists vary from about 4 bytes to 4 MiB, the size roughly following a Zipf distribution.
 
 The current 165,435-access sample in
 [`benchmarks/access_pattern.ndjson`](benchmarks/access_pattern.ndjson) has a 3.74-KiB median and
-1.96-MiB mean requested range; 72.9% of requests are at most 4 KiB, and the maximum is about 67.2 MiB. Under an
+1.96-MiB mean requested range. 72.9% of requests are at most 4 KiB, and the maximum is about 67.2 MiB. Under an
 uncached exact-request application of the source model below, fixed request latency contributes about 83.0% of
 total source time.
 
 On a miss, the source-bounded expanded benchmark looks 5 ms ahead and coalesces same-object ranges separated by
 less than the source model's 10,000,000-byte break-even distance. The initiating callback downloads the merged
-range before followers replay. Downloads default to whole splits below 8 MiB and exact ranges otherwise; the
+range before followers replay. Downloads default to whole splits below 8 MiB and exact ranges otherwise. The
 whole-split threshold and coalescing distance are environment-controlled.
 
 For target-workload evaluation, source retrieval cost means elapsed source-service time. The default controlled
@@ -152,13 +152,13 @@ charges each strategy for its actual source GETs and downloaded bytes.
 The retention objective is expected future source or lower-tier retrieval time avoided per retained footprint,
 not raw object hit rate. The shared policy values each exact access at the modeled fixed source-request
 cost plus its requested bytes, then compares recent retrieval value per retained payload byte. Disk scoring
-uses payload length only; alignment, metadata and chunk overhead still consume physical capacity but do not
+uses payload length only. Alignment, metadata and chunk overhead still consume physical capacity but do not
 enter the score's denominator. Repeated access must
 increase retention value, stale evidence must eventually expire, and only the exact requested interval receives
 observed-access credit.
 
 Access evidence is held in RAM per object key and shared by both tiers. Each successful lookup records once,
-regardless of its source; disk reads and population do not record additional events. Evidence survives memory
+regardless of its source. Disk reads and population do not record additional events. Evidence survives memory
 eviction while a disk entry or active population retains it, and is released after its last owner disappears.
 It is not persisted: recovered entries start without pre-restart access evidence.
 
@@ -179,7 +179,7 @@ footprint, read and write amplification, cleaning or relocation traffic, through
 
 The performance hypotheses are that integrated containment can reuse a larger downloaded range and exact
 range attribution improves frequency-aware retention. The current disk design uses whole-entry checksum
-validation and 4-KiB-aligned entry allocations; it does not claim smaller reads or sub-alignment packing than
+validation and 4-KiB-aligned entry allocations. It does not claim smaller reads or sub-alignment packing than
 Foyer. These are hypotheses to isolate, not evidence of superiority. Feuer must not claim to beat Foyer until
 the comparison demonstrates the claim without violating correctness or the stated resource guardrails.
 
@@ -206,14 +206,14 @@ For range trimming only, exact events are bounded to 64 per object by default
 (`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this) and expire after 262,144 later successful
 same-shard accesses by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this).
 Once its grace of 64 successful same-shard accesses expires, that same
-victim is trimmed when its observed requests can release at least one quarter of its payload; otherwise it is
+victim is trimmed when its observed requests can release at least one quarter of its payload. Otherwise it is
 evicted.
 Compacted replacements use only observed requests, merge only overlapping or adjacent intervals, preserve gaps,
 create no access, and cannot affect lookup results or caller-held slices.
 
 Lookup and access recording must not scan every live shard entry. Victim selection samples a bounded number
-of entries; scoring work depends on the distinct requested ranges each candidate covers;
-copies made outside the metadata lock require generation revalidation.
+of entries. Scoring work depends on the distinct requested ranges each candidate covers.
+Copies made outside the metadata lock require generation revalidation.
 
 ## 7. Best-effort disk population
 
@@ -226,7 +226,7 @@ Disk population is bounded and best-effort, not mandatory.
 - If a memory-cached range is evicted before its queued write starts, that write is canceled or discarded.
 - A write already issued to the operating system may finish after memory eviction or caller cancellation.
   Its `DiskRegion` must remain reserved and protected against conflicting access until the submitted I/O
-  completes; abandoning its result does not stop the write. The task owning the reservation must keep
+  completes. Abandoning its result does not stop the write. The task owning the reservation must keep
   awaiting completion rather than being aborted. A region whose completion is unknown after queue failure
   must not be reused. A completed write may publish a disk entry only if its generation is still current
   and the disk policy still admits it.
@@ -236,7 +236,7 @@ Disk population is bounded and best-effort, not mandatory.
 The policy may consider pending-write and disk-residency state when choosing victims, but the contract does
 not assign fixed weights to those states.
 
-There is no flush API; disk population and persistence are best-effort.
+There is no flush API. Disk population and persistence are best-effort.
 
 Disk capacity is fixed at open time and must be respected. Internal allocation, indexing, disk-region layout,
 partial retention, rewriting, checksums, metadata persistence, and submission engines are implementation
@@ -245,7 +245,7 @@ known downloaded object bytes.
 
 The upper storage layer, not the I/O queue, prevents conflicting reads and writes across physical byte
 ranges rounded outward to the I/O alignment. A `DiskRegionReadGuard` prevents overwriting or reusing a disk
-region while a read depends on its contents; multiple reads may hold guards concurrently. A canceled read
+region while a read depends on its contents. Multiple reads may hold guards concurrently. A canceled read
 whose result is discarded no longer needs unchanged disk contents, but its submitted I/O buffer must still
 survive until completion. The I/O layer owns that buffer lifetime.
 
@@ -253,14 +253,14 @@ The current disk design packs explicit batches of variable-length entries into i
 grouping smaller entries together. Each chunk's payload, metadata and discovery bitmap are finalized before
 its only write. Later batches cannot append to it or reuse holes left by removed entries. A chunk becomes
 reusable only after all entry owners and read guards release it. Partially filled final chunks consume their
-full capacity. Payload starts and allocated lengths are rounded to 4 KiB; small entries consume at least
+full capacity. Payload starts and allocated lengths are rounded to 4 KiB. Small entries consume at least
 4 KiB of payload storage plus metadata within their batch's chunks. Large entries may span chunks. Payload
 bytes have no interleaved page headers, and each entry's expected checksum lives in separate metadata.
 Multiple entries may share a chunk only when each entry's complete payload and metadata fit inside that chunk.
-An entry spanning multiple chunks owns those chunks exclusively; its unused tail cannot hold another entry.
+An entry spanning multiple chunks owns those chunks exclusively. Its unused tail cannot hold another entry.
 Disk pressure selects individual entries by sampled retrieval value per payload byte, not all owners of a
 shared chunk together. Removing an entry may free no whole chunk. If bounded eviction cannot reclaim enough
-capacity, population is skipped; still-retained neighbors are not removed merely to empty the chunk.
+capacity, population is skipped. Still-retained neighbors are not removed merely to empty the chunk.
 The allocator must handle the full size distribution, reclaim
 fragmented capacity with bounded work and rewrite traffic, remain practical at 1-TiB-plus capacities, and
 avoid a cache-wide hot lock. Free-space structures, relocation, and cleaning remain private mechanisms.
@@ -269,7 +269,7 @@ avoid a cache-wide hot lock. Free-space structures, relocation, and cleaning rem
 
 At open time, deployments choose one payload I/O mode:
 
-- `PayloadIoMode::Buffered`, using normal buffered file I/O; or
+- `PayloadIoMode::Buffered`, using normal buffered file I/O.
 - `PayloadIoMode::Direct`, requesting platform direct or uncached file I/O.
 
 Disk storage is supported on Linux only and requires usable io_uring. Feuer must fail open when io_uring is
@@ -320,73 +320,73 @@ Normal instrumentation must be low-overhead and use the repository's tracing and
 
 It must make it possible to observe:
 
-- memory hits, disk hits, callback misses, errors, callback invocations, and returned download bytes;
-- lookup, callback, and disk-I/O latency;
-- memory pressure, victim trimming, compaction, disk-write queue pressure, and eviction;
-- useful disk payload, allocation overhead, dead or fragmented capacity, and cleaner or relocation traffic;
-- integrity and recovery outcomes; and
+- memory hits, disk hits, callback misses, errors, callback invocations, and returned download bytes.
+- lookup, callback, and disk-I/O latency.
+- memory pressure, victim trimming, compaction, disk-write queue pressure, and eviction.
+- useful disk payload, allocation overhead, dead or fragmented capacity, and cleaner or relocation traffic.
+- integrity and recovery outcomes.
 - skipped, canceled, failed, and completed disk population.
 
 Actual source GETs and transferred bytes remain application-owned and are instrumented by the comparative
-benchmark harness; callback counts are not assumed to equal source GETs when application coordination shares
+benchmark harness. Callback counts are not assumed to equal source GETs when application coordination shares
 work. Normal labels and spans must not include object-key contents or other unbounded-cardinality values. Exact
 metric and span inventories are implementation checklists, not product API commitments. An
-incompatible-format reset must be logged; it does not require a dedicated metric in the MVP.
+incompatible-format reset must be logged. It does not require a dedicated metric in the MVP.
 
 ## 13. MVP acceptance criteria
 
 The MVP is complete when tests demonstrate that:
 
-- arbitrary valid unaligned requested ranges return one contiguous `Bytes` containing exactly the requested object bytes;
-- memory hits, disk hits, and callback results obey the same result contract;
-- a miss invokes the callback supplied to that `get_or_fetch` call;
-- the callback may use query-local state and an application download manager may debounce and share work across callbacks;
-- each callback returns one start offset and non-empty `Bytes`, the downloaded range is derived from them, and Feuer rejects a result that does not cover the requested range;
-- callback errors are returned without Feuer performing source retries;
-- a callback result already contained by cached data is not populated or written again;
-- every successful lookup appends its exact requested range once to its key's accessed ranges, independent of downloaded-range population;
+- arbitrary valid unaligned requested ranges return one contiguous `Bytes` containing exactly the requested object bytes.
+- memory hits, disk hits, and callback results obey the same result contract.
+- a miss invokes the callback supplied to that `get_or_fetch` call.
+- the callback may use query-local state and an application download manager may debounce and share work across callbacks.
+- each callback returns one start offset and non-empty `Bytes`, the downloaded range is derived from them, and Feuer rejects a result that does not cover the requested range.
+- callback errors are returned without Feuer performing source retries.
+- a callback result already contained by cached data is not populated or written again.
+- every successful lookup appends its exact requested range once to its key's accessed ranges, independent of downloaded-range population.
 - controlled policy tests credit only the requested interval, favor repeated reuse, age stale frequency, and
-  bound never-requested prefetch;
+  bound never-requested prefetch.
 - a broader memory admission cannot be compacted until 64 successful accesses in its shard have elapsed, while
-  pressure may still evict it;
+  pressure may still evict it.
 - after that grace, pressure can trim the selected victim to its observed exact requests without separate
-  promotion or prefetch-reuse state;
-- returned `Bytes` may safely outlive cache eviction;
-- shard pressure evicts toward each shard's assigned target, while an oversized download empties its shard and remains cached even when aggregate retained payload exceeds the configured target;
+  promotion or prefetch-reuse state.
+- returned `Bytes` may safely outlive cache eviction.
+- shard pressure evicts toward each shard's assigned target, while an oversized download empties its shard and remains cached even when aggregate retained payload exceeds the configured target.
 - pressure-driven in-memory compaction can release unrequested cached payload without changing results, and
-  normal access and victim selection avoid full scans of all live shard entries;
-- disk-write queues remain bounded and queue pressure does not block or fail successful lookups;
-- evicted queued writes cannot later publish stale state, while already-active current writes can complete safely;
-- failed or uncertain disk writes never become disk hits;
-- explicit batches group small entries in immutable 1-MiB chunks with 4-KiB-aligned payload storage;
-- shared chunks contain each entry's complete payload and metadata, while multi-chunk entries own their chunks exclusively;
-- written chunks are neither modified nor reused until all entry owners and read guards release them;
+  normal access and victim selection avoid full scans of all live shard entries.
+- disk-write queues remain bounded and queue pressure does not block or fail successful lookups.
+- evicted queued writes cannot later publish stale state, while already-active current writes can complete safely.
+- failed or uncertain disk writes never become disk hits.
+- explicit batches group small entries in immutable 1-MiB chunks with 4-KiB-aligned payload storage.
+- shared chunks contain each entry's complete payload and metadata, while multi-chunk entries own their chunks exclusively.
+- written chunks are neither modified nor reused until all entry owners and read guards release them.
 - allocator stress tests report useful utilization, fragmentation, allocation latency, and rewrite traffic
-  across the target size distribution;
-- buffered and direct modes return identical requested bytes, and requested direct mode never silently falls back;
-- Linux supports direct mode on a capable filesystem, with simultaneous reads and writes through bounded io_uring submission;
-- disk hits verify the whole covering entry, return only requested bytes, and do not read neighboring entries;
-- corrupted or uncertain disk bytes always miss and are never returned;
-- restart recovers a safe useful subset after injected crashes;
-- unsupported persistent formats are reset and logged safely;
-- disk capacities of at least 1 TiB are representable with bounded internal accounting;
+  across the target size distribution.
+- buffered and direct modes return identical requested bytes, and requested direct mode never silently falls back.
+- Linux supports direct mode on a capable filesystem, with simultaneous reads and writes through bounded io_uring submission.
+- disk hits verify the whole covering entry, return only requested bytes, and do not read neighboring entries.
+- corrupted or uncertain disk bytes always miss and are never returned.
+- restart recovers a safe useful subset after injected crashes.
+- unsupported persistent formats are reset and logged safely.
+- disk capacities of at least 1 TiB are representable with bounded internal accounting.
 - the memory-only gate runs exact and expanded downloader controls with 1, 4, 16, and 64 shards through
-  32 GiB, compares actual retained payload, and reports policy throughput; and
+  32 GiB, compares actual retained payload, and reports policy throughput.
 - the controlled native-Foyer comparison and separate end-to-end prefetch benchmark produce the metrics
   defined in Section 5.
 
 ## 14. Explicitly deferred
 
-- streaming callback output;
-- more than one `Download` returned by one callback;
-- physical difference-only storage for partially overlapping downloads;
-- guaranteed assembly from multiple cached ranges;
-- public policy plug-ins or online disk-versus-network cost measurement;
-- hard process-RSS guarantees, including callback and caller-held memory;
-- online disk-capacity resize;
-- native multi-volume placement;
-- mutable objects, invalidation, and tombstones;
-- multi-process access;
-- disk storage on platforms other than Linux;
-- stable on-disk compatibility across arbitrary future releases; and
+- streaming callback output.
+- more than one `Download` returned by one callback.
+- physical difference-only storage for partially overlapping downloads.
+- guaranteed assembly from multiple cached ranges.
+- public policy plug-ins or online disk-versus-network cost measurement.
+- hard process-RSS guarantees, including callback and caller-held memory.
+- online disk-capacity resize.
+- native multi-volume placement.
+- mutable objects, invalidation, and tombstones.
+- multi-process access.
+- disk storage on platforms other than Linux.
+- stable on-disk compatibility across arbitrary future releases.
 - authoritative-storage or per-entry durability guarantees.

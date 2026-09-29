@@ -1,7 +1,7 @@
 # Feuer Implementation Status
 
 **Status:** implementation is in progress. [`tiered-plan.md`](tiered-plan.md) is the authoritative behavioral
-contract; this document records what exists and what remains to build.
+contract. This document records what exists and what remains to build.
 
 ## Current state
 
@@ -29,7 +29,7 @@ Reopening still starts with an empty disk index: recovery is not implemented.
   one `Download { downloaded_start, bytes }`, whose derived range must cover the request.
 - Successful lookups return exactly the requested bytes in one `Bytes`, which may share a larger allocation.
 - Population discards a download already contained by cached data. Partially overlapping downloads may remain
-  independent; broader downloads replace contained ranges.
+  independent. Broader downloads replace contained ranges.
 - Each successful lookup records its exact requested range once. Population and access are distinct policy
   events, applied atomically under the shard lock for callback results.
 - Capacity is a soft payload-byte target divided among shards. An oversized download empties its shard and
@@ -43,7 +43,7 @@ Reopening still starts with an empty disk index: recovery is not implemented.
   Separately, range trimming retains at most 64 repeated events per object by default
   (`FEUER_MAX_ACCESS_EVENTS_PER_KEY`), expiring after 262,144 same-shard accesses
   (`FEUER_MAX_ACCESS_AGE_ACCESSES`). These limits do not truncate scoring counters.
-  Evidence survives memory eviction while disk entries or active population retain it; releasing the final
+  Evidence survives memory eviction while disk entries or active population retain it. Releasing the final
   owner removes the weak registry record. Histories are volatile, not persisted. Wall-clock aging is not
   implemented.
 - Decayed counts weight the sum of fixed-cost-equivalent bytes (default 10,000,000,
@@ -53,12 +53,12 @@ Reopening still starts with an empty disk index: recovery is not implemented.
   The victim has the lowest retrieval value per retained byte, with monotonic entry identity breaking ties.
   Registration and removal are constant-work and leave no stale candidate backlog.
 - After a grace of 64 successful same-shard accesses, the selected victim is trimmed to observed requests if
-  that releases at least one quarter of its payload; otherwise it is evicted. Grace never prevents eviction.
+  that releases at least one quarter of its payload. Otherwise it is evicted. Grace never prevents eviction.
 - Compaction merges only overlapping or adjacent observed intervals and copies them into independent `Bytes`.
   It preserves exact coverage, updates accounting and metrics, creates no access, and leaves caller-held
   slices valid.
 - Copying happens outside the shard lock. Generation checks reject output invalidated by concurrent access
-  through either tier or same-object structural changes; admission falls back to eviction.
+  through either tier or same-object structural changes. Admission falls back to eviction.
 
 There is no periodic compaction, separate prefetch-promotion state, or public policy configuration.
 
@@ -69,21 +69,21 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
   without busy polling or registered buffers.
 - Read and write admission each reserve up to 64 requests and 64 MiB of aligned I/O buffers. Chunks are at most
   1 MiB. Caller inputs and read-result allocations are outside the combined 128-MiB I/O buffer memory budget.
-- Reads accept arbitrary byte ranges; write offsets and lengths must be multiples of 4 KiB, enforced by
+- Reads accept arbitrary byte ranges. Write offsets and lengths must be multiples of 4 KiB, enforced by
   assertions. The driver performs no read-modify-write or overlap checks: the upper layer must supply
   complete aligned blocks and prevent conflicting access across physical byte ranges rounded outward
-  to 4 KiB. `DataFile` rounds read requests outward and slices the results; the io_uring driver accepts
+  to 4 KiB. `DataFile` rounds read requests outward and slices the results. The io_uring driver accepts
   only nonempty aligned requests and returns complete aligned read buffers.
 - Multi-chunk operations are not atomic. Completion permits subsequent reads but does not guarantee crash
-  durability; there are no global scheduling barriers.
+  durability. There are no global scheduling barriers.
 - Caller cancellation does not cancel submitted kernel writes. The task owning a write's `DiskRegion` must
   keep awaiting completion and prevent conflicting access or reuse, even when the result is abandoned.
-  `DiskRangeCache` owns reservation lifetime; public scheduling additionally revalidates the memory-entry
+  `DiskRangeCache` owns reservation lifetime. Public scheduling additionally revalidates the memory-entry
   identity under its shard lock throughout disk publication.
 - Submitted buffers survive caller cancellation. Last-handle drop drains and joins the driver. Abnormal
   driver failure retains uncertain active buffers and the directory lock until process exit.
 - Raw capacity must be positive, 4-KiB-aligned, and representable as a Linux signed file offset. Opening
-  requires usable io_uring and compatible `STATX_DIOALIGN`; there is no backend or buffered fallback.
+  requires usable io_uring and compatible `STATX_DIOALIGN`. There is no backend or buffered fallback.
 
 This is a raw I/O layer, not a disk cache or population queue. Disk storage and its CI target Linux only.
 
@@ -99,8 +99,8 @@ This is a raw I/O layer, not a disk cache or population queue. Disk storage and 
 - The complete memory gate was rerun after sharing access evidence (eight capacities through 32 GiB, exact
   and expanded downloads, 1/4/16/64 shards). All hit counts, hit bytes, source GETs/bytes and retained-payload
   values matched the preceding implementation across all 256 engine rows. In this single same-host comparison,
-  Feuer's median elapsed-time ratio across its 64 cases was 1.153 (about 15% slower); the native Foyer medians
-  were approximately unchanged. Shared evidence adds synchronization and metadata; this is not a throughput
+  Feuer's median elapsed-time ratio across its 64 cases was 1.153 (about 15% slower). The native Foyer medians
+  were approximately unchanged. Shared evidence adds synchronization and metadata. This is not a throughput
   improvement. CSV artifacts on `m8g-32cpu-local-ssd` are
   `/mnt/local-ssd/feuer-value.BkkxPo/memory-gate.csv` and
   `/mnt/local-ssd/feuer-pressure.RgwqyQ/memory-baseline.csv`.
@@ -108,38 +108,38 @@ This is a raw I/O layer, not a disk cache or population queue. Disk storage and 
   caller-serialized shared pages, bounds, short I/O, cancellation, and reopening.
 - The [direct-I/O smoke benchmark](benchmarks/storage/README.md) measures the driver on the local SSD, not
   an end-to-end cache or matched backend comparison. Separate [SSD measurements](benchmarks/ssd/ssd-concurrent-read-write.md)
-  explore mixed reads and writes; small-read-heavy workloads may still warrant write throttling.
+  explore mixed reads and writes. Small-read-heavy workloads may still warrant write throttling.
 
 ## In progress: disk range-cache prototype
 
 [`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) specifies the experimental layout and
 remaining crash/recovery questions. `DiskRangeCache::insert_batch` groups smaller entries together within each
 shard, assembles whole chunks including entry metadata and discovery bitmaps, writes each chunk once, and then
-publishes after containment revalidation. Partial final chunks are finalized too; later batches cannot fill them. Full keys and exact
+publishes after containment revalidation. Partial final chunks are finalized too. Later batches cannot fill them. Full keys and exact
 object ranges map to ordered physical regions. Payload bytes have no interleaved headers. Entry metadata stores
 one BLAKE3 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
 entry while copying only requested bytes into the result. It does not read neighboring entries or metadata.
 
 Independent shards have their own allocator and range-index lock. The allocator tracks only coalesced free
-whole-chunk runs. There is no persistent bitmap map or async index-write lock. Written chunks remain immutable;
-all entry owners, queued writes, and read guards must release a chunk before reuse. Queued writes retain
-chunk ownership through completion despite caller cancellation; failed batches release chunks normally.
+whole-chunk runs. There is no persistent bitmap map or async index-write lock. Written chunks remain immutable.
+All entry owners, queued writes, and read guards must release a chunk before reuse. Queued writes retain
+chunk ownership through completion despite caller cancellation. Failed batches release chunks normally.
 Publication is not transactional across shards. Callers bound batch memory and concurrency.
 
 Entries within a batch share 1-MiB chunks with 4-KiB-aligned storage only when each entry's complete payload
 and metadata fit inside that chunk. Multi-chunk entries own their chunks exclusively, including unused tails. Small entries use at least 4 KiB of payload
 plus 4 KiB of metadata inside their batch's chunks. Metadata pages are not shared between entries. A single-entry
-batch costs at least one chunk; removed entries leave holes that cannot be reused individually.
+batch costs at least one chunk. Removed entries leave holes that cannot be reused individually.
 The v3 format uses a checksum over the complete entry metadata and a bitmap of entry metadata starts,
 without write IDs or generation counters.
-Read invalidation compares expected payload checksums; discarding a newer identical copy is an allowed miss.
+Read invalidation compares expected payload checksums. Discarding a newer identical copy is an allowed miss.
 Pressure eviction samples up to 64 live entries and selects the lowest recent retrieval value per payload
 byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.
-Alignment, metadata and chunk overhead do not enter the score. Only selected entries are removed; neighbors
+Alignment, metadata and chunk overhead do not enter the score. Only selected entries are removed. Neighbors
 remain indexed and may keep a partially empty chunk unavailable. No eviction metadata reads are needed.
 Each shard batch is limited to 64 sampled decisions and 4,096 removed region references. Guarded or active
 storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
-disk cache to a memory cache's evidence; public tier orchestration now uses it.
+disk cache to a memory cache's evidence. Public tier orchestration now uses it.
 Reopening deliberately starts empty and logs the reset. Recovery remains unimplemented.
 No comparative layout/performance claim is established.
 
@@ -149,20 +149,20 @@ mixed-size packing, exclusive multi-chunk ownership, finalized discovery bitmaps
 bounded value-aware entry eviction, shared evidence across tiers, payload-only scoring, mixed-size churn,
 concurrent eviction/reads,
 fragmented chunks and whole-entry
-validation of 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable;
-unrelated entries and metadata are not loaded. On `m8g-32cpu-local-ssd`, all 71 storage tests and all 135 workspace tests passed with real direct I/O
-and io_uring on the local ext4 SSD. Workspace Clippy passed with warnings denied; formatting and whitespace
+validation of 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable.
+Unrelated entries and metadata are not loaded. On `m8g-32cpu-local-ssd`, all 71 storage tests and all 135 workspace tests passed with real direct I/O
+and io_uring on the local ext4 SSD. Workspace Clippy passed with warnings denied. Formatting and whitespace
 checks passed for the changed files.
 
 ## Implemented: best-effort disk scheduling
 
 - A nonblocking queue allows at most 256 pending entries. Queued and active payload bytes are tracked
   but not limited or charged to the memory-cache capacity.
-- One worker drains up to 64 entries into an explicit immutable batch; there is no batching timer or flush API.
+- One worker drains up to 64 entries into an explicit immutable batch. There is no batching timer or flush API.
   Queue saturation skips candidates without blocking or failing successful lookups.
 - Queued writes are discarded if their exact memory admission was evicted, replaced, or compacted.
 - Active writes retain reservations through completion despite cancellation. Publication checks the original
-  memory-entry identity under the memory shard lock, within the disk index lock; no memory operation takes
+  memory-entry identity under the memory shard lock, within the disk index lock. No memory operation takes
   a disk lock. Stale writes are discarded, and disk containment/allocation policy can still skip entries.
 - Failed writes are logged and remain invisible. Shared evidence survives queued and active population.
 - Disk hits, memory hits, and successful callbacks each record exactly one request. Callback results already
@@ -172,20 +172,20 @@ On `m8g-32cpu-local-ssd`, all 145 workspace tests passed with real direct I/O an
 New tests cover disk hits after memory pressure, requested-range promotion, exactly-once evidence, directory
 ownership, byte/count saturation, oversized candidates, queued eviction/readmission, batching, callback and
 writer cancellation, stale publication, and disk-contained callback suppression. No new corruption tests were
-added in this slice. Workspace Clippy passed with warnings denied; formatting checks passed for changed Rust
+added in this slice. Workspace Clippy passed with warnings denied. Formatting checks passed for changed Rust
 files, and whitespace checks passed.
 The isolated validation checkout is `/mnt/local-ssd/feuer-tiered.iB2JNA`.
 
 ## Implemented: cache metrics
 
 - `open_with_metrics` wires a `mixtrics` registry through public lookups, callbacks, both cache tiers and
-  disk population; `open` remains no-op. Labels contain only fixed operation/outcome/source values.
+  disk population. `open` remains no-op. Labels contain only fixed operation/outcome/source values.
 - Added lookup latency/outcomes and served bytes, callback counts/latency/download bytes, disk read-error
   and integrity outcomes, population admission/skip/terminal outcomes, queue pressure/wait time,
   chunk capacity states, indexed payload/entries, pressure eviction and byte-weighted batch packing.
 - Queue and capacity gauges follow ownership, including canceled work, detached writes, read guards,
   write failure and cache shutdown. See [`metrics.md`](metrics.md) for exact accounting semantics.
-- Validation on macOS: portable Feuer/memory/types tests pass; Linux workspace all-target checks and Clippy
+- Validation on macOS: portable Feuer/memory/types tests pass. Linux workspace all-target checks and Clippy
   pass. New Linux metric integration tests are compile-checked but have not been executed on this host.
 
 ## Remaining implementation
@@ -195,10 +195,10 @@ The isolated validation checkout is `/mnt/local-ssd/feuer-tiered.iB2JNA`.
 - Integrate and measure covering-range lookup and whole-entry validation, including subrange read amplification.
 - Add `PayloadIoMode::Buffered` and `PayloadIoMode::Direct`, integrating the existing driver without silent
   backend fallback.
-- Keep requested and downloaded ranges arbitrary and unaligned; physical entry allocations are 4-KiB-aligned.
+- Keep requested and downloaded ranges arbitrary and unaligned. Physical entry allocations are 4-KiB-aligned.
 - Evaluate sampled value-aware disk eviction, payload-only scoring and partially empty chunk utilization.
 - Bound allocation work, fragmentation reclamation, rewrite traffic, metadata, and physical capacity at the
-  contract's target scale of at least 30 TiB; avoid a cache-wide hot lock.
+  contract's target scale of at least 30 TiB. Avoid a cache-wide hot lock.
 
 The allocator is undecided. Compare size-segregated slabs, append-packed storage with cleaning, and a
 Foyer-style block baseline using trace-driven simulation and focused prototypes. Measure useful utilization,
@@ -212,7 +212,7 @@ permanently excluded by the design.
 
 - Extend current memory-identity publication checks when tier-aware retention policy is implemented.
 - Validate the versioned metadata format and whole-entry BLAKE3 checksums against injected crash and reuse cases.
-- Recover a safe subset after process and machine crashes; test corruption and torn state.
+- Recover a safe subset after process and machine crashes. Test corruption and torn state.
 - Automatically reset unsupported persistent formats and log the reset.
 
 ### Tier-aware policy and hardening
@@ -230,10 +230,10 @@ permanently excluded by the design.
 
 - Rerun the memory-only gate and add a controlled tiered comparison against native Foyer at a pinned revision
   and reported tuning. Hold callback ranges, application coordination, memory target, disk capacity,
-  concurrency, and cold-cache start constant; report actual used memory.
+  concurrency, and cold-cache start constant. Report actual used memory.
 - Evaluate prefetch and downloaded-range selection separately. Instrument actual source GETs and bytes in
-  the application harness and charge `GETs * 125 ms + bytes / 80 MB/s`; callback counts are not source GETs.
-- Report cost-weighted, request, and byte hit rates; useful-payload utilization; fragmentation and metadata;
-  read, write, cleaning, and relocation amplification; throughput; and tail latency.
+  the application harness and charge `GETs * 125 ms + bytes / 80 MB/s`. Callback counts are not source GETs.
+- Report cost-weighted, request, and byte hit rates, useful-payload utilization, fragmentation and metadata,
+  read/write/cleaning/relocation amplification, throughput, and tail latency.
 - Keep allocator and policy choices experimental until measurements support them. Make no claim of beating
   Foyer before controlled results demonstrate it.
