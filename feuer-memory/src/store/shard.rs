@@ -129,15 +129,15 @@ impl ReclaimCandidateRing {
     /// Removes `slot` and returns the candidate moved into it, if any.
     fn remove(&mut self, slot: usize, expected_id: u64) -> Option<CachedRangeIdentity> {
         debug_assert_eq!(self.entries.get(slot).map(|candidate| candidate.id), Some(expected_id));
-        let last = self.entries.len() - 1;
+        let last_slot = self.entries.len() - 1;
         self.entries.swap_remove(slot);
-        let moved = (slot != last).then(|| self.entries[slot].clone());
+        let moved_candidate = (slot != last_slot).then(|| self.entries[slot].clone());
         if self.entries.is_empty() {
             self.cursor = 0;
         } else {
             self.cursor %= self.entries.len();
         }
-        moved
+        moved_candidate
     }
 
     fn sample(&mut self, sample_size: usize) -> (usize, usize) {
@@ -315,7 +315,7 @@ impl MemoryCacheShard {
             return AdmissionProgress::Trim(source);
         }
 
-        let removed = self
+        let removed_payload_bytes = self
             .detach_entry(
                 &candidate.object_key,
                 candidate.range,
@@ -323,7 +323,7 @@ impl MemoryCacheShard {
                 candidate.object_key == *object_key,
             )
             .expect("a sampled pressure candidate cannot disappear while its shard is locked");
-        self.metrics.decrease_usage(removed, 1);
+        self.metrics.decrease_usage(removed_payload_bytes, 1);
         AdmissionProgress::Evicted
     }
 
@@ -402,20 +402,20 @@ impl MemoryCacheShard {
     fn remove_contained_ranges(&mut self, object_key: &ObjectKey, ranges: &[ByteRange]) -> RemovedCacheUsage {
         let mut removal = RemovedCacheUsage::default();
         for &range in ranges {
-            let bytes = self
+            let removed_payload_bytes = self
                 .detach_entry(object_key, range, None, true)
                 .expect("the contained cached range was just found");
-            removal.payload_bytes += bytes;
+            removal.payload_bytes += removed_payload_bytes;
             removal.entry_count += 1;
         }
         removal
     }
 
     pub(super) fn remove(&mut self, object_key: &ObjectKey, range: ByteRange) -> bool {
-        let Some(bytes) = self.detach_entry(object_key, range, None, false) else {
+        let Some(removed_payload_bytes) = self.detach_entry(object_key, range, None, false) else {
             return false;
         };
-        self.metrics.decrease_usage(bytes, 1);
+        self.metrics.decrease_usage(removed_payload_bytes, 1);
         self.metrics.record_remove();
         true
     }
@@ -429,8 +429,8 @@ impl MemoryCacheShard {
     ) -> Option<u64> {
         let (entry, object_is_empty) = {
             let entries = self.ranges.get_mut(object_key)?;
-            let current = entries.by_start.get(&range.start())?;
-            if current.range != range || expected_id.is_some_and(|id| id != current.id) {
+            let current_entry = entries.by_start.get(&range.start())?;
+            if current_entry.range != range || expected_id.is_some_and(|id| id != current_entry.id) {
                 return None;
             }
             let entry = entries
@@ -446,21 +446,21 @@ impl MemoryCacheShard {
         if object_is_empty && !preserve_access_history {
             self.ranges.remove(object_key);
         }
-        let bytes = entry.bytes.len() as u64;
-        self.used_bytes -= bytes;
-        Some(bytes)
+        let removed_payload_bytes = entry.bytes.len() as u64;
+        self.used_bytes -= removed_payload_bytes;
+        Some(removed_payload_bytes)
     }
 
     fn unregister_candidate(&mut self, slot: usize, expected_id: u64) {
-        let moved = self.candidates.remove(slot, expected_id);
-        let Some(moved) = moved else {
+        let moved_candidate = self.candidates.remove(slot, expected_id);
+        let Some(moved_candidate) = moved_candidate else {
             return;
         };
         let entry = self
             .ranges
-            .get_mut(&moved.object_key)
-            .and_then(|entries| entries.by_start.get_mut(&moved.start))
-            .filter(|entry| entry.id == moved.id)
+            .get_mut(&moved_candidate.object_key)
+            .and_then(|entries| entries.by_start.get_mut(&moved_candidate.start))
+            .filter(|entry| entry.id == moved_candidate.id)
             .expect("a moved policy candidate must still refer to a live entry");
         entry.candidate_slot = slot;
     }
@@ -473,7 +473,7 @@ impl MemoryCacheShard {
     ) -> Option<ReclaimCandidate> {
         let (sample_start, sample_count) = self.candidates.sample(self.reclaim_sample_size);
         let candidate_count = self.candidates.entries.len();
-        let mut selected: Option<(&ObjectKey, &CachedRange, f64)> = None;
+        let mut selected_candidate: Option<(&ObjectKey, &CachedRange, f64)> = None;
 
         for offset in 0..sample_count {
             let candidate = &self.candidates.entries[(sample_start + offset) % candidate_count];
@@ -491,22 +491,22 @@ impl MemoryCacheShard {
             }
 
             let retrieval_cost = entries.accesses.retention_score(entry.range);
-            if selected.is_none_or(|(current_key, current, current_cost)| {
+            if selected_candidate.is_none_or(|(selected_key, selected_entry, selected_cost)| {
                 compare_cost_per_byte(
                     retrieval_cost,
                     entry.bytes.len() as u64,
-                    current_cost,
-                    current.bytes.len() as u64,
+                    selected_cost,
+                    selected_entry.bytes.len() as u64,
                 )
-                .then_with(|| entry.id.cmp(&current.id))
-                .then_with(|| candidate.object_key.cmp(current_key))
-                .then_with(|| entry.range.cmp(&current.range))
+                .then_with(|| entry.id.cmp(&selected_entry.id))
+                .then_with(|| candidate.object_key.cmp(selected_key))
+                .then_with(|| entry.range.cmp(&selected_entry.range))
                 .is_lt()
             }) {
-                selected = Some((&candidate.object_key, entry, retrieval_cost));
+                selected_candidate = Some((&candidate.object_key, entry, retrieval_cost));
             }
         }
-        selected.map(|(object_key, entry, _)| ReclaimCandidate {
+        selected_candidate.map(|(object_key, entry, _)| ReclaimCandidate {
             object_key: object_key.clone(),
             range: entry.range,
             id: entry.id,
@@ -549,7 +549,7 @@ impl MemoryCacheShard {
         let accesses = entries.accesses.clone();
         // Evidence can change through disk-only requests while payload copying happens outside this lock.
         let history = accesses.lock();
-        let valid = self.ranges.get(&replacement.object_key).is_some_and(|entries| {
+        let source_unchanged = self.ranges.get(&replacement.object_key).is_some_and(|entries| {
             history.generation() == replacement.access_generation
                 && entries.object_generation == replacement.object_generation
                 && entries
@@ -557,7 +557,7 @@ impl MemoryCacheShard {
                     .get(&replacement.start)
                     .is_some_and(|entry| entry.id == replacement.id && entry.range == replacement.plan.source_range())
         });
-        if !valid {
+        if !source_unchanged {
             return false;
         }
 
@@ -587,13 +587,13 @@ impl MemoryCacheShard {
             self.insert_trimmed_range(&replacement.object_key, retained_range, bytes);
         }
 
-        let reclaimed = removed_bytes - retained_bytes;
-        debug_assert!(reclaimed >= replacement.plan.reclaimed_bytes());
+        let reclaimed_bytes = removed_bytes - retained_bytes;
+        debug_assert!(reclaimed_bytes >= replacement.plan.reclaimed_bytes());
         self.metrics.decrease_usage(removed_bytes, 1);
         if retained_entries != 0 {
             self.metrics.increase_usage(retained_bytes, retained_entries);
         }
-        self.metrics.record_range_trim(reclaimed);
+        self.metrics.record_range_trim(reclaimed_bytes);
         true
     }
 
@@ -625,9 +625,9 @@ impl MemoryCacheShard {
 
 impl Drop for MemoryCacheShard {
     fn drop(&mut self) {
-        let entries = self.entry_count() as u64;
-        if entries != 0 {
-            self.metrics.decrease_usage(self.used_bytes, entries);
+        let entry_count = self.entry_count() as u64;
+        if entry_count != 0 {
+            self.metrics.decrease_usage(self.used_bytes, entry_count);
         }
     }
 }

@@ -65,17 +65,17 @@ impl MemoryCache {
     /// Creates a cache with an explicit shard count for controlled benchmarks.
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
-    pub fn with_shards_for_benchmark(capacity: u64, shard_count: usize) -> Self {
-        Self::with_shard_count(capacity, MemoryMetrics::noop(), shard_count)
+    pub fn with_shards_for_benchmark(capacity: u64, num_shards: usize) -> Self {
+        Self::with_shard_count(capacity, MemoryMetrics::noop(), num_shards)
     }
 
-    fn with_shard_count(capacity: u64, metrics: Arc<MemoryMetrics>, shard_count: usize) -> Self {
-        assert!(shard_count > 0, "memory cache requires at least one shard");
-        let access_histories = Arc::new(ObjectAccessHistories::new(shard_count));
-        let shards = (0..shard_count)
-            .map(|index| {
+    fn with_shard_count(capacity: u64, metrics: Arc<MemoryMetrics>, num_shards: usize) -> Self {
+        assert!(num_shards > 0, "memory cache requires at least one shard");
+        let access_histories = Arc::new(ObjectAccessHistories::new(num_shards));
+        let shards = (0..num_shards)
+            .map(|shard_index| {
                 Mutex::new(MemoryCacheShard::new(
-                    shard_capacity_for(capacity, shard_count, index),
+                    shard_capacity_for(capacity, num_shards, shard_index),
                     metrics.clone(),
                     access_histories.clone(),
                 ))
@@ -170,23 +170,23 @@ impl MemoryCache {
     ) -> Option<u64> {
         let shard_index = self.shard_index(&object_key);
         let mut allow_range_trim = true;
-        let mut evicted = false;
+        let mut evicted_any_entry = false;
         loop {
-            let step = self.shards[shard_index].lock().try_admit_or_reclaim(
+            let admission_progress = self.shards[shard_index].lock().try_admit_or_reclaim(
                 &object_key,
                 downloaded_range,
                 &bytes,
                 requested_range,
                 allow_range_trim,
             );
-            match step {
-                AdmissionProgress::Complete(id) => {
-                    if evicted {
+            match admission_progress {
+                AdmissionProgress::Complete(entry_id) => {
+                    if evicted_any_entry {
                         self.metrics.eviction_triggering_insertions.increase(1);
                     }
-                    return id;
+                    return entry_id;
                 }
-                AdmissionProgress::Evicted => evicted = true,
+                AdmissionProgress::Evicted => evicted_any_entry = true,
                 AdmissionProgress::Retry => continue,
                 AdmissionProgress::Trim(source) => {
                     // Payload copying is deliberately outside the shard lock.
@@ -234,9 +234,9 @@ impl MemoryCache {
     }
 }
 
-fn shard_capacity_for(total: u64, shards: usize, index: usize) -> u64 {
-    let shards = shards as u64;
-    total / shards + u64::from((index as u64) < total % shards)
+fn shard_capacity_for(total_capacity: u64, num_shards: usize, shard_index: usize) -> u64 {
+    let num_shards = num_shards as u64;
+    total_capacity / num_shards + u64::from((shard_index as u64) < total_capacity % num_shards)
 }
 
 fn default_shard_count() -> usize {

@@ -18,14 +18,14 @@ use crate::{ByteRange, ObjectKey, config::read_env_number};
 pub const RECLAIM_SAMPLE_SIZE: usize = 64;
 
 /// Chooses the next bounded, rotating sample from a dense candidate list.
-pub fn sample_candidates(cursor: &mut usize, length: usize, sample_size: usize) -> (usize, usize) {
-    if length == 0 {
+pub fn sample_candidates(next_candidate: &mut usize, candidate_count: usize, sample_size: usize) -> (usize, usize) {
+    if candidate_count == 0 {
         return (0, 0);
     }
-    let start = *cursor % length;
-    let count = length.min(sample_size);
-    *cursor = (start + count) % length;
-    (start, count)
+    let sample_start = *next_candidate % candidate_count;
+    let sample_count = candidate_count.min(sample_size);
+    *next_candidate = (sample_start + sample_count) % candidate_count;
+    (sample_start, sample_count)
 }
 
 /// Compares decayed retrieval value per payload byte without division.
@@ -47,10 +47,12 @@ struct AccessHistoryShard {
 
 impl ObjectAccessHistories {
     /// Creates independently clocked shards. Use the memory tier's shard count.
-    pub fn new(shards: usize) -> Self {
-        assert!(shards > 0);
+    pub fn new(num_shards: usize) -> Self {
+        assert!(num_shards > 0);
         Self {
-            shards: (0..shards).map(|_| Arc::new(AccessHistoryShard::default())).collect(),
+            shards: (0..num_shards)
+                .map(|_| Arc::new(AccessHistoryShard::default()))
+                .collect(),
         }
     }
 
@@ -214,14 +216,14 @@ pub struct RangeAccessHistory {
 impl RangeAccessHistory {
     fn record(&mut self, range: ByteRange, access_clock: u64) {
         self.generation = self.generation.saturating_add(1);
-        let index = *self.access_count_indices.entry(range).or_insert_with(|| {
-            let index = self.access_counts.len();
+        let count_index = *self.access_count_indices.entry(range).or_insert_with(|| {
+            let count_index = self.access_counts.len();
             self.access_counts.push((range, DecayedAccessCount::default()));
-            index
+            count_index
         });
-        let accesses = &mut self.access_counts[index].1;
-        accesses.count = accesses.decayed_count(access_clock) + 1.0;
-        accesses.observed_at_access = access_clock;
+        let access_count = &mut self.access_counts[count_index].1;
+        access_count.count = access_count.decayed_count(access_clock) + 1.0;
+        access_count.observed_at_access = access_clock;
         self.remove_expired_events(access_clock);
         if self.events.len() == *MAX_ACCESS_EVENTS_PER_KEY {
             self.events.pop_front();
@@ -244,16 +246,16 @@ impl RangeAccessHistory {
     /// Eviction compares this score per payload byte.
     pub fn retention_score(&self, cached_range: ByteRange, access_clock: u64) -> f64 {
         let fixed_retrieval_cost = *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64;
-        if let Some(&index) = self.access_count_indices.get(&cached_range) {
+        if let Some(&count_index) = self.access_count_indices.get(&cached_range) {
             // Non-overlapping requests mean an exact match cannot contain another request.
-            return self.access_counts[index].1.decayed_count(access_clock)
+            return self.access_counts[count_index].1.decayed_count(access_clock)
                 * (fixed_retrieval_cost + cached_range.len() as f64);
         }
         self.access_counts
             .iter()
-            .filter(|(requested, _)| cached_range.contains(*requested))
-            .map(|(requested, accesses)| {
-                accesses.decayed_count(access_clock) * (fixed_retrieval_cost + requested.len() as f64)
+            .filter(|(requested_range, _)| cached_range.contains(*requested_range))
+            .map(|(requested_range, access_count)| {
+                access_count.decayed_count(access_clock) * (fixed_retrieval_cost + requested_range.len() as f64)
             })
             .sum()
     }

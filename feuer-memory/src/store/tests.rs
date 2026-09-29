@@ -643,10 +643,11 @@ fn copied_range_trim_is_revalidated_before_publication_and_can_fall_back() {
     assert_eq!(cache.used_bytes(), 10);
     assert!(cache.get(&key, range(6, 8)).is_some());
 
-    let step = cache.shards[0]
-        .lock()
-        .try_admit_or_reclaim(&incoming, range(0, 2), &incoming_bytes, None, false);
-    assert!(matches!(step, AdmissionProgress::Evicted));
+    let admission_progress =
+        cache.shards[0]
+            .lock()
+            .try_admit_or_reclaim(&incoming, range(0, 2), &incoming_bytes, None, false);
+    assert!(matches!(admission_progress, AdmissionProgress::Evicted));
     assert_eq!(cache.used_bytes(), 0, "fallback pressure may evict but cannot starve");
 }
 
@@ -671,14 +672,14 @@ fn shared_evidence_survives_memory_eviction_and_records_disk_only_requests() {
         download(range(0, 1), Bytes::from_static(b"a")),
         range(0, 1),
     );
-    let disk_owner = cache.access_histories().for_key(&key);
+    let disk_access_history = cache.access_histories().for_key(&key);
     assert!(cache.remove(&key, range(0, 1)));
     cache.record_access(&key, range(10, 11));
-    assert_eq!(disk_owner.lock().generation(), 2);
+    assert_eq!(disk_access_history.lock().generation(), 2);
     populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
     assert_eq!(accessed_ranges(&cache, &key), vec![range(0, 1), range(10, 11)]);
     assert!(cache.get(&key, range(0, 1)).is_some());
-    assert_eq!(disk_owner.lock().generation(), 3);
+    assert_eq!(disk_access_history.lock().generation(), 3);
 }
 
 #[test]
@@ -712,8 +713,8 @@ fn shard_targets_can_collectively_exceed_the_configured_capacity() {
     let mut keys = [None, None];
     for candidate in 0..100 {
         let key = ObjectKey::from(format!("object-{candidate}"));
-        let shard = cache.shard_index(&key);
-        keys[shard].get_or_insert(key);
+        let shard_index = cache.shard_index(&key);
+        keys[shard_index].get_or_insert(key);
         if keys.iter().all(Option::is_some) {
             break;
         }

@@ -28,12 +28,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = args.next().expect("provide a directory on the target filesystem");
     let seconds: u64 = args.next().unwrap_or_else(|| "5".into()).parse()?;
     assert!(seconds > 0);
-    let write_callers: Vec<usize> = match args.next() {
+    let writer_counts: Vec<usize> = match args.next() {
         Some(value) => vec![value.parse()?],
         None => vec![0, 4],
     };
     assert!(
-        write_callers
+        writer_counts
             .iter()
             .all(|&count| count <= ((CAPACITY - READ_SPACE_BYTES) / MIB as u64) as usize)
     );
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     for read_size in [4096, 65536, MIB] {
         for readers in [1, 32, 64, 128] {
-            for &writers in &write_callers {
+            for &writers in &writer_counts {
                 benchmark_concurrent_io(&file, read_size, readers, writers, seconds).await;
             }
         }
@@ -71,29 +71,29 @@ async fn benchmark_concurrent_io(file: &DataFile, read_size: usize, readers: usi
     // Random reads and sequential 1-MiB writes use disjoint regions. Write lanes
     // are disjoint too, satisfying DataFile's caller-owned conflict prevention.
     let payload = Arc::new(Bytes::from(vec![0x5a; MIB]));
-    for id in 0..readers + writers {
+    for caller_index in 0..readers + writers {
         let file = file.clone();
         let payload = payload.clone();
         tasks.push(tokio::spawn(async move {
-            let reading = id < readers;
-            let mut random = id as u64 + 1;
+            let is_reader = caller_index < readers;
+            let mut random_state = caller_index as u64 + 1;
             let mut measurements = IoMeasurements::default();
             let mut write_offset = 0;
             let lane_size = (CAPACITY - READ_SPACE_BYTES) / MIB as u64 / writers.max(1) as u64 * MIB as u64;
             while Instant::now() < deadline {
                 let started = Instant::now();
-                let bytes = if reading {
-                    random ^= random << 13;
-                    random ^= random >> 7;
-                    random ^= random << 17;
-                    let offset = (random % (READ_SPACE_BYTES / read_size as u64)) * read_size as u64;
-                    let value = file.read_at(offset, read_size).await.unwrap();
-                    assert_eq!(value.len(), read_size);
-                    assert_eq!(value[0], 0x5a);
-                    assert_eq!(value[read_size - 1], 0x5a);
+                let transferred_bytes = if is_reader {
+                    random_state ^= random_state << 13;
+                    random_state ^= random_state >> 7;
+                    random_state ^= random_state << 17;
+                    let offset = (random_state % (READ_SPACE_BYTES / read_size as u64)) * read_size as u64;
+                    let read_bytes = file.read_at(offset, read_size).await.unwrap();
+                    assert_eq!(read_bytes.len(), read_size);
+                    assert_eq!(read_bytes[0], 0x5a);
+                    assert_eq!(read_bytes[read_size - 1], 0x5a);
                     read_size
                 } else {
-                    let offset = READ_SPACE_BYTES + (id - readers) as u64 * lane_size + write_offset;
+                    let offset = READ_SPACE_BYTES + (caller_index - readers) as u64 * lane_size + write_offset;
                     file.write_at(offset, &payload).await.unwrap();
                     write_offset = (write_offset + MIB as u64) % lane_size;
                     MIB
@@ -101,44 +101,51 @@ async fn benchmark_concurrent_io(file: &DataFile, read_size: usize, readers: usi
                 let finished = Instant::now();
                 if started >= measure_start && finished <= deadline {
                     measurements.operations += 1;
-                    measurements.bytes += bytes as u64;
+                    measurements.bytes += transferred_bytes as u64;
                     // Sample API latency (including queueing) at 1/32 to bound harness overhead.
-                    if reading && measurements.operations.is_multiple_of(32) {
+                    if is_reader && measurements.operations.is_multiple_of(32) {
                         measurements
                             .latency_samples_micros
                             .push(finished.duration_since(started).as_micros() as u64);
                     }
                 }
             }
-            (reading, measurements)
+            (is_reader, measurements)
         }));
     }
     tokio::time::sleep_until(measure_start.into()).await;
     let cpu_start = process_cpu_seconds();
-    let mut read = IoMeasurements::default();
-    let mut write = IoMeasurements::default();
+    let mut read_measurements = IoMeasurements::default();
+    let mut write_measurements = IoMeasurements::default();
     for task in tasks {
-        let (reading, measurements) = task.await.unwrap();
-        let total = if reading { &mut read } else { &mut write };
-        total.operations += measurements.operations;
-        total.bytes += measurements.bytes;
-        total.latency_samples_micros.extend(measurements.latency_samples_micros);
+        let (is_reader, measurements) = task.await.unwrap();
+        let combined_measurements = if is_reader {
+            &mut read_measurements
+        } else {
+            &mut write_measurements
+        };
+        combined_measurements.operations += measurements.operations;
+        combined_measurements.bytes += measurements.bytes;
+        combined_measurements
+            .latency_samples_micros
+            .extend(measurements.latency_samples_micros);
     }
     let cpu_percent = (process_cpu_seconds() - cpu_start) / measure_start.elapsed().as_secs_f64() * 100.0;
-    read.latency_samples_micros.sort_unstable();
-    let percentile = |p: usize| {
-        read.latency_samples_micros
-            .get(read.latency_samples_micros.len() * p / 100)
+    read_measurements.latency_samples_micros.sort_unstable();
+    let read_latency_percentile = |percentile: usize| {
+        read_measurements
+            .latency_samples_micros
+            .get(read_measurements.latency_samples_micros.len() * percentile / 100)
             .copied()
             .unwrap_or(0)
     };
     println!(
         "{read_size},{readers},{writers},{seconds},{:.1},{:.1},{:.0},{},{},{:.1}",
-        read.bytes as f64 / seconds as f64 / 1e6,
-        write.bytes as f64 / seconds as f64 / 1e6,
-        read.operations as f64 / seconds as f64,
-        percentile(50),
-        percentile(99),
+        read_measurements.bytes as f64 / seconds as f64 / 1e6,
+        write_measurements.bytes as f64 / seconds as f64 / 1e6,
+        read_measurements.operations as f64 / seconds as f64,
+        read_latency_percentile(50),
+        read_latency_percentile(99),
         cpu_percent
     );
 }

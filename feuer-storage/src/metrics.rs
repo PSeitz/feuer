@@ -82,7 +82,7 @@ impl IoMetrics {
             &["operation", "pool", "outcome"],
         );
 
-        let operation = |label: &'static str| IoOperationMetrics {
+        let operation_metrics = |label: &'static str| IoOperationMetrics {
             success: operations.counter(&[label.into(), "success".into()]),
             error: operations.counter(&[label.into(), "error".into()]),
             bytes: bytes.counter(&[label.into()]),
@@ -98,8 +98,8 @@ impl IoMetrics {
         };
 
         Arc::new(Self {
-            read: operation(IoOperation::Read.as_str()),
-            write: operation(IoOperation::Write.as_str()),
+            read: operation_metrics(IoOperation::Read.as_str()),
+            write: operation_metrics(IoOperation::Write.as_str()),
             read_size: read_size.histogram(&[]),
         })
     }

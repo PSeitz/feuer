@@ -31,35 +31,37 @@ struct DiskChunkAvailability {
 impl DiskChunkAvailability {
     /// Reserves the first free chunk by disk address and updates chunk accounting.
     fn reserve_first_free_chunk(&mut self) -> u64 {
-        let (start, count) = self.free_chunk_count_by_start.pop_first().unwrap();
-        if count > 1 {
-            self.free_chunk_count_by_start.insert(start + 1, count - 1);
+        let (first_chunk, chunk_count) = self.free_chunk_count_by_start.pop_first().unwrap();
+        if chunk_count > 1 {
+            self.free_chunk_count_by_start.insert(first_chunk + 1, chunk_count - 1);
         }
         self.available_chunks -= 1;
         self.metrics.free_chunks.decrease(1);
         self.metrics.allocated_chunks.increase(1);
-        start
+        first_chunk
     }
 
-    fn release_chunk(&mut self, chunk: u64) {
-        let mut start = chunk;
-        let mut count = 1;
-        if let Some((&previous_start, &previous_count)) = self.free_chunk_count_by_start.range(..chunk).next_back() {
-            assert!(previous_start + previous_count <= chunk);
-            if previous_start + previous_count == chunk {
-                start = previous_start;
-                count += previous_count;
+    fn release_chunk(&mut self, chunk_number: u64) {
+        let mut first_chunk = chunk_number;
+        let mut chunk_count = 1;
+        if let Some((&previous_start, &previous_count)) =
+            self.free_chunk_count_by_start.range(..chunk_number).next_back()
+        {
+            assert!(previous_start + previous_count <= chunk_number);
+            if previous_start + previous_count == chunk_number {
+                first_chunk = previous_start;
+                chunk_count += previous_count;
                 self.free_chunk_count_by_start.remove(&previous_start);
             }
         }
-        if let Some((&next_start, &next_count)) = self.free_chunk_count_by_start.range(chunk..).next() {
-            assert!(next_start > chunk);
-            if next_start == chunk + 1 {
-                count += next_count;
+        if let Some((&next_start, &next_count)) = self.free_chunk_count_by_start.range(chunk_number..).next() {
+            assert!(next_start > chunk_number);
+            if next_start == chunk_number + 1 {
+                chunk_count += next_count;
                 self.free_chunk_count_by_start.remove(&next_start);
             }
         }
-        self.free_chunk_count_by_start.insert(start, count);
+        self.free_chunk_count_by_start.insert(first_chunk, chunk_count);
         self.available_chunks += 1;
         self.metrics.free_chunks.increase(1);
         self.metrics.allocated_chunks.decrease(1);
@@ -114,20 +116,20 @@ impl DiskChunkAllocator {
     }
 
     /// Reserves whole chunks, not necessarily adjacent. Failure consumes no space.
-    pub(super) fn reserve_chunks(&self, count: u64) -> Option<Vec<DiskRegion>> {
+    pub(super) fn reserve_chunks(&self, chunk_count: u64) -> Option<Vec<DiskRegion>> {
         let mut free = self.free.lock().unwrap();
-        if count == 0 || count > free.available_chunks {
+        if chunk_count == 0 || chunk_count > free.available_chunks {
             return None;
         }
         Some(
-            (0..count)
+            (0..chunk_count)
                 .map(|_| {
-                    let chunk = free.reserve_first_free_chunk();
+                    let chunk_number = free.reserve_first_free_chunk();
                     DiskRegion {
-                        range: chunk * CHUNK_BYTES..(chunk + 1) * CHUNK_BYTES,
-                        state: Arc::new(ChunkReservation {
+                        range: chunk_number * CHUNK_BYTES..(chunk_number + 1) * CHUNK_BYTES,
+                        reservation: Arc::new(ChunkReservation {
                             free: self.free.clone(),
-                            chunk,
+                            chunk_number,
                         }),
                     }
                 })
@@ -140,14 +142,14 @@ impl DiskChunkAllocator {
 #[derive(Debug)]
 pub(super) struct DiskRegion {
     range: Range<u64>,
-    state: Arc<ChunkReservation>,
+    reservation: Arc<ChunkReservation>,
 }
 
 /// Ownership of one whole chunk, shared by its entry regions and read guards.
 #[derive(Debug)]
 struct ChunkReservation {
     free: Arc<Mutex<DiskChunkAvailability>>,
-    chunk: u64,
+    chunk_number: u64,
 }
 
 impl DiskRegion {
@@ -160,7 +162,7 @@ impl DiskRegion {
         assert!(self.range.start <= range.start && range.start < range.end && range.end <= self.range.end);
         Self {
             range,
-            state: self.state.clone(),
+            reservation: self.reservation.clone(),
         }
     }
 
@@ -191,7 +193,7 @@ impl DiskRegionReadGuard {
 
 impl Drop for ChunkReservation {
     fn drop(&mut self) {
-        self.free.lock().unwrap().release_chunk(self.chunk);
+        self.free.lock().unwrap().release_chunk(self.chunk_number);
     }
 }
 

@@ -164,9 +164,9 @@ struct FeuerReplayCache {
 }
 
 impl FeuerReplayCache {
-    fn new(capacity: usize, shards: usize) -> Self {
+    fn new(capacity: usize, num_shards: usize) -> Self {
         Self {
-            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, shards),
+            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards),
         }
     }
 }
@@ -248,9 +248,14 @@ struct FoyerReplayCache {
 }
 
 impl FoyerReplayCache {
-    fn new(capacity: usize, shards: usize, key_range: FoyerKeyRange, eviction_policy: FoyerEvictionPolicy) -> Self {
+    fn new(
+        capacity: usize,
+        num_shards: usize,
+        key_range: FoyerKeyRange,
+        eviction_policy: FoyerEvictionPolicy,
+    ) -> Self {
         Self {
-            cache: build_foyer_cache(capacity, shards, eviction_policy),
+            cache: build_foyer_cache(capacity, num_shards, eviction_policy),
             key_range,
             eviction_policy,
         }
@@ -275,10 +280,14 @@ impl ReplayCache for FoyerReplayCache {
         let Some(entry) = self.cache.get(&key) else {
             return false;
         };
-        let value = entry.value();
-        debug_assert!(value.downloaded_range.contains(request.requested_range));
-        let result = requested_payload(&value.payload, value.downloaded_range, request.requested_range);
-        debug_assert_eq!(result.len() as u64, request.requested_range.len());
+        let cached_download = entry.value();
+        debug_assert!(cached_download.downloaded_range.contains(request.requested_range));
+        let requested_bytes = requested_payload(
+            &cached_download.payload,
+            cached_download.downloaded_range,
+            request.requested_range,
+        );
+        debug_assert_eq!(requested_bytes.len() as u64, request.requested_range.len());
         true
     }
 
@@ -302,12 +311,12 @@ impl ReplayCache for FoyerReplayCache {
 /// Builds a Foyer cache with payload-byte accounting and the selected eviction policy.
 fn build_foyer_cache(
     capacity: usize,
-    shards: usize,
+    num_shards: usize,
     eviction_policy: FoyerEvictionPolicy,
 ) -> FoyerCache<FoyerRangeKey, FoyerCachedDownload> {
     let builder = CacheBuilder::new(capacity)
-        .with_shards(shards)
-        .with_weighter(|_key: &FoyerRangeKey, value: &FoyerCachedDownload| value.payload.len());
+        .with_shards(num_shards)
+        .with_weighter(|_key: &FoyerRangeKey, download: &FoyerCachedDownload| download.payload.len());
     match eviction_policy {
         FoyerEvictionPolicy::S3Fifo => builder.with_eviction_config(S3FifoConfig::default()).build(),
         FoyerEvictionPolicy::CostAware => builder
@@ -352,12 +361,14 @@ impl ReplayReport {
     /// Returns the source-cost savings ratio against fetching every exact request; extra bytes can make it negative.
     fn source_cost_savings_ratio(&self) -> f64 {
         let fixed_cost = u128::from(SOURCE_FIXED_EQUIVALENT_BYTES);
-        let baseline = u128::from(self.traffic.requests) * fixed_cost + u128::from(self.traffic.requested_bytes);
-        let actual = u128::from(self.traffic.source_requests) * fixed_cost + u128::from(self.traffic.source_bytes);
-        if baseline == 0 {
+        let uncached_source_cost =
+            u128::from(self.traffic.requests) * fixed_cost + u128::from(self.traffic.requested_bytes);
+        let cached_source_cost =
+            u128::from(self.traffic.source_requests) * fixed_cost + u128::from(self.traffic.source_bytes);
+        if uncached_source_cost == 0 {
             0.0
         } else {
-            1.0 - actual as f64 / baseline as f64
+            1.0 - cached_source_cost as f64 / uncached_source_cost as f64
         }
     }
 
@@ -399,9 +410,10 @@ fn main() -> Result<(), String> {
     }
 
     for &downloader in &args.downloaders {
-        let max_download = max_download_len(&workload, downloader);
-        let max_download = usize::try_from(max_download).map_err(|_| "largest callback payload does not fit usize")?;
-        let source_payload = Bytes::from(vec![0x5a; max_download]);
+        let max_download_bytes = max_download_len(&workload, downloader);
+        let max_download_bytes =
+            usize::try_from(max_download_bytes).map_err(|_| "largest callback payload does not fit usize")?;
+        let source_payload = Bytes::from(vec![0x5a; max_download_bytes]);
 
         for &shards in &args.shards {
             for &capacity in &args.capacities {
@@ -514,54 +526,59 @@ struct CoalescedDownload<'a> {
 }
 
 fn expanded_download_ranges(workload: &[TraceRequest], config: DownloadExpansionConfig) -> Vec<ByteRange> {
-    let mut by_object: HashMap<(&str, u64), Vec<usize>> = HashMap::new();
-    for (index, request) in workload.iter().enumerate() {
-        by_object
+    let mut request_indices_by_object: HashMap<(&str, u64), Vec<usize>> = HashMap::new();
+    for (request_index, request) in workload.iter().enumerate() {
+        request_indices_by_object
             .entry((&request.object_key, request.object_size))
             .or_default()
-            .push(index);
+            .push(request_index);
     }
 
     let base_ranges: Vec<_> = workload
         .iter()
         .map(|request| request.downloaded_range(DownloadRangePolicy::Expanded, config))
         .collect();
-    let mut ranges = base_ranges.clone();
+    let mut expanded_ranges = base_ranges.clone();
     // The first batch that claims a request fixes its expansion. Recomputing a
     // sliding window for each member would produce different native Foyer keys
     // for requests served by the same coalesced download.
-    let mut assigned = vec![false; workload.len()];
-    for indexes in by_object.values() {
-        for (position, &index) in indexes.iter().enumerate() {
-            if assigned[index] {
+    let mut expansion_assigned = vec![false; workload.len()];
+    for request_indices in request_indices_by_object.values() {
+        for (object_request_index, &request_index) in request_indices.iter().enumerate() {
+            if expansion_assigned[request_index] {
                 continue;
             }
 
-            let deadline = workload[index]
+            let coalescing_deadline_millis = workload[request_index]
                 .timestamp_millis
                 .saturating_add(COALESCING_WINDOW_MILLIS);
-            let pending = indexes[position..]
+            let pending_downloads = request_indices[object_request_index..]
                 .iter()
                 .copied()
-                .take_while(|&candidate| workload[candidate].timestamp_millis <= deadline)
-                .filter(|&candidate| !assigned[candidate])
-                .map(|candidate| DownloadToCoalesce {
-                    trace_index: candidate,
-                    request: &workload[candidate],
-                    downloaded_range: base_ranges[candidate],
+                .take_while(|&candidate_index| workload[candidate_index].timestamp_millis <= coalescing_deadline_millis)
+                .filter(|&candidate_index| !expansion_assigned[candidate_index])
+                .map(|candidate_index| DownloadToCoalesce {
+                    trace_index: candidate_index,
+                    request: &workload[candidate_index],
+                    downloaded_range: base_ranges[candidate_index],
                 })
                 .collect();
-            let download = coalesced_downloads(pending, config.coalescing_distance_bytes)
+            let download = coalesced_downloads(pending_downloads, config.coalescing_distance_bytes)
                 .into_iter()
-                .find(|download| download.requests.iter().any(|(trace_index, _)| *trace_index == index))
+                .find(|download| {
+                    download
+                        .requests
+                        .iter()
+                        .any(|(trace_index, _)| *trace_index == request_index)
+                })
                 .expect("the current request must belong to one coalesced download");
-            for (member, _) in download.requests {
-                ranges[member] = download.downloaded_range;
-                assigned[member] = true;
+            for (member_index, _) in download.requests {
+                expanded_ranges[member_index] = download.downloaded_range;
+                expansion_assigned[member_index] = true;
             }
         }
     }
-    ranges
+    expanded_ranges
 }
 
 fn max_download_len(workload: &ReplayWorkload, downloader: DownloadRangePolicy) -> u64 {
@@ -615,10 +632,10 @@ fn replay_pass<C: ReplayCache + ?Sized>(
 }
 
 fn coalesced_downloads(
-    mut pending: Vec<DownloadToCoalesce<'_>>,
+    mut pending_downloads: Vec<DownloadToCoalesce<'_>>,
     coalescing_distance_bytes: u64,
 ) -> Vec<CoalescedDownload<'_>> {
-    pending.sort_by(|left, right| {
+    pending_downloads.sort_by(|left, right| {
         left.request
             .object_key
             .cmp(&right.request.object_key)
@@ -628,18 +645,18 @@ fn coalesced_downloads(
     });
 
     let mut downloads: Vec<CoalescedDownload<'_>> = Vec::new();
-    for pending in pending {
-        let merge = downloads.last_mut().filter(|download| {
-            let representative = download.requests[0].1;
-            let gap = pending
+    for pending in pending_downloads {
+        let mergeable_download = downloads.last_mut().filter(|download| {
+            let first_request = download.requests[0].1;
+            let gap_bytes = pending
                 .downloaded_range
                 .start()
                 .saturating_sub(download.downloaded_range.end());
-            representative.object_key == pending.request.object_key
-                && representative.object_size == pending.request.object_size
-                && gap < coalescing_distance_bytes
+            first_request.object_key == pending.request.object_key
+                && first_request.object_size == pending.request.object_size
+                && gap_bytes < coalescing_distance_bytes
         });
-        if let Some(download) = merge {
+        if let Some(download) = mergeable_download {
             download.downloaded_range = ByteRange::new(
                 download.downloaded_range.start().min(pending.downloaded_range.start()),
                 download.downloaded_range.end().max(pending.downloaded_range.end()),
@@ -916,10 +933,10 @@ fn find_json_u64(line: &str, field: &str) -> Result<u64, String> {
 
 /// Returns the line from the named JSON value's starting position, without parsing the value.
 fn line_from_json_value<'a>(line: &'a str, field: &str) -> Result<&'a str, String> {
-    let needle = format!("\"{field}\"");
+    let quoted_field_name = format!("\"{field}\"");
     let after_field = line
-        .find(&needle)
-        .map(|index| &line[index + needle.len()..])
+        .find(&quoted_field_name)
+        .map(|index| &line[index + quoted_field_name.len()..])
         .ok_or_else(|| format!("missing field {field:?}"))?;
     let after_colon = after_field
         .find(':')
@@ -1053,17 +1070,20 @@ mod tests {
         let second = request(12, 14);
         let expanded = ByteRange::new(0, 20).unwrap();
 
-        let mut expanded_key =
+        let mut expanded_key_cache =
             FoyerReplayCache::new(1 << 20, 1, FoyerKeyRange::ExpandedDownload, FoyerEvictionPolicy::S3Fifo);
-        assert!(!expanded_key.lookup_hit(&first, expanded));
-        expanded_key
+        assert!(!expanded_key_cache.lookup_hit(&first, expanded));
+        expanded_key_cache
             .populate(&first, expanded, Bytes::from(vec![0; 20]))
             .unwrap();
-        assert!(expanded_key.lookup_hit(&second, expanded));
+        assert!(expanded_key_cache.lookup_hit(&second, expanded));
 
-        let mut exact_key = FoyerReplayCache::new(1 << 20, 1, FoyerKeyRange::ExactRequest, FoyerEvictionPolicy::S3Fifo);
-        exact_key.populate(&first, expanded, Bytes::from(vec![0; 20])).unwrap();
-        assert!(!exact_key.lookup_hit(&second, expanded));
+        let mut exact_key_cache =
+            FoyerReplayCache::new(1 << 20, 1, FoyerKeyRange::ExactRequest, FoyerEvictionPolicy::S3Fifo);
+        exact_key_cache
+            .populate(&first, expanded, Bytes::from(vec![0; 20]))
+            .unwrap();
+        assert!(!exact_key_cache.lookup_hit(&second, expanded));
     }
 
     #[test]

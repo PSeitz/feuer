@@ -100,8 +100,8 @@ struct EntryMetadataStartBitmap {
 
 impl EntryMetadataStartBitmap {
     fn insert(&mut self, offset_in_chunk: u64) {
-        let slot = (offset_in_chunk / METADATA_PAGE_BYTES as u64) as usize;
-        self.bitmap[slot / 8] |= 1 << (slot % 8);
+        let bit_index = (offset_in_chunk / METADATA_PAGE_BYTES as u64) as usize;
+        self.bitmap[bit_index / 8] |= 1 << (bit_index % 8);
     }
 }
 
@@ -160,12 +160,12 @@ impl DiskRangeCache {
         capacity: u64,
         metrics: Arc<IoMetrics>,
     ) -> Result<Self, DiskRangeCacheError> {
-        let shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
+        let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
         Self::open_with_access_histories(
             directory,
             capacity,
             metrics,
-            Arc::new(ObjectAccessHistories::new(shards)),
+            Arc::new(ObjectAccessHistories::new(num_shards)),
         )
         .await
     }
@@ -205,14 +205,14 @@ impl DiskRangeCache {
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
         let file = DataFile::open(directory, capacity, io_metrics).await?;
         tracing::warn!(target: "feuer::storage", "disk range cache prototype starts empty; recovery is not implemented");
-        let shard_count = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
+        let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
         let chunk_count = capacity / CHUNK_BYTES;
-        let shards = (0..shard_count)
+        let shards = (0..num_shards)
             .map(|shard_index| DiskCacheShard {
                 reclaim_sample_size,
                 allocator: DiskChunkAllocator::with_metrics(
-                    (chunk_count * shard_index / shard_count) * CHUNK_BYTES
-                        ..(chunk_count * (shard_index + 1) / shard_count) * CHUNK_BYTES,
+                    (chunk_count * shard_index / num_shards) * CHUNK_BYTES
+                        ..(chunk_count * (shard_index + 1) / num_shards) * CHUNK_BYTES,
                     metrics.clone(),
                 )
                 .unwrap(),
@@ -277,12 +277,12 @@ impl DiskRangeCache {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
         runtime
             .spawn(async move {
-                let mut by_shard: Vec<Vec<_>> = (0..disk.shards.len()).map(|_| Vec::new()).collect();
+                let mut downloads_by_shard: Vec<Vec<_>> = (0..disk.shards.len()).map(|_| Vec::new()).collect();
                 for (key, download, token, attempt) in downloads {
-                    by_shard[disk.shard_index_for_key(&key)].push((key, download, token, attempt));
+                    downloads_by_shard[disk.shard_index_for_key(&key)].push((key, download, token, attempt));
                 }
-                let mut published = 0;
-                for (shard, mut downloads) in disk.shards.iter().zip(by_shard) {
+                let mut published_entries = 0;
+                for (shard, mut downloads) in disk.shards.iter().zip(downloads_by_shard) {
                     downloads.sort_by_key(|(_, download, _, _)| download.bytes().len());
                     let mut batch = UnwrittenShardBatch::default();
                     let mut publication_tokens = Vec::new();
@@ -298,7 +298,7 @@ impl DiskRangeCache {
                         {
                             // Preserve the object's evidence even if pressure removes its last existing entry.
                             let accesses = disk.access_histories.for_key(&key);
-                            let previous_entries = batch.entries.len();
+                            let previous_entry_count = batch.entries.len();
                             let previous_regions_left = regions_left;
                             while let Err(chunks_needed) =
                                 batch.pack_download(&shard.allocator, &key, &download, &accesses)
@@ -312,7 +312,7 @@ impl DiskRangeCache {
                             }
                             // Only actual removals consume the region budget; sampling alone does not.
                             attempt.evicted = regions_left != previous_regions_left;
-                            if batch.entries.len() != previous_entries {
+                            if batch.entries.len() != previous_entry_count {
                                 publication_tokens.push((token, attempt));
                             } else {
                                 attempt.set_outcome(PopulationOutcome::NoCapacity);
@@ -344,13 +344,13 @@ impl DiskRangeCache {
                         with_current(&token, &mut || {
                             if let Some((key, storage)) = entry.take() {
                                 index.insert(key, storage);
-                                published += 1;
+                                published_entries += 1;
                                 attempt.set_outcome(PopulationOutcome::Published);
                             }
                         });
                     }
                 }
-                Ok(published)
+                Ok(published_entries)
             })
             .await
             .map_err(DiskRangeCacheError::PopulationTaskFailed)?
@@ -446,31 +446,32 @@ impl DiskCacheShard {
             return false;
         }
         let mut index = self.entry_index.lock().unwrap();
-        let length = index.eviction_candidates.len();
-        if length == 0 {
+        let candidate_count = index.eviction_candidates.len();
+        if candidate_count == 0 {
             return false;
         }
         *attempts_left -= 1;
-        let (start, count) = sample_candidates(&mut index.next_candidate, length, self.reclaim_sample_size);
-        let mut selected: Option<(usize, f64, u64, u64)> = None;
-        for offset in 0..count {
-            let position = (start + offset) % length;
+        let (sample_start, sample_count) =
+            sample_candidates(&mut index.next_candidate, candidate_count, self.reclaim_sample_size);
+        let mut selected_candidate: Option<(usize, f64, u64, u64)> = None;
+        for sample_offset in 0..sample_count {
+            let position = (sample_start + sample_offset) % candidate_count;
             let (key, range_start) = &index.eviction_candidates[position];
             let entry = &index.ranges_by_key[key][range_start];
             if entry.region_count() > *regions_left {
                 continue;
             }
-            let value = entry.accesses.retention_score(entry.object_range);
+            let retrieval_cost = entry.accesses.retention_score(entry.object_range);
             let payload_bytes = entry.object_range.len();
-            if selected.is_none_or(|(_, current_value, current_bytes, current_id)| {
-                compare_cost_per_byte(value, payload_bytes, current_value, current_bytes)
-                    .then_with(|| entry.publication_id.cmp(&current_id))
+            if selected_candidate.is_none_or(|(_, selected_cost, selected_bytes, selected_id)| {
+                compare_cost_per_byte(retrieval_cost, payload_bytes, selected_cost, selected_bytes)
+                    .then_with(|| entry.publication_id.cmp(&selected_id))
                     .is_lt()
             }) {
-                selected = Some((position, value, payload_bytes, entry.publication_id));
+                selected_candidate = Some((position, retrieval_cost, payload_bytes, entry.publication_id));
             }
         }
-        if let Some((position, ..)) = selected {
+        if let Some((position, ..)) = selected_candidate {
             let (key, start) = index.eviction_candidates[position].clone();
             *regions_left -= index.ranges_by_key[&key][&start].region_count();
             index.remove(&key, start);
@@ -489,8 +490,9 @@ impl ObjectRangeDiskStorage {
         if self.payload_regions.len() != 1 || self.entry_metadata_regions.len() != 1 {
             return None;
         }
-        let chunk = self.payload_regions[0].range().start / CHUNK_BYTES;
-        (self.entry_metadata_regions[0].range().start / CHUNK_BYTES == chunk).then_some(chunk * CHUNK_BYTES)
+        let chunk_number = self.payload_regions[0].range().start / CHUNK_BYTES;
+        (self.entry_metadata_regions[0].range().start / CHUNK_BYTES == chunk_number)
+            .then_some(chunk_number * CHUNK_BYTES)
     }
 }
 
@@ -508,11 +510,11 @@ impl DiskEntryIndex {
     fn insert(&mut self, key: ObjectKey, mut storage: ObjectRangeDiskStorage) {
         let object_range = storage.object_range;
         if let Some(entries) = self.ranges_by_key.get(&key) {
-            let replaced: Vec<_> = entries
+            let replaced_range_starts: Vec<_> = entries
                 .range(object_range.start()..object_range.end())
                 .filter_map(|(&start, entry)| object_range.contains(entry.object_range).then_some(start))
                 .collect();
-            for start in replaced {
+            for start in replaced_range_starts {
                 self.remove(&key, start);
             }
         }
@@ -612,21 +614,21 @@ impl UnwrittenShardBatch {
     ) -> Result<(), u64> {
         let object_range = download.downloaded_range();
         let bytes = download.bytes();
-        let payload_bytes = (bytes.len() as u64).next_multiple_of(PAYLOAD_ALIGNMENT_BYTES);
+        let aligned_payload_bytes = (bytes.len() as u64).next_multiple_of(PAYLOAD_ALIGNMENT_BYTES);
         let chunk_data_bytes = CHUNK_BYTES - METADATA_PAGE_BYTES as u64;
-        let payload_region_count = payload_bytes.div_ceil(chunk_data_bytes);
+        let payload_region_count = aligned_payload_bytes.div_ceil(chunk_data_bytes);
         let metadata_bytes =
             metadata_storage_bytes(72 + 16 * payload_region_count as usize + key.len()).ok_or(u64::MAX)?;
-        let entry_bytes = payload_bytes + metadata_bytes;
-        let tail_bytes = self.chunks.last().map_or(0, |chunk| CHUNK_BYTES - chunk.used_bytes);
+        let entry_bytes = aligned_payload_bytes + metadata_bytes;
+        let free_tail_bytes = self.chunks.last().map_or(0, |chunk| CHUNK_BYTES - chunk.used_bytes);
         // Never split an entry across a shared chunk boundary, even if only metadata would spill.
-        let shares_tail = entry_bytes <= tail_bytes;
+        let shares_tail = entry_bytes <= free_tail_bytes;
         let new_chunk_count = if shares_tail {
             0
         } else {
             entry_bytes.div_ceil(chunk_data_bytes)
         };
-        let mut cursor = if shares_tail {
+        let mut chunk_index = if shares_tail {
             self.chunks.len() - 1
         } else {
             self.chunks.len()
@@ -641,40 +643,44 @@ impl UnwrittenShardBatch {
                 metadata_starts: EntryMetadataStartBitmap::default(),
             }));
         }
-        let (payload_regions, first_chunk) = self.reserve_entry_regions(&mut cursor, payload_bytes);
-        let mut consumed = 0;
-        for (chunk, region) in self.chunks[first_chunk..].iter_mut().zip(&payload_regions) {
-            let range = region.range();
-            let offset = (range.start % CHUNK_BYTES) as usize;
-            let end = (consumed + (range.end - range.start) as usize).min(bytes.len());
-            chunk.parts.push((offset, bytes.slice(consumed..end)));
-            consumed = end;
+        let (payload_regions, first_payload_chunk) =
+            self.reserve_entry_regions(&mut chunk_index, aligned_payload_bytes);
+        let mut payload_offset = 0;
+        for (chunk, region) in self.chunks[first_payload_chunk..].iter_mut().zip(&payload_regions) {
+            let disk_range = region.range();
+            let offset_in_chunk = (disk_range.start % CHUNK_BYTES) as usize;
+            let payload_end = (payload_offset + (disk_range.end - disk_range.start) as usize).min(bytes.len());
+            chunk
+                .parts
+                .push((offset_in_chunk, bytes.slice(payload_offset..payload_end)));
+            payload_offset = payload_end;
         }
         let payload_checksum = blake3::hash(bytes);
         let contents = page_format::encode_entry_metadata(key, object_range, &payload_regions, &payload_checksum);
-        let (entry_metadata_regions, first_chunk) = self.reserve_entry_regions(&mut cursor, metadata_bytes);
-        self.chunks[first_chunk]
+        let (entry_metadata_regions, first_metadata_chunk) =
+            self.reserve_entry_regions(&mut chunk_index, metadata_bytes);
+        self.chunks[first_metadata_chunk]
             .metadata_starts
             .insert(entry_metadata_regions[0].range().start % CHUNK_BYTES);
         let content_checksum = blake3::hash(&contents);
         let mut page_ordinal = 0;
-        let mut consumed = 0;
-        for (region_index, (chunk, region)) in self.chunks[first_chunk..]
+        let mut metadata_offset = 0;
+        for (region_index, (chunk, region)) in self.chunks[first_metadata_chunk..]
             .iter_mut()
             .zip(&entry_metadata_regions)
             .enumerate()
         {
             let range = region.range();
             for page_address in (range.start..range.end).step_by(METADATA_PAGE_BYTES) {
-                let next = if page_address + (METADATA_PAGE_BYTES as u64) < range.end {
+                let next_page_address = if page_address + (METADATA_PAGE_BYTES as u64) < range.end {
                     page_address + METADATA_PAGE_BYTES as u64
                 } else {
                     entry_metadata_regions
                         .get(region_index + 1)
                         .map_or(0, |region| region.range().start)
                 };
-                let offset = (page_address % CHUNK_BYTES) as usize;
-                let end = (consumed + PAGE_CONTENT_BYTES).min(contents.len());
+                let offset_in_chunk = (page_address % CHUNK_BYTES) as usize;
+                let metadata_end = (metadata_offset + PAGE_CONTENT_BYTES).min(contents.len());
                 let mut page = vec![0; METADATA_PAGE_BYTES];
                 page_format::encode_page(
                     &mut page,
@@ -682,11 +688,11 @@ impl UnwrittenShardBatch {
                     content_checksum.as_bytes(),
                     page_address,
                     page_ordinal,
-                    next,
-                    &contents[consumed..end],
+                    next_page_address,
+                    &contents[metadata_offset..metadata_end],
                 );
-                chunk.parts.push((offset, Bytes::from(page)));
-                consumed = end;
+                chunk.parts.push((offset_in_chunk, Bytes::from(page)));
+                metadata_offset = metadata_end;
                 page_ordinal += 1;
             }
         }
@@ -711,24 +717,24 @@ impl UnwrittenShardBatch {
     }
 
     /// Reserves aligned entry regions within the batch's chunks, preserving shared whole-chunk ownership.
-    fn reserve_entry_regions(&mut self, cursor: &mut usize, mut bytes: u64) -> (Vec<DiskRegion>, usize) {
-        while self.chunks[*cursor].used_bytes == CHUNK_BYTES {
-            *cursor += 1;
+    fn reserve_entry_regions(&mut self, chunk_index: &mut usize, mut remaining_bytes: u64) -> (Vec<DiskRegion>, usize) {
+        while self.chunks[*chunk_index].used_bytes == CHUNK_BYTES {
+            *chunk_index += 1;
         }
-        let first_chunk = *cursor;
+        let first_chunk_index = *chunk_index;
         let mut regions = Vec::new();
-        while bytes > 0 {
-            let chunk = &mut self.chunks[*cursor];
-            let length = bytes.min(CHUNK_BYTES - chunk.used_bytes);
-            let start = chunk.region.range().start + chunk.used_bytes;
-            regions.push(chunk.region.slice(start..start + length));
-            chunk.used_bytes += length;
-            bytes -= length;
-            if bytes > 0 {
-                *cursor += 1;
+        while remaining_bytes > 0 {
+            let chunk = &mut self.chunks[*chunk_index];
+            let region_bytes = remaining_bytes.min(CHUNK_BYTES - chunk.used_bytes);
+            let disk_offset = chunk.region.range().start + chunk.used_bytes;
+            regions.push(chunk.region.slice(disk_offset..disk_offset + region_bytes));
+            chunk.used_bytes += region_bytes;
+            remaining_bytes -= region_bytes;
+            if remaining_bytes > 0 {
+                *chunk_index += 1;
             }
         }
-        (regions, first_chunk)
+        (regions, first_chunk_index)
     }
 
     /// Finalizes discovery metadata and writes all chunks before returning entries for publication.

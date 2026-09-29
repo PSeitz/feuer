@@ -41,22 +41,22 @@ pub(super) fn plan_range_trim(
         .collect();
     retained_ranges.sort_unstable();
 
-    let mut grouped: Vec<ByteRange> = Vec::with_capacity(retained_ranges.len());
-    for requested in retained_ranges {
-        if let Some(previous) = grouped.last_mut()
-            && requested.start() <= previous.end()
+    let mut merged_ranges: Vec<ByteRange> = Vec::with_capacity(retained_ranges.len());
+    for requested_range in retained_ranges {
+        if let Some(previous_range) = merged_ranges.last_mut()
+            && requested_range.start() <= previous_range.end()
         {
-            *previous = ByteRange::new(previous.start(), previous.end().max(requested.end()))
+            *previous_range = ByteRange::new(previous_range.start(), previous_range.end().max(requested_range.end()))
                 .expect("a union of non-empty ranges must remain non-empty");
         } else {
-            grouped.push(requested);
+            merged_ranges.push(requested_range);
         }
     }
 
-    if grouped.is_empty() {
+    if merged_ranges.is_empty() {
         return None;
     }
-    let retained_bytes = grouped.iter().map(|range| range.len()).sum();
+    let retained_bytes = merged_ranges.iter().map(|range| range.len()).sum();
     let reclaimed_bytes = source_range.len() - retained_bytes;
     let minimum_saved_bytes =
         (u128::from(source_range.len()) * u128::from(MIN_PAYLOAD_COMPACTION_SAVINGS_PERCENT)).div_ceil(100);
@@ -66,7 +66,7 @@ pub(super) fn plan_range_trim(
 
     Some(RangeTrimPlan {
         source_range,
-        retained_ranges: grouped,
+        retained_ranges: merged_ranges,
         retained_bytes,
     })
 }

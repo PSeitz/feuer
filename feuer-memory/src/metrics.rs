@@ -52,15 +52,15 @@ impl MemoryMetrics {
             "Downloaded range entries retained in Feuer's memory tier".into(),
             &[],
         );
-        let operation = |label: &'static str| operations.counter(&[label.into()]);
+        let operation_counter = |label: &'static str| operations.counter(&[label.into()]);
 
         Arc::new(Self {
-            insert: operation("insert"),
-            replace: operation("replace"),
-            redundant: operation("redundant"),
-            remove: operation("remove"),
+            insert: operation_counter("insert"),
+            replace: operation_counter("replace"),
+            redundant: operation_counter("redundant"),
+            remove: operation_counter("remove"),
             eviction_triggering_insertions: eviction_triggering_insertions.counter(&[]),
-            trim: operation("compact"),
+            trim: operation_counter("compact"),
             trimmed_payload_bytes: trimmed_payload_bytes.counter(&[]),
             payload_bytes: payload_bytes.gauge(&[]),
             entries: entries.gauge(&[]),
@@ -88,14 +88,14 @@ impl MemoryMetrics {
         self.trimmed_payload_bytes.increase(reclaimed_bytes);
     }
 
-    pub(crate) fn increase_usage(&self, bytes: u64, entries: u64) {
-        self.payload_bytes.increase(bytes);
-        self.entries.increase(entries);
+    pub(crate) fn increase_usage(&self, payload_bytes: u64, entry_count: u64) {
+        self.payload_bytes.increase(payload_bytes);
+        self.entries.increase(entry_count);
     }
 
-    pub(crate) fn decrease_usage(&self, bytes: u64, entries: u64) {
-        self.payload_bytes.decrease(bytes);
-        self.entries.decrease(entries);
+    pub(crate) fn decrease_usage(&self, payload_bytes: u64, entry_count: u64) {
+        self.payload_bytes.decrease(payload_bytes);
+        self.entries.decrease(entry_count);
     }
 
     pub(crate) fn noop() -> Arc<Self> {

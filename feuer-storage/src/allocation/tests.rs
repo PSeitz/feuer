@@ -12,10 +12,10 @@ fn capacity_metrics_follow_whole_chunk_ownership_and_allocator_drop() {
     assert_eq!(chunks("free"), 3.0);
     let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
     assert_eq!(chunks("allocated"), 1.0);
-    let reader = chunk.read_guard();
+    let read_guard = chunk.read_guard();
     drop(chunk);
     assert_eq!(chunks("free"), 2.0);
-    drop(reader);
+    drop(read_guard);
     assert_eq!(chunks("free"), 3.0);
     assert_eq!(chunks("allocated"), 0.0);
     let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
@@ -103,13 +103,13 @@ fn entry_regions_and_readers_prevent_whole_chunk_reuse() {
     let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
     let first = chunk.slice(1..2);
     let second = chunk.slice(2..4);
-    let reader = first.read_guard();
+    let read_guard = first.read_guard();
     drop((chunk, first));
     assert!(allocator.reserve_chunks(1).is_none());
     drop(second);
     assert!(allocator.reserve_chunks(1).is_none());
-    assert_eq!(reader.range(), 1..2);
-    drop(reader);
+    assert_eq!(read_guard.range(), 1..2);
+    drop(read_guard);
     assert_all_chunks_free(&allocator, CHUNK_BYTES);
 }
 
@@ -117,15 +117,15 @@ fn entry_regions_and_readers_prevent_whole_chunk_reuse() {
 fn reuse_waits_for_all_concurrent_readers() {
     let allocator = DiskChunkAllocator::new(CHUNK_BYTES).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
-    let final_reader = chunk.read_guard();
+    let final_read_guard = chunk.read_guard();
     let barrier = Arc::new(Barrier::new(9));
     std::thread::scope(|scope| {
         for _ in 0..8 {
-            let reader = chunk.read_guard();
+            let read_guard = chunk.read_guard();
             let barrier = barrier.clone();
             scope.spawn(move || {
                 barrier.wait();
-                assert_eq!(reader.range(), 0..CHUNK_BYTES);
+                assert_eq!(read_guard.range(), 0..CHUNK_BYTES);
             });
         }
         drop(chunk);
@@ -133,7 +133,7 @@ fn reuse_waits_for_all_concurrent_readers() {
         barrier.wait();
     });
     assert!(allocator.reserve_chunks(1).is_none());
-    drop(final_reader);
+    drop(final_read_guard);
     assert_all_chunks_free(&allocator, CHUNK_BYTES);
 }
 
@@ -180,18 +180,18 @@ fn randomized_reuse_matches_whole_chunk_ownership() {
         if !entries.is_empty() && random.is_multiple_of(3) {
             let regions = entries.swap_remove(random as usize % entries.len());
             for region in &regions {
-                let chunk = (region.range().start / CHUNK_BYTES) as usize;
-                assert!(occupied[chunk]);
-                occupied[chunk] = false;
+                let chunk_index = (region.range().start / CHUNK_BYTES) as usize;
+                assert!(occupied[chunk_index]);
+                occupied[chunk_index] = false;
             }
         } else {
             let count = random % 5 + 1;
             match allocator.reserve_chunks(count) {
                 Some(regions) => {
                     for region in &regions {
-                        let chunk = (region.range().start / CHUNK_BYTES) as usize;
-                        assert!(!occupied[chunk]);
-                        occupied[chunk] = true;
+                        let chunk_index = (region.range().start / CHUNK_BYTES) as usize;
+                        assert!(!occupied[chunk_index]);
+                        occupied[chunk_index] = true;
                     }
                     entries.push(regions);
                 }
@@ -217,9 +217,9 @@ fn concurrent_reservation_and_release_restores_all_free_chunks() {
             scope.spawn(move || {
                 for _ in 0..1000 {
                     let regions = allocator.reserve_chunks(2).unwrap();
-                    let readers: Vec<_> = regions.iter().map(DiskRegion::read_guard).collect();
+                    let read_guards: Vec<_> = regions.iter().map(DiskRegion::read_guard).collect();
                     drop(regions);
-                    drop(readers);
+                    drop(read_guards);
                 }
             });
         }

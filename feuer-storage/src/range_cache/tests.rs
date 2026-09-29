@@ -17,7 +17,7 @@ fn download(start: u64, length: usize) -> Download {
         start,
         Bytes::from(
             (start..start + length as u64)
-                .map(|i| (i % 251) as u8)
+                .map(|object_offset| (object_offset % 251) as u8)
                 .collect::<Vec<_>>(),
         ),
     )
@@ -339,17 +339,17 @@ async fn eviction_budgets_and_active_reservations_bound_reclamation() {
         .await
         .unwrap();
     let shard = &cache.disk.shards[0];
-    let mut candidates = 0;
-    let mut regions = MAX_EVICTION_REGIONS;
-    assert!(!shard.evict_candidate(&mut candidates, &mut regions));
-    candidates = 1;
-    regions = 1;
-    assert!(shard.evict_candidate(&mut candidates, &mut regions));
-    assert_eq!(candidates, 0);
+    let mut attempts_left = 0;
+    let mut regions_left = MAX_EVICTION_REGIONS;
+    assert!(!shard.evict_candidate(&mut attempts_left, &mut regions_left));
+    attempts_left = 1;
+    regions_left = 1;
+    assert!(shard.evict_candidate(&mut attempts_left, &mut regions_left));
+    assert_eq!(attempts_left, 0);
     assert!(cache.get(&key, range(0, 1)).await.is_some());
-    candidates = 1;
-    regions = MAX_EVICTION_REGIONS;
-    assert!(shard.evict_candidate(&mut candidates, &mut regions));
+    attempts_left = 1;
+    regions_left = MAX_EVICTION_REGIONS;
+    assert!(shard.evict_candidate(&mut attempts_left, &mut regions_left));
     let active = shard.allocator.reserve_chunks(2).unwrap();
     assert!(!cache.insert("blocked".to_owned(), download(0, 1)).await.unwrap());
     drop(active);
@@ -381,9 +381,9 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
         .await
         .unwrap();
     let shard = &cache.disk.shards[0];
-    let mut attempts = 1;
-    let mut regions = MAX_EVICTION_REGIONS;
-    assert!(shard.evict_candidate(&mut attempts, &mut regions));
+    let mut attempts_left = 1;
+    let mut regions_left = MAX_EVICTION_REGIONS;
+    assert!(shard.evict_candidate(&mut attempts_left, &mut regions_left));
     assert!(cache.get(&cold, range(0, 1)).await.is_none());
     assert!(cache.get(&hot, range(0, 1)).await.is_some());
     assert_eq!(shard.allocator.available_bytes(), 0); // Hot neighbor still owns the chunk.
@@ -613,7 +613,7 @@ async fn a_written_chunk_is_immutable_until_all_entries_and_readers_release_it()
         2
     );
     let original = cache.disk.file.read_at(0, CHUNK_BYTES as usize).await.unwrap();
-    let reader = {
+    let read_guard = {
         let mut index = cache.disk.shards[0].entry_index.lock().unwrap();
         let entry = index.remove(&first, 3).unwrap();
         entry.payload_regions[0].read_guard()
@@ -627,7 +627,7 @@ async fn a_written_chunk_is_immutable_until_all_entries_and_readers_release_it()
     // Pressure removed the neighbor from lookup, but the reader still prevents reuse.
     assert!(cache.get(&neighbor, range(7, 4104)).await.is_none());
     assert!(!cache.insert(first.clone(), download(100, 1024)).await.unwrap());
-    drop(reader);
+    drop(read_guard);
     assert!(cache.insert(first.clone(), download(100, 1024)).await.unwrap());
     assert_eq!(
         cache.get(&first, range(100, 1124)).await.unwrap(),
@@ -729,9 +729,9 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
     )
     .unwrap();
     assert_eq!(next_entry_metadata_page_address, 0);
-    let slot = ((entry_metadata_start_address - chunk_address) / METADATA_PAGE_BYTES as u64) as usize;
+    let bit_index = ((entry_metadata_start_address - chunk_address) / METADATA_PAGE_BYTES as u64) as usize;
     assert_eq!(blake3::hash(&entry_metadata_starts[..32]).as_bytes(), &bitmap_checksum);
-    assert_ne!(entry_metadata_starts[slot / 8] & (1 << (slot % 8)), 0);
+    assert_ne!(entry_metadata_starts[bit_index / 8] & (1 << (bit_index % 8)), 0);
     assert_eq!(entry_metadata_starts[0] & 1, 0);
     let head = cache
         .disk
@@ -862,13 +862,13 @@ async fn entry_metadata_space_is_charged_and_failed_reservations_roll_back() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn racing_equal_and_containing_writes_revalidate_publication() {
     let (_directory, cache) = open_test_cache(16 * CHUNK_BYTES).await;
-    let start = Arc::new(tokio::sync::Barrier::new(16));
+    let start_barrier = Arc::new(tokio::sync::Barrier::new(16));
     let mut tasks = Vec::new();
     for _ in 0..16 {
         let cache = cache.clone();
-        let start = start.clone();
+        let start_barrier = start_barrier.clone();
         tasks.push(tokio::spawn(async move {
-            start.wait().await;
+            start_barrier.wait().await;
             cache.insert("object".to_owned(), download(7, 100)).await.unwrap()
         }));
     }

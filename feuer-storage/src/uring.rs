@@ -83,24 +83,24 @@ impl IoAdmissionBudgets {
         Self {
             request_slots: Arc::new(Semaphore::new(max_in_flight)),
             buffer_memory: Arc::new(Semaphore::new(MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES)),
-            idle_buffers: std::array::from_fn(|index| {
+            idle_buffers: std::array::from_fn(|pool_index| {
                 Arc::new(Mutex::new(IdleIoBuffers::new(
-                    IDLE_IO_BUFFER_CAPACITIES[index],
-                    metrics.buffer_pools(operation)[index].clone(),
+                    IDLE_IO_BUFFER_CAPACITIES[pool_index],
+                    metrics.buffer_pools(operation)[pool_index].clone(),
                 )))
             }),
         }
     }
 
     fn buffer_pool(&self, length: usize) -> &Arc<Mutex<IdleIoBuffers>> {
-        let index = if length <= MAX_IO_CHUNK_BYTES {
+        let pool_index = if length <= MAX_IO_CHUNK_BYTES {
             0
         } else if length < 10 * 1024 * 1024 {
             1
         } else {
             2
         };
-        &self.idle_buffers[index]
+        &self.idle_buffers[pool_index]
     }
 }
 
@@ -232,8 +232,8 @@ impl IoQueueHandle {
         destination: Range<usize>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
     ) -> io::Result<IoBuffers> {
-        let (reply, receive) = oneshot::channel();
-        let request = IoRequest::new(offset, buffers, destination, reply, permits);
+        let (result_sender, result_receiver) = oneshot::channel();
+        let request = IoRequest::new(offset, buffers, destination, result_sender, permits);
         // All queued + active requests hold a permit, so this cannot wait for space.
         self.sender
             .as_ref()
@@ -241,7 +241,7 @@ impl IoQueueHandle {
             .try_send(request)
             .map_err(|_| queue_stopped_error())?;
         wake_queue(&self.wake_fd);
-        receive.await.map_err(|_| queue_stopped_error())?
+        result_receiver.await.map_err(|_| queue_stopped_error())?
     }
 }
 
@@ -304,7 +304,7 @@ impl AlignedIoBuffer {
         read_guards: Vec<DiskRegionReadGuard>,
         idle_buffers: &Arc<Mutex<IdleIoBuffers>>,
     ) -> io::Result<Self> {
-        let reused = {
+        let reused_buffer = {
             let mut idle = idle_buffers.lock().unwrap();
             let buffer = idle.by_length.get_mut(&length).and_then(Vec::pop);
             if buffer.is_some() {
@@ -317,7 +317,7 @@ impl AlignedIoBuffer {
             buffer
         };
         // Reused memory is initialized but not zeroed; reads overwrite it before exposure.
-        let mut buffer = match reused {
+        let mut buffer = match reused_buffer {
             Some(buffer) => buffer,
             None => Self::allocate_zeroed(length)?,
         };
@@ -451,18 +451,18 @@ impl IoBuffers {
             }
             Self::Write { bytes, vectors, .. } => {
                 vectors.clear();
-                let mut skip = range.start;
+                let mut bytes_to_skip = range.start;
                 for bytes in bytes {
-                    if skip >= bytes.len() {
-                        skip -= bytes.len();
+                    if bytes_to_skip >= bytes.len() {
+                        bytes_to_skip -= bytes.len();
                         continue;
                     }
-                    let remaining = &bytes[skip..];
+                    let remaining_bytes = &bytes[bytes_to_skip..];
                     vectors.push(libc::iovec {
-                        iov_base: remaining.as_ptr().cast_mut().cast(),
-                        iov_len: remaining.len(),
+                        iov_base: remaining_bytes.as_ptr().cast_mut().cast(),
+                        iov_len: remaining_bytes.len(),
                     });
-                    skip = 0;
+                    bytes_to_skip = 0;
                 }
                 // Each slice covers at least 4 KiB: at most 256 descriptors per
                 // 1-MiB request, below Linux's IOV_MAX. The request owns them all.
@@ -550,11 +550,11 @@ impl IoRequest {
         if result < 0 {
             return Err(io::Error::from_raw_os_error(-result));
         }
-        let count = result as usize;
-        if count == 0 || count > self.destination.len() - self.completed_bytes {
+        let completion_bytes = result as usize;
+        if completion_bytes == 0 || completion_bytes > self.destination.len() - self.completed_bytes {
             return Err(self.incomplete_io_error());
         }
-        self.completed_bytes += count;
+        self.completed_bytes += completion_bytes;
         if self.completed_bytes != self.destination.len() {
             // An unaligned remainder cannot be resubmitted with O_DIRECT.
             if !self.completed_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
@@ -628,8 +628,8 @@ impl IoQueue {
                 }
             }
             self.queue_pending_requests();
-            let active = self.active.iter().any(Option::is_some);
-            if disconnected && !active && self.pending.is_empty() {
+            let has_active_requests = self.active.iter().any(Option::is_some);
+            if disconnected && !has_active_requests && self.pending.is_empty() {
                 return Ok(());
             }
             // submit() never waits for a completion. poll watches BOTH completions and
@@ -714,9 +714,9 @@ impl IoQueue {
             return Err(queue_stopped_error());
         }
         if fds[1].revents & libc::POLLIN != 0 {
-            let mut value = 0u64;
-            // SAFETY: value is writable for the required eight bytes; eventfd is nonblocking.
-            unsafe { libc::read(self.wake_fd.as_raw_fd(), (&mut value as *mut u64).cast(), 8) };
+            let mut wake_count = 0u64;
+            // SAFETY: wake_count is writable for the required eight bytes; eventfd is nonblocking.
+            unsafe { libc::read(self.wake_fd.as_raw_fd(), (&mut wake_count as *mut u64).cast(), 8) };
         }
         Ok(())
     }
@@ -746,10 +746,10 @@ impl Drop for IoQueue {
 
 /// Wakes the queue thread through its eventfd after enqueueing work or disconnecting the sender.
 fn wake_queue(wake_fd: &OwnedFd) {
-    let value = 1u64;
+    let wake_count = 1u64;
     loop {
-        // SAFETY: value is readable for eight bytes and wake is an owned eventfd.
-        let result = unsafe { libc::write(wake_fd.as_raw_fd(), (&value as *const u64).cast(), 8) };
+        // SAFETY: wake_count is readable for eight bytes and wake_fd is an owned eventfd.
+        let result = unsafe { libc::write(wake_fd.as_raw_fd(), (&wake_count as *const u64).cast(), 8) };
         if result >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
             // EAGAIN means a notification is already pending (eventfd counter full).
             return;

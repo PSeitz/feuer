@@ -67,16 +67,16 @@ impl DiskPopulationQueue {
     }
 
     #[cfg(test)]
-    fn channel(entries: usize) -> (Self, mpsc::Receiver<PendingDiskWrite>) {
+    fn channel(entry_capacity: usize) -> (Self, mpsc::Receiver<PendingDiskWrite>) {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
-        Self::channel_with_metrics(entries, PopulationQueueMetrics::new(&registry))
+        Self::channel_with_metrics(entry_capacity, PopulationQueueMetrics::new(&registry))
     }
 
     fn channel_with_metrics(
-        entries: usize,
+        entry_capacity: usize,
         metrics: Arc<PopulationQueueMetrics>,
     ) -> (Self, mpsc::Receiver<PendingDiskWrite>) {
-        let (sender, receiver) = mpsc::channel(entries);
+        let (sender, receiver) = mpsc::channel(entry_capacity);
         (Self { sender, metrics }, receiver)
     }
 
@@ -130,13 +130,13 @@ impl DiskPopulationQueue {
         memory: Arc<MemoryCache>,
         disk: DiskRangeCache,
     ) {
-        while let Some(first) = receiver.recv().await {
-            let mut pending = vec![first];
-            while pending.len() < MAX_BATCH_ENTRIES {
-                let Ok(next) = receiver.try_recv() else { break };
-                pending.push(next);
+        while let Some(first_write) = receiver.recv().await {
+            let mut pending_writes = vec![first_write];
+            while pending_writes.len() < MAX_BATCH_ENTRIES {
+                let Ok(next_write) = receiver.try_recv() else { break };
+                pending_writes.push(next_write);
             }
-            let downloads = pending
+            let downloads = pending_writes
                 .into_iter()
                 .filter_map(|PendingDiskWrite { download, mut source }| {
                     source.record_dequeue();

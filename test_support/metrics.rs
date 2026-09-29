@@ -7,25 +7,25 @@ pub fn registry() -> (prometheus::Registry, BoxedRegistry) {
 }
 
 /// Returns counter/gauge values or a histogram's sample count. Missing series fail the test.
-pub fn value(registry: &prometheus::Registry, name: &str, labels: &[(&str, &str)]) -> f64 {
+pub fn value(registry: &prometheus::Registry, metric_name: &str, labels: &[(&str, &str)]) -> f64 {
     let family = registry
         .gather()
         .into_iter()
-        .find(|family| family.name() == name)
-        .unwrap_or_else(|| panic!("missing metric {name}"));
+        .find(|family| family.name() == metric_name)
+        .unwrap_or_else(|| panic!("missing metric {metric_name}"));
     let metric = family
         .get_metric()
         .iter()
         .find(|metric| {
             metric.get_label().len() == labels.len()
-                && labels.iter().all(|(name, value)| {
+                && labels.iter().all(|(label_name, label_value)| {
                     metric
                         .get_label()
                         .iter()
-                        .any(|label| label.name() == *name && label.value() == *value)
+                        .any(|label| label.name() == *label_name && label.value() == *label_value)
                 })
         })
-        .unwrap_or_else(|| panic!("missing labels {labels:?} for {name}"));
+        .unwrap_or_else(|| panic!("missing labels {labels:?} for {metric_name}"));
     match family.get_field_type() {
         prometheus::proto::MetricType::COUNTER => metric.get_counter().get_value(),
         prometheus::proto::MetricType::GAUGE => metric.get_gauge().get_value(),
