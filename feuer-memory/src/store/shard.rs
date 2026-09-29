@@ -442,7 +442,7 @@ impl MemoryCacheShard {
             (entry, object_is_empty)
         };
 
-        self.unregister_candidate(entry.candidate_slot, entry.id);
+        self.remove_eviction_candidate(entry.candidate_slot, entry.id);
         if object_is_empty && !preserve_access_history {
             self.ranges.remove(object_key);
         }
@@ -451,7 +451,7 @@ impl MemoryCacheShard {
         Some(removed_payload_bytes)
     }
 
-    fn unregister_candidate(&mut self, slot: usize, expected_id: u64) {
+    fn remove_eviction_candidate(&mut self, slot: usize, expected_id: u64) {
         let moved_candidate = self.candidates.remove(slot, expected_id);
         let Some(moved_candidate) = moved_candidate else {
             return;
