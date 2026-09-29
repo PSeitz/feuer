@@ -222,7 +222,7 @@ impl RangeAccessHistory {
         let accesses = &mut self.access_counts[index].1;
         accesses.count = accesses.decayed_count(access_clock) + 1.0;
         accesses.observed_at_access = access_clock;
-        self.expire(access_clock);
+        self.remove_expired_events(access_clock);
         if self.events.len() == *MAX_ACCESS_EVENTS_PER_KEY {
             self.events.pop_front();
         }
@@ -236,7 +236,7 @@ impl RangeAccessHistory {
     pub fn active_ranges(&self, access_clock: u64) -> impl Iterator<Item = ByteRange> + '_ {
         self.events
             .iter()
-            .filter(move |event| is_active(**event, access_clock))
+            .filter(move |event| is_within_range_trim_age_limit(**event, access_clock))
             .map(|event| event.range)
     }
 
@@ -263,11 +263,12 @@ impl RangeAccessHistory {
         self.generation
     }
 
-    fn expire(&mut self, access_clock: u64) {
+    /// Removes expired trimming events without discarding the decayed access counts.
+    fn remove_expired_events(&mut self, access_clock: u64) {
         while self
             .events
             .front()
-            .is_some_and(|event| !is_active(*event, access_clock))
+            .is_some_and(|event| !is_within_range_trim_age_limit(*event, access_clock))
         {
             self.events.pop_front();
         }
@@ -284,7 +285,9 @@ impl RangeAccessHistory {
     }
 }
 
-fn is_active(event: RangeAccess, access_clock: u64) -> bool {
+/// Checks whether the access is within the configured range-trimming age limit,
+/// measured in successful accesses to the same shard rather than elapsed time.
+fn is_within_range_trim_age_limit(event: RangeAccess, access_clock: u64) -> bool {
     access_clock.saturating_sub(event.observed_at_access) <= *MAX_ACCESS_AGE_ACCESSES
 }
 

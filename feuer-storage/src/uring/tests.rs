@@ -14,7 +14,7 @@ fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) 
         .try_acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
         .unwrap();
     let buffers = if operation == IoOperation::Write {
-        let mut buffer = AlignedIoBuffer::allocate(length).unwrap();
+        let mut buffer = AlignedIoBuffer::allocate_zeroed(length).unwrap();
         buffer.as_mut_slice().fill(0x99);
         IoBuffers::Write {
             bytes: vec![buffer.into_bytes()],
@@ -50,7 +50,7 @@ fn queue() -> IoQueue {
     assert!(fd >= 0);
     // SAFETY: fd was just created and has no other owner.
     let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
-    let (_, receiver) = mpsc::sync_channel(MAX_IN_FLIGHT_READS); // disconnected: run() will drain and exit
+    let (_, receiver) = mpsc::sync_channel(MAX_IN_FLIGHT_READS); // disconnected: processing requests will drain and exit
     IoQueue {
         admission: Arc::new(IoAdmissionBudgets::new(
             MAX_IN_FLIGHT_READS,
@@ -374,7 +374,7 @@ fn full_ring_does_not_block_the_other_direction() {
             full_queue.pending.push_back(request);
             full_replies.push(reply);
         }
-        full_queue.schedule();
+        full_queue.queue_pending_requests();
         full_queue.ring.submit().unwrap();
         assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
         assert_eq!(full_queue.admission.request_slots.available_permits(), 0);
@@ -391,17 +391,17 @@ fn full_ring_does_not_block_the_other_direction() {
             other_queue.pending.push_back(request);
             other_replies.push(reply);
         }
-        other_queue.schedule();
+        other_queue.queue_pending_requests();
         assert_eq!(other_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
         assert_eq!(other_queue.ring.submission().len(), MAX_IN_FLIGHT_READS);
         assert!(other_queue.pending.is_empty());
         // Complete an entire ring without processing any completions on the full queue.
-        other_queue.run().unwrap();
+        other_queue.process_requests_until_disconnected().unwrap();
         for mut reply in other_replies {
             reply.try_recv().unwrap().unwrap();
         }
         assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
-        full_queue.run().unwrap();
+        full_queue.process_requests_until_disconnected().unwrap();
         for mut reply in full_replies {
             reply.try_recv().unwrap().unwrap();
         }
@@ -503,11 +503,11 @@ fn canceled_submitted_write_retains_resources() {
         *region = allocator.reserve_chunks(1).unwrap().pop();
     }
     queue.pending.push_back(write);
-    queue.schedule();
+    queue.queue_pending_requests();
     // The write has reached the kernel, but its completion is not yet processed.
     queue.ring.submit_and_wait(1).unwrap();
     drop(reply);
-    queue.schedule();
+    queue.queue_pending_requests();
     assert!(allocator.reserve_chunks(1).is_none());
     assert!(queue.active[0].is_some());
     assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS - 1);
@@ -515,7 +515,7 @@ fn canceled_submitted_write_retains_resources() {
         queue.admission.buffer_memory.available_permits(),
         MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES - 1
     );
-    queue.run().unwrap();
+    queue.process_requests_until_disconnected().unwrap();
     assert!(queue.active.iter().all(Option::is_none));
     assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
     assert_eq!(
@@ -531,7 +531,7 @@ fn canceled_submitted_write_retains_resources() {
     read_queue.directory_lock = queue.directory_lock.clone();
     let (read, mut reply) = request(&read_queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
     read_queue.pending.push_back(read);
-    read_queue.run().unwrap();
+    read_queue.process_requests_until_disconnected().unwrap();
     assert_eq!(
         reply.try_recv().unwrap().unwrap().into_read().as_ref(),
         &[0x99; DIRECT_IO_ALIGNMENT_BYTES]
@@ -544,7 +544,7 @@ fn discarded_queued_requests_never_reach_the_ring() {
     let (request, reply) = request(&queue, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
     queue.pending.push_back(request);
     drop(reply);
-    queue.schedule();
+    queue.queue_pending_requests();
     assert!(queue.pending.is_empty());
     assert!(queue.active.iter().all(Option::is_none));
     assert!(queue.ring.submission().is_empty());
@@ -560,8 +560,8 @@ fn finished_read_transfers_buffer_ownership() {
     };
     buffer.as_mut_slice().fill(0x99);
     let ptr = buffer.ptr.as_ptr().cast_const();
-    assert!(!read.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
-    read.finish(Ok(()));
+    assert!(!read.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+    read.send_result(Ok(()));
 
     let bytes = reply.try_recv().unwrap().unwrap().into_read().into_bytes();
     assert_eq!(bytes.as_ptr(), ptr);
@@ -626,10 +626,10 @@ fn canceled_read_retains_destination_and_disk_guard_until_completion() {
     read.destination = DIRECT_IO_ALIGNMENT_BYTES..2 * DIRECT_IO_ALIGNMENT_BYTES;
     drop(region);
     queue.pending.push_back(read);
-    queue.schedule();
+    queue.queue_pending_requests();
     queue.ring.submit_and_wait(1).unwrap();
     drop(reply);
-    queue.schedule();
+    queue.queue_pending_requests();
     assert_eq!(allocator.available_bytes(), 0);
     assert!(queue.active[0].is_some());
     assert!(
@@ -641,7 +641,7 @@ fn canceled_read_retains_destination_and_disk_guard_until_completion() {
             .by_length
             .contains_key(&(2 * DIRECT_IO_ALIGNMENT_BYTES))
     );
-    queue.run().unwrap();
+    queue.process_requests_until_disconnected().unwrap();
     assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
     assert_eq!(
         queue
@@ -669,7 +669,7 @@ fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
         dirty.as_mut_slice().fill(0xff);
         drop(dirty);
         let parts = [(0, source.slice(1..length + 1)), (page, source.slice(..page + 17))];
-        let mut buffers = IoBuffers::write(4 * page, &parts, None).unwrap();
+        let mut buffers = IoBuffers::from_write_parts(4 * page, &parts, None).unwrap();
         assert_eq!(pool.lock().unwrap().bytes, 2 * page);
         buffers.submission_entry(types::Fd(-1), page as u64, page..4 * page);
         let IoBuffers::Write { bytes, vectors, .. } = buffers else {
@@ -694,24 +694,30 @@ fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
 fn completion_state_handles_short_io_and_errors() {
     let queue = queue();
     let (mut read, _reply) = request(&queue, IoOperation::Read, 0, 2 * DIRECT_IO_ALIGNMENT_BYTES);
-    assert!(read.complete(-libc::EINTR).unwrap());
+    assert!(read.apply_completion_result(-libc::EINTR).unwrap());
     assert_eq!(read.completed_bytes, 0);
-    assert!(read.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
-    assert!(!read.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+    assert!(read.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+    assert!(!read.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
 
     let (mut read, _reply) = request(&queue, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
-    assert_eq!(read.complete(17).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
-    let (mut write, _reply) = request(&queue, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
-    assert_eq!(write.complete(0).unwrap_err().kind(), io::ErrorKind::WriteZero);
     assert_eq!(
-        write.complete(-libc::ENOSPC).unwrap_err().raw_os_error(),
+        read.apply_completion_result(17).unwrap_err().kind(),
+        io::ErrorKind::UnexpectedEof
+    );
+    let (mut write, _reply) = request(&queue, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    assert_eq!(
+        write.apply_completion_result(0).unwrap_err().kind(),
+        io::ErrorKind::WriteZero
+    );
+    assert_eq!(
+        write.apply_completion_result(-libc::ENOSPC).unwrap_err().raw_os_error(),
         Some(libc::ENOSPC)
     );
 
     let (mut write, _reply) = request(&queue, IoOperation::Write, 0, 2 * DIRECT_IO_ALIGNMENT_BYTES);
-    assert!(write.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+    assert!(write.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
     assert_eq!(write.completed_bytes, DIRECT_IO_ALIGNMENT_BYTES);
-    assert!(!write.complete(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+    assert!(!write.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
 }
 
 #[test]

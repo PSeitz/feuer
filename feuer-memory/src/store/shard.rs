@@ -55,7 +55,8 @@ struct ObjectCachedRanges {
 }
 
 impl ObjectCachedRanges {
-    fn covering(&self, range: ByteRange) -> Option<&CachedRange> {
+    /// Finds the cached range covering the entire requested range.
+    fn covering_range(&self, range: ByteRange) -> Option<&CachedRange> {
         let (_, entry) = self.by_start.range(..=range.start()).next_back()?;
         entry.range.contains(range).then_some(entry)
     }
@@ -76,7 +77,8 @@ impl ObjectCachedRanges {
         Some(projected)
     }
 
-    fn superseded_by(&self, range: ByteRange) -> SupersededRanges {
+    /// Collects cached ranges contained by the incoming range and their payload bytes.
+    fn ranges_contained_by(&self, range: ByteRange) -> SupersededRanges {
         let mut superseded = SupersededRanges::default();
         for (_, entry) in self.by_start.range(range.start()..range.end()) {
             if range.contains(entry.range) {
@@ -162,8 +164,8 @@ pub(super) struct RangeTrimSource {
 }
 
 impl RangeTrimSource {
-    /// Copies retained payload while no shard metadata lock is held.
-    pub(super) fn copy_payload(self) -> RangeTrimReplacement {
+    /// Copies the retained payloads into separate allocations while no shard metadata lock is held.
+    pub(super) fn copy_retained_payloads(self) -> RangeTrimReplacement {
         let retained_payloads = self
             .plan
             .retained_ranges()
@@ -260,8 +262,12 @@ impl MemoryCacheShard {
         }
     }
 
-    /// Advances one bounded admission action while holding the shard lock.
-    pub(super) fn advance_admission(
+    /// Tries to admit the download or reclaim space by evicting one range or preparing a trim.
+    /// Cached ranges fully contained in the incoming download will be replaced on insertion.
+    /// Their bytes are already subtracted when checking capacity, so eviction sampling skips them.
+    /// If a sample has no eligible victim, the caller releases the lock before trying the next sample
+    /// to bound sampling work per lock hold.
+    pub(super) fn try_admit_or_reclaim(
         &mut self,
         object_key: &ObjectKey,
         range: ByteRange,
@@ -270,14 +276,14 @@ impl MemoryCacheShard {
         allow_range_trim: bool,
     ) -> AdmissionProgress {
         let superseded = match self.ranges.get(object_key) {
-            Some(entries) if entries.covering(range).is_some() => {
+            Some(entries) if entries.covering_range(range).is_some() => {
                 self.metrics.record_redundant();
                 if let Some(requested_range) = requested_range {
                     self.record_successful_access(object_key, requested_range);
                 }
                 return AdmissionProgress::Complete(None);
             }
-            Some(entries) => entries.superseded_by(range),
+            Some(entries) => entries.ranges_contained_by(range),
             None => SupersededRanges::default(),
         };
         let added_bytes = bytes.len() as u64;
@@ -285,9 +291,9 @@ impl MemoryCacheShard {
         let max_existing_bytes = self.capacity.saturating_sub(added_bytes);
 
         if used_bytes_without_superseded <= max_existing_bytes {
-            let removal = self.remove_superseded(object_key, &superseded.ranges);
+            let removal = self.remove_superseded_ranges(object_key, &superseded.ranges);
             debug_assert_eq!(removal.payload_bytes, superseded.payload_bytes);
-            let id = self.insert_admission(object_key.clone(), range, bytes.clone());
+            let id = self.insert_downloaded_range(object_key.clone(), range, bytes.clone());
 
             if removal.entry_count != 0 {
                 self.metrics.decrease_usage(removal.payload_bytes, removal.entry_count);
@@ -301,10 +307,11 @@ impl MemoryCacheShard {
         }
 
         let Some(candidate) = self.select_reclaim_candidate(object_key, range) else {
-            // The sample can contain only superseded entries. Retry after releasing the shard lock.
+            // The sample cursor advanced, but no eligible victim was found.
+            // Return to the caller so it can release the lock before sampling again.
             return AdmissionProgress::Retry;
         };
-        if allow_range_trim && let Some(source) = self.range_trim_source(&candidate) {
+        if allow_range_trim && let Some(source) = self.prepare_range_trim(&candidate) {
             return AdmissionProgress::Trim(source);
         }
 
@@ -320,7 +327,8 @@ impl MemoryCacheShard {
         AdmissionProgress::Evicted
     }
 
-    fn insert_admission(&mut self, object_key: ObjectKey, range: ByteRange, bytes: Bytes) -> u64 {
+    /// Inserts a downloaded range into the index and candidate ring, charging its payload bytes.
+    fn insert_downloaded_range(&mut self, object_key: ObjectKey, range: ByteRange, bytes: Bytes) -> u64 {
         self.used_bytes += bytes.len() as u64;
         let id = self.allocate_entry_id();
         let candidate_slot = self.candidates.register(CachedRangeIdentity {
@@ -357,7 +365,8 @@ impl MemoryCacheShard {
             .is_some_and(|entry| entry.id == id && entry.range == range)
     }
 
-    fn insert_trimmed(&mut self, object_key: &ObjectKey, range: ByteRange, bytes: Bytes) {
+    /// Inserts a trimmed range into the index and candidate ring; the caller accounts for its bytes.
+    fn insert_trimmed_range(&mut self, object_key: &ObjectKey, range: ByteRange, bytes: Bytes) {
         let id = self.allocate_entry_id();
         let candidate_slot = self.candidates.register(CachedRangeIdentity {
             object_key: object_key.clone(),
@@ -388,7 +397,8 @@ impl MemoryCacheShard {
         self.next_entry_id
     }
 
-    fn remove_superseded(&mut self, object_key: &ObjectKey, ranges: &[ByteRange]) -> RemovedCacheUsage {
+    /// Removes superseded ranges while preserving their object's access history for the replacement.
+    fn remove_superseded_ranges(&mut self, object_key: &ObjectKey, ranges: &[ByteRange]) -> RemovedCacheUsage {
         let mut removal = RemovedCacheUsage::default();
         for &range in ranges {
             let bytes = self
@@ -502,8 +512,8 @@ impl MemoryCacheShard {
         })
     }
 
-    /// Plans range trimming only for the selected candidate, after its grace expires.
-    fn range_trim_source(&self, candidate: &ReclaimCandidate) -> Option<RangeTrimSource> {
+    /// Prepares a range trim by retaining its source bytes, plan, and identity after the grace period.
+    fn prepare_range_trim(&self, candidate: &ReclaimCandidate) -> Option<RangeTrimSource> {
         let entries = self
             .ranges
             .get(&candidate.object_key)
@@ -565,7 +575,7 @@ impl MemoryCacheShard {
             if self
                 .ranges
                 .get(&replacement.object_key)
-                .and_then(|entries| entries.covering(retained_range))
+                .and_then(|entries| entries.covering_range(retained_range))
                 .is_some()
             {
                 continue;
@@ -573,7 +583,7 @@ impl MemoryCacheShard {
             retained_bytes += bytes.len() as u64;
             retained_entries += 1;
             self.used_bytes += bytes.len() as u64;
-            self.insert_trimmed(&replacement.object_key, retained_range, bytes);
+            self.insert_trimmed_range(&replacement.object_key, retained_range, bytes);
         }
 
         let reclaimed = removed_bytes - retained_bytes;

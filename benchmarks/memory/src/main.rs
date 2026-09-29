@@ -112,7 +112,8 @@ struct TraceRequest {
 }
 
 impl TraceRequest {
-    fn validate(&self, index: usize) -> Result<(), String> {
+    /// Checks that the requested range stays within the object's byte bounds.
+    fn check_requested_range_bounds(&self, index: usize) -> Result<(), String> {
         if self.requested_range.end() > self.object_size {
             return Err(format!(
                 "operation {index} requests {}..{} beyond object size {}",
@@ -148,8 +149,9 @@ struct ReplayWorkload {
 trait ReplayCache {
     fn name(&self) -> &'static str;
 
-    /// Looks up a request using the range this downloader would fetch on a miss.
-    fn get(&mut self, request: &TraceRequest, downloaded_range: ByteRange) -> bool;
+    /// Looks up a request and reports a hit, without returning the cached payload.
+    /// Uses the range this downloader would fetch on a miss.
+    fn lookup_hit(&mut self, request: &TraceRequest, downloaded_range: ByteRange) -> bool;
 
     fn populate(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes) -> Result<(), String>;
 
@@ -174,7 +176,8 @@ impl ReplayCache for FeuerReplayCache {
         "feuer-value-density"
     }
 
-    fn get(&mut self, request: &TraceRequest, _downloaded_range: ByteRange) -> bool {
+    /// Looks up the requested bytes in Feuer and reports whether the lookup hit.
+    fn lookup_hit(&mut self, request: &TraceRequest, _downloaded_range: ByteRange) -> bool {
         let Some(bytes) = self.cache.get(&request.object_key, request.requested_range) else {
             return false;
         };
@@ -247,7 +250,7 @@ struct FoyerReplayCache {
 impl FoyerReplayCache {
     fn new(capacity: usize, shards: usize, key_range: FoyerKeyRange, eviction_policy: FoyerEvictionPolicy) -> Self {
         Self {
-            cache: foyer_cache(capacity, shards, eviction_policy),
+            cache: build_foyer_cache(capacity, shards, eviction_policy),
             key_range,
             eviction_policy,
         }
@@ -266,7 +269,8 @@ impl ReplayCache for FoyerReplayCache {
         self.eviction_policy.engine_name(self.key_range)
     }
 
-    fn get(&mut self, request: &TraceRequest, downloaded_range: ByteRange) -> bool {
+    /// Looks up the selected Foyer key and reports whether the lookup hit.
+    fn lookup_hit(&mut self, request: &TraceRequest, downloaded_range: ByteRange) -> bool {
         let key = self.key(request, downloaded_range);
         let Some(entry) = self.cache.get(&key) else {
             return false;
@@ -295,7 +299,8 @@ impl ReplayCache for FoyerReplayCache {
     }
 }
 
-fn foyer_cache(
+/// Builds a Foyer cache with payload-byte accounting and the selected eviction policy.
+fn build_foyer_cache(
     capacity: usize,
     shards: usize,
     eviction_policy: FoyerEvictionPolicy,
@@ -337,14 +342,15 @@ struct ReplayReport {
 
 impl ReplayReport {
     fn cache_hit_rate(&self) -> f64 {
-        ratio(self.traffic.hits, self.traffic.requests)
+        ratio_or_zero(self.traffic.hits, self.traffic.requests)
     }
 
     fn byte_hit_rate(&self) -> f64 {
-        ratio(self.traffic.hit_bytes, self.traffic.requested_bytes)
+        ratio_or_zero(self.traffic.hit_bytes, self.traffic.requested_bytes)
     }
 
-    fn source_cost_hit_rate(&self) -> f64 {
+    /// Returns the source-cost savings ratio against fetching every exact request; extra bytes can make it negative.
+    fn source_cost_savings_ratio(&self) -> f64 {
         let fixed_cost = u128::from(SOURCE_FIXED_EQUIVALENT_BYTES);
         let baseline = u128::from(self.traffic.requests) * fixed_cost + u128::from(self.traffic.requested_bytes);
         let actual = u128::from(self.traffic.source_requests) * fixed_cost + u128::from(self.traffic.source_bytes);
@@ -372,7 +378,7 @@ fn main() -> Result<(), String> {
         return Err("at least one --downloader value is required".to_owned());
     }
     let download_config = DownloadExpansionConfig::from_env()?;
-    let workload = trace_workload(&args, download_config)?;
+    let workload = load_trace_workload(&args, download_config)?;
 
     if args.csv {
         eprintln!(
@@ -438,7 +444,8 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-fn trace_workload(args: &ReplayArgs, download_config: DownloadExpansionConfig) -> Result<ReplayWorkload, String> {
+/// Loads the trace workload, validates request order and bounds, and precomputes download ranges.
+fn load_trace_workload(args: &ReplayArgs, download_config: DownloadExpansionConfig) -> Result<ReplayWorkload, String> {
     let mut requests = load_trace()?;
     if let Some(operations) = args.operations {
         requests.truncate(operations);
@@ -447,7 +454,7 @@ fn trace_workload(args: &ReplayArgs, download_config: DownloadExpansionConfig) -
         return Err("trace is empty".to_owned());
     }
     for (index, request) in requests.iter().enumerate() {
-        request.validate(index)?;
+        request.check_requested_range_bounds(index)?;
         if index > 0 && request.timestamp_millis < requests[index - 1].timestamp_millis {
             return Err(format!(
                 "operation {index} has a timestamp earlier than its predecessor"
@@ -474,12 +481,12 @@ fn replay_cache(
 ) -> Result<ReplayReport, String> {
     for _ in 0..warmup_iterations {
         let mut warmup_traffic = ReplayTraffic::default();
-        execute_pass(&mut *cache, workload, downloader, source_payload, &mut warmup_traffic)?;
+        replay_pass(&mut *cache, workload, downloader, source_payload, &mut warmup_traffic)?;
     }
 
     let mut traffic = ReplayTraffic::default();
     let started = Instant::now();
-    execute_pass(&mut *cache, workload, downloader, source_payload, &mut traffic)?;
+    replay_pass(&mut *cache, workload, downloader, source_payload, &mut traffic)?;
     let elapsed = started.elapsed();
 
     Ok(ReplayReport {
@@ -578,7 +585,8 @@ fn max_download_len(workload: &ReplayWorkload, downloader: DownloadRangePolicy) 
     }
 }
 
-fn execute_pass<C: ReplayCache + ?Sized>(
+/// Replays one pass of the workload through the cache and records its traffic.
+fn replay_pass<C: ReplayCache + ?Sized>(
     cache: &mut C,
     workload: &ReplayWorkload,
     downloader: DownloadRangePolicy,
@@ -592,7 +600,7 @@ fn execute_pass<C: ReplayCache + ?Sized>(
                 request.downloaded_range(DownloadRangePolicy::Exact, workload.download_config)
             }
         };
-        let hit = cache.get(request, downloaded_range);
+        let hit = cache.lookup_hit(request, downloaded_range);
         record_request(traffic, request, hit);
         if hit {
             continue;
@@ -714,11 +722,11 @@ fn print_human_report(report: &ReplayReport) {
         report.downloader,
         human_engine_name(report.engine),
         report.cache_hit_rate() * 100.0,
-        report.source_cost_hit_rate() * 100.0,
+        report.source_cost_savings_ratio() * 100.0,
         report.traffic.source_requests,
         format_binary_bytes(report.traffic.source_bytes),
         format_binary_bytes(report.used_payload_bytes),
-        format_rate(report.operations_per_second()),
+        format_operations_per_second(report.operations_per_second()),
     );
 }
 
@@ -757,7 +765,8 @@ fn format_binary_bytes(bytes: u64) -> String {
     format!("{bytes} B")
 }
 
-fn format_rate(operations_per_second: f64) -> String {
+/// Formats operations per second with decimal K/s or M/s suffixes when appropriate.
+fn format_operations_per_second(operations_per_second: f64) -> String {
     if operations_per_second >= 1_000_000.0 {
         format!("{:.2} M/s", operations_per_second / 1_000_000.0)
     } else if operations_per_second >= 1_000.0 {
@@ -781,7 +790,7 @@ fn print_csv_report(report: &ReplayReport) {
         report.traffic.hit_bytes,
         report.cache_hit_rate() * 100.0,
         report.byte_hit_rate() * 100.0,
-        report.source_cost_hit_rate() * 100.0,
+        report.source_cost_savings_ratio() * 100.0,
         report.traffic.source_requests,
         report.traffic.source_bytes,
         report.used_payload_bytes,
@@ -882,7 +891,7 @@ fn parse_timestamp_millis(value: &str) -> Result<u64, String> {
 }
 
 fn find_json_string(line: &str, field: &str) -> Result<String, String> {
-    let value = field_value(line, field)?;
+    let value = line_from_json_value(line, field)?;
     let value = value
         .strip_prefix('"')
         .ok_or_else(|| format!("field {field:?} is not a string"))?;
@@ -893,7 +902,7 @@ fn find_json_string(line: &str, field: &str) -> Result<String, String> {
 }
 
 fn find_json_u64(line: &str, field: &str) -> Result<u64, String> {
-    let value = field_value(line, field)?;
+    let value = line_from_json_value(line, field)?;
     let end = value
         .find(|character: char| !character.is_ascii_digit())
         .unwrap_or(value.len());
@@ -905,7 +914,8 @@ fn find_json_u64(line: &str, field: &str) -> Result<u64, String> {
         .map_err(|error| format!("invalid {field:?}: {error}"))
 }
 
-fn field_value<'a>(line: &'a str, field: &str) -> Result<&'a str, String> {
+/// Returns the line from the named JSON value's starting position, without parsing the value.
+fn line_from_json_value<'a>(line: &'a str, field: &str) -> Result<&'a str, String> {
     let needle = format!("\"{field}\"");
     let after_field = line
         .find(&needle)
@@ -918,7 +928,8 @@ fn field_value<'a>(line: &'a str, field: &str) -> Result<&'a str, String> {
     Ok(after_colon.trim_start())
 }
 
-fn ratio(numerator: u64, denominator: u64) -> f64 {
+/// Returns the ratio, or zero when the denominator is zero.
+fn ratio_or_zero(numerator: u64, denominator: u64) -> f64 {
     if denominator == 0 {
         0.0
     } else {
@@ -944,7 +955,8 @@ mod tests {
             "warmup-test"
         }
 
-        fn get(&mut self, _request: &TraceRequest, _downloaded_range: ByteRange) -> bool {
+        /// Reports a lookup hit once the warmup has populated this test cache.
+        fn lookup_hit(&mut self, _request: &TraceRequest, _downloaded_range: ByteRange) -> bool {
             self.populated
         }
 
@@ -973,7 +985,8 @@ mod tests {
             "range-test"
         }
 
-        fn get(&mut self, request: &TraceRequest, _downloaded_range: ByteRange) -> bool {
+        /// Reports a lookup hit when a test entry covers the requested range.
+        fn lookup_hit(&mut self, request: &TraceRequest, _downloaded_range: ByteRange) -> bool {
             self.entries.iter().any(|(key, downloaded_range)| {
                 key == &request.object_key && downloaded_range.contains(request.requested_range)
             })
@@ -1042,15 +1055,15 @@ mod tests {
 
         let mut expanded_key =
             FoyerReplayCache::new(1 << 20, 1, FoyerKeyRange::ExpandedDownload, FoyerEvictionPolicy::S3Fifo);
-        assert!(!expanded_key.get(&first, expanded));
+        assert!(!expanded_key.lookup_hit(&first, expanded));
         expanded_key
             .populate(&first, expanded, Bytes::from(vec![0; 20]))
             .unwrap();
-        assert!(expanded_key.get(&second, expanded));
+        assert!(expanded_key.lookup_hit(&second, expanded));
 
         let mut exact_key = FoyerReplayCache::new(1 << 20, 1, FoyerKeyRange::ExactRequest, FoyerEvictionPolicy::S3Fifo);
         exact_key.populate(&first, expanded, Bytes::from(vec![0; 20])).unwrap();
-        assert!(!exact_key.get(&second, expanded));
+        assert!(!exact_key.lookup_hit(&second, expanded));
     }
 
     #[test]
@@ -1150,7 +1163,7 @@ mod tests {
             elapsed: Duration::from_secs(1),
         };
 
-        assert!(report.source_cost_hit_rate() < 0.0);
+        assert!(report.source_cost_savings_ratio() < 0.0);
     }
 
     #[test]

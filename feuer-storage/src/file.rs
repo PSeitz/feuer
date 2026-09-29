@@ -140,7 +140,7 @@ impl DataFile {
     /// depends on its contents; see [`DataFile`]'s concurrency contract.
     pub async fn read_at(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
         self.measure_io(IoOperation::Read, offset, length, async {
-            check_range(IoOperation::Read, offset, length as u64, self.state.capacity)?;
+            check_file_bounds(IoOperation::Read, offset, length as u64, self.state.capacity)?;
             if length == 0 {
                 return Ok(Bytes::new());
             }
@@ -181,7 +181,7 @@ impl DataFile {
         assert!(offset.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64));
         assert!(bytes.len().is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
         self.measure_io(IoOperation::Write, offset, bytes.len(), async {
-            check_range(IoOperation::Write, offset, bytes.len() as u64, self.state.capacity)?;
+            check_file_bounds(IoOperation::Write, offset, bytes.len() as u64, self.state.capacity)?;
             for start in (0..bytes.len()).step_by(uring::MAX_IO_CHUNK_BYTES) {
                 let end = (start + uring::MAX_IO_CHUNK_BYTES).min(bytes.len());
                 self.state
@@ -211,7 +211,7 @@ impl DataFile {
         let offset = range.start;
         let length = (range.end - range.start) as usize;
         self.measure_io(IoOperation::Write, offset, length, async {
-            check_range(IoOperation::Write, offset, length as u64, self.state.capacity)?;
+            check_file_bounds(IoOperation::Write, offset, length as u64, self.state.capacity)?;
             self.state
                 .write_queue
                 .write_parts(offset, length, parts, Some(region))
@@ -259,7 +259,7 @@ impl DataFile {
         let operation = IoOperation::Read;
         let mut length = 0usize;
         for range in ranges {
-            check_range(operation, range.start, range.end - range.start, self.state.capacity)?;
+            check_file_bounds(operation, range.start, range.end - range.start, self.state.capacity)?;
             length = length
                 .checked_add((range.end - range.start) as usize)
                 .ok_or(DataFileError::LengthOverflow { operation, length })?;
@@ -391,7 +391,8 @@ fn check_direct_io_alignment(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn check_range(operation: IoOperation, offset: u64, length: u64, capacity: u64) -> DataFileResult<()> {
+/// Checks that the requested bytes fit within file bounds, rejecting offset-plus-length overflow.
+fn check_file_bounds(operation: IoOperation, offset: u64, length: u64, capacity: u64) -> DataFileResult<()> {
     if offset.checked_add(length).is_none_or(|end| end > capacity) {
         return Err(DataFileError::OutOfBounds {
             operation,

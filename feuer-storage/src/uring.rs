@@ -137,7 +137,7 @@ impl IoQueueHandle {
             active: (0..max_in_flight).map(|_| None).collect(),
         };
         let thread = thread::Builder::new().name(thread_name.into()).spawn(move || {
-            if let Err(error) = queue.run() {
+            if let Err(error) = queue.process_requests_until_disconnected() {
                 tracing::error!(target: "feuer::storage::io", operation = operation.as_str(), %error, "io_uring queue stopped");
             }
         })?;
@@ -150,7 +150,11 @@ impl IoQueueHandle {
         })
     }
 
-    async fn acquire(&self, length: usize) -> io::Result<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
+    /// Acquires a request slot and buffer-memory permits before preparing or queueing I/O.
+    async fn acquire_request_and_buffer_permits(
+        &self,
+        length: usize,
+    ) -> io::Result<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
         let request_permit = self
             .admission
             .request_slots
@@ -178,10 +182,10 @@ impl IoQueueHandle {
 
     pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
         assert_eq!(self.operation, IoOperation::Read);
-        let permits = self.acquire(length).await?;
+        let permits = self.acquire_request_and_buffer_permits(length).await?;
         let buffer = self.allocate_buffer(length, Vec::new())?;
         Ok(self
-            .execute_buffers(offset, IoBuffers::Read(buffer), 0..length, permits)
+            .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permits)
             .await?
             .into_read()
             .into_bytes())
@@ -199,9 +203,9 @@ impl IoQueueHandle {
         assert_eq!(self.operation, IoOperation::Write);
         assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
-        let permits = self.acquire(length).await?;
-        let buffers = IoBuffers::write(length, parts, region)?;
-        self.execute_buffers(offset, buffers, 0..length, permits).await?;
+        let permits = self.acquire_request_and_buffer_permits(length).await?;
+        let buffers = IoBuffers::from_write_parts(length, parts, region)?;
+        self.submit_and_wait(offset, buffers, 0..length, permits).await?;
         Ok(())
     }
 
@@ -213,14 +217,15 @@ impl IoQueueHandle {
         destination: Range<usize>,
     ) -> io::Result<AlignedIoBuffer> {
         assert_eq!(self.operation, IoOperation::Read);
-        let permits = self.acquire(destination.len()).await?;
+        let permits = self.acquire_request_and_buffer_permits(destination.len()).await?;
         Ok(self
-            .execute_buffers(offset, IoBuffers::Read(buffer), destination, permits)
+            .submit_and_wait(offset, IoBuffers::Read(buffer), destination, permits)
             .await?
             .into_read())
     }
 
-    async fn execute_buffers(
+    /// Submits the admitted request to the queue and waits for its buffers or an I/O error.
+    async fn submit_and_wait(
         &self,
         offset: u64,
         buffers: IoBuffers,
@@ -235,7 +240,7 @@ impl IoQueueHandle {
             .unwrap()
             .try_send(request)
             .map_err(|_| queue_stopped_error())?;
-        notify(&self.wake_fd);
+        wake_queue(&self.wake_fd);
         receive.await.map_err(|_| queue_stopped_error())?
     }
 }
@@ -243,7 +248,7 @@ impl IoQueueHandle {
 impl Drop for IoQueueHandle {
     fn drop(&mut self) {
         self.sender.take();
-        notify(&self.wake_fd);
+        wake_queue(&self.wake_fd);
         // The queue drains submitted I/O before releasing buffers and the directory lock.
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -314,15 +319,15 @@ impl AlignedIoBuffer {
         // Reused memory is initialized but not zeroed; reads overwrite it before exposure.
         let mut buffer = match reused {
             Some(buffer) => buffer,
-            None => Self::allocate(length)?,
+            None => Self::allocate_zeroed(length)?,
         };
         buffer.read_guards = read_guards;
         buffer.idle_buffers = Arc::downgrade(idle_buffers);
         Ok(buffer)
     }
 
-    /// Fresh, zeroed aligned memory, freed rather than pooled when its owner is dropped.
-    fn allocate(length: usize) -> io::Result<Self> {
+    /// Allocates fresh, zeroed aligned memory, freed rather than pooled when its owner is dropped.
+    fn allocate_zeroed(length: usize) -> io::Result<Self> {
         assert!(length > 0);
         let layout = Layout::from_size_align(length, DIRECT_IO_ALIGNMENT_BYTES).map_err(|_| {
             io::Error::new(
@@ -405,7 +410,9 @@ enum IoBuffers {
 }
 
 impl IoBuffers {
-    fn write(length: usize, parts: &[(usize, Bytes)], region: Option<DiskRegion>) -> io::Result<Self> {
+    /// Builds buffers from write parts, retaining aligned slices and copying the rest with zero padding.
+    /// This prepares memory only; it does not issue a disk write.
+    fn from_write_parts(length: usize, parts: &[(usize, Bytes)], region: Option<DiskRegion>) -> io::Result<Self> {
         assert_eq!(parts.first().map(|part| part.0), Some(0));
         let mut buffers = Vec::new();
         for (index, (offset, bytes)) in parts.iter().enumerate() {
@@ -422,7 +429,7 @@ impl IoBuffers {
             }
             let copy_length = end - offset - aligned_length;
             if copy_length > 0 {
-                let mut buffer = AlignedIoBuffer::allocate(copy_length)?;
+                let mut buffer = AlignedIoBuffer::allocate_zeroed(copy_length)?;
                 buffer.as_mut_slice()[..bytes.len() - aligned_length].copy_from_slice(&bytes[aligned_length..]);
                 buffers.push(buffer.into_bytes());
             }
@@ -534,8 +541,9 @@ impl IoRequest {
             .user_data(slot as u64)
     }
 
-    // true means the operation needs to be retried or its remainder submitted.
-    fn complete(&mut self, result: i32) -> io::Result<bool> {
+    /// Applies a kernel completion result to the completed-byte count.
+    /// Returns true when the request needs a retry or its aligned remainder submitted.
+    fn apply_completion_result(&mut self, result: i32) -> io::Result<bool> {
         if result == -libc::EINTR {
             return Ok(true);
         }
@@ -568,7 +576,8 @@ impl IoRequest {
         )
     }
 
-    fn finish(mut self, result: io::Result<()>) {
+    /// Sends the buffers or error as the request result, releasing its admission permits.
+    fn send_result(mut self, result: io::Result<()>) {
         let result = result.map(|()| self.buffers);
         let _ = self.reply.take().unwrap().send(result);
     }
@@ -594,7 +603,8 @@ struct IoQueue {
 }
 
 impl IoQueue {
-    fn run(&mut self) -> io::Result<()> {
+    /// Processes requests until the sender disconnects and all queued and active I/O drains.
+    fn process_requests_until_disconnected(&mut self) -> io::Result<()> {
         let mut disconnected = false;
         let mut completions = Vec::with_capacity(self.active.len());
         loop {
@@ -602,9 +612,9 @@ impl IoQueue {
             for (slot, result) in completions.drain(..) {
                 let slot = slot as usize;
                 let request = self.active[slot].as_mut().expect("completion for inactive slot");
-                match request.complete(result) {
-                    Ok(true) => self.submit_slot(slot),
-                    result => self.active[slot].take().unwrap().finish(result.map(|_| ())),
+                match request.apply_completion_result(result) {
+                    Ok(true) => self.queue_active_request(slot),
+                    result => self.active[slot].take().unwrap().send_result(result.map(|_| ())),
                 }
             }
             loop {
@@ -617,7 +627,7 @@ impl IoQueue {
                     }
                 }
             }
-            self.schedule();
+            self.queue_pending_requests();
             let active = self.active.iter().any(Option::is_some);
             if disconnected && !active && self.pending.is_empty() {
                 return Ok(());
@@ -634,11 +644,13 @@ impl IoQueue {
             if !self.ring.submission().is_empty() {
                 continue;
             }
-            self.wait()?;
+            self.wait_for_completion_or_wakeup()?;
         }
     }
 
-    fn schedule(&mut self) {
+    /// Queues pending, uncanceled requests in free active slots and the ring's submission queue.
+    /// The caller submits them to the kernel separately.
+    fn queue_pending_requests(&mut self) {
         self.pending
             .retain(|request| !request.reply.as_ref().unwrap().is_closed());
         // Callers own conflict prevention and disk-region lifetime through completion.
@@ -651,11 +663,12 @@ impl IoQueue {
                 break;
             };
             self.active[slot] = Some(request);
-            self.submit_slot(slot);
+            self.queue_active_request(slot);
         }
     }
 
-    fn submit_slot(&mut self, slot: usize) {
+    /// Queues the active request's remaining I/O in the ring without submitting it to the kernel yet.
+    fn queue_active_request(&mut self, slot: usize) {
         let entry = self.active[slot]
             .as_mut()
             .unwrap()
@@ -670,7 +683,8 @@ impl IoQueue {
         };
     }
 
-    fn wait(&self) -> io::Result<()> {
+    /// Waits for a ring completion or an eventfd wakeup for new requests or shutdown.
+    fn wait_for_completion_or_wakeup(&self) -> io::Result<()> {
         let mut fds = [
             libc::pollfd {
                 fd: self.ring.as_raw_fd(),
@@ -730,7 +744,8 @@ impl Drop for IoQueue {
     }
 }
 
-fn notify(wake_fd: &OwnedFd) {
+/// Wakes the queue thread through its eventfd after enqueueing work or disconnecting the sender.
+fn wake_queue(wake_fd: &OwnedFd) {
     let value = 1u64;
     loop {
         // SAFETY: value is readable for eight bytes and wake is an owned eventfd.

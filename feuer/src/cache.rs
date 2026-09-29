@@ -157,7 +157,7 @@ impl TieredMemoryDiskCache {
         let requested_bytes = requested_slice(download.bytes(), downloaded_range, requested_range);
         #[cfg(target_os = "linux")]
         if self.state.disk.contains(&object_key, downloaded_range) {
-            self.state.population.skip_covered();
+            self.state.population.record_already_covered();
             self.state.memory.record_access(&object_key, requested_range);
             metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
             return Ok(requested_bytes);
@@ -168,9 +168,11 @@ impl TieredMemoryDiskCache {
             .insert_and_record(object_key.clone(), download.clone(), requested_range);
         #[cfg(target_os = "linux")]
         if let Some(entry_id) = entry_id {
-            self.state.population.schedule(object_key, download, entry_id, accesses);
+            self.state
+                .population
+                .enqueue_if_capacity(object_key, download, entry_id, accesses);
         } else {
-            self.state.population.skip_redundant();
+            self.state.population.record_redundant_admission();
         }
         #[cfg(not(target_os = "linux"))]
         let _ = (entry_id, accesses);

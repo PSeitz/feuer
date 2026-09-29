@@ -300,7 +300,9 @@ impl DiskRangeCache {
                             let accesses = disk.access_histories.for_key(&key);
                             let previous_entries = batch.entries.len();
                             let previous_regions_left = regions_left;
-                            while let Err(chunks_needed) = batch.push(&shard.allocator, &key, &download, &accesses) {
+                            while let Err(chunks_needed) =
+                                batch.pack_download(&shard.allocator, &key, &download, &accesses)
+                            {
                                 // Evicting cannot help an entry that exceeds the capacity left by this batch.
                                 if chunks_needed > shard.allocator.chunk_capacity - batch.chunks.len() as u64
                                     || !shard.evict_candidate(&mut attempts_left, &mut regions_left)
@@ -319,7 +321,7 @@ impl DiskRangeCache {
                             attempt.set_outcome(PopulationOutcome::AlreadyCovered);
                         }
                     }
-                    let entries = match batch.write(&disk.file, &disk.metrics).await {
+                    let entries = match batch.write_chunks(&disk.file, &disk.metrics).await {
                         Ok(entries) => entries,
                         Err(error) => {
                             for (_, attempt) in &mut publication_tokens {
@@ -396,7 +398,10 @@ impl DiskRangeCache {
         // If the initializing caller is canceled, OnceCell lets a waiter take over.
         let result = read_result
             .get_or_init(|| async {
-                match guarded_read.read(&self.disk.file, guarded_read.object_range).await {
+                match guarded_read
+                    .read_verified_range(&self.disk.file, guarded_read.object_range)
+                    .await
+                {
                     Ok(Some(bytes)) => Ok(bytes),
                     result => {
                         let outcome = match result {
@@ -409,7 +414,11 @@ impl DiskRangeCache {
                                 DiskLookupOutcome::ChecksumFailed
                             }
                         };
-                        shard.entry_index.lock().unwrap().invalidate(key, &guarded_read);
+                        shard
+                            .entry_index
+                            .lock()
+                            .unwrap()
+                            .remove_entry_matching_read(key, &guarded_read);
                         Err(outcome)
                     }
                 }
@@ -542,7 +551,8 @@ impl DiskEntryIndex {
         Some(storage)
     }
 
-    fn invalidate(&mut self, key: &str, read: &GuardedObjectRangeRead) {
+    /// Removes the indexed entry matching the failed read's expected start and checksum.
+    fn remove_entry_matching_read(&mut self, key: &str, read: &GuardedObjectRangeRead) {
         let start = read.object_range.start();
         // Preserve different contents. Discarding a newer identical copy is an acceptable miss.
         if self
@@ -583,15 +593,17 @@ impl DiskRangeCacheState {
     }
 }
 
-fn page_storage_bytes(content_bytes: usize) -> Option<u64> {
+/// Computes metadata storage bytes, including page headers and final padding.
+fn metadata_storage_bytes(content_bytes: usize) -> Option<u64> {
     (content_bytes as u64)
         .div_ceil(PAGE_CONTENT_BYTES as u64)
         .checked_mul(METADATA_PAGE_BYTES as u64)
 }
 
 impl UnwrittenShardBatch {
+    /// Packs one download's payload and metadata into reserved chunks without writing them.
     /// Allocation failure leaves the batch unchanged and reports the required number of new chunks.
-    fn push(
+    fn pack_download(
         &mut self,
         allocator: &DiskChunkAllocator,
         key: &ObjectKey,
@@ -603,7 +615,8 @@ impl UnwrittenShardBatch {
         let payload_bytes = (bytes.len() as u64).next_multiple_of(PAYLOAD_ALIGNMENT_BYTES);
         let chunk_data_bytes = CHUNK_BYTES - METADATA_PAGE_BYTES as u64;
         let payload_region_count = payload_bytes.div_ceil(chunk_data_bytes);
-        let metadata_bytes = page_storage_bytes(72 + 16 * payload_region_count as usize + key.len()).ok_or(u64::MAX)?;
+        let metadata_bytes =
+            metadata_storage_bytes(72 + 16 * payload_region_count as usize + key.len()).ok_or(u64::MAX)?;
         let entry_bytes = payload_bytes + metadata_bytes;
         let tail_bytes = self.chunks.last().map_or(0, |chunk| CHUNK_BYTES - chunk.used_bytes);
         // Never split an entry across a shared chunk boundary, even if only metadata would spill.
@@ -628,7 +641,7 @@ impl UnwrittenShardBatch {
                 metadata_starts: EntryMetadataStartBitmap::default(),
             }));
         }
-        let (payload_regions, first_chunk) = self.take_regions(&mut cursor, payload_bytes);
+        let (payload_regions, first_chunk) = self.reserve_entry_regions(&mut cursor, payload_bytes);
         let mut consumed = 0;
         for (chunk, region) in self.chunks[first_chunk..].iter_mut().zip(&payload_regions) {
             let range = region.range();
@@ -639,7 +652,7 @@ impl UnwrittenShardBatch {
         }
         let payload_checksum = blake3::hash(bytes);
         let contents = page_format::encode_entry_metadata(key, object_range, &payload_regions, &payload_checksum);
-        let (entry_metadata_regions, first_chunk) = self.take_regions(&mut cursor, metadata_bytes);
+        let (entry_metadata_regions, first_chunk) = self.reserve_entry_regions(&mut cursor, metadata_bytes);
         self.chunks[first_chunk]
             .metadata_starts
             .insert(entry_metadata_regions[0].range().start % CHUNK_BYTES);
@@ -697,8 +710,8 @@ impl UnwrittenShardBatch {
         Ok(())
     }
 
-    /// Carves aligned entry regions from reserved chunks, preserving shared whole-chunk ownership.
-    fn take_regions(&mut self, cursor: &mut usize, mut bytes: u64) -> (Vec<DiskRegion>, usize) {
+    /// Reserves aligned entry regions within the batch's chunks, preserving shared whole-chunk ownership.
+    fn reserve_entry_regions(&mut self, cursor: &mut usize, mut bytes: u64) -> (Vec<DiskRegion>, usize) {
         while self.chunks[*cursor].used_bytes == CHUNK_BYTES {
             *cursor += 1;
         }
@@ -718,7 +731,8 @@ impl UnwrittenShardBatch {
         (regions, first_chunk)
     }
 
-    async fn write(
+    /// Finalizes discovery metadata and writes all chunks before returning entries for publication.
+    async fn write_chunks(
         mut self,
         file: &DataFile,
         metrics: &DiskMetrics,
@@ -756,7 +770,8 @@ impl UnwrittenShardBatch {
 }
 
 impl GuardedObjectRangeRead {
-    async fn read(&self, file: &DataFile, requested: ByteRange) -> DataFileResult<Option<Bytes>> {
+    /// Reads the whole entry, verifies its checksum, and returns only the requested byte range.
+    async fn read_verified_range(&self, file: &DataFile, requested: ByteRange) -> DataFileResult<Option<Bytes>> {
         let start = requested.start() - self.object_range.start();
         let end = requested.end() - self.object_range.start();
         let bytes = file

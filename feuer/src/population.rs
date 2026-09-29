@@ -38,7 +38,8 @@ struct PendingDiskWrite {
 }
 
 impl DiskWriteSource {
-    fn dequeue(&mut self) {
+    /// Records dequeue time and removes this write from the queued-entry accounting.
+    fn record_dequeue(&mut self) {
         let queued_at = self.queued_at.take().expect("queued write dequeued once");
         self.metrics.queued_entries.decrease(1);
         self.metrics.queue_duration.record(queued_at.elapsed().as_secs_f64());
@@ -61,7 +62,7 @@ impl DiskPopulationQueue {
             Self::channel_with_metrics(MAX_QUEUED_ENTRIES, PopulationQueueMetrics::new(registry));
         // The worker owns no sender. Dropping the last cache handle closes the queue;
         // submitted writes still finish under storage's detached reservation owner.
-        tokio::spawn(Self::run(receiver, memory, disk));
+        tokio::spawn(Self::write_queued_batches(receiver, memory, disk));
         population
     }
 
@@ -79,15 +80,19 @@ impl DiskPopulationQueue {
         (Self { sender, metrics }, receiver)
     }
 
-    pub(crate) fn skip_covered(&self) {
+    /// Records a download skipped because the disk already covers its range.
+    pub(crate) fn record_already_covered(&self) {
         self.metrics.record(PopulationQueueOutcome::AlreadyCovered);
     }
 
-    pub(crate) fn skip_redundant(&self) {
+    /// Records a download skipped because its memory admission was redundant.
+    pub(crate) fn record_redundant_admission(&self) {
         self.metrics.record(PopulationQueueOutcome::Redundant);
     }
 
-    pub(crate) fn schedule(
+    /// Enqueues a disk write if the queue has capacity, without waiting for space.
+    /// Full or closed queues discard the download and record the corresponding outcome.
+    pub(crate) fn enqueue_if_capacity(
         &self,
         key: ObjectKey,
         download: Download,
@@ -119,7 +124,12 @@ impl DiskPopulationQueue {
         permit.send(PendingDiskWrite { download, source });
     }
 
-    async fn run(mut receiver: mpsc::Receiver<PendingDiskWrite>, memory: Arc<MemoryCache>, disk: DiskRangeCache) {
+    /// Writes queued downloads in batches, checking their memory identities before publication.
+    async fn write_queued_batches(
+        mut receiver: mpsc::Receiver<PendingDiskWrite>,
+        memory: Arc<MemoryCache>,
+        disk: DiskRangeCache,
+    ) {
         while let Some(first) = receiver.recv().await {
             let mut pending = vec![first];
             while pending.len() < MAX_BATCH_ENTRIES {
@@ -129,7 +139,7 @@ impl DiskPopulationQueue {
             let downloads = pending
                 .into_iter()
                 .filter_map(|PendingDiskWrite { download, mut source }| {
-                    source.dequeue();
+                    source.record_dequeue();
                     // This is the transition from queued to active. Later eviction may
                     // discard publication, but cannot cancel issued I/O or release its regions.
                     if memory

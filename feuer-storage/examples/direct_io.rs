@@ -53,17 +53,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for read_size in [4096, 65536, MIB] {
         for readers in [1, 32, 64, 128] {
             for &writers in &write_callers {
-                run_case(&file, read_size, readers, writers, seconds).await;
+                benchmark_concurrent_io(&file, read_size, readers, writers, seconds).await;
             }
         }
     }
     // Verify that read protection does not permanently cap write-only throughput.
-    run_case(&file, MIB, 0, 64, seconds).await;
+    benchmark_concurrent_io(&file, MIB, 0, 64, seconds).await;
     drop(file); // drain and unlock before removing only the temporary benchmark directory
     Ok(())
 }
 
-async fn run_case(file: &DataFile, read_size: usize, readers: usize, writers: usize, seconds: u64) {
+/// Benchmarks concurrent reads and writes after warmup, printing throughput, latency, and CPU usage.
+async fn benchmark_concurrent_io(file: &DataFile, read_size: usize, readers: usize, writers: usize, seconds: u64) {
     let measure_start = Instant::now() + Duration::from_secs(2);
     let deadline = measure_start + Duration::from_secs(seconds);
     let mut tasks = Vec::new();
@@ -113,7 +114,7 @@ async fn run_case(file: &DataFile, read_size: usize, readers: usize, writers: us
         }));
     }
     tokio::time::sleep_until(measure_start.into()).await;
-    let cpu_start = cpu_seconds();
+    let cpu_start = process_cpu_seconds();
     let mut read = IoMeasurements::default();
     let mut write = IoMeasurements::default();
     for task in tasks {
@@ -123,7 +124,7 @@ async fn run_case(file: &DataFile, read_size: usize, readers: usize, writers: us
         total.bytes += measurements.bytes;
         total.latency_samples_micros.extend(measurements.latency_samples_micros);
     }
-    let cpu_percent = (cpu_seconds() - cpu_start) / measure_start.elapsed().as_secs_f64() * 100.0;
+    let cpu_percent = (process_cpu_seconds() - cpu_start) / measure_start.elapsed().as_secs_f64() * 100.0;
     read.latency_samples_micros.sort_unstable();
     let percentile = |p: usize| {
         read.latency_samples_micros
@@ -142,7 +143,8 @@ async fn run_case(file: &DataFile, read_size: usize, readers: usize, writers: us
     );
 }
 
-fn cpu_seconds() -> f64 {
+/// Returns this process's accumulated user and system CPU time in seconds.
+fn process_cpu_seconds() -> f64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     // SAFETY: usage is writable and getrusage initializes it on success.
     assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) }, 0);

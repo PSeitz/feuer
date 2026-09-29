@@ -172,7 +172,7 @@ impl MemoryCache {
         let mut allow_range_trim = true;
         let mut evicted = false;
         loop {
-            let step = self.shards[shard_index].lock().advance_admission(
+            let step = self.shards[shard_index].lock().try_admit_or_reclaim(
                 &object_key,
                 downloaded_range,
                 &bytes,
@@ -192,7 +192,7 @@ impl MemoryCache {
                     // Payload copying is deliberately outside the shard lock.
                     // Publication revalidates both the source and its object's
                     // access/structure generation before changing the index.
-                    let replacement = source.copy_payload();
+                    let replacement = source.copy_retained_payloads();
                     if !self.shards[shard_index].lock().publish_range_trim(replacement) {
                         // A hot source can invalidate every copy. Fall back to
                         // bounded eviction for this admission so it cannot

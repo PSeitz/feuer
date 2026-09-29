@@ -124,14 +124,14 @@ fn reclaim_sampling_advances_past_superseded_ranges() {
     let replacement = Bytes::from_static(b"abc");
     for expected_entries in [3, 3, 2] {
         assert!(matches!(
-            shard.advance_admission(&key, range(0, 3), &replacement, None, false),
+            shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, None, false),
             AdmissionProgress::Retry | AdmissionProgress::Evicted
         ));
         assert_eq!(shard.entry_count(), expected_entries);
     }
     // The partial overlap is eligible; the two fully superseded entries were skipped.
     assert!(matches!(
-        shard.advance_admission(&key, range(0, 3), &replacement, None, false),
+        shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, None, false),
         AdmissionProgress::Complete(Some(_))
     ));
     assert_eq!(shard.entry_count(), 1);
@@ -627,12 +627,12 @@ fn copied_range_trim_is_revalidated_before_publication_and_can_fall_back() {
     let replacement = {
         let mut shard = cache.shards[0].lock();
         let AdmissionProgress::Trim(source) =
-            shard.advance_admission(&incoming, range(0, 2), &incoming_bytes, None, true)
+            shard.try_admit_or_reclaim(&incoming, range(0, 2), &incoming_bytes, None, true)
         else {
             panic!("pressure should select the cold compactable cached range");
         };
         drop(shard);
-        source.copy_payload()
+        source.copy_retained_payloads()
     };
 
     // Simulate a disk-served request: it changes shared evidence without taking the memory shard lock.
@@ -643,7 +643,7 @@ fn copied_range_trim_is_revalidated_before_publication_and_can_fall_back() {
 
     let step = cache.shards[0]
         .lock()
-        .advance_admission(&incoming, range(0, 2), &incoming_bytes, None, false);
+        .try_admit_or_reclaim(&incoming, range(0, 2), &incoming_bytes, None, false);
     assert!(matches!(step, AdmissionProgress::Evicted));
     assert_eq!(cache.used_bytes(), 0, "fallback pressure may evict but cannot starve");
 }

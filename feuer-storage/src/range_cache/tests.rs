@@ -185,7 +185,7 @@ fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighb
         ("small after metadata-only chunk".to_owned(), 1),
     ] {
         batch
-            .push(&allocator, &key, &download(0, length), &histories.for_key(&key))
+            .pack_download(&allocator, &key, &download(0, length), &histories.for_key(&key))
             .unwrap();
     }
     let mut owners = BTreeMap::<u64, Vec<usize>>::new();
@@ -221,7 +221,7 @@ fn metadata_must_fit_before_an_entry_can_share_a_chunk() {
     let mut batch = UnwrittenShardBatch::default();
     let histories = ObjectAccessHistories::new(1);
     batch
-        .push(
+        .pack_download(
             &allocator,
             &"first".to_owned(),
             &download(0, CHUNK_BYTES as usize - 3 * METADATA_PAGE_BYTES),
@@ -230,7 +230,7 @@ fn metadata_must_fit_before_an_entry_can_share_a_chunk() {
         .unwrap();
     // The remaining page fits payload, but not its metadata. Both must go in a new chunk.
     batch
-        .push(
+        .pack_download(
             &allocator,
             &"second".to_owned(),
             &download(0, 1),
@@ -315,7 +315,10 @@ async fn multi_chunk_eviction_preserves_an_in_progress_read_until_its_guards_dro
     );
     assert!(cache.get(&key, range(3, 4)).await.is_none());
     assert_eq!(
-        read.read(&cache.disk.file, range(3, 20)).await.unwrap().unwrap(),
+        read.read_verified_range(&cache.disk.file, range(3, 20))
+            .await
+            .unwrap()
+            .unwrap(),
         source.bytes().slice(..17)
     );
     drop(read);
@@ -1094,7 +1097,7 @@ fn chunk_write_owner_holds_shared_storage_until_released() {
     let mut batch = UnwrittenShardBatch::default();
     let histories = ObjectAccessHistories::new(1);
     batch
-        .push(
+        .pack_download(
             &allocator,
             &"a".to_owned(),
             &download(0, 10),
@@ -1102,7 +1105,7 @@ fn chunk_write_owner_holds_shared_storage_until_released() {
         )
         .unwrap();
     batch
-        .push(
+        .pack_download(
             &allocator,
             &"b".to_owned(),
             &download(0, 10),
@@ -1227,7 +1230,7 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
                 entry_metadata_regions: Vec::new(),
             },
         );
-        index.invalidate("object", &read);
+        index.remove_entry_matching_read("object", &read);
         assert_eq!(
             index.covering_range("object", range(0, 3)).is_some(),
             replacement != b"old"

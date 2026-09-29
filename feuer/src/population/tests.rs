@@ -22,7 +22,7 @@ fn queue_metrics_cover_admission_pressure_dequeue_and_cancellation() {
     assert_eq!(value(&registry, "feuer_disk_population_pending_bytes", &[]), 4.0);
     assert_eq!(value(&registry, "feuer_disk_population_queued_entries", &[]), 1.0);
     let mut active = receiver.try_recv().unwrap();
-    active.source.dequeue();
+    active.source.record_dequeue();
     assert_eq!(value(&registry, "feuer_disk_population_queued_entries", &[]), 0.0);
     assert_eq!(value(&registry, "feuer_disk_population_pending_bytes", &[]), 4.0);
     assert_eq!(
@@ -61,7 +61,7 @@ fn enqueue(population: &DiskPopulationQueue, memory: &MemoryCache, key: &str) {
     let id = memory
         .insert_and_record(key.clone(), download.clone(), download.downloaded_range())
         .unwrap();
-    population.schedule(key, download, id, accesses);
+    population.enqueue_if_capacity(key, download, id, accesses);
 }
 
 #[test]
@@ -108,7 +108,7 @@ async fn queued_eviction_and_readmission_cancel_old_writes_while_live_entries_ba
         Download::new(3, Bytes::from_static(b"abcd")).unwrap(),
     );
     drop(population);
-    DiskPopulationQueue::run(receiver, memory.clone(), disk.clone()).await;
+    DiskPopulationQueue::write_queued_batches(receiver, memory.clone(), disk.clone()).await;
     assert!(!disk.contains(&"evicted".to_owned(), range));
     assert!(!disk.contains(&"readmitted".to_owned(), range));
     // Both fit on disk only if the drained batch packs them into the same chunk.

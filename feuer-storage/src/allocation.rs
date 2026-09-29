@@ -29,7 +29,8 @@ struct DiskChunkAvailability {
 }
 
 impl DiskChunkAvailability {
-    fn take_chunk(&mut self) -> u64 {
+    /// Reserves the first free chunk by disk address and updates chunk accounting.
+    fn reserve_first_free_chunk(&mut self) -> u64 {
         let (start, count) = self.free_chunk_count_by_start.pop_first().unwrap();
         if count > 1 {
             self.free_chunk_count_by_start.insert(start + 1, count - 1);
@@ -121,7 +122,7 @@ impl DiskChunkAllocator {
         Some(
             (0..count)
                 .map(|_| {
-                    let chunk = free.take_chunk();
+                    let chunk = free.reserve_first_free_chunk();
                     DiskRegion {
                         range: chunk * CHUNK_BYTES..(chunk + 1) * CHUNK_BYTES,
                         state: Arc::new(ChunkReservation {
