@@ -78,21 +78,21 @@ impl ObjectCachedRanges {
     }
 
     /// Collects cached ranges contained by the incoming range and their payload bytes.
-    fn ranges_contained_by(&self, range: ByteRange) -> SupersededRanges {
-        let mut superseded = SupersededRanges::default();
+    fn ranges_contained_by(&self, range: ByteRange) -> ContainedCachedRanges {
+        let mut contained_ranges = ContainedCachedRanges::default();
         for (_, entry) in self.by_start.range(range.start()..range.end()) {
             if range.contains(entry.range) {
-                superseded.ranges.push(entry.range);
-                superseded.payload_bytes += entry.bytes.len() as u64;
+                contained_ranges.ranges.push(entry.range);
+                contained_ranges.payload_bytes += entry.bytes.len() as u64;
             }
         }
-        superseded
+        contained_ranges
     }
 }
 
-/// Existing entries fully covered by one larger download.
+/// Cached ranges fully contained in an incoming download, with their total payload bytes.
 #[derive(Default)]
-struct SupersededRanges {
+struct ContainedCachedRanges {
     ranges: Vec<ByteRange>,
     payload_bytes: u64,
 }
@@ -275,7 +275,7 @@ impl MemoryCacheShard {
         requested_range: Option<ByteRange>,
         allow_range_trim: bool,
     ) -> AdmissionProgress {
-        let superseded = match self.ranges.get(object_key) {
+        let contained_ranges = match self.ranges.get(object_key) {
             Some(entries) if entries.covering_range(range).is_some() => {
                 self.metrics.record_redundant();
                 if let Some(requested_range) = requested_range {
@@ -284,15 +284,15 @@ impl MemoryCacheShard {
                 return AdmissionProgress::Complete(None);
             }
             Some(entries) => entries.ranges_contained_by(range),
-            None => SupersededRanges::default(),
+            None => ContainedCachedRanges::default(),
         };
         let added_bytes = bytes.len() as u64;
-        let used_bytes_without_superseded = self.used_bytes - superseded.payload_bytes;
+        let used_bytes_without_contained_ranges = self.used_bytes - contained_ranges.payload_bytes;
         let max_existing_bytes = self.capacity.saturating_sub(added_bytes);
 
-        if used_bytes_without_superseded <= max_existing_bytes {
-            let removal = self.remove_superseded_ranges(object_key, &superseded.ranges);
-            debug_assert_eq!(removal.payload_bytes, superseded.payload_bytes);
+        if used_bytes_without_contained_ranges <= max_existing_bytes {
+            let removal = self.remove_contained_ranges(object_key, &contained_ranges.ranges);
+            debug_assert_eq!(removal.payload_bytes, contained_ranges.payload_bytes);
             let id = self.insert_downloaded_range(object_key.clone(), range, bytes.clone());
 
             if removal.entry_count != 0 {
@@ -397,13 +397,14 @@ impl MemoryCacheShard {
         self.next_entry_id
     }
 
-    /// Removes superseded ranges while preserving their object's access history for the replacement.
-    fn remove_superseded_ranges(&mut self, object_key: &ObjectKey, ranges: &[ByteRange]) -> RemovedCacheUsage {
+    /// Removes cached ranges already found fully contained in the incoming download,
+    /// preserving their object's access history for the replacement.
+    fn remove_contained_ranges(&mut self, object_key: &ObjectKey, ranges: &[ByteRange]) -> RemovedCacheUsage {
         let mut removal = RemovedCacheUsage::default();
         for &range in ranges {
             let bytes = self
                 .detach_entry(object_key, range, None, true)
-                .expect("the superseded entry was just found");
+                .expect("the contained cached range was just found");
             removal.payload_bytes += bytes;
             removal.entry_count += 1;
         }

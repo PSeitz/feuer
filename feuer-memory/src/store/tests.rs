@@ -33,7 +33,9 @@ fn disk_population_identity_expires_on_removal_replacement_and_readmission() {
     cache.insert(key.clone(), Download::new(9, Bytes::from_static(b"abcdef")).unwrap());
     assert!(
         cache
-            .with_current_entry(&key, range, replacement_id, || panic!("superseded admission"))
+            .with_current_entry(&key, range, replacement_id, || panic!(
+                "admission replaced by a containing download"
+            ))
             .is_none()
     );
 }
@@ -110,7 +112,7 @@ fn equal_cost_eviction_uses_entry_age_not_sample_order() {
 }
 
 #[test]
-fn reclaim_sampling_advances_past_superseded_ranges() {
+fn reclaim_sampling_advances_past_contained_ranges() {
     let cache = cache(4).with_reclaim_sample_size(1);
     let key = "object".to_owned();
     for (start, bytes) in [
@@ -129,7 +131,7 @@ fn reclaim_sampling_advances_past_superseded_ranges() {
         ));
         assert_eq!(shard.entry_count(), expected_entries);
     }
-    // The partial overlap is eligible; the two fully superseded entries were skipped.
+    // The partial overlap is eligible; the two ranges fully contained in the incoming download were skipped.
     assert!(matches!(
         shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, None, false),
         AdmissionProgress::Complete(Some(_))
