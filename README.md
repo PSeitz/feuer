@@ -1,5 +1,7 @@
 # Feuer
 
+Scared of burning your S3 budget? Feuer will take care of that.
+
 Feuer is a Rust cache for S3. It checks memory, then disk, and calls your async
 download function on a miss. Requests can cover any non-empty byte range without
 alignment requirements.
