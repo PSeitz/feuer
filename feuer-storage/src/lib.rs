@@ -21,6 +21,8 @@ mod range_cache;
 mod test_metrics;
 #[cfg(target_os = "linux")]
 mod uring;
+#[cfg(all(target_os = "linux", feature = "io-bench"))]
+pub mod io_bench;
 
 pub use disk_metrics::DiskMetrics;
 pub use error::{DataFileError, DataFileErrorKind, DataFileResult, IoOperation};
