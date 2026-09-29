@@ -37,12 +37,7 @@ struct DataFileState {
 /// Reads and writes have separate io_uring rings and worker threads, admitting
 /// up to 64 reads and 8 writes. Each queue schedules in arrival order without
 /// checking for conflicts. Submission order does not guarantee completion order.
-/// Each queue budgets 64 MiB of active I/O slices. Read destinations are
-/// allocated separately and are not bounded by that budget. Each queue has
-/// separate pools for idle aligned buffers: up to 128 MiB for buffers <=1 MiB,
-/// 256 MiB for buffers >1 MiB and <10 MiB, and 1024 MiB for buffers >=10 MiB.
-/// Buffers become available for same-sized reuse after the last result reference
-/// is dropped; these limits exclude active buffers and caller-owned results.
+/// Each queue budgets 64 MiB of active I/O slices. 
 ///
 /// # Caller-owned concurrency and cancellation
 ///
