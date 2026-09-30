@@ -235,6 +235,29 @@ async fn incrementally_recovers_shared_chunks_and_multi_chunk_entries() {
 }
 
 #[tokio::test]
+async fn recovery_advances_past_multi_chunk_payload_to_the_next_allocation() {
+    let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
+    let large = download(0, 2 * CHUNK_BYTES as usize + 17);
+    let small = download(0, 123);
+    cache.insert("large".to_owned(), large.clone()).await.unwrap();
+    cache.insert("small".to_owned(), small.clone()).await.unwrap();
+    cache.disk.save_recovery_ends().unwrap();
+    drop(cache);
+
+    let cache = open_paused(directory.path(), 4 * CHUNK_BYTES).await;
+    let end = cache.disk.shards[0].written_end.load(Ordering::Relaxed);
+    let next = cache.disk.recover_chunk(0, 0, end).await.unwrap();
+    assert_eq!(next, 3 * CHUNK_BYTES);
+    assert_eq!(cache.disk.recover_chunk(0, next, end).await, Some(end));
+    for (key, source) in [("large", large), ("small", small)] {
+        assert_eq!(
+            cache.get(&key.to_owned(), source.downloaded_range()).await.unwrap(),
+            source.bytes()
+        );
+    }
+}
+
+#[tokio::test]
 async fn packed_records_cross_pages_and_corruption_rejects_the_shared_prefix() {
     for corrupt in [false, true] {
         let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;

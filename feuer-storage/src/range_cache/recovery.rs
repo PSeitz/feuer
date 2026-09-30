@@ -214,12 +214,16 @@ impl DiskRangeCacheState {
                         scan_chunks = (end - start) / CHUNK_BYTES,
                         "starting disk shard recovery scan"
                     );
-                    for address in (start..end).step_by(CHUNK_BYTES as usize) {
+                    let mut address = start;
+                    while address < end {
                         {
                             let Some(disk) = weak.upgrade() else { return };
-                            disk.recover_chunk(index, address, end).await;
+                            address = disk
+                                .recover_chunk(index, address, end)
+                                .await
+                                .unwrap_or(address + CHUNK_BYTES);
                         }
-                        // Do not retain the cache between chunks, or monopolize an executor on skipped chunks.
+                        // Do not retain the cache between attempts, or monopolize an executor on skipped chunks.
                         tokio::task::yield_now().await;
                     }
                     let Some(disk) = weak.upgrade() else { return };
@@ -265,7 +269,8 @@ impl DiskRangeCacheState {
         });
     }
 
-    async fn recover_chunk(&self, shard_index: usize, address: u64, scan_end: u64) -> Option<()> {
+    /// Returns the allocation's end so the scan skips its continuation chunks.
+    async fn recover_chunk(&self, shard_index: usize, address: u64, scan_end: u64) -> Option<u64> {
         let shard = &self.shards[shard_index];
         let mut region = shard.allocator.reserve_for_recovery(address / CHUNK_BYTES, 1)?;
         let header = self.read_chunk_header(&region).await?;
@@ -322,7 +327,7 @@ impl DiskRangeCacheState {
             // them, so this scan cannot resurrect the copy after its final owner releases it.
             region.mark_recovered();
         }
-        Some(())
+        Some(region.range().end)
     }
 
     async fn read_chunk_header(&self, chunk: &DiskRegion) -> Option<ChunkHeader> {
