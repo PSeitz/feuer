@@ -96,9 +96,7 @@ are still checked before publishing bytes copied outside the memory shard lock.
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Trimming event age limit in requests across all keys. |
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Trimming events retained per key. |
 | `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed request cost in equivalent bytes. `0` scores bytes only. |
-| `FEUER_SMALL_IO_BUFFER_POOL_BYTES` | `128MiB` | Idle buffer budget per read queue, allocations ≤ 1 MiB. |
-| `FEUER_MEDIUM_IO_BUFFER_POOL_BYTES` | `256MiB` | Idle buffer budget per read queue, allocations > 1 MiB and < 10 MiB. |
-| `FEUER_LARGE_IO_BUFFER_POOL_BYTES` | `1GiB` | Idle buffer budget per read queue, allocations ≥ 10 MiB. |
+| `FEUER_IO_BUFFER_POOL_BYTES` | `1408MiB` | Shared idle buffer budget per read queue. `0` disables retention. |
 
 Values accept integers or size suffixes such as `8KiB`, `1.5 GiB`, and `5GB`.
 Binary suffixes use powers of 1024 and decimal suffixes use powers of 1000.
@@ -109,10 +107,15 @@ The first four settings require positive values. The rest allow zero.
 `.with_reclaim_sample_size(n)` overrides it for that cache. The other settings are
 process-wide, read once on first use, and panic on invalid values.
 
-Read and write queues each have their own buffer pools, so total idle retention
-can reach twice the sum of the three budgets. Active buffers and caller-owned
-results use additional memory. Set a budget to zero to disable idle retention
-for that size class.
+Each read queue has one idle buffer pool with fixed allocation sizes of 32 KiB,
+256 KiB, 4 MiB, 16 MiB, 32 MiB, and 64 MiB. Aligned read lengths round up to the
+smallest fitting size; callers receive only the requested bytes. All sizes share
+the budget, charged by allocation capacity. Larger buffers are allocated at the
+required size and freed rather than pooled. Writes do not retain idle buffers.
+Active buffers and caller-owned results use additional memory.
+
+`FEUER_IO_BUFFER_POOL_BYTES` replaces the former small/medium/large settings;
+the default preserves their combined budget. The old settings are no longer read.
 
 ### Memory benchmark only
 

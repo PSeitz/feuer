@@ -144,11 +144,12 @@ Use `0.50` or `0.99` for p50 or p99. Percentiles are estimated from the buckets.
 
 ## I/O buffer pools
 
-Each read queue has three pools for idle aligned allocations: `small`
-(≤1 MiB), `medium` (>1 MiB and <10 MiB), and `large` (≥10 MiB).
+Each read queue has one pool with fixed allocation sizes of 32 KiB, 256 KiB,
+4 MiB, 16 MiB, 32 MiB, and 64 MiB sharing one idle-byte budget. Accounting uses
+allocation capacity, not requested length. Larger allocations are not pooled.
 Writes reuse aligned input slices or allocate unpooled scratch buffers.
-All metrics below have a `pool` (`small`, `medium`, `large`) label, with no
-`operation` label.
+The metrics below have no `pool` or `operation` label. The former
+`pool=small|medium|large` labels have been removed; update dashboard filters.
 
 | Metric | Type | Meaning |
 |---|---|---|
@@ -156,25 +157,26 @@ All metrics below have a `pool` (`small`, `medium`, `large`) label, with no
 | `feuer_io_buffer_pool_capacity_bytes` | Gauge | Configured idle-byte limit of live pools, including environment overrides |
 | `feuer_io_buffer_pool_returns_total` | Counter | Released buffers with `outcome`: `returned` (kept in the pool for reuse) or `dropped` (freed due to insufficient idle-byte capacity) |
 
-**Utilization (%) per pool** — retained idle bytes as a percentage of capacity:
+**Utilization (%)** — retained idle bytes as a percentage of capacity:
 
 ```promql
-100 * sum by (pool) (feuer_io_buffer_pool_idle_bytes)
-  / sum by (pool) (feuer_io_buffer_pool_capacity_bytes)
+100 * sum(feuer_io_buffer_pool_idle_bytes)
+  / sum(feuer_io_buffer_pool_capacity_bytes)
 ```
 
-**Dropped (%) per pool over the last 5 minutes** — counts released buffers, not bytes:
+**Dropped (%) over the last 5 minutes** — counts released buffers, not bytes:
 
 ```promql
-100 * sum by (pool) (rate(feuer_io_buffer_pool_returns_total{outcome="dropped"}[5m]))
-  / sum by (pool) (rate(feuer_io_buffer_pool_returns_total[5m]))
+100 * sum(rate(feuer_io_buffer_pool_returns_total{outcome="dropped"}[5m]))
+  / sum(rate(feuer_io_buffer_pool_returns_total[5m]))
 ```
 
 Utilization is undefined for zero capacity. Dropped percentage is undefined when
 no buffers return during the window.
 
 Buffers return only after their last owner releases them. A zero-capacity pool
-frees all returned buffers (100%). Shutdown removes the pool's gauge
+frees all returned buffers (100%). Allocations above 64 MiB bypass the pool and
+its return counters. Shutdown removes the pool's gauge
 contributions. Neither freeing idle buffers at shutdown nor freeing results
 that outlive the pool counts as a return. Gauges sum across queues sharing a
 registry. The direct-read check during file opening also uses the read pool.

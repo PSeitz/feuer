@@ -3,7 +3,7 @@
 
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     fs::File,
     io,
     ops::Range,
@@ -35,17 +35,20 @@ const MAX_IN_FLIGHT_READS: usize = 64;
 // throughput, but raised write p99 from 4.6 to 47 ms and worsened small-read latency.
 // See benchmarks/ssd/uring-20260928/REPORT.md.
 const MAX_IN_FLIGHT_WRITES: usize = 8;
-// Read-queue idle allocations, separate from active I/O and caller-owned results.
-// Read once on first use; zero disables retention for that size class.
-static IDLE_IO_BUFFER_CAPACITIES: LazyLock<[usize; 3]> = LazyLock::new(|| {
-    [
-        ("FEUER_SMALL_IO_BUFFER_POOL_BYTES", 128 * 1024 * 1024),
-        ("FEUER_MEDIUM_IO_BUFFER_POOL_BYTES", 256 * 1024 * 1024),
-        ("FEUER_LARGE_IO_BUFFER_POOL_BYTES", 1024 * 1024 * 1024),
-    ]
-    .map(|(name, default)| {
-        feuer_types::config::read_env_number(name, default, 0).unwrap_or_else(|error| panic!("{error}"))
-    })
+// Fixed allocation capacities. Larger reads use exact-size, unpooled buffers.
+const IO_BUFFER_SIZES: [usize; 6] = [
+    32 * 1024,
+    256 * 1024,
+    4 * 1024 * 1024,
+    16 * 1024 * 1024,
+    32 * 1024 * 1024,
+    64 * 1024 * 1024,
+];
+// Shared read-queue idle budget, separate from active I/O and caller-owned results.
+// Read once on first use; zero disables retention.
+static IDLE_IO_BUFFER_CAPACITY: LazyLock<usize> = LazyLock::new(|| {
+    feuer_types::config::read_env_number("FEUER_IO_BUFFER_POOL_BYTES", 1408 * 1024 * 1024, 0)
+        .unwrap_or_else(|error| panic!("{error}"))
 });
 
 #[cfg(test)]
@@ -70,7 +73,7 @@ struct IoQueueResources {
     // Limit covering preparing, queued, and active requests.
     request_slots: Arc<Semaphore>,
     // Writes retain input slices or use unpooled scratch buffers.
-    idle_buffers: Option<[Arc<Mutex<IdleIoBuffers>>; 3]>,
+    idle_buffers: Option<Arc<Mutex<IdleIoBuffers>>>,
 }
 
 impl IoQueueResources {
@@ -78,25 +81,16 @@ impl IoQueueResources {
         Self {
             request_slots: Arc::new(Semaphore::new(max_in_flight)),
             idle_buffers: (operation == IoOperation::Read).then(|| {
-                std::array::from_fn(|pool_index| {
-                    Arc::new(Mutex::new(IdleIoBuffers::new(
-                        IDLE_IO_BUFFER_CAPACITIES[pool_index],
-                        metrics.read_buffer_pools[pool_index].clone(),
-                    )))
-                })
+                Arc::new(Mutex::new(IdleIoBuffers::new(
+                    *IDLE_IO_BUFFER_CAPACITY,
+                    metrics.read_buffer_pool.clone(),
+                )))
             }),
         }
     }
 
-    fn buffer_pool(&self, length: usize) -> &Arc<Mutex<IdleIoBuffers>> {
-        let pool_index = if length <= MAX_IO_CHUNK_BYTES {
-            0
-        } else if length < 10 * 1024 * 1024 {
-            1
-        } else {
-            2
-        };
-        &self.idle_buffers.as_ref().expect("only reads use buffer pools")[pool_index]
+    fn buffer_pool(&self) -> &Arc<Mutex<IdleIoBuffers>> {
+        self.idle_buffers.as_ref().expect("only reads use buffer pools")
     }
 }
 
@@ -161,7 +155,7 @@ impl IoQueueHandle {
         length: usize,
         read_guards: Vec<DiskRegionReadGuard>,
     ) -> io::Result<AlignedIoBuffer> {
-        AlignedIoBuffer::new(length, read_guards, self.resources.buffer_pool(length))
+        AlignedIoBuffer::new(length, read_guards, self.resources.buffer_pool())
     }
 
     pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
@@ -275,9 +269,9 @@ fn queue_stopped_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "io_uring queue stopped")
 }
 
-/// Idle aligned buffers indexed by allocation size, with a separate byte budget per pool.
+/// Idle aligned buffers in fixed-size buckets sharing one byte budget.
 struct IdleIoBuffers {
-    by_length: BTreeMap<usize, Vec<AlignedIoBuffer>>,
+    by_size: [Vec<AlignedIoBuffer>; IO_BUFFER_SIZES.len()],
     bytes: usize,
     capacity: usize,
     metrics: Arc<IoBufferPoolMetrics>,
@@ -287,7 +281,7 @@ impl IdleIoBuffers {
     fn new(capacity: usize, metrics: Arc<IoBufferPoolMetrics>) -> Self {
         metrics.capacity_bytes.increase(capacity as u64);
         Self {
-            by_length: BTreeMap::new(),
+            by_size: std::array::from_fn(|_| Vec::new()),
             bytes: 0,
             capacity,
             metrics,
@@ -305,8 +299,10 @@ impl Drop for IdleIoBuffers {
 pub(crate) struct AlignedIoBuffer {
     // Owned, aligned allocation whose address stays stable while the kernel uses it.
     ptr: NonNull<u8>,
-    // Allocation size/alignment for slice bounds and matching deallocation.
+    // Allocation capacity/alignment for matching deallocation and idle-byte accounting.
     layout: Layout,
+    // Requested bytes; spare allocation capacity must not be read or exposed.
+    length: usize,
     // Whole-entry reads retain disk ownership even if the waiting caller is canceled.
     read_guards: Vec<DiskRegionReadGuard>,
     // Results do not keep the read pool alive. Idle buffers and write scratch have an empty Weak.
@@ -319,25 +315,28 @@ impl AlignedIoBuffer {
         read_guards: Vec<DiskRegionReadGuard>,
         idle_buffers: &Arc<Mutex<IdleIoBuffers>>,
     ) -> io::Result<Self> {
-        let reused_buffer = {
+        assert!(length > 0);
+        let bucket = IO_BUFFER_SIZES.iter().position(|&size| length <= size);
+        let capacity = bucket.map_or(length, |index| IO_BUFFER_SIZES[index]);
+        let reused_buffer = bucket.and_then(|index| {
             let mut idle = idle_buffers.lock().unwrap();
-            let buffer = idle.by_length.get_mut(&length).and_then(Vec::pop);
+            let buffer = idle.by_size[index].pop();
             if buffer.is_some() {
-                idle.bytes -= length;
-                idle.metrics.idle_bytes.decrease(length as u64);
-                if idle.by_length[&length].is_empty() {
-                    idle.by_length.remove(&length);
-                }
+                idle.bytes -= capacity;
+                idle.metrics.idle_bytes.decrease(capacity as u64);
             }
             buffer
-        };
+        });
         // Reused memory is initialized but not zeroed; reads overwrite it before exposure.
         let mut buffer = match reused_buffer {
             Some(buffer) => buffer,
-            None => Self::allocate_zeroed(length)?,
+            None => Self::allocate_zeroed(capacity)?,
         };
+        buffer.length = length;
         buffer.read_guards = read_guards;
-        buffer.idle_buffers = Arc::downgrade(idle_buffers);
+        if bucket.is_some() {
+            buffer.idle_buffers = Arc::downgrade(idle_buffers);
+        }
         Ok(buffer)
     }
 
@@ -356,6 +355,7 @@ impl AlignedIoBuffer {
         Ok(Self {
             ptr,
             layout,
+            length,
             read_guards: Vec::new(),
             idle_buffers: Weak::new(),
         })
@@ -370,7 +370,7 @@ impl AlignedIoBuffer {
     fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: this allocation is initialized and exclusively accessed by its owner.
         // Called only before submission or after the corresponding CQE has been consumed.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.layout.size()) }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.length) }
     }
 }
 
@@ -378,7 +378,7 @@ impl AsRef<[u8]> for AlignedIoBuffer {
     fn as_ref(&self) -> &[u8] {
         // SAFETY: the allocation is initialized and remains owned by self.
         // Called only after I/O completes, when the kernel no longer accesses it.
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.layout.size()) }
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.length) }
     }
 }
 
@@ -395,9 +395,11 @@ impl Drop for AlignedIoBuffer {
             if length <= idle.capacity - idle.bytes {
                 // Transfer allocation ownership to the pool. Its empty Weak ensures that
                 // destroying the pool frees this allocation instead of returning it again.
-                idle.by_length.entry(length).or_default().push(Self {
+                let index = IO_BUFFER_SIZES.iter().position(|&size| size == length).unwrap();
+                idle.by_size[index].push(Self {
                     ptr: self.ptr,
                     layout: self.layout,
+                    length: self.length,
                     read_guards: Vec::new(),
                     idle_buffers: Weak::new(),
                 });
@@ -531,7 +533,7 @@ impl IoRequest {
         let length = destination.len();
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         match &buffers {
-            IoBuffers::Read(buffer) => assert!(destination.end <= buffer.layout.size()),
+            IoBuffers::Read(buffer) => assert!(destination.end <= buffer.length),
             IoBuffers::Write { bytes, .. } => assert_eq!(destination, 0..bytes.iter().map(Bytes::len).sum()),
         }
         assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);
