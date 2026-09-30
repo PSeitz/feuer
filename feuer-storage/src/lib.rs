@@ -2,7 +2,7 @@
 //!
 //! A fixed-capacity O_DIRECT file with a bounded io_uring driver, plus an experimental
 //! disk range cache with connected allocation, entry metadata writes and integrity-checked reads.
-//! Used by public tiered lookup and population, with incremental best-effort restart recovery.
+//! Used by public tiered lookup and disk writes, with incremental best-effort restart recovery.
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("feuer-storage requires Linux with io_uring and O_DIRECT support");

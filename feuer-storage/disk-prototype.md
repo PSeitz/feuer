@@ -1,10 +1,10 @@
 # Disk range-cache prototype
 
-Experimental `DiskRangeCache`, connected to public tiered lookup and bounded background population.
+Experimental `DiskRangeCache`, connected to public tiered lookup and bounded background disk writes.
 [tiered-plan.md](../tiered-plan.md) remains authoritative.
 
 **Open starts background recovery without waiting for the scan.** Recovered entries become readable
-incrementally while ordinary reads and population continue.
+incrementally while ordinary reads and writes continue.
 
 ## Layout and ownership
 
@@ -55,7 +55,7 @@ Returned bytes retain no disk ownership. A checksum mismatch invalidates the ind
 expected checksum still matches the failed read's expected checksum. This can discard a newer identical copy.
 
 Disk and memory share access history and retention scoring through `feuer-types::retention`.
-Successful accesses are recorded by tier orchestration, not raw reads or population.
+Successful accesses are recorded by tier orchestration, not raw reads or writes.
 Eviction samples live entries and removes the lowest recent retrieval value per payload byte.
 Metadata, alignment, and unused chunk space count against capacity but not the score.
 
@@ -76,12 +76,12 @@ Whole-chunk reuse replaces it.
 
 `recovery-ends` is a small checksummed file containing the layout, cache generation, and one scan end
 per shard. Growing ends are checkpointed by atomic replacement every ten seconds; stale ends may omit
-recent writes. Recovery snapshots those ends at open and stops there, regardless of new population.
+recent writes. Recovery snapshots those ends at open and stops there, regardless of new writes.
 Missing, invalid, or incompatible inventory resets the cache generation and logs a cold start. The reset
 is synchronized before serving; old-generation chunks cannot reappear on later restarts. No payload
 synchronization or final checkpoint on close is promised.
 
-The allocator records chunks claimed during recovery, even if their owners later release them. Population
+The allocator records chunks claimed during recovery, even if their owners later release them. New writes
 may claim unscanned chunks immediately. Recovery reserves only chunks being inspected, validates their
 metadata chains, generation, batch IDs, mappings, and ownership, then publishes without displacing indexed
 ranges. Shared-chunk entries retain shared ownership; multi-chunk entries reserve every chunk exclusively.

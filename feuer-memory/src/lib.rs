@@ -2,7 +2,7 @@
 //!
 //! This is one sharded, soft-capacity cache of downloaded ranges keyed by
 //! fully compared immutable-object identities. Covering lookups return exactly
-//! the requested bytes, access evidence is separate from population, and
+//! the requested bytes, access evidence is separate from insertion, and
 //! shard-local retention and range trimming remain private policy.
 
 mod metrics;

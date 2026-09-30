@@ -2,14 +2,14 @@
 //!
 //! The current public boundary provides exact requested byte ranges, opaque
 //! object identities, a soft-capacity memory tier, integrity-checked disk hits,
-//! bounded best-effort disk population, and per-call asynchronous download callbacks.
+//! bounded best-effort disk writes, and per-call asynchronous download callbacks.
 //! Opening requires Linux direct I/O and io_uring. Disk recovery runs incrementally in the background.
 
 mod cache;
 mod config;
-mod metrics;
 #[cfg(target_os = "linux")]
-mod population;
+mod disk_write;
+mod metrics;
 #[cfg(test)]
 #[path = "../../test_support/metrics.rs"]
 mod test_metrics;

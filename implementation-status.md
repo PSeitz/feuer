@@ -8,12 +8,12 @@ contract. This document records what exists and what remains to build.
 The public cache now connects **memory → integrity-checked disk → callback**. The fallible asynchronous
 `TieredMemoryDiskCache::open` opens the configured directory using Linux direct I/O and io_uring, with no
 silent fallback. A bounded worker batches retained downloads into the experimental `DiskRangeCache`.
-Reopening starts bounded background recovery, publishing entries incrementally alongside reads and population.
+Reopening starts bounded background recovery, publishing entries incrementally alongside reads and writes.
 The recovery additions cross-compile for Linux; real io_uring execution and device-crash testing remain outstanding.
 
 | Area | Implemented | Remaining |
 | --- | --- | --- |
-| `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, bounded batched population, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
+| `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, bounded batched disk writes, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range, internal shared access evidence and value comparison | None for the current public type boundary |
 | `feuer-memory` | Sharded covering-range index, bounded exact access evidence shared with disk, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
 | `feuer-storage` | Fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, experimental sharded `DiskRangeCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, guarded whole-chunk reuse and bounded value-aware entry eviction | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
@@ -21,7 +21,7 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 
 ## Implemented behavior
 
-### Public lookup and memory population
+### Public lookup and memory insertion
 
 - Lookup checks memory, then integrity-checked disk, before invoking the per-call callback. Disk hits promote
   only the requested bytes to memory without scheduling another write. Read uncertainty invalidates disk
@@ -29,9 +29,9 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 - Misses invoke callbacks independently, without internal coordination or source retries. Each callback returns
   one `Download { downloaded_start, bytes }`, whose derived range must cover the request.
 - Successful lookups return exactly the requested bytes in one `Bytes`, which may share a larger allocation.
-- Population discards a download already contained by cached data. Partially overlapping downloads may remain
+- Insertion discards a download already contained by cached data. Partially overlapping downloads may remain
   independent. Broader downloads replace contained ranges.
-- Each successful lookup records its exact requested range once. Population and access are distinct policy
+- Each successful lookup records its exact requested range once. Insertion and access are distinct policy
   events, applied atomically under the shard lock for callback results.
 - Capacity is a soft payload-byte target divided among shards. An oversized download empties its shard and
   remains admitted even when retained payload exceeds the target. Caller-held results survive eviction and
@@ -44,7 +44,7 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
   Separately, range trimming retains at most 64 repeated events per object by default
   (`FEUER_MAX_ACCESS_EVENTS_PER_KEY`), expiring after 262,144 same-shard accesses
   (`FEUER_MAX_ACCESS_AGE_ACCESSES`). These limits do not truncate scoring counters.
-  Evidence survives memory eviction while disk entries or active population retain it. Releasing the final
+  Evidence survives memory eviction while disk entries or active disk writes retain it. Releasing the final
   owner removes the weak registry record. Histories are volatile, not persisted. Wall-clock aging is not
   implemented.
 - Decayed counts weight the sum of fixed-cost-equivalent bytes (default 10,000,000,
@@ -86,7 +86,7 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
 - Raw capacity must be positive, 4-KiB-aligned, and representable as a Linux signed file offset. Opening
   requires usable io_uring and compatible `STATX_DIOALIGN`. There is no backend or buffered fallback.
 
-This is a raw I/O layer, not a disk cache or population queue. Disk storage and its CI target Linux only.
+This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and its CI target Linux only.
 
 ## Validation and benchmarks
 
@@ -141,7 +141,7 @@ remain indexed and may keep a partially empty chunk unavailable. No eviction met
 Each shard batch is limited to 64 sampled decisions and 4,096 removed region references. Guarded or active
 storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
 disk cache to a memory cache's evidence. Public tier orchestration now uses it.
-Recovery scans up to saved per-shard ends and publishes validated entries incrementally. Population can
+Recovery scans up to saved per-shard ends and publishes validated entries incrementally. New writes can
 claim unscanned chunks; foreground reads take priority over scan I/O. Layout changes start a new cache
 generation and log a cold reset. See the prototype document for checkpoint and validation details.
 No comparative layout/performance claim is established.
@@ -168,7 +168,7 @@ checks passed for the changed files.
 - Active writes retain reservations through completion despite cancellation. Publication checks the original
   memory-entry identity under the memory shard lock, within the disk index lock. No memory operation takes
   a disk lock. Stale writes are discarded, and disk containment/allocation policy can still skip entries.
-- Failed writes are logged and remain invisible. Shared evidence survives queued and active population.
+- Failed writes are logged and remain invisible. Shared evidence survives queued and active disk writes.
 - Disk hits, memory hits, and successful callbacks each record exactly one request. Callback results already
   covered by disk are discarded without memory admission or another write.
 
@@ -183,9 +183,9 @@ The isolated validation checkout is `/mnt/local-ssd/feuer-tiered.iB2JNA`.
 ## Implemented: cache metrics
 
 - `open_with_metrics` wires a `mixtrics` registry through public lookups, callbacks, both cache tiers and
-  disk population. `open` remains no-op. Labels contain only fixed operation/outcome/source values.
+  disk writes. `open` remains no-op. Labels contain only fixed operation/outcome/source values.
 - Added lookup latency/outcomes and served bytes, callback counts/latency/download bytes, disk read-error
-  and integrity outcomes, population admission/skip/terminal outcomes, queue pressure/wait time,
+  and integrity outcomes, disk-write admission/skip/terminal outcomes, queue pressure/wait time,
   chunk capacity states, indexed payload/entries, pressure eviction and byte-weighted batch packing.
 - Queue and capacity gauges follow ownership, including canceled work, detached writes, read guards,
   write failure and cache shutdown. See [`metrics.md`](metrics.md) for exact accounting semantics.

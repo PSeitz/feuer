@@ -1,7 +1,7 @@
 use std::{fmt, future::Future, sync::Arc, time::Instant};
 
 #[cfg(target_os = "linux")]
-use crate::population::DiskPopulationQueue;
+use crate::disk_write::DiskWriteQueue;
 use bytes::Bytes;
 use feuer_memory::MemoryCache;
 #[cfg(target_os = "linux")]
@@ -26,14 +26,14 @@ struct CacheState {
     #[cfg(target_os = "linux")]
     disk: DiskRangeCache,
     #[cfg(target_os = "linux")]
-    population: DiskPopulationQueue,
+    disk_write_queue: DiskWriteQueue,
 }
 
 /// A cloneable handle to one Feuer cache.
 ///
 /// Lookups check memory, then integrity-checked disk, then the per-call callback.
-/// Disk population is bounded and best-effort. Opening requires Linux direct I/O
-/// and io_uring. Background recovery adds disk entries incrementally without gating lookups or population.
+/// Disk writes are bounded and best-effort. Opening requires Linux direct I/O
+/// and io_uring. Background recovery adds disk entries incrementally without gating lookups or writes.
 #[derive(Clone)]
 pub struct TieredMemoryDiskCache {
     state: Arc<CacheState>,
@@ -52,7 +52,7 @@ impl TieredMemoryDiskCache {
     /// Opens an exclusively locked disk cache and starts its best-effort writer.
     /// Disk capacity must be a positive multiple of 1 MiB. Requires a Tokio runtime,
     /// usable io_uring and direct I/O; no memory-only or buffered fallback is used.
-    /// Existing disk entries recover incrementally in the background while lookups and population proceed.
+    /// Existing disk entries recover incrementally in the background while lookups and writes proceed.
     #[cfg(target_os = "linux")]
     pub async fn open(config: CacheConfig) -> Result<Self, DiskRangeCacheError> {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
@@ -77,14 +77,14 @@ impl TieredMemoryDiskCache {
             config.reclaim_sample_size(),
         )
         .await?;
-        let population = DiskPopulationQueue::with_metrics(memory.clone(), disk.clone(), registry);
+        let disk_write_queue = DiskWriteQueue::with_metrics(memory.clone(), disk.clone(), registry);
         Ok(Self {
             state: Arc::new(CacheState {
                 config,
                 memory,
                 metrics: LookupMetrics::new(registry),
                 disk,
-                population,
+                disk_write_queue,
             }),
         })
     }
@@ -104,7 +104,7 @@ impl TieredMemoryDiskCache {
     /// soft, so callback results are not rejected solely for exceeding it.
     ///
     /// Every success records `requested_range` exactly once. Downloaded-range
-    /// population is separate and creates no access.
+    /// insertion is separate and creates no access.
     /// The returned [`Bytes`] contains exactly the request and may share the
     /// download's allocation.
     pub async fn get_or_fetch<F, Fut, E>(
@@ -124,7 +124,7 @@ impl TieredMemoryDiskCache {
             return Ok(bytes);
         }
 
-        // Keep evidence alive across disk reads, callback execution and population,
+        // Keep evidence alive across disk reads, callback execution and cache insertion,
         // including concurrent eviction of the last entry for this object.
         let accesses = self.state.memory.access_histories().for_key(&object_key);
         #[cfg(target_os = "linux")]
@@ -157,7 +157,7 @@ impl TieredMemoryDiskCache {
         let requested_bytes = requested_slice(download.bytes(), downloaded_range, requested_range);
         #[cfg(target_os = "linux")]
         if self.state.disk.contains(&object_key, downloaded_range) {
-            self.state.population.record_already_covered();
+            self.state.disk_write_queue.record_already_covered();
             self.state.memory.record_access(&object_key, requested_range);
             metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
             return Ok(requested_bytes);
@@ -169,10 +169,10 @@ impl TieredMemoryDiskCache {
         #[cfg(target_os = "linux")]
         if let Some(entry_id) = entry_id {
             self.state
-                .population
+                .disk_write_queue
                 .enqueue_if_capacity(object_key, download, entry_id, accesses);
         } else {
-            self.state.population.record_redundant_admission();
+            self.state.disk_write_queue.record_redundant_admission();
         }
         #[cfg(not(target_os = "linux"))]
         let _ = (entry_id, accesses);
@@ -223,7 +223,7 @@ mod tests {
     use crate::test_metrics::{registry, value};
 
     #[tokio::test]
-    async fn public_registry_observes_memory_disk_callbacks_and_population() {
+    async fn public_registry_observes_memory_disk_callbacks_and_writes() {
         let directory = tempfile::tempdir().unwrap();
         let (registry, backend) = registry();
         let cache = TieredMemoryDiskCache::open_with_metrics(
@@ -298,10 +298,10 @@ mod tests {
             1.0
         );
         assert_eq!(
-            value(&registry, "feuer_disk_population_total", &[("outcome", "published")]),
+            value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),
             1.0
         );
-        // Closing the cache also releases the detached population worker's gauges.
+        // Closing the cache also releases the detached disk-write worker's gauges.
         drop(cache);
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while value(&registry, "feuer_disk_chunks", &[("state", "free")]) != 0.0 {
@@ -310,8 +310,8 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(value(&registry, "feuer_disk_population_pending_bytes", &[]), 0.0);
-        assert_eq!(value(&registry, "feuer_disk_population_queued_entries", &[]), 0.0);
+        assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 0.0);
+        assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);
         assert_eq!(value(&registry, "feuer_memory_payload_bytes", &[]), 0.0);
         assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
     }
@@ -335,7 +335,7 @@ mod tests {
             }
         })
         .await
-        .expect("disk population did not finish");
+        .expect("disk write did not finish");
     }
 
     #[tokio::test]
@@ -375,13 +375,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callback_covered_by_a_racing_disk_write_is_not_repopulated() {
+    async fn callback_covered_by_a_racing_disk_write_is_not_inserted_again() {
         let (_directory, cache) = cache(32).await;
         let key = ObjectKey::from("object");
         let history = cache.state.memory.access_histories().for_key(&key);
         let bytes = cache
             .get_or_fetch(key.clone(), range(2, 4), || async {
-                // Simulate another population finishing while this callback is pending.
+                // Simulate another disk write finishing while this callback is pending.
                 cache
                     .state
                     .disk
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callback_cancellation_does_not_populate_or_record_an_access() {
+    async fn callback_cancellation_does_not_insert_or_record_an_access() {
         let (_directory, cache) = cache(32).await;
         let key = ObjectKey::from("canceled");
         let history = cache.state.memory.access_histories().for_key(&key);
@@ -508,7 +508,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callback_errors_are_returned_without_retry_or_population() {
+    async fn callback_errors_are_returned_without_retry_or_insertion() {
         let (_directory, cache) = cache(8).await;
         let key = ObjectKey::from("object");
         let callback_count = Arc::new(AtomicU64::new(0));

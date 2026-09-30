@@ -11,7 +11,7 @@ pub(crate) enum DiskLookupOutcome {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum PopulationOutcome {
+pub(crate) enum DiskWriteOutcome {
     Published,
     AlreadyCovered,
     NoCapacity,
@@ -20,15 +20,16 @@ pub(crate) enum PopulationOutcome {
     Canceled,
 }
 
-/// Disk range lookup, immutable population and whole-chunk capacity metrics.
+/// Disk range lookup, immutable writes and whole-chunk capacity metrics.
 /// All labels have fixed values; gauges aggregate caches sharing a registry.
 #[derive(Debug)]
 pub struct DiskMetrics {
     lookup_count: [BoxedCounter; 4],
     hit_duration: BoxedHistogram,
-    population: [BoxedCounter; 6],
+    write_entries: [BoxedCounter; 6],
     eviction_triggering_insertions: BoxedCounter,
     pub(crate) written_entries: BoxedCounter,
+    pub(crate) recovered_entries: BoxedCounter,
     pub(crate) free_chunks: BoxedGauge,
     pub(crate) allocated_chunks: BoxedGauge,
     pub(crate) payload_bytes: BoxedGauge,
@@ -51,8 +52,8 @@ impl DiskMetrics {
             &["outcome"],
             Buckets::exponential(0.000_001, 2.0, 25),
         );
-        let population = registry.register_counter_vec(
-            "feuer_disk_population_total".into(),
+        let write_entries = registry.register_counter_vec(
+            "feuer_disk_write_entries_total".into(),
             "Terminal outcomes of entries submitted to disk batch insertion".into(),
             &["outcome"],
         );
@@ -62,8 +63,13 @@ impl DiskMetrics {
             &[],
         );
         let written = registry.register_counter_vec(
-            "feuer_disk_population_written_entries_total".into(),
+            "feuer_disk_written_entries_total".into(),
             "Entries in successfully written shard batches, whether published or discarded".into(),
+            &[],
+        );
+        let recovered = registry.register_counter_vec(
+            "feuer_disk_recovery_entries_total".into(),
+            "Entries added to the disk index by recovery; payload checksums are verified on read".into(),
             &[],
         );
         let chunks = registry.register_gauge_vec(
@@ -87,7 +93,7 @@ impl DiskMetrics {
         Arc::new(Self {
             lookup_count: outcomes.map(|label| lookups.counter(&[label.into()])),
             hit_duration: duration.histogram(&["hit".into()]),
-            population: [
+            write_entries: [
                 "published",
                 "already_covered",
                 "no_capacity",
@@ -95,9 +101,10 @@ impl DiskMetrics {
                 "failed",
                 "canceled",
             ]
-            .map(|label| population.counter(&[label.into()])),
+            .map(|label| write_entries.counter(&[label.into()])),
             eviction_triggering_insertions: eviction_triggering_insertions.counter(&[]),
             written_entries: written.counter(&[]),
+            recovered_entries: recovered.counter(&[]),
             free_chunks: chunks.gauge(&["free".into()]),
             allocated_chunks: chunks.gauge(&["allocated".into()]),
             payload_bytes: payload.gauge(&[]),
@@ -122,29 +129,29 @@ impl DiskMetrics {
 }
 
 /// Records exactly one terminal outcome even if a batch task is dropped.
-pub(crate) struct PopulationAttempt {
+pub(crate) struct DiskWriteAttempt {
     metrics: Arc<DiskMetrics>,
-    outcome: PopulationOutcome,
+    outcome: DiskWriteOutcome,
     pub(crate) evicted: bool,
 }
 
-impl PopulationAttempt {
+impl DiskWriteAttempt {
     pub(crate) fn new(metrics: Arc<DiskMetrics>) -> Self {
         Self {
             metrics,
-            outcome: PopulationOutcome::Canceled,
+            outcome: DiskWriteOutcome::Canceled,
             evicted: false,
         }
     }
 
-    pub(crate) fn set_outcome(&mut self, outcome: PopulationOutcome) {
+    pub(crate) fn set_outcome(&mut self, outcome: DiskWriteOutcome) {
         self.outcome = outcome;
     }
 }
 
-impl Drop for PopulationAttempt {
+impl Drop for DiskWriteAttempt {
     fn drop(&mut self) {
-        self.metrics.population[self.outcome as usize].increase(1);
+        self.metrics.write_entries[self.outcome as usize].increase(1);
         if self.evicted {
             self.metrics.eviction_triggering_insertions.increase(1);
         }

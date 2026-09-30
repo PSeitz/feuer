@@ -23,7 +23,7 @@ const MAX_SHARDS: usize = 64;
 /// the exact request and returns a [`Bytes`] slice containing only those
 /// requested bytes. The result can share the retained allocation and never
 /// holds an entry guard. Decayed access counts and bounded range-trimming history
-/// are recorded separately from downloaded-range population.
+/// are recorded separately from downloaded-range insertion.
 ///
 /// The configured capacity is divided among independently locked shards. Each
 /// shard evicts locally before insertion. A payload larger than its shard's
@@ -131,7 +131,7 @@ impl MemoryCache {
 
     /// Caches one callback download and records its successful request atomically.
     ///
-    /// Population and access remain distinct policy events, but sharing one
+    /// Insertion and access remain distinct policy events, but sharing one
     /// shard lock prevents an intervening admission from losing the callback's
     /// attribution. The request contributes to shared access history even when
     /// an existing entry contains the download.

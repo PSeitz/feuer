@@ -24,7 +24,7 @@ Its central result contract is:
 
 > Every successful lookup returns one contiguous `bytes::Bytes` containing exactly the requested object bytes.
 
-Feuer may produce false misses, skip or lose disk population, and lose recently cached data after a crash. It
+Feuer may produce false misses, skip or lose disk writes, and lose recently cached data after a crash. It
 must never return bytes whose object identity or integrity is uncertain.
 
 ## 2. Object and range contract
@@ -102,7 +102,7 @@ disk storage, allocation guards, or file mappings.
 Every successful lookup appends its exact requested range once to the accessed ranges for its complete cache
 key. Accessed ranges are independent of the downloaded or cached range that happened to satisfy the lookup.
 Policy and compaction may project them onto currently cached ranges. Download insertion, replacement, and
-redundant-population suppression create no accesses.
+redundant-insertion suppression create no accesses.
 
 When application callbacks share one source download, every successful waiter still contributes its own
 accessed range, while Feuer caches at most the downloaded ranges selected by its ordinary containment rules.
@@ -158,8 +158,8 @@ increase retention value, stale evidence must eventually expire, and only the ex
 observed-access credit.
 
 Access evidence is held in RAM per object key and shared by both tiers. Each successful lookup records once,
-regardless of its source. Disk reads and population do not record additional events. Evidence survives memory
-eviction while a disk entry or active population retains it, and is released after its last owner disappears.
+regardless of its source. Disk reads and writes do not record additional events. Evidence survives memory
+eviction while a disk entry or active disk write retains it, and is released after its last owner disappears.
 It is not persisted: recovered entries start without pre-restart access evidence.
 
 Every admission gets a short, deterministic shard-local grace before compaction. Policy keeps no separate
@@ -190,7 +190,7 @@ Feuer has one sharded in-memory cache with a soft payload-byte target.
 - The configured target is divided among shards. Admission evicts only from the selected shard.
 - A download larger than its shard target is admitted after the shard is emptied. One oversized entry can
   therefore make a shard, and aggregate retained payload, exceed the configured target.
-- No memory entry is protected merely because it is queued for disk population.
+- No memory entry is protected merely because it is queued for disk writes.
 - Memory pressure does not wait for disk throughput.
 - Usage is charged to payload bytes retained by the cache. Metadata, allocator overhead, callback-owned source
   buffers, transient copies, and caller-held results are outside that accounting.
@@ -215,13 +215,13 @@ Lookup and access recording must not scan every live shard entry. Victim selecti
 of entries. Scoring work depends on the distinct requested ranges each candidate covers.
 Copies made outside the metadata lock require generation revalidation.
 
-## 7. Best-effort disk population
+## 7. Best-effort disk writes
 
-Disk population is bounded and best-effort, not mandatory.
+Disk writes are bounded and best-effort, not mandatory.
 
-- A retained download may be scheduled for disk population.
+- A retained download may be scheduled for a disk write.
 - The pending-write queue is bounded by both bytes and entry count.
-- Under queue pressure, the internal policy may skip or replace a disk-population candidate. This never fails
+- Under queue pressure, the internal policy may skip or replace a disk-write candidate. This never fails
   an otherwise successful lookup.
 - If a memory-cached range is evicted before its queued write starts, that write is canceled or discarded.
 - A write already issued to the operating system may finish after memory eviction or caller cancellation.
@@ -236,7 +236,7 @@ Disk population is bounded and best-effort, not mandatory.
 The policy may consider pending-write and disk-residency state when choosing victims, but the contract does
 not assign fixed weights to those states.
 
-There is no flush API. Disk population and persistence are best-effort.
+There is no flush API. Disk writes and persistence are best-effort.
 
 Disk capacity is fixed at open time and must be respected. Internal allocation, indexing, disk-region layout,
 partial retention, rewriting, checksums, metadata persistence, and submission engines are implementation
@@ -260,7 +260,7 @@ Multiple entries may share a chunk only when each entry's complete payload and m
 An entry spanning multiple chunks owns those chunks exclusively. Its unused tail cannot hold another entry.
 Disk pressure selects individual entries by sampled retrieval value per payload byte, not all owners of a
 shared chunk together. Removing an entry may free no whole chunk. If bounded eviction cannot reclaim enough
-capacity, population is skipped. Still-retained neighbors are not removed merely to empty the chunk.
+capacity, the write is skipped. Still-retained neighbors are not removed merely to empty the chunk.
 The allocator must handle the full size distribution, reclaim
 fragmented capacity with bounded work and rewrite traffic, remain practical at 1-TiB-plus capacities, and
 avoid a cache-wide hot lock. Free-space structures, relocation, and cleaning remain private mechanisms.
@@ -294,7 +294,7 @@ returned by its download callback.
 ## 10. Recovery and compatibility
 
 After an ordinary process or machine crash, Feuer recovers any safe subset of previously completed disk
-population. Incomplete, torn, corrupt, or structurally uncertain state is ignored. Recently returned downloads
+writes. Incomplete, torn, corrupt, or structurally uncertain state is ignored. Recently returned downloads
 and skipped, canceled, or unfinished disk writes may disappear.
 
 The persistence and recovery mechanism is an implementation choice. Feuer does not promise stable on-disk
@@ -325,7 +325,7 @@ It must make it possible to observe:
 - memory pressure, victim trimming, compaction, disk-write queue pressure, and eviction.
 - useful disk payload, allocation overhead, dead or fragmented capacity, and cleaner or relocation traffic.
 - integrity and recovery outcomes.
-- skipped, canceled, failed, and completed disk population.
+- skipped, canceled, failed, and completed disk writes.
 
 Actual source GETs and transferred bytes remain application-owned and are instrumented by the comparative
 benchmark harness. Callback counts are not assumed to equal source GETs when application coordination shares
@@ -343,8 +343,8 @@ The MVP is complete when tests demonstrate that:
 - the callback may use query-local state and an application download manager may debounce and share work across callbacks.
 - each callback returns one start offset and non-empty `Bytes`, the downloaded range is derived from them, and Feuer rejects a result that does not cover the requested range.
 - callback errors are returned without Feuer performing source retries.
-- a callback result already contained by cached data is not populated or written again.
-- every successful lookup appends its exact requested range once to its key's accessed ranges, independent of downloaded-range population.
+- a callback result already contained by cached data is not inserted or written again.
+- every successful lookup appends its exact requested range once to its key's accessed ranges, independent of downloaded-range insertion.
 - controlled policy tests credit only the requested interval, favor repeated reuse, age stale frequency, and
   bound never-requested prefetch.
 - a broader memory admission cannot be compacted until 64 successful accesses in its shard have elapsed, while

@@ -2,7 +2,7 @@
 
 On Linux, use `TieredMemoryDiskCache::open_with_metrics(config, &registry).await`
 with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup,
-memory, disk I/O, range-cache and population metrics in that registry.
+memory, disk I/O, range-cache and disk-write metrics in that registry.
 Feuer does not install an exporter, the application owns the registry and its export endpoint.
 
 All labels below have fixed values. Object keys, paths and caller-defined cache
@@ -14,7 +14,7 @@ counters and gauges. Use separate registries if they must be distinguished.
 | Metric | Type | Labels / meaning |
 |---|---|---|
 | `feuer_lookup_total` | Counter | `outcome`: `memory_hit`, `disk_hit`, `callback`, `callback_error`, `invalid_download` |
-| `feuer_lookup_duration_seconds` | Histogram | `outcome`: `memory_hit`, `disk_hit`, `callback`. Entire successful lookup, including callback work and synchronous population scheduling |
+| `feuer_lookup_duration_seconds` | Histogram | `outcome`: `memory_hit`, `disk_hit`, `callback`. Entire successful lookup, including callback work and synchronous disk-write scheduling |
 | `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`. Exact requested bytes successfully returned |
 
 Lookup outcomes count completed operations, not canceled futures. Duration
@@ -58,6 +58,22 @@ still include successful writes from partially failed batches. Existing read-I/O
 byte counters measure completed DataFile read lengths, not alignment padding or
 individual kernel submissions.
 
+## Disk recovery
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `feuer_disk_recovery_entries_total` | Counter | Entries added to the disk index by background recovery; no labels |
+
+This counter increases as recovery publishes entries, not for normal writes
+or skipped candidates. It does not decrease on eviction. Recovered entries are
+metadata-validated candidates; payload checksums are verified on read. Disk hits
+confirm that recovered payloads are readable.
+
+A positive value shows that recovery restored entries. Zero can mean an empty
+cache, an unfinished scan, or no recoverable entries; this counter does not report
+scan completion. The `disk cache recovery finished` log reports completion of a
+nonempty scan.
+
 ## Insertions that trigger eviction
 
 | Metric | Type | Meaning |
@@ -83,7 +99,7 @@ Percentage of disk insertion attempts that trigger eviction:
 
 ```promql
 100 * sum(rate(feuer_disk_eviction_triggering_insertions_total[5m]))
-  / sum(rate(feuer_disk_population_total[5m]))
+  / sum(rate(feuer_disk_write_entries_total[5m]))
 ```
 
 Both denominators include redundant/already-covered attempts. Disk attempts
@@ -143,19 +159,19 @@ contributions. Neither freeing idle buffers at shutdown nor freeing results
 that outlive the pool counts as a return. Gauges sum across queues sharing a
 registry. The direct-read check during file opening also uses the read pool.
 
-## Best-effort disk population
+## Best-effort disk writes
 
 | Metric | Type | Labels / meaning |
 |---|---|---|
-| `feuer_disk_population_queue_total` | Counter | `outcome`: `queued`, `queue_full`, `queue_closed`, `stale`, `canceled`, `already_covered`, `redundant` |
-| `feuer_disk_population_queued_entries` | Gauge | Entries waiting to begin population |
-| `feuer_disk_population_pending_bytes` | Gauge | Queued plus active payload bytes, not limited or charged to the memory-cache capacity |
-| `feuer_disk_population_queue_duration_seconds` | Histogram | Queue admission to dequeue, including entries found stale. Excludes entries canceled before dequeue |
-| `feuer_disk_population_total` | Counter | Terminal per-entry batch-insertion outcome: `published`, `already_covered`, `no_capacity`, `stale`, `failed`, `canceled` |
-| `feuer_disk_population_written_entries_total` | Counter | Entries in successfully written shard batches, before publication checks |
+| `feuer_disk_write_queue_total` | Counter | `outcome`: `queued`, `queue_full`, `queue_closed`, `stale`, `canceled`, `already_covered`, `redundant` |
+| `feuer_disk_write_queued_entries` | Gauge | Entries waiting to begin disk writes |
+| `feuer_disk_write_pending_bytes` | Gauge | Queued plus active payload bytes, not limited or charged to the memory-cache capacity |
+| `feuer_disk_write_queue_duration_seconds` | Histogram | Queue admission to dequeue, including entries found stale. Excludes entries canceled before dequeue |
+| `feuer_disk_write_entries_total` | Counter | Terminal per-entry batch-insertion outcome: `published`, `already_covered`, `no_capacity`, `stale`, `failed`, `canceled` |
+| `feuer_disk_written_entries_total` | Counter | Entries in successfully written shard batches, before publication checks |
 
 Queue and storage counters describe different stages: do not sum all their
-values as a total number of population attempts. `queued` is admission, not a
+values as a total number of disk-write attempts. `queued` is admission, not a
 terminal outcome. Queue `already_covered` means disk already covers the callback
 download. `redundant` means memory declined a contained download. Queue `stale`
 means the original memory admission expired before writing. Storage `stale`
@@ -184,4 +200,4 @@ completion release their counts along with the associated payload budget.
   `write`, outcome `success` only. Errors remain counted but are not timed.
 - `feuer_disk_io_bytes_total{operation}`: operations `read` and `write`.
 
-No recovery, flush, serialization, or source-download-manager metrics are added.
+No flush, serialization, or source-download-manager metrics are added.

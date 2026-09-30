@@ -11,7 +11,7 @@ pub(crate) async fn wait_for_recovery(cache: &DiskRangeCache) {
     .unwrap();
 }
 
-// Open the same production state without starting the scan, to control population/scan ordering.
+// Open the same production state without starting the scan, to control write/scan ordering.
 async fn open_paused(directory: &Path, capacity: u64) -> DiskRangeCache {
     let file = DataFile::open(directory, capacity, IoMetrics::noop()).await.unwrap();
     let count = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
@@ -123,14 +123,14 @@ async fn incrementally_recovers_shared_chunks_and_multi_chunk_entries() {
 }
 
 #[tokio::test]
-async fn population_can_win_before_scanning_and_recovery_does_not_resurrect_freed_entries() {
+async fn writes_can_win_before_scanning_and_recovery_does_not_resurrect_freed_entries() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
     cache.insert("old".to_owned(), download(0, 100)).await.unwrap();
     cache.insert("untouched".to_owned(), download(0, 100)).await.unwrap();
     cache.disk.save_recovery_ends().unwrap();
     drop(cache);
     let cache = open_paused(directory.path(), 3 * CHUNK_BYTES).await;
-    // Both lookups and population work while the scan has not advanced at all.
+    // Both lookups and writes work while the scan has not advanced at all.
     assert!(cache.get(&"old".to_owned(), range(0, 1)).await.is_none());
     assert!(cache.insert("new".to_owned(), download(0, 17)).await.unwrap());
     assert_eq!(
@@ -154,7 +154,7 @@ async fn population_can_win_before_scanning_and_recovery_does_not_resurrect_free
 }
 
 #[tokio::test]
-async fn recovery_does_not_replace_a_range_published_by_population() {
+async fn recovery_does_not_replace_a_range_published_by_a_write() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
     cache.insert("discarded".to_owned(), download(0, 100)).await.unwrap();
     cache.insert("object".to_owned(), download(0, 100)).await.unwrap();
@@ -169,7 +169,7 @@ async fn recovery_does_not_replace_a_range_published_by_population() {
 }
 
 #[tokio::test]
-async fn stale_ends_bound_recovery_and_new_population_does_not_extend_the_scan() {
+async fn stale_ends_bound_recovery_and_new_writes_do_not_extend_the_scan() {
     let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     cache.insert("saved".to_owned(), download(0, 100)).await.unwrap();
     cache.disk.save_recovery_ends().unwrap();

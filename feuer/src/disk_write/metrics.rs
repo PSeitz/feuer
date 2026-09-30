@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedHistogram, BoxedRegistry, Buckets};
 
-/// An admission or discard outcome from the disk-population queue.
+/// An admission or discard outcome from the disk-write queue.
 #[derive(Clone, Copy)]
-pub(super) enum PopulationQueueOutcome {
+pub(super) enum DiskWriteQueueOutcome {
     Queued,
     Full,
     Closed,
@@ -14,33 +14,33 @@ pub(super) enum PopulationQueueOutcome {
     Redundant,
 }
 
-/// Metrics for population-queue admission, waiting entries, and pending bytes.
-pub(super) struct PopulationQueueMetrics {
+/// Metrics for disk-write queue admission, waiting entries, and pending bytes.
+pub(super) struct DiskWriteQueueMetrics {
     outcomes: [BoxedCounter; 7],
     pub(super) queued_entries: BoxedGauge,
     pub(super) pending_bytes: BoxedGauge,
     pub(super) queue_duration: BoxedHistogram,
 }
 
-impl PopulationQueueMetrics {
+impl DiskWriteQueueMetrics {
     pub(super) fn new(registry: &BoxedRegistry) -> Arc<Self> {
         let outcomes = registry.register_counter_vec(
-            "feuer_disk_population_queue_total".into(),
-            "Population queue admissions, rejections and pre-write discards; queued is not a terminal outcome".into(),
+            "feuer_disk_write_queue_total".into(),
+            "Disk-write queue admissions, rejections and pre-write discards; queued is not a terminal outcome".into(),
             &["outcome"],
         );
         let queued = registry.register_gauge_vec(
-            "feuer_disk_population_queued_entries".into(),
-            "Entries waiting to start disk population".into(),
+            "feuer_disk_write_queued_entries".into(),
+            "Entries waiting to start disk writes".into(),
             &[],
         );
         let bytes = registry.register_gauge_vec(
-            "feuer_disk_population_pending_bytes".into(),
-            "Queued plus active population payload bytes".into(),
+            "feuer_disk_write_pending_bytes".into(),
+            "Queued plus active disk-write payload bytes".into(),
             &[],
         );
         let duration = registry.register_histogram_vec_with_buckets(
-            "feuer_disk_population_queue_duration_seconds".into(),
+            "feuer_disk_write_queue_duration_seconds".into(),
             "Time from queue admission to dequeue, including stale entries".into(),
             &[],
             Buckets::exponential(0.000_001, 2.0, 25),
@@ -62,7 +62,7 @@ impl PopulationQueueMetrics {
         })
     }
 
-    pub(super) fn record(&self, outcome: PopulationQueueOutcome) {
+    pub(super) fn record(&self, outcome: DiskWriteQueueOutcome) {
         self.outcomes[outcome as usize].increase(1);
     }
 }

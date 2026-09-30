@@ -14,7 +14,7 @@ use super::{
 use crate::MemoryMetrics;
 
 #[test]
-fn disk_population_identity_expires_on_removal_replacement_and_readmission() {
+fn disk_write_identity_expires_on_removal_replacement_and_readmission() {
     let cache = cache(1024);
     let key = ObjectKey::from("disk-source");
     let payload = Download::new(10, Bytes::from_static(b"abcd")).unwrap();
@@ -50,7 +50,7 @@ fn download(expected_range: ByteRange, bytes: Bytes) -> Download {
     download
 }
 
-fn populate(cache: &MemoryCache, object_key: ObjectKey, download: Download) {
+fn insert(cache: &MemoryCache, object_key: ObjectKey, download: Download) {
     cache.insert(object_key, download);
 }
 
@@ -146,7 +146,7 @@ fn covering_lookup_returns_only_requested_bytes_and_shares_the_allocation() {
     let key = ObjectKey::from("object");
     let value = Bytes::from_static(b"abcdefghij");
 
-    populate(&cache, key.clone(), download(range(10, 20), value.clone()));
+    insert(&cache, key.clone(), download(range(10, 20), value.clone()));
     let result = cache.get(&key, range(13, 17)).unwrap();
 
     assert_eq!(result, Bytes::from_static(b"defg"));
@@ -163,7 +163,7 @@ fn covering_lookup_returns_only_requested_bytes_and_shares_the_allocation() {
 fn different_identity_or_noncovering_ranges_miss() {
     let cache = cache(16);
     let key = ObjectKey::from("object-a");
-    populate(&cache, key.clone(), download(range(10, 13), Bytes::from_static(b"abc")));
+    insert(&cache, key.clone(), download(range(10, 13), Bytes::from_static(b"abc")));
 
     assert!(cache.get(&ObjectKey::from("object-b"), range(10, 13)).is_none());
     assert!(cache.get(&key, range(9, 12)).is_none());
@@ -175,17 +175,17 @@ fn different_identity_or_noncovering_ranges_miss() {
 fn adjacent_entries_are_not_assembled_into_a_hit() {
     let cache = cache(8);
     let key = ObjectKey::from("object");
-    populate(&cache, key.clone(), download(range(0, 2), Bytes::from_static(b"ab")));
-    populate(&cache, key.clone(), download(range(2, 4), Bytes::from_static(b"cd")));
+    insert(&cache, key.clone(), download(range(0, 2), Bytes::from_static(b"ab")));
+    insert(&cache, key.clone(), download(range(2, 4), Bytes::from_static(b"cd")));
 
     assert!(cache.get(&key, range(1, 3)).is_none());
 }
 
 #[test]
-fn population_and_accesses_are_independent() {
+fn insertion_and_accesses_are_independent() {
     let cache = cache(16);
     let key = ObjectKey::from("object");
-    populate(
+    insert(
         &cache,
         key.clone(),
         download(range(10, 20), Bytes::from_static(b"abcdefghij")),
@@ -195,7 +195,7 @@ fn population_and_accesses_are_independent() {
     assert!(cache.get(&key, range(11, 13)).is_some());
     assert_eq!(accessed_ranges(&cache, &key), vec![range(11, 13)]);
 
-    populate(
+    insert(
         &cache,
         key.clone(),
         download(range(12, 18), Bytes::from_static(b"cdefgh")),
@@ -207,7 +207,7 @@ fn population_and_accesses_are_independent() {
 }
 
 #[test]
-fn shared_download_population_is_deduplicated_but_each_waiter_records_an_access() {
+fn shared_download_insertion_is_deduplicated_but_each_waiter_records_an_access() {
     let cache = cache(16);
     let key = ObjectKey::from("object");
     let shared = download(range(0, 10), Bytes::from_static(b"abcdefghij"));
@@ -228,10 +228,10 @@ fn shared_download_population_is_deduplicated_but_each_waiter_records_an_access(
 fn partially_overlapping_downloads_coexist_and_do_not_form_a_hit() {
     let cache = cache(32);
     let key = ObjectKey::from("object");
-    populate(&cache, key.clone(), download(range(0, 5), Bytes::from_static(b"abcde")));
-    populate(&cache, key.clone(), download(range(8, 12), Bytes::from_static(b"ijkl")));
+    insert(&cache, key.clone(), download(range(0, 5), Bytes::from_static(b"abcde")));
+    insert(&cache, key.clone(), download(range(8, 12), Bytes::from_static(b"ijkl")));
 
-    populate(
+    insert(
         &cache,
         key.clone(),
         download(range(3, 10), Bytes::from_static(b"defghij")),
@@ -249,14 +249,14 @@ fn partially_overlapping_downloads_coexist_and_do_not_form_a_hit() {
 fn a_larger_download_replaces_contained_entries_but_not_partial_overlaps() {
     let cache = cache(32);
     let key = ObjectKey::from("object");
-    populate(&cache, key.clone(), download(range(2, 5), Bytes::from_static(b"cde")));
-    populate(
+    insert(&cache, key.clone(), download(range(2, 5), Bytes::from_static(b"cde")));
+    insert(
         &cache,
         key.clone(),
         download(range(10, 15), Bytes::from_static(b"klmno")),
     );
 
-    populate(
+    insert(
         &cache,
         key.clone(),
         download(range(0, 12), Bytes::from_static(b"abcdefghijkl")),
@@ -276,13 +276,13 @@ fn a_larger_download_replaces_contained_entries_but_not_partial_overlaps() {
 fn a_contained_download_is_discarded_without_replacing_cached_bytes() {
     let cache = cache(16);
     let key = ObjectKey::from("object");
-    populate(
+    insert(
         &cache,
         key.clone(),
         download(range(0, 10), Bytes::from_static(b"abcdefghij")),
     );
 
-    populate(
+    insert(
         &cache,
         key.clone(),
         download(range(2, 8), Bytes::from_static(b"XXXXXX")),
@@ -296,12 +296,12 @@ fn a_contained_download_is_discarded_without_replacing_cached_bytes() {
 fn capacity_is_charged_by_retained_download_payload_bytes() {
     let cache = cache(5);
     let key = ObjectKey::from("object");
-    populate(&cache, key.clone(), download(range(0, 3), Bytes::from_static(b"abc")));
-    populate(&cache, key.clone(), download(range(3, 5), Bytes::from_static(b"de")));
+    insert(&cache, key.clone(), download(range(0, 3), Bytes::from_static(b"abc")));
+    insert(&cache, key.clone(), download(range(3, 5), Bytes::from_static(b"de")));
     assert_eq!(cache.used_bytes(), 5);
     assert_eq!(cache.entry_count(), 2);
 
-    populate(&cache, key.clone(), download(range(5, 9), Bytes::from_static(b"fghi")));
+    insert(&cache, key.clone(), download(range(5, 9), Bytes::from_static(b"fghi")));
     assert!(cache.used_bytes() <= cache.capacity());
     assert_eq!(cache.used_bytes(), 4);
     assert_eq!(cache.entry_count(), 1);
@@ -312,10 +312,10 @@ fn capacity_is_charged_by_retained_download_payload_bytes() {
 fn repeated_redundant_insertions_do_not_change_usage_or_replace_data() {
     let cache = cache(4);
     let key = ObjectKey::from("object");
-    populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
+    insert(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
 
     for _ in 0..200 {
-        populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"b")));
+        insert(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"b")));
     }
     assert_eq!(cache.used_bytes(), 1);
     assert_eq!(cache.entry_count(), 1);
@@ -326,9 +326,9 @@ fn repeated_redundant_insertions_do_not_change_usage_or_replace_data() {
 fn oversized_insertion_empties_its_shard_and_remains_cached() {
     let cache = cache(3);
     let key = ObjectKey::from("object");
-    populate(&cache, key.clone(), download(range(10, 12), Bytes::from_static(b"ok")));
+    insert(&cache, key.clone(), download(range(10, 12), Bytes::from_static(b"ok")));
 
-    populate(&cache, key.clone(), download(range(0, 4), Bytes::from_static(b"data")));
+    insert(&cache, key.clone(), download(range(0, 4), Bytes::from_static(b"data")));
 
     assert!(cache.get(&key, range(10, 12)).is_none());
     assert_eq!(cache.get(&key, range(0, 4)).unwrap(), Bytes::from_static(b"data"));
@@ -340,14 +340,14 @@ fn oversized_insertion_empties_its_shard_and_remains_cached() {
 fn accessed_ranges_survive_downloaded_range_replacement() {
     let cache = cache(16);
     let key = ObjectKey::from("object");
-    populate(&cache, key.clone(), download(range(0, 4), Bytes::from_static(b"abcd")));
-    populate(&cache, key.clone(), download(range(6, 10), Bytes::from_static(b"ghij")));
+    insert(&cache, key.clone(), download(range(0, 4), Bytes::from_static(b"abcd")));
+    insert(&cache, key.clone(), download(range(6, 10), Bytes::from_static(b"ghij")));
 
     cache.record_access(&key, range(1, 3));
     cache.record_access(&key, range(7, 9));
     assert_eq!(accessed_ranges(&cache, &key), vec![range(1, 3), range(7, 9)]);
 
-    populate(
+    insert(
         &cache,
         key.clone(),
         download(range(0, 10), Bytes::from_static(b"abcdefghij")),
@@ -360,9 +360,9 @@ fn accessed_ranges_survive_downloaded_range_replacement() {
 fn access_history_survives_same_object_eviction_during_replacement() {
     let cache = cache(10);
     let key = ObjectKey::from("object");
-    populate(&cache, key.clone(), download(range(0, 4), Bytes::from_static(b"abcd")));
-    populate(&cache, key.clone(), download(range(6, 10), Bytes::from_static(b"ghij")));
-    populate(
+    insert(&cache, key.clone(), download(range(0, 4), Bytes::from_static(b"abcd")));
+    insert(&cache, key.clone(), download(range(6, 10), Bytes::from_static(b"ghij")));
+    insert(
         &cache,
         ObjectKey::from("other"),
         download(range(0, 2), Bytes::from_static(b"xx")),
@@ -370,7 +370,7 @@ fn access_history_survives_same_object_eviction_during_replacement() {
     cache.record_access(&key, range(1, 2));
     cache.record_access(&key, range(7, 8));
 
-    populate(
+    insert(
         &cache,
         key.clone(),
         download(range(0, 8), Bytes::from_static(b"abcdefgh")),
@@ -387,7 +387,7 @@ fn access_history_survives_same_object_eviction_during_replacement() {
 fn access_history_is_bounded_and_preserves_repeated_exact_requests() {
     let cache = cache(1);
     let key = ObjectKey::from("object");
-    populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
+    insert(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
 
     for _ in 0..*MAX_ACCESS_EVENTS_PER_KEY + 17 {
         cache.record_access(&key, range(0, 1));
@@ -406,13 +406,13 @@ fn repeated_requested_intervals_are_retained_over_single_accesses() {
     let hot = ObjectKey::from("hot");
     let cold = ObjectKey::from("cold");
     let incoming = ObjectKey::from("incoming");
-    populate(&cache, hot.clone(), download(range(0, 1), Bytes::from_static(b"h")));
-    populate(&cache, cold.clone(), download(range(0, 1), Bytes::from_static(b"c")));
+    insert(&cache, hot.clone(), download(range(0, 1), Bytes::from_static(b"h")));
+    insert(&cache, cold.clone(), download(range(0, 1), Bytes::from_static(b"c")));
 
     cache.record_access(&cold, range(0, 1));
     cache.record_access(&hot, range(0, 1));
     cache.record_access(&hot, range(0, 1));
-    populate(
+    insert(
         &cache,
         incoming.clone(),
         download(range(0, 1), Bytes::from_static(b"i")),
@@ -428,12 +428,12 @@ fn requested_bytes_contribute_to_retrieval_value() {
     let cache = cache(20);
     let small = ObjectKey::from("small-request");
     let large = ObjectKey::from("large-request");
-    populate(
+    insert(
         &cache,
         small.clone(),
         download(range(0, 10), Bytes::from_static(b"0123456789")),
     );
-    populate(
+    insert(
         &cache,
         large.clone(),
         download(range(0, 10), Bytes::from_static(b"abcdefghij")),
@@ -441,7 +441,7 @@ fn requested_bytes_contribute_to_retrieval_value() {
 
     cache.record_access(&small, range(0, 1));
     cache.record_access(&large, range(0, 9));
-    populate(
+    insert(
         &cache,
         ObjectKey::from("incoming"),
         download(range(0, 10), Bytes::from_static(b"klmnopqrst")),
@@ -456,11 +456,11 @@ fn retention_credit_is_projected_only_onto_the_requested_interval() {
     let cache = cache(2);
     let key = ObjectKey::from("split-object");
     let incoming = ObjectKey::from("incoming");
-    populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
-    populate(&cache, key.clone(), download(range(1, 2), Bytes::from_static(b"b")));
+    insert(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
+    insert(&cache, key.clone(), download(range(1, 2), Bytes::from_static(b"b")));
 
     cache.record_access(&key, range(0, 1));
-    populate(&cache, incoming, download(range(0, 1), Bytes::from_static(b"c")));
+    insert(&cache, incoming, download(range(0, 1), Bytes::from_static(b"c")));
 
     assert!(cache.get(&key, range(0, 1)).is_some());
     assert!(cache.get(&key, range(1, 2)).is_none());
@@ -472,9 +472,9 @@ fn stale_frequency_decays_below_recent_accesses() {
     let stale = ObjectKey::from("stale");
     let fresh = ObjectKey::from("fresh");
     let clock = ObjectKey::from("clock");
-    populate(&cache, stale.clone(), download(range(0, 1), Bytes::from_static(b"s")));
-    populate(&cache, fresh.clone(), download(range(0, 1), Bytes::from_static(b"f")));
-    populate(&cache, clock.clone(), download(range(0, 1), Bytes::from_static(b"c")));
+    insert(&cache, stale.clone(), download(range(0, 1), Bytes::from_static(b"s")));
+    insert(&cache, fresh.clone(), download(range(0, 1), Bytes::from_static(b"f")));
+    insert(&cache, clock.clone(), download(range(0, 1), Bytes::from_static(b"c")));
 
     for _ in 0..8 {
         cache.record_access(&stale, range(0, 1));
@@ -483,7 +483,7 @@ fn stale_frequency_decays_below_recent_accesses() {
         cache.record_access(&clock, range(0, 1));
     }
     cache.record_access(&fresh, range(0, 1));
-    populate(
+    insert(
         &cache,
         ObjectKey::from("incoming"),
         download(range(0, 1), Bytes::from_static(b"i")),
@@ -502,7 +502,7 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
         download(range(0, 10), Bytes::from_static(b"abcdefghij")),
         range(2, 4),
     );
-    populate(
+    insert(
         &early_pressure,
         ObjectKey::from("early-pressure"),
         download(range(0, 2), Bytes::from_static(b"xy")),
@@ -514,7 +514,7 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
     let key = ObjectKey::from("download");
     let incoming = ObjectKey::from("incoming");
     let original = Bytes::from_static(b"abcdefghij");
-    populate(&cache, key.clone(), download(range(0, 10), original.clone()));
+    insert(&cache, key.clone(), download(range(0, 10), original.clone()));
 
     let returned = cache.get(&key, range(2, 4)).unwrap();
     assert_eq!(returned, Bytes::from_static(b"cd"));
@@ -522,7 +522,7 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
     for _ in 1..MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
         cache.record_access(&key, range(2, 4));
     }
-    populate(&cache, incoming, download(range(0, 2), Bytes::from_static(b"xy")));
+    insert(&cache, incoming, download(range(0, 2), Bytes::from_static(b"xy")));
 
     assert_eq!(cache.used_bytes(), 4);
     assert_eq!(cache.entry_count(), 2);
@@ -546,7 +546,7 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
 fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
     let cache = cache(10);
     let key = ObjectKey::from("download");
-    populate(
+    insert(
         &cache,
         key.clone(),
         download(range(0, 10), Bytes::from_static(b"abcdefghij")),
@@ -557,7 +557,7 @@ fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
         cache.record_access(&key, range(1, 3));
     }
 
-    populate(
+    insert(
         &cache,
         ObjectKey::from("incoming"),
         download(range(0, 2), Bytes::from_static(b"xy")),
@@ -574,7 +574,7 @@ fn range_trim_waits_for_pressure_and_adds_no_access() {
     let cache = cache(16);
     let key = ObjectKey::from("download");
     let original = Bytes::from_static(b"abcdefghijklmnop");
-    populate(&cache, key.clone(), download(range(0, 16), original.clone()));
+    insert(&cache, key.clone(), download(range(0, 16), original.clone()));
 
     let returned = cache.get(&key, range(4, 8)).unwrap();
     for _ in 1..MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
@@ -584,7 +584,7 @@ fn range_trim_waits_for_pressure_and_adds_no_access() {
     assert_eq!(cache.used_bytes(), 16);
     let history_len = (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION as usize);
     assert_eq!(access_history_len(&cache, &key), history_len);
-    populate(
+    insert(
         &cache,
         ObjectKey::from("pressure"),
         download(range(0, 1), Bytes::from_static(b"x")),
@@ -655,7 +655,7 @@ fn copied_range_trim_is_revalidated_before_publication_and_can_fall_back() {
 fn removing_the_last_cached_range_releases_its_access_history() {
     let cache = cache(1);
     let key = ObjectKey::from("object");
-    populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
+    insert(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
     cache.record_access(&key, range(0, 1));
 
     assert_eq!(access_history_len(&cache, &key), 1);
@@ -676,7 +676,7 @@ fn shared_evidence_survives_memory_eviction_and_records_disk_only_requests() {
     assert!(cache.remove(&key, range(0, 1)));
     cache.record_access(&key, range(10, 11));
     assert_eq!(disk_access_history.lock().generation(), 2);
-    populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
+    insert(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
     assert_eq!(accessed_ranges(&cache, &key), vec![range(0, 1), range(10, 11)]);
     assert!(cache.get(&key, range(0, 1)).is_some());
     assert_eq!(disk_access_history.lock().generation(), 3);
@@ -687,8 +687,8 @@ fn zero_target_still_retains_the_latest_entry() {
     let cache = cache(0);
     let key = ObjectKey::from("object");
 
-    populate(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
-    populate(&cache, key.clone(), download(range(1, 2), Bytes::from_static(b"b")));
+    insert(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
+    insert(&cache, key.clone(), download(range(1, 2), Bytes::from_static(b"b")));
 
     assert!(cache.get(&key, range(0, 1)).is_none());
     assert_eq!(cache.get(&key, range(1, 2)).unwrap(), Bytes::from_static(b"b"));
@@ -723,8 +723,8 @@ fn shard_targets_can_collectively_exceed_the_configured_capacity() {
         panic!("test keys must cover both shards");
     };
 
-    populate(&cache, first, download(range(0, 2), Bytes::from_static(b"aa")));
-    populate(&cache, second, download(range(0, 2), Bytes::from_static(b"bb")));
+    insert(&cache, first, download(range(0, 2), Bytes::from_static(b"aa")));
+    insert(&cache, second, download(range(0, 2), Bytes::from_static(b"bb")));
 
     assert_eq!(cache.used_bytes(), 4);
     assert_eq!(cache.capacity(), 2);
@@ -740,7 +740,7 @@ fn concurrent_shards_respect_their_targets_for_regular_entries() {
             let key = ObjectKey::from(format!("object-{worker}"));
             for index in 0..500_u64 {
                 let start = index * 8;
-                populate(
+                insert(
                     &cache,
                     key.clone(),
                     download(range(start, start + 8), Bytes::from(vec![worker as u8; 8])),

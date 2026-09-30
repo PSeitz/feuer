@@ -9,9 +9,9 @@ fn recovery_claims_survive_release_but_inspection_alone_does_not_claim_a_chunk()
     let inspected = allocator.reserve_for_recovery(5).unwrap();
     assert_eq!(inspected.range(), 5 * CHUNK_BYTES..6 * CHUNK_BYTES);
     assert!(allocator.reserve_for_recovery(5).is_none());
-    let populated = allocator.reserve_chunks(1).unwrap().pop().unwrap();
-    assert_eq!(populated.range().start, 3 * CHUNK_BYTES);
-    drop(populated);
+    let write_region = allocator.reserve_chunks(1).unwrap().pop().unwrap();
+    assert_eq!(write_region.range().start, 3 * CHUNK_BYTES);
+    drop(write_region);
     assert!(allocator.reserve_for_recovery(3).is_none());
     drop(inspected);
     let recovered = allocator.reserve_for_recovery(5).unwrap();
@@ -34,7 +34,7 @@ fn recovery_claims_survive_release_but_inspection_alone_does_not_claim_a_chunk()
 }
 
 #[test]
-fn population_and_recovery_cannot_reserve_the_same_chunk_concurrently() {
+fn writes_and_recovery_cannot_reserve_the_same_chunk_concurrently() {
     for _ in 0..100 {
         let allocator = DiskChunkAllocator::new(CHUNK_BYTES).unwrap();
         allocator.start_recovery(0, CHUNK_BYTES);
@@ -47,8 +47,8 @@ fn population_and_recovery_cannot_reserve_the_same_chunk_concurrently() {
         });
         barrier.wait();
         let recovered = allocator.reserve_for_recovery(0);
-        let populated = task.join().unwrap();
-        assert_ne!(recovered.is_some(), populated.is_some());
+        let write_regions = task.join().unwrap();
+        assert_ne!(recovered.is_some(), write_regions.is_some());
     }
 }
 

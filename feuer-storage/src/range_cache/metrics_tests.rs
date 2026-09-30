@@ -22,6 +22,43 @@ async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache, pr
 }
 
 #[tokio::test]
+async fn recovery_counts_indexed_entries_not_writes_or_reads() {
+    let capacity = 8 * CHUNK_BYTES;
+    let (directory, cache, registry) = measured_cache(capacity).await;
+    let inputs = vec![
+        ("small-a".to_owned(), download(4)),
+        ("small-b".to_owned(), download(8)),
+        ("large".to_owned(), download(2 * CHUNK_BYTES as usize + 17)),
+    ];
+    cache.insert_batch(inputs.clone()).await.unwrap();
+    assert_eq!(value(&registry, "feuer_disk_recovery_entries_total", &[]), 0.0);
+    cache.disk.save_recovery_ends().unwrap();
+    let metrics = cache.disk.metrics.clone();
+    drop(cache);
+
+    let cache = DiskRangeCache::open_with_metrics(
+        directory.path(),
+        capacity,
+        IoMetrics::noop(),
+        Arc::new(ObjectAccessHistories::new(1)),
+        metrics,
+        RECLAIM_SAMPLE_SIZE,
+    )
+    .await
+    .unwrap();
+    recovery::tests::wait_for_recovery(&cache).await;
+    assert_eq!(value(&registry, "feuer_disk_recovery_entries_total", &[]), 3.0);
+    for (key, source) in inputs {
+        assert_eq!(
+            cache.get(&key, source.downloaded_range()).await.unwrap(),
+            source.bytes()
+        );
+    }
+    drop(cache);
+    assert_eq!(value(&registry, "feuer_disk_recovery_entries_total", &[]), 3.0);
+}
+
+#[tokio::test]
 async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation() {
     use std::{future::Future, task::Poll};
 
@@ -88,11 +125,11 @@ async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation()
 }
 
 #[tokio::test]
-async fn records_population_outcomes_packing_and_index_usage() {
+async fn records_write_outcomes_packing_and_index_usage() {
     let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
     let key = "object".to_owned();
     let request = ByteRange::new(0, 1).unwrap();
-    let outcome = |label| value(&registry, "feuer_disk_population_total", &[("outcome", label)]);
+    let outcome = |label| value(&registry, "feuer_disk_write_entries_total", &[("outcome", label)]);
     assert_eq!(
         cache
             .insert_batch(vec![(key.clone(), download(4)), ("neighbor".into(), download(8))])
@@ -121,10 +158,7 @@ async fn records_population_outcomes_packing_and_index_usage() {
         0
     );
     assert_eq!(outcome("stale"), 1.0);
-    assert_eq!(
-        value(&registry, "feuer_disk_population_written_entries_total", &[]),
-        3.0
-    );
+    assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 3.0);
     assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 1.0);
     assert_eq!(
         cache
@@ -170,7 +204,7 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
     assert!(!cache.contains(&"second".into(), ByteRange::new(0, 1).unwrap()));
     assert_eq!(triggering(), 1.0);
     assert_eq!(
-        value(&registry, "feuer_disk_population_total", &[("outcome", "published")]),
+        value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),
         4.0
     );
     cache.insert_batch(vec![("third".into(), download(4))]).await.unwrap();
@@ -186,7 +220,11 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
     assert_eq!(triggering(), 2.0);
     assert_eq!(
-        value(&registry, "feuer_disk_population_total", &[("outcome", "no_capacity")]),
+        value(
+            &registry,
+            "feuer_disk_write_entries_total",
+            &[("outcome", "no_capacity")]
+        ),
         1.0
     );
     // No victims remain, so an unsuccessful eviction search must not count.
@@ -264,38 +302,35 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
             .is_err()
     );
     assert_eq!(
-        value(&registry, "feuer_disk_population_total", &[("outcome", "failed")]),
+        value(&registry, "feuer_disk_write_entries_total", &[("outcome", "failed")]),
         2.0
     );
-    assert_eq!(
-        value(&registry, "feuer_disk_population_written_entries_total", &[]),
-        2.0
-    );
+    assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 2.0);
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
     assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 3.0);
     assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 0.0);
 }
 
 #[test]
-fn abandoned_population_attempts_count_once_as_canceled() {
+fn abandoned_write_attempts_count_once_as_canceled() {
     let (registry, backend) = registry();
     let metrics = DiskMetrics::new(&backend);
-    let mut canceled = PopulationAttempt::new(metrics.clone());
+    let mut canceled = DiskWriteAttempt::new(metrics.clone());
     canceled.evicted = true;
     drop(canceled);
     assert_eq!(
         value(&registry, "feuer_disk_eviction_triggering_insertions_total", &[]),
         1.0
     );
-    let mut finished = PopulationAttempt::new(metrics);
-    finished.set_outcome(PopulationOutcome::Published);
+    let mut finished = DiskWriteAttempt::new(metrics);
+    finished.set_outcome(DiskWriteOutcome::Published);
     drop(finished);
     assert_eq!(
-        value(&registry, "feuer_disk_population_total", &[("outcome", "canceled")]),
+        value(&registry, "feuer_disk_write_entries_total", &[("outcome", "canceled")]),
         1.0
     );
     assert_eq!(
-        value(&registry, "feuer_disk_population_total", &[("outcome", "published")]),
+        value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),
         1.0
     );
 }

@@ -25,7 +25,7 @@ struct DiskChunkAvailability {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
     free_chunk_count_by_start: BTreeMap<u64, u64>,
     available_chunks: u64,
-    // Sticky during recovery, including chunks freed after population or recovery claimed them.
+    // Sticky during recovery, including chunks freed after writes or recovery claimed them.
     recovery_claims: Option<(u64, Vec<u64>)>,
     metrics: Arc<DiskMetrics>,
 }
@@ -131,7 +131,7 @@ impl DiskChunkAllocator {
         })
     }
 
-    /// Must run before exposing the allocator to population. Only the startup scan needs these bits.
+    /// Must run before exposing the allocator to writes. Only the startup scan needs these bits.
     pub(super) fn start_recovery(&self, start: u64, end: u64) {
         self.free.lock().unwrap().recovery_claims = Some((
             start / CHUNK_BYTES,
@@ -144,7 +144,7 @@ impl DiskChunkAllocator {
     }
 
     /// Reserves an old chunk for inspection without marking it claimed. The reservation prevents
-    /// population from overwriting metadata during I/O. Previously claimed chunks never recover again.
+    /// writes from overwriting metadata during I/O. Previously claimed chunks never recover again.
     pub(super) fn reserve_for_recovery(&self, chunk: u64) -> Option<DiskRegion> {
         let mut free = self.free.lock().unwrap();
         let (start, words) = free.recovery_claims.as_ref()?;

@@ -31,7 +31,7 @@ use tokio::sync::OnceCell;
 use crate::{
     DataFile, DataFileError, DataFileResult, DiskMetrics, IoMetrics,
     allocation::{CHUNK_BYTES, DiskChunkAllocator, DiskRegion, DiskRegionReadGuard},
-    disk_metrics::{DiskLookupOutcome, PopulationAttempt, PopulationOutcome},
+    disk_metrics::{DiskLookupOutcome, DiskWriteAttempt, DiskWriteOutcome},
 };
 use page_format::{METADATA_PAGE_BYTES, PAGE_CONTENT_BYTES};
 
@@ -49,7 +49,7 @@ const MAX_EVICTION_REGIONS: usize = 4096;
 /// Full-key hashing selects an independently allocated shard; admission may fail despite space elsewhere.
 ///
 /// Pressure eviction uses sampled retrieval value per payload byte.
-/// Recovery publishes old entries incrementally alongside foreground reads and population.
+/// Recovery publishes old entries incrementally alongside foreground reads and writes.
 /// The experimental format is neither a persistence guarantee nor a stable on-disk interface.
 #[derive(Clone)]
 pub struct DiskRangeCache {
@@ -137,7 +137,7 @@ struct GuardedObjectRangeRead {
     payload_regions: Vec<DiskRegionReadGuard>,
 }
 
-/// Failure opening or populating the experimental disk range cache. Read uncertainty becomes a miss.
+/// Failure opening or writing to the experimental disk range cache. Read uncertainty becomes a miss.
 #[derive(Debug, thiserror::Error)]
 pub enum DiskRangeCacheError {
     /// The prototype requires a positive whole number of 1-MiB chunks within Linux's file-offset limit.
@@ -146,9 +146,9 @@ pub enum DiskRangeCacheError {
     /// Raw storage failed.
     #[error(transparent)]
     DataFile(#[from] DataFileError),
-    /// The task that owns a population failed; queued writes retain their chunks until completion.
-    #[error("disk population task failed: {0}")]
-    PopulationTaskFailed(#[source] tokio::task::JoinError),
+    /// The task that owns a disk write failed; queued writes retain their chunks until completion.
+    #[error("disk write task failed: {0}")]
+    WriteTaskFailed(#[source] tokio::task::JoinError),
     /// The small recovery inventory could not be initialized or durably reset.
     #[error("opening disk recovery state failed: {0}")]
     RecoveryState(#[source] std::io::Error),
@@ -165,7 +165,7 @@ impl fmt::Debug for DiskRangeCache {
 
 impl DiskRangeCache {
     /// Opens an exclusively locked, fixed-capacity file and starts background recovery.
-    /// Reads and population are immediately available; recovered entries appear incrementally.
+    /// Reads and writes are immediately available; recovered entries appear incrementally.
     pub async fn open(
         directory: impl AsRef<Path>,
         capacity: u64,
@@ -182,7 +182,7 @@ impl DiskRangeCache {
     }
 
     /// Opens a disk tier using the memory tier's shared access evidence.
-    /// Population and `get` do not record accesses; the successful public lookup records exactly once.
+    /// Insertion and `get` do not record accesses; the successful public lookup records exactly once.
     pub async fn open_with_access_histories(
         directory: impl AsRef<Path>,
         capacity: u64,
@@ -294,7 +294,7 @@ impl DiskRangeCache {
         let disk = self.disk.clone();
         let downloads: Vec<_> = downloads
             .into_iter()
-            .map(|(key, download, token)| (key, download, token, PopulationAttempt::new(disk.metrics.clone())))
+            .map(|(key, download, token)| (key, download, token, DiskWriteAttempt::new(disk.metrics.clone())))
             .collect();
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
         runtime
@@ -340,10 +340,10 @@ impl DiskRangeCache {
                             if batch.entries.len() != previous_entry_count {
                                 publication_tokens.push((token, attempt));
                             } else {
-                                attempt.set_outcome(PopulationOutcome::NoCapacity);
+                                attempt.set_outcome(DiskWriteOutcome::NoCapacity);
                             }
                         } else {
-                            attempt.set_outcome(PopulationOutcome::AlreadyCovered);
+                            attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
                         }
                     }
                     let entries = match batch
@@ -353,7 +353,7 @@ impl DiskRangeCache {
                         Ok(entries) => entries,
                         Err(error) => {
                             for (_, attempt) in &mut publication_tokens {
-                                attempt.set_outcome(PopulationOutcome::Failed);
+                                attempt.set_outcome(DiskWriteOutcome::Failed);
                             }
                             return Err(error);
                         }
@@ -364,16 +364,16 @@ impl DiskRangeCache {
                         let object_range = storage.object_range;
                         // Another writer or an earlier entry in this batch may already cover this range.
                         if index.covering_range(&key, object_range).is_some() {
-                            attempt.set_outcome(PopulationOutcome::AlreadyCovered);
+                            attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
                             continue;
                         }
-                        attempt.set_outcome(PopulationOutcome::Stale);
+                        attempt.set_outcome(DiskWriteOutcome::Stale);
                         let mut entry = Some((key, storage));
                         with_current(&token, &mut || {
                             if let Some((key, storage)) = entry.take() {
                                 index.insert(key, storage);
                                 published_entries += 1;
-                                attempt.set_outcome(PopulationOutcome::Published);
+                                attempt.set_outcome(DiskWriteOutcome::Published);
                             }
                         });
                     }
@@ -381,7 +381,7 @@ impl DiskRangeCache {
                 Ok(published_entries)
             })
             .await
-            .map_err(DiskRangeCacheError::PopulationTaskFailed)?
+            .map_err(DiskRangeCacheError::WriteTaskFailed)?
     }
 
     /// Checks indexed coverage without reading payload or recording an access.

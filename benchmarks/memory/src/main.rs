@@ -145,7 +145,7 @@ struct ReplayWorkload {
     download_config: DownloadExpansionConfig,
 }
 
-/// A cache populated and queried while replaying a workload.
+/// A cache receiving insertions and lookups while replaying a workload.
 trait ReplayCache {
     fn name(&self) -> &'static str;
 
@@ -153,7 +153,7 @@ trait ReplayCache {
     /// Uses the range this downloader would fetch on a miss.
     fn lookup_hit(&mut self, request: &TraceRequest, downloaded_range: ByteRange) -> bool;
 
-    fn populate(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes) -> Result<(), String>;
+    fn insert(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes) -> Result<(), String>;
 
     fn used_payload_bytes(&self) -> u64;
 }
@@ -185,7 +185,7 @@ impl ReplayCache for FeuerReplayCache {
         true
     }
 
-    fn populate(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes) -> Result<(), String> {
+    fn insert(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes) -> Result<(), String> {
         let download = Download::new(downloaded_range.start(), payload).map_err(|error| error.to_string())?;
         debug_assert_eq!(download.downloaded_range(), downloaded_range);
         self.cache
@@ -291,7 +291,7 @@ impl ReplayCache for FoyerReplayCache {
         true
     }
 
-    fn populate(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes) -> Result<(), String> {
+    fn insert(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes) -> Result<(), String> {
         let key = self.key(request, downloaded_range);
         self.cache.insert(
             key,
@@ -624,7 +624,7 @@ fn replay_pass<C: ReplayCache + ?Sized>(
         }
 
         let payload = source_payload_slice(source_payload, downloaded_range)?;
-        cache.populate(request, downloaded_range, payload)?;
+        cache.insert(request, downloaded_range, payload)?;
         traffic.source_requests += 1;
         traffic.source_bytes += downloaded_range.len();
     }
@@ -964,7 +964,7 @@ mod tests {
     use super::*;
 
     struct WarmupTestCache {
-        populated: bool,
+        has_entry: bool,
     }
 
     impl ReplayCache for WarmupTestCache {
@@ -972,23 +972,23 @@ mod tests {
             "warmup-test"
         }
 
-        /// Reports a lookup hit once the warmup has populated this test cache.
+        /// Reports a lookup hit once the warmup has inserted an entry into this test cache.
         fn lookup_hit(&mut self, _request: &TraceRequest, _downloaded_range: ByteRange) -> bool {
-            self.populated
+            self.has_entry
         }
 
-        fn populate(
+        fn insert(
             &mut self,
             _request: &TraceRequest,
             _downloaded_range: ByteRange,
             _payload: Bytes,
         ) -> Result<(), String> {
-            self.populated = true;
+            self.has_entry = true;
             Ok(())
         }
 
         fn used_payload_bytes(&self) -> u64 {
-            u64::from(self.populated)
+            u64::from(self.has_entry)
         }
     }
 
@@ -1009,7 +1009,7 @@ mod tests {
             })
         }
 
-        fn populate(
+        fn insert(
             &mut self,
             request: &TraceRequest,
             downloaded_range: ByteRange,
@@ -1042,7 +1042,7 @@ mod tests {
             },
         };
         let report = replay_cache(
-            Box::new(WarmupTestCache { populated: false }),
+            Box::new(WarmupTestCache { has_entry: false }),
             &workload,
             DownloadRangePolicy::Exact,
             1,
@@ -1074,14 +1074,14 @@ mod tests {
             FoyerReplayCache::new(1 << 20, 1, FoyerKeyRange::ExpandedDownload, FoyerEvictionPolicy::S3Fifo);
         assert!(!expanded_key_cache.lookup_hit(&first, expanded));
         expanded_key_cache
-            .populate(&first, expanded, Bytes::from(vec![0; 20]))
+            .insert(&first, expanded, Bytes::from(vec![0; 20]))
             .unwrap();
         assert!(expanded_key_cache.lookup_hit(&second, expanded));
 
         let mut exact_key_cache =
             FoyerReplayCache::new(1 << 20, 1, FoyerKeyRange::ExactRequest, FoyerEvictionPolicy::S3Fifo);
         exact_key_cache
-            .populate(&first, expanded, Bytes::from(vec![0; 20]))
+            .insert(&first, expanded, Bytes::from(vec![0; 20]))
             .unwrap();
         assert!(!exact_key_cache.lookup_hit(&second, expanded));
     }

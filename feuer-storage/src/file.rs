@@ -162,7 +162,7 @@ impl DataFile {
     }
 
     /// Recovery issues only one metadata read at a time. It does not queue for admission ahead of
-    /// foreground reads, and its guard prevents concurrent population from overwriting this page.
+    /// foreground reads, and its guard prevents concurrent writes from overwriting this page.
     pub(crate) async fn read_recovery_page(&self, region: &DiskRegion, address: u64) -> DataFileResult<Bytes> {
         let length = uring::DIRECT_IO_ALIGNMENT_BYTES;
         let page = region.slice(address..address + length as u64);

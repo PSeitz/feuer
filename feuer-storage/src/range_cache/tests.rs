@@ -451,7 +451,7 @@ async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
     let original_cost = evidence.retention_score(range(0, 100));
     assert!(original_cost > 0.0);
     assert_eq!(evidence.retention_score(range(200, 300)), 0.0);
-    // Successful lookups are recorded explicitly; raw storage reads/population do not double-count.
+    // Successful lookups are recorded explicitly; raw storage reads/writes do not double-count.
     assert!(cache.get(&key, range(0, 1)).await.is_some());
     assert_eq!(evidence.lock().generation(), 3);
     for _ in 0..*ACCESS_COUNT_HALF_LIFE {

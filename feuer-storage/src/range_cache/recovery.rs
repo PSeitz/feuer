@@ -1,4 +1,4 @@
-//! Best-effort, incremental recovery. Population may claim any still-free chunk first.
+//! Best-effort, incremental recovery. New writes may claim any still-free chunk first.
 
 use std::{
     fs::{self, File},
@@ -276,6 +276,7 @@ impl DiskRangeCacheState {
                     continue; // Never displace an already indexed entry.
                 }
                 index.insert(key, storage);
+                self.metrics.recovered_entries.increase(1);
             }
             // Our reservations survive publication and even concurrent eviction. Mark before releasing
             // them, so this scan cannot resurrect the copy after its final owner releases it.

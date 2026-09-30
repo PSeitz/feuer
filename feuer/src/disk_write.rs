@@ -4,7 +4,7 @@ mod metrics;
 #[cfg(test)]
 mod tests;
 
-use metrics::{PopulationQueueMetrics, PopulationQueueOutcome};
+use metrics::{DiskWriteQueueMetrics, DiskWriteQueueOutcome};
 use mixtrics::metrics::BoxedRegistry;
 use std::{sync::Arc, time::Instant};
 
@@ -16,10 +16,10 @@ use tokio::sync::mpsc;
 const MAX_QUEUED_ENTRIES: usize = 256;
 const MAX_BATCH_ENTRIES: usize = 64;
 
-/// A bounded queue scheduling best-effort disk population.
-pub(crate) struct DiskPopulationQueue {
+/// A bounded queue scheduling best-effort disk writes.
+pub(crate) struct DiskWriteQueue {
     sender: mpsc::Sender<PendingDiskWrite>,
-    metrics: Arc<PopulationQueueMetrics>,
+    metrics: Arc<DiskWriteQueueMetrics>,
 }
 
 /// The exact memory admission authorizing a queued or active disk write.
@@ -29,7 +29,7 @@ struct DiskWriteSource {
     entry_id: u64,
     _accesses: Arc<ObjectAccessHistory>,
     queued_at: Option<Instant>,
-    metrics: Arc<PopulationQueueMetrics>,
+    metrics: Arc<DiskWriteQueueMetrics>,
 }
 
 struct PendingDiskWrite {
@@ -51,30 +51,30 @@ impl Drop for DiskWriteSource {
         self.metrics.pending_bytes.decrease(self.range.len());
         if self.queued_at.is_some() {
             self.metrics.queued_entries.decrease(1);
-            self.metrics.record(PopulationQueueOutcome::Canceled);
+            self.metrics.record(DiskWriteQueueOutcome::Canceled);
         }
     }
 }
 
-impl DiskPopulationQueue {
+impl DiskWriteQueue {
     pub(crate) fn with_metrics(memory: Arc<MemoryCache>, disk: DiskRangeCache, registry: &BoxedRegistry) -> Self {
-        let (population, receiver) =
-            Self::channel_with_metrics(MAX_QUEUED_ENTRIES, PopulationQueueMetrics::new(registry));
+        let (disk_write_queue, receiver) =
+            Self::channel_with_metrics(MAX_QUEUED_ENTRIES, DiskWriteQueueMetrics::new(registry));
         // The worker owns no sender. Dropping the last cache handle closes the queue;
         // submitted writes still finish under storage's detached reservation owner.
         tokio::spawn(Self::write_queued_batches(receiver, memory, disk));
-        population
+        disk_write_queue
     }
 
     #[cfg(test)]
     fn channel(entry_capacity: usize) -> (Self, mpsc::Receiver<PendingDiskWrite>) {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
-        Self::channel_with_metrics(entry_capacity, PopulationQueueMetrics::new(&registry))
+        Self::channel_with_metrics(entry_capacity, DiskWriteQueueMetrics::new(&registry))
     }
 
     fn channel_with_metrics(
         entry_capacity: usize,
-        metrics: Arc<PopulationQueueMetrics>,
+        metrics: Arc<DiskWriteQueueMetrics>,
     ) -> (Self, mpsc::Receiver<PendingDiskWrite>) {
         let (sender, receiver) = mpsc::channel(entry_capacity);
         (Self { sender, metrics }, receiver)
@@ -82,12 +82,12 @@ impl DiskPopulationQueue {
 
     /// Records a download skipped because the disk already covers its range.
     pub(crate) fn record_already_covered(&self) {
-        self.metrics.record(PopulationQueueOutcome::AlreadyCovered);
+        self.metrics.record(DiskWriteQueueOutcome::AlreadyCovered);
     }
 
     /// Records a download skipped because its memory admission was redundant.
     pub(crate) fn record_redundant_admission(&self) {
-        self.metrics.record(PopulationQueueOutcome::Redundant);
+        self.metrics.record(DiskWriteQueueOutcome::Redundant);
     }
 
     /// Enqueues a disk write if the queue has capacity, without waiting for space.
@@ -102,15 +102,15 @@ impl DiskPopulationQueue {
         let permit = match self.sender.try_reserve() {
             Ok(permit) => permit,
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.metrics.record(PopulationQueueOutcome::Full);
+                self.metrics.record(DiskWriteQueueOutcome::Full);
                 return;
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                self.metrics.record(PopulationQueueOutcome::Closed);
+                self.metrics.record(DiskWriteQueueOutcome::Closed);
                 return;
             }
         };
-        self.metrics.record(PopulationQueueOutcome::Queued);
+        self.metrics.record(DiskWriteQueueOutcome::Queued);
         self.metrics.queued_entries.increase(1);
         self.metrics.pending_bytes.increase(download.downloaded_range().len());
         let source = DiskWriteSource {
@@ -146,7 +146,7 @@ impl DiskPopulationQueue {
                         .with_current_entry(&source.key, source.range, source.entry_id, || ())
                         .is_none()
                     {
-                        source.metrics.record(PopulationQueueOutcome::Stale);
+                        source.metrics.record(DiskWriteQueueOutcome::Stale);
                         return None;
                     }
                     Some((source.key.clone(), download, source))
@@ -164,7 +164,7 @@ impl DiskPopulationQueue {
                 })
                 .await
             {
-                tracing::warn!(target: "feuer::storage", %error, "disk population failed");
+                tracing::warn!(target: "feuer::storage", %error, "disk write failed");
             }
         }
     }

@@ -56,7 +56,7 @@ impl ObjectAccessHistories {
         }
     }
 
-    /// Keeps a key's history alive for a cached entry or active population.
+    /// Keeps a key's history alive for a cached entry or active cache insertion.
     pub fn for_key(&self, key: &ObjectKey) -> Arc<ObjectAccessHistory> {
         let shard = &self.shards[self.shard_index(key)];
         let mut objects = shard.objects.lock().unwrap();
@@ -73,7 +73,7 @@ impl ObjectAccessHistories {
     }
 
     /// Records one successful public lookup, regardless of which tier supplied it.
-    /// Population alone must not call this. With no entry owners, the evidence is immediately released.
+    /// Insertion alone must not call this. With no entry owners, the evidence is immediately released.
     pub fn record_access(&self, key: &ObjectKey, requested: ByteRange) {
         self.for_key(key).record(requested);
     }
