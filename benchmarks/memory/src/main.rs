@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     fs,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -15,6 +16,7 @@ use feuer_types::{
     config::{parse_config_number, read_env_number},
     retention::{
         ACCESS_COUNT_HALF_LIFE, FIXED_RETRIEVAL_EQUIVALENT_BYTES, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY,
+        ObjectAccessHistories,
     },
 };
 use foyer_memory::{Cache as FoyerCache, CacheBuilder, CostAwareConfig, S3FifoConfig};
@@ -161,12 +163,15 @@ trait ReplayCache {
 /// Feuer's memory cache used for workload replay.
 struct FeuerReplayCache {
     cache: MemoryCache,
+    access_histories: Arc<ObjectAccessHistories>,
 }
 
 impl FeuerReplayCache {
     fn new(capacity: usize, num_shards: usize) -> Self {
+        let access_histories = Arc::new(ObjectAccessHistories::new());
         Self {
-            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards),
+            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards, access_histories.clone()),
+            access_histories,
         }
     }
 }
@@ -178,6 +183,8 @@ impl ReplayCache for FeuerReplayCache {
 
     /// Looks up the requested bytes in Feuer and reports whether the lookup hit.
     fn lookup_hit(&mut self, request: &TraceRequest, _downloaded_range: ByteRange) -> bool {
+        self.access_histories
+            .record_access(&request.object_key, request.requested_range);
         let Some(bytes) = self.cache.get(&request.object_key, request.requested_range) else {
             return false;
         };
@@ -188,8 +195,7 @@ impl ReplayCache for FeuerReplayCache {
     fn insert(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes) -> Result<(), String> {
         let download = Download::new(downloaded_range.start(), payload).map_err(|error| error.to_string())?;
         debug_assert_eq!(download.downloaded_range(), downloaded_range);
-        self.cache
-            .insert_and_record(request.object_key.clone(), download, request.requested_range);
+        self.cache.insert(request.object_key.clone(), download);
         Ok(())
     }
 
@@ -248,12 +254,7 @@ struct FoyerReplayCache {
 }
 
 impl FoyerReplayCache {
-    fn new(
-        capacity: usize,
-        num_shards: usize,
-        key_range: FoyerKeyRange,
-        eviction_policy: FoyerEvictionPolicy,
-    ) -> Self {
+    fn new(capacity: usize, num_shards: usize, key_range: FoyerKeyRange, eviction_policy: FoyerEvictionPolicy) -> Self {
         Self {
             cache: build_foyer_cache(capacity, num_shards, eviction_policy),
             key_range,
@@ -705,11 +706,8 @@ fn print_human_header(args: &ReplayArgs, workload: &ReplayWorkload) {
     println!("Feuer memory benchmark");
     println!("Trace: {TRACE_FILE} ({} operations)", workload.requests.len());
     println!("Shards: {shards} | Warm-up passes: {}", args.warmup_iterations);
-    println!(
-        "Feuer cost-aware half-life: {} same-shard accesses",
-        *ACCESS_COUNT_HALF_LIFE
-    );
-    println!("Feuer trimming age: {} same-shard accesses", *MAX_ACCESS_AGE_ACCESSES);
+    println!("Feuer cost-aware half-life: {} requests", *ACCESS_COUNT_HALF_LIFE);
+    println!("Feuer trimming age: {} requests", *MAX_ACCESS_AGE_ACCESSES);
     println!(
         "Feuer trimming history: {} events per object",
         *MAX_ACCESS_EVENTS_PER_KEY

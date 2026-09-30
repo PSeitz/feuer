@@ -45,12 +45,9 @@ fn queue_metrics_cover_admission_pressure_dequeue_and_cancellation() {
 
 fn enqueue(disk_write_queue: &DiskWriteQueue, memory: &MemoryCache, key: &str) {
     let key = key.to_owned();
-    let accesses = memory.access_histories().for_key(&key);
     let download = Download::new(3, Bytes::from_static(b"abcd")).unwrap();
-    let id = memory
-        .insert_and_record(key.clone(), download.clone(), download.downloaded_range())
-        .unwrap();
-    disk_write_queue.enqueue_if_capacity(key, download, id, accesses);
+    let id = memory.insert(key.clone(), download.clone()).unwrap();
+    disk_write_queue.enqueue_if_capacity(key, download, id);
 }
 
 #[test]
@@ -60,9 +57,8 @@ fn queue_saturation_is_nonblocking_and_bounded_by_entries() {
     enqueue(&disk_write_queue, &memory, "first");
     enqueue(&disk_write_queue, &memory, "skipped");
     assert_eq!(receiver.len(), 1);
-    // Queue pressure did not reject memory admission or its successful access.
+    // Queue pressure did not reject memory admission.
     let key = "skipped".to_owned();
-    assert_eq!(memory.access_histories().for_key(&key).lock().generation(), 1);
     assert!(memory.get(&key, ByteRange::new(3, 7).unwrap()).is_some());
     let active = receiver.try_recv().unwrap();
     enqueue(&disk_write_queue, &memory, "next");
@@ -76,14 +72,9 @@ fn queue_saturation_is_nonblocking_and_bounded_by_entries() {
 async fn queued_eviction_and_readmission_cancel_old_writes_while_live_entries_batch_together() {
     let directory = tempfile::tempdir().unwrap();
     let memory = Arc::new(MemoryCache::new(4096));
-    let disk = DiskRangeCache::open_with_access_histories(
-        directory.path(),
-        1 << 20,
-        IoMetrics::noop(),
-        memory.access_histories(),
-    )
-    .await
-    .unwrap();
+    let disk = DiskRangeCache::open(directory.path(), 1 << 20, IoMetrics::noop())
+        .await
+        .unwrap();
     let (registry, backend) = registry();
     let (disk_write_queue, receiver) = DiskWriteQueue::channel_with_metrics(8, DiskWriteQueueMetrics::new(&backend));
     let range = ByteRange::new(3, 7).unwrap();
@@ -107,8 +98,9 @@ async fn queued_eviction_and_readmission_cancel_old_writes_while_live_entries_ba
             Bytes::from_static(b"abcd")
         );
         assert_eq!(
-            memory.access_histories().for_key(&key.to_owned()).lock().generation(),
-            1
+            disk.access_histories().clock(),
+            0,
+            "queue operations do not record requests"
         );
     }
     assert_eq!(

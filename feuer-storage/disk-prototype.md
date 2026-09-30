@@ -54,8 +54,10 @@ Reads acquire `DiskRegionReadGuard`s under the range-index lock and retain them 
 Returned bytes retain no disk ownership. A checksum mismatch invalidates the indexed entry if its
 expected checksum still matches the failed read's expected checksum. This can discard a newer identical copy.
 
-Disk and memory share access history and retention scoring through `feuer-types::retention`.
-Successful accesses are recorded by tier orchestration, not raw reads or writes.
+Disk and memory consult standalone access history through `feuer-types::retention`.
+Requests are recorded by tier orchestration before lookup, regardless of outcome, not by raw reads or writes. History owns its
+counters independently of both tiers: eviction never deletes them, and cache entries hold no history handles.
+Its clock counts requests across all keys. History is in-memory only and has no counter capacity limit.
 Eviction samples live entries and removes the lowest recent retrieval value per payload byte.
 Metadata, alignment, and unused chunk space count against capacity but not the score.
 

@@ -22,9 +22,7 @@ use std::{
 use bytes::Bytes;
 use feuer_types::{
     ByteRange, Download, ObjectKey,
-    retention::{
-        ObjectAccessHistories, ObjectAccessHistory, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates,
-    },
+    retention::{ObjectAccessHistories, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates},
 };
 use tokio::sync::OnceCell;
 
@@ -122,7 +120,6 @@ struct ObjectRangeDiskStorage {
     read_result: Weak<EntryReadResult>,
     eviction_position: usize,
     publication_id: u64,
-    accesses: Arc<ObjectAccessHistory>,
     object_range: ByteRange,
     payload_checksum: blake3::Hash,
     payload_regions: Vec<DiskRegion>,
@@ -171,18 +168,11 @@ impl DiskRangeCache {
         capacity: u64,
         metrics: Arc<IoMetrics>,
     ) -> Result<Self, DiskRangeCacheError> {
-        let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
-        Self::open_with_access_histories(
-            directory,
-            capacity,
-            metrics,
-            Arc::new(ObjectAccessHistories::new(num_shards)),
-        )
-        .await
+        Self::open_with_access_histories(directory, capacity, metrics, Arc::new(ObjectAccessHistories::new())).await
     }
 
-    /// Opens a disk tier using the memory tier's shared access evidence.
-    /// Insertion and `get` do not record accesses; the successful public lookup records exactly once.
+    /// Opens a disk tier that consults standalone shared request history for retention decisions.
+    /// Insertion and `get` do not record accesses; public request handling records once before lookup.
     pub async fn open_with_access_histories(
         directory: impl AsRef<Path>,
         capacity: u64,
@@ -251,7 +241,7 @@ impl DiskRangeCache {
         Ok(Self { disk })
     }
 
-    /// Shared evidence for recording successful lookups, once, outside raw storage operations.
+    /// Shared history for recording requests once, before lookup and outside raw storage operations.
     pub fn access_histories(&self) -> Arc<ObjectAccessHistories> {
         self.disk.access_histories.clone()
     }
@@ -321,16 +311,16 @@ impl DiskRangeCache {
                             .covering_range(&key, download.downloaded_range())
                             .is_none()
                         {
-                            // Preserve the object's evidence even if pressure removes its last existing entry.
-                            let accesses = disk.access_histories.for_key(&key);
                             let previous_entry_count = batch.entries.len();
                             let previous_regions_left = regions_left;
-                            while let Err(chunks_needed) =
-                                batch.pack_download(&shard.allocator, &key, &download, &accesses)
-                            {
+                            while let Err(chunks_needed) = batch.pack_download(&shard.allocator, &key, &download) {
                                 // Evicting cannot help an entry that exceeds the capacity left by this batch.
                                 if chunks_needed > shard.allocator.chunk_capacity - batch.chunks.len() as u64
-                                    || !shard.evict_candidate(&mut attempts_left, &mut regions_left)
+                                    || !shard.evict_candidate(
+                                        &disk.access_histories,
+                                        &mut attempts_left,
+                                        &mut regions_left,
+                                    )
                                 {
                                     break;
                                 }
@@ -469,7 +459,12 @@ impl DiskRangeCache {
 impl DiskCacheShard {
     /// Advances bounded policy work and evicts at most one entry, never its neighbors.
     /// Chunk release is left to ownership.
-    fn evict_candidate(&self, attempts_left: &mut usize, regions_left: &mut usize) -> bool {
+    fn evict_candidate(
+        &self,
+        access_histories: &ObjectAccessHistories,
+        attempts_left: &mut usize,
+        regions_left: &mut usize,
+    ) -> bool {
         if *attempts_left == 0 || *regions_left == 0 {
             return false;
         }
@@ -489,7 +484,7 @@ impl DiskCacheShard {
             if entry.region_count() > *regions_left {
                 continue;
             }
-            let retrieval_cost = entry.accesses.retention_score(entry.object_range);
+            let retrieval_cost = access_histories.retention_score(key, entry.object_range);
             let payload_bytes = entry.object_range.len();
             if selected_candidate.is_none_or(|(_, selected_cost, selected_bytes, selected_id)| {
                 compare_cost_per_byte(retrieval_cost, payload_bytes, selected_cost, selected_bytes)
@@ -638,7 +633,6 @@ impl UnwrittenShardBatch {
         allocator: &DiskChunkAllocator,
         key: &ObjectKey,
         download: &Download,
-        accesses: &Arc<ObjectAccessHistory>,
     ) -> Result<(), u64> {
         let object_range = download.downloaded_range();
         let bytes = download.bytes();
@@ -735,7 +729,6 @@ impl UnwrittenShardBatch {
                 read_result: Weak::new(),
                 eviction_position: 0,
                 publication_id: 0,
-                accesses: accesses.clone(),
                 object_range,
                 payload_checksum,
                 payload_regions,

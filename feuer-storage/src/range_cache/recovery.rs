@@ -257,7 +257,6 @@ impl DiskRangeCacheState {
                 read_result: Weak::new(),
                 eviction_position: 0,
                 publication_id: 0,
-                accesses: self.access_histories.for_key(&key),
                 object_range,
                 payload_checksum: checksum,
                 payload_regions: payload.iter().map(slice).collect(),

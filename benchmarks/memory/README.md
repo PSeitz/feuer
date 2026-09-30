@@ -27,11 +27,12 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
 ## Compared engines
 
 - `feuer-value-density`: `MemoryCache` with independent exact-range access counts
-  decaying with an 8,192-successful-same-shard-access half-life by default. Sampled eviction
+  decaying with an 8,192-request half-life across all keys by default. Sampled eviction
   compares decayed retrieval value per retained byte, crediting requests fully
   covered by each cached range. Bounded event history is used only for trimming. After a
-  64-successful-access grace, pressure trims the selected victim to its observed
-  request ranges when useful.
+  64-request grace, pressure trims the selected victim to its observed
+  request ranges when useful. The replay driver records requests before lookup in standalone history;
+  distinct counters survive all cache evictions for the duration of the run.
 - `foyer-native-exact-key`: requested ranges are native Foyer keys. The
   complete callback payload is retained under that exact request key, but
   native Foyer does not perform containment lookup.
@@ -95,7 +96,7 @@ FEUER_MAX_ACCESS_AGE_ACCESSES=65536 cargo run --release -p feuer-memory-bench --
   --capacity 1GiB --shards 1 --downloader exact --warmup-iterations 1
 ```
 
-The limit counts same-shard successful accesses, not milliseconds. It does not
+The limit counts requests across all keys, not milliseconds. It does not
 change the per-object history cap. To change that cap independently (default 64):
 
 ```bash

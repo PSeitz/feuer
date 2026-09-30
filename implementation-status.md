@@ -31,21 +31,22 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 - Successful lookups return exactly the requested bytes in one `Bytes`, which may share a larger allocation.
 - Insertion discards a download already contained by cached data. Partially overlapping downloads may remain
   independent. Broader downloads replace contained ranges.
-- Each successful lookup records its exact requested range once. Insertion and access are distinct policy
-  events, applied atomically under the shard lock for callback results.
+- Tier orchestration records each started request's exact range once, before lookup, in standalone shared
+  history. Failures, invalid downloads, and cancellation after starting still count as demand.
+  Raw memory/disk lookups and insertions do not record accesses; history takes no cache shard lock.
 - Capacity is a soft payload-byte target divided among shards. An oversized download empties its shard and
   remains admitted even when retained payload exceeds the target. Caller-held results survive eviction and
   are outside cache accounting.
 
 ### Memory retention and compaction
 
-- Cost-aware scoring uses independent exact-range access counts with an 8,192-successful-same-shard-access
-  half-life by default. Both tiers share the history and cost calculation in `feuer-types::retention`.
+- Cost-aware scoring uses exact-range access counts with an 8,192-request half-life by default,
+  measured across all keys. Both tiers consult standalone history in `feuer-types::retention`, with its own
+  lock and clock independent of cache shards. Every distinct counter survives all cache evictions for the
+  history object's lifetime; metadata has no capacity limit. History is volatile, not persisted.
   Separately, range trimming retains at most 64 repeated events per object by default
-  (`FEUER_MAX_ACCESS_EVENTS_PER_KEY`), expiring after 262,144 same-shard accesses
-  (`FEUER_MAX_ACCESS_AGE_ACCESSES`). These limits do not truncate scoring counters.
-  Evidence survives memory eviction while disk entries or active disk writes retain it. Releasing the final
-  owner removes the weak registry record. Histories are volatile, not persisted. Wall-clock aging is not
+  (`FEUER_MAX_ACCESS_EVENTS_PER_KEY`), expiring after 262,144 requests across all keys
+  (`FEUER_MAX_ACCESS_AGE_ACCESSES`). These limits do not truncate scoring counters. Wall-clock aging is not
   implemented.
 - Decayed counts weight the sum of fixed-cost-equivalent bytes (default 10,000,000,
   configurable via `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES`) and requested bytes. Only cached ranges
@@ -53,13 +54,14 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 - A dense rotating candidate ring supplies a shared sample of at most 64 live entries per pressure decision.
   The victim has the lowest retrieval value per retained byte, with monotonic entry identity breaking ties.
   Registration and removal are constant-work and leave no stale candidate backlog.
-- After a grace of 64 successful same-shard accesses, the selected victim is trimmed to observed requests if
+- After a grace of 64 requests across all keys, the selected victim is trimmed to observed requests if
   that releases at least one quarter of its payload. Otherwise it is evicted. Grace never prevents eviction.
 - Compaction merges only overlapping or adjacent observed intervals and copies them into independent `Bytes`.
   It preserves exact coverage, updates accounting and metrics, creates no access, and leaves caller-held
   slices valid.
-- Copying happens outside the shard lock. Generation checks reject output invalidated by concurrent access
-  through either tier or same-object structural changes. Admission falls back to eviction.
+- Copying happens outside the shard lock. Entry identity and structural generation checks reject output
+  invalidated by same-object cached-range changes. New accesses do not invalidate a trimming snapshot.
+  Admission falls back to eviction when cached-range changes invalidate a copy.
 
 There is no periodic compaction, separate prefetch-promotion state, or public policy configuration.
 
@@ -169,7 +171,7 @@ checks passed for the changed files.
   memory-entry identity under the memory shard lock, within the disk index lock. No memory operation takes
   a disk lock. Stale writes are discarded, and disk containment/allocation policy can still skip entries.
 - Failed writes are logged and remain invisible. Shared evidence survives queued and active disk writes.
-- Disk hits, memory hits, and successful callbacks each record exactly one request. Callback results already
+- Requests record exactly once before lookup, including requests that fail or are later canceled. Callback results already
   covered by disk are discarded without memory admission or another write.
 
 On `m8g-32cpu-local-ssd`, all 145 workspace tests passed with real direct I/O and io_uring after integration.

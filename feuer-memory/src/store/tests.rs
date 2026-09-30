@@ -3,12 +3,12 @@ use std::{sync::Arc, thread};
 use bytes::Bytes;
 use feuer_types::{
     ByteRange, Download, ObjectKey,
-    retention::{ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_EVENTS_PER_KEY},
+    retention::{ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_EVENTS_PER_KEY, ObjectAccessHistories},
 };
 
 use super::{
     MemoryCache,
-    shard::{AdmissionProgress, MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION},
+    shard::{AdmissionProgress, MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION},
     shard_capacity_for,
 };
 use crate::MemoryMetrics;
@@ -19,11 +19,11 @@ fn disk_write_identity_expires_on_removal_replacement_and_readmission() {
     let key = ObjectKey::from("disk-source");
     let payload = Download::new(10, Bytes::from_static(b"abcd")).unwrap();
     let range = payload.downloaded_range();
-    let id = cache.insert_and_record(key.clone(), payload.clone(), range).unwrap();
+    let id = cache.insert(key.clone(), payload.clone()).unwrap();
     assert_eq!(cache.with_current_entry(&key, range, id, || 7), Some(7));
-    assert_eq!(cache.insert_and_record(key.clone(), payload.clone(), range), None);
+    assert_eq!(cache.insert(key.clone(), payload.clone()), None);
     assert!(cache.remove(&key, range));
-    let replacement_id = cache.insert_and_record(key.clone(), payload, range).unwrap();
+    let replacement_id = cache.insert(key.clone(), payload).unwrap();
     assert_ne!(id, replacement_id);
     assert!(
         cache
@@ -55,15 +55,20 @@ fn insert(cache: &MemoryCache, object_key: ObjectKey, download: Download) {
 }
 
 fn cache(capacity: u64) -> MemoryCache {
-    MemoryCache::with_shard_count(capacity, MemoryMetrics::noop(), 1)
+    MemoryCache::with_shard_count(
+        capacity,
+        MemoryMetrics::noop(),
+        1,
+        Arc::new(ObjectAccessHistories::new()),
+    )
 }
 
 fn accessed_ranges(cache: &MemoryCache, key: &ObjectKey) -> Vec<ByteRange> {
-    cache.shards[cache.shard_index(key)].lock().accessed_ranges(key)
+    cache.access_histories.active_ranges(key)
 }
 
 fn access_history_len(cache: &MemoryCache, key: &ObjectKey) -> usize {
-    cache.shards[cache.shard_index(key)].lock().access_history_len(key)
+    accessed_ranges(cache, key).len()
 }
 
 fn candidate_count(cache: &MemoryCache) -> usize {
@@ -75,7 +80,12 @@ fn eviction_triggering_insertions_count_once_per_attempt_not_per_victim() {
     use crate::test_metrics::{registry, value};
 
     let (registry, backend) = registry();
-    let cache = MemoryCache::with_shard_count(4, MemoryMetrics::new(&backend), 1);
+    let cache = MemoryCache::with_shard_count(
+        4,
+        MemoryMetrics::new(&backend),
+        1,
+        Arc::new(ObjectAccessHistories::new()),
+    );
     let triggering = || value(&registry, "feuer_memory_eviction_triggering_insertions_total", &[]);
     let operation = |label| value(&registry, "feuer_memory_operations_total", &[("operation", label)]);
     for key in ["first", "second"] {
@@ -126,14 +136,14 @@ fn reclaim_sampling_advances_past_contained_ranges() {
     let replacement = Bytes::from_static(b"abc");
     for expected_entries in [3, 3, 2] {
         assert!(matches!(
-            shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, None, false),
+            shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, &cache.access_histories, false),
             AdmissionProgress::Retry | AdmissionProgress::Evicted
         ));
         assert_eq!(shard.entry_count(), expected_entries);
     }
     // The partial overlap is eligible; the two ranges fully contained in the incoming download were skipped.
     assert!(matches!(
-        shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, None, false),
+        shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, &cache.access_histories, false),
         AdmissionProgress::Complete(Some(_))
     ));
     assert_eq!(shard.entry_count(), 1);
@@ -193,6 +203,8 @@ fn insertion_and_accesses_are_independent() {
     assert!(accessed_ranges(&cache, &key).is_empty());
 
     assert!(cache.get(&key, range(11, 13)).is_some());
+    assert!(accessed_ranges(&cache, &key).is_empty());
+    cache.access_histories.record_access(&key, range(11, 13));
     assert_eq!(accessed_ranges(&cache, &key), vec![range(11, 13)]);
 
     insert(
@@ -202,7 +214,7 @@ fn insertion_and_accesses_are_independent() {
     );
     assert_eq!(accessed_ranges(&cache, &key), vec![range(11, 13)]);
 
-    cache.record_access(&key, range(14, 16));
+    cache.access_histories.record_access(&key, range(14, 16));
     assert_eq!(accessed_ranges(&cache, &key), vec![range(11, 13), range(14, 16)]);
 }
 
@@ -213,7 +225,8 @@ fn shared_download_insertion_is_deduplicated_but_each_waiter_records_an_access()
     let shared = download(range(0, 10), Bytes::from_static(b"abcdefghij"));
 
     for requested_range in [range(1, 3), range(7, 9), range(1, 3)] {
-        cache.insert_and_record(key.clone(), shared.clone(), requested_range);
+        cache.insert(key.clone(), shared.clone());
+        cache.access_histories.record_access(&key, requested_range);
     }
 
     assert_eq!(cache.used_bytes(), 10);
@@ -343,8 +356,8 @@ fn accessed_ranges_survive_downloaded_range_replacement() {
     insert(&cache, key.clone(), download(range(0, 4), Bytes::from_static(b"abcd")));
     insert(&cache, key.clone(), download(range(6, 10), Bytes::from_static(b"ghij")));
 
-    cache.record_access(&key, range(1, 3));
-    cache.record_access(&key, range(7, 9));
+    cache.access_histories.record_access(&key, range(1, 3));
+    cache.access_histories.record_access(&key, range(7, 9));
     assert_eq!(accessed_ranges(&cache, &key), vec![range(1, 3), range(7, 9)]);
 
     insert(
@@ -367,8 +380,8 @@ fn access_history_survives_same_object_eviction_during_replacement() {
         ObjectKey::from("other"),
         download(range(0, 2), Bytes::from_static(b"xx")),
     );
-    cache.record_access(&key, range(1, 2));
-    cache.record_access(&key, range(7, 8));
+    cache.access_histories.record_access(&key, range(1, 2));
+    cache.access_histories.record_access(&key, range(7, 8));
 
     insert(
         &cache,
@@ -390,7 +403,7 @@ fn access_history_is_bounded_and_preserves_repeated_exact_requests() {
     insert(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
 
     for _ in 0..*MAX_ACCESS_EVENTS_PER_KEY + 17 {
-        cache.record_access(&key, range(0, 1));
+        cache.access_histories.record_access(&key, range(0, 1));
     }
 
     assert_eq!(access_history_len(&cache, &key), *MAX_ACCESS_EVENTS_PER_KEY);
@@ -409,9 +422,9 @@ fn repeated_requested_intervals_are_retained_over_single_accesses() {
     insert(&cache, hot.clone(), download(range(0, 1), Bytes::from_static(b"h")));
     insert(&cache, cold.clone(), download(range(0, 1), Bytes::from_static(b"c")));
 
-    cache.record_access(&cold, range(0, 1));
-    cache.record_access(&hot, range(0, 1));
-    cache.record_access(&hot, range(0, 1));
+    cache.access_histories.record_access(&cold, range(0, 1));
+    cache.access_histories.record_access(&hot, range(0, 1));
+    cache.access_histories.record_access(&hot, range(0, 1));
     insert(
         &cache,
         incoming.clone(),
@@ -439,8 +452,8 @@ fn requested_bytes_contribute_to_retrieval_value() {
         download(range(0, 10), Bytes::from_static(b"abcdefghij")),
     );
 
-    cache.record_access(&small, range(0, 1));
-    cache.record_access(&large, range(0, 9));
+    cache.access_histories.record_access(&small, range(0, 1));
+    cache.access_histories.record_access(&large, range(0, 9));
     insert(
         &cache,
         ObjectKey::from("incoming"),
@@ -459,7 +472,7 @@ fn retention_credit_is_projected_only_onto_the_requested_interval() {
     insert(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
     insert(&cache, key.clone(), download(range(1, 2), Bytes::from_static(b"b")));
 
-    cache.record_access(&key, range(0, 1));
+    cache.access_histories.record_access(&key, range(0, 1));
     insert(&cache, incoming, download(range(0, 1), Bytes::from_static(b"c")));
 
     assert!(cache.get(&key, range(0, 1)).is_some());
@@ -477,12 +490,12 @@ fn stale_frequency_decays_below_recent_accesses() {
     insert(&cache, clock.clone(), download(range(0, 1), Bytes::from_static(b"c")));
 
     for _ in 0..8 {
-        cache.record_access(&stale, range(0, 1));
+        cache.access_histories.record_access(&stale, range(0, 1));
     }
     for _ in 0..*ACCESS_COUNT_HALF_LIFE * 4 {
-        cache.record_access(&clock, range(0, 1));
+        cache.access_histories.record_access(&clock, range(0, 1));
     }
-    cache.record_access(&fresh, range(0, 1));
+    cache.access_histories.record_access(&fresh, range(0, 1));
     insert(
         &cache,
         ObjectKey::from("incoming"),
@@ -497,11 +510,11 @@ fn stale_frequency_decays_below_recent_accesses() {
 fn range_trim_respects_grace_then_releases_unrequested_payload() {
     let early_pressure = cache(10);
     let early_key = ObjectKey::from("early-download");
-    early_pressure.insert_and_record(
+    early_pressure.insert(
         early_key.clone(),
         download(range(0, 10), Bytes::from_static(b"abcdefghij")),
-        range(2, 4),
     );
+    early_pressure.access_histories.record_access(&early_key, range(2, 4));
     insert(
         &early_pressure,
         ObjectKey::from("early-pressure"),
@@ -510,7 +523,12 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
     assert!(early_pressure.get(&early_key, range(2, 4)).is_none());
 
     let (registry, backend) = crate::test_metrics::registry();
-    let cache = MemoryCache::with_shard_count(10, MemoryMetrics::new(&backend), 1);
+    let cache = MemoryCache::with_shard_count(
+        10,
+        MemoryMetrics::new(&backend),
+        1,
+        Arc::new(ObjectAccessHistories::new()),
+    );
     let key = ObjectKey::from("download");
     let incoming = ObjectKey::from("incoming");
     let original = Bytes::from_static(b"abcdefghij");
@@ -519,8 +537,8 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
     let returned = cache.get(&key, range(2, 4)).unwrap();
     assert_eq!(returned, Bytes::from_static(b"cd"));
     assert_eq!(returned.as_ptr(), original.slice(2..).as_ptr());
-    for _ in 1..MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
-        cache.record_access(&key, range(2, 4));
+    for _ in 0..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+        cache.access_histories.record_access(&key, range(2, 4));
     }
     insert(&cache, incoming, download(range(0, 2), Bytes::from_static(b"xy")));
 
@@ -537,7 +555,7 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
     assert!(cache.get(&key, range(0, 1)).is_none());
     assert_eq!(
         access_history_len(&cache, &key),
-        (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION as usize + 1)
+        (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION as usize)
     );
     assert!(accessed_ranges(&cache, &key).iter().all(|seen| *seen == range(2, 4)));
 }
@@ -551,10 +569,10 @@ fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
         key.clone(),
         download(range(0, 10), Bytes::from_static(b"abcdefghij")),
     );
-    cache.record_access(&key, range(1, 3));
-    cache.record_access(&key, range(7, 9));
-    for _ in 2..MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
-        cache.record_access(&key, range(1, 3));
+    cache.access_histories.record_access(&key, range(1, 3));
+    cache.access_histories.record_access(&key, range(7, 9));
+    for _ in 2..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+        cache.access_histories.record_access(&key, range(1, 3));
     }
 
     insert(
@@ -577,12 +595,12 @@ fn range_trim_waits_for_pressure_and_adds_no_access() {
     insert(&cache, key.clone(), download(range(0, 16), original.clone()));
 
     let returned = cache.get(&key, range(4, 8)).unwrap();
-    for _ in 1..MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
-        cache.record_access(&key, range(4, 8));
+    for _ in 0..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+        cache.access_histories.record_access(&key, range(4, 8));
     }
 
     assert_eq!(cache.used_bytes(), 16);
-    let history_len = (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION as usize);
+    let history_len = (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION as usize);
     assert_eq!(access_history_len(&cache, &key), history_len);
     insert(
         &cache,
@@ -603,7 +621,8 @@ fn candidate_state_tracks_entries_during_oversized_churn() {
     let cache = cache(1);
     for index in 0..300 {
         let key = ObjectKey::from(format!("download-{index}"));
-        cache.insert_and_record(key, download(range(0, 2), Bytes::from_static(b"ab")), range(0, 1));
+        cache.insert(key.clone(), download(range(0, 2), Bytes::from_static(b"ab")));
+        cache.access_histories.record_access(&key, range(0, 1));
     }
 
     assert_eq!(cache.used_bytes(), 2);
@@ -612,16 +631,12 @@ fn candidate_state_tracks_entries_during_oversized_churn() {
 }
 
 #[test]
-fn copied_range_trim_is_revalidated_before_publication_and_can_fall_back() {
+fn new_accesses_do_not_invalidate_a_copied_range_trim() {
     let cache = cache(10);
     let key = ObjectKey::from("download");
-    cache.insert_and_record(
-        key.clone(),
-        download(range(0, 10), Bytes::from_static(b"abcdefghij")),
-        range(2, 4),
-    );
-    for _ in 1..MIN_SHARD_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
-        cache.record_access(&key, range(2, 4));
+    cache.insert(key.clone(), download(range(0, 10), Bytes::from_static(b"abcdefghij")));
+    for _ in 0..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+        cache.access_histories.record_access(&key, range(2, 4));
     }
 
     let incoming = ObjectKey::from("incoming");
@@ -629,7 +644,7 @@ fn copied_range_trim_is_revalidated_before_publication_and_can_fall_back() {
     let replacement = {
         let mut shard = cache.shards[0].lock();
         let AdmissionProgress::Trim(source) =
-            shard.try_admit_or_reclaim(&incoming, range(0, 2), &incoming_bytes, None, true)
+            shard.try_admit_or_reclaim(&incoming, range(0, 2), &incoming_bytes, &cache.access_histories, true)
         else {
             panic!("pressure should select the cold compactable cached range");
         };
@@ -637,49 +652,98 @@ fn copied_range_trim_is_revalidated_before_publication_and_can_fall_back() {
         source.copy_retained_payloads()
     };
 
-    // Simulate a disk-served request: it changes shared evidence without taking the memory shard lock.
-    cache.access_histories().record_access(&key, range(6, 8));
-    assert!(!cache.shards[0].lock().publish_range_trim(replacement));
-    assert_eq!(cache.used_bytes(), 10);
-    assert!(cache.get(&key, range(6, 8)).is_some());
-
-    let admission_progress =
-        cache.shards[0]
-            .lock()
-            .try_admit_or_reclaim(&incoming, range(0, 2), &incoming_bytes, None, false);
-    assert!(matches!(admission_progress, AdmissionProgress::Evicted));
-    assert_eq!(cache.used_bytes(), 0, "fallback pressure may evict but cannot starve");
+    // Recording needs no memory shard lock, even while the shard is held here.
+    let mut shard = cache.shards[0].lock();
+    cache.access_histories.record_access(&key, range(6, 8));
+    assert!(shard.publish_range_trim(replacement, cache.access_histories.clock()));
+    drop(shard);
+    assert_eq!(cache.used_bytes(), 2);
+    assert_eq!(cache.get(&key, range(2, 4)).unwrap(), Bytes::from_static(b"cd"));
+    assert!(cache.get(&key, range(6, 8)).is_none());
+    assert!(accessed_ranges(&cache, &key).contains(&range(6, 8)));
 }
 
 #[test]
-fn removing_the_last_cached_range_releases_its_access_history() {
+fn cached_range_changes_still_invalidate_copied_trimming() {
+    for change in 0..3 {
+        let cache = cache(20);
+        let key = "source".to_owned();
+        let source = download(range(0, 10), Bytes::from_static(b"abcdefghij"));
+        cache.insert(key.clone(), source.clone());
+        for _ in 0..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+            cache.access_histories.record_access(&key, range(2, 4));
+        }
+        let trim_source = {
+            let mut shard = cache.shards[0].lock();
+            let AdmissionProgress::Trim(source) = shard.try_admit_or_reclaim(
+                &"incoming".to_owned(),
+                range(0, 11),
+                &Bytes::from_static(b"01234567890"),
+                &cache.access_histories,
+                true,
+            ) else {
+                panic!("expected a trim");
+            };
+            source
+        };
+        let replacement = trim_source.copy_retained_payloads();
+        match change {
+            0 => {
+                assert!(cache.remove(&key, range(0, 10)));
+            }
+            1 => {
+                assert!(cache.remove(&key, range(0, 10)));
+                cache.insert(key.clone(), source);
+            }
+            _ => {
+                cache.insert(key.clone(), download(range(12, 13), Bytes::from_static(b"x")));
+            }
+        }
+        let bytes_before = cache.used_bytes();
+        assert!(
+            !cache.shards[0]
+                .lock()
+                .publish_range_trim(replacement, cache.access_histories.clock())
+        );
+        assert_eq!(cache.used_bytes(), bytes_before);
+        if change != 0 {
+            assert_eq!(
+                cache.get(&key, range(0, 10)).unwrap(),
+                Bytes::from_static(b"abcdefghij")
+            );
+        }
+    }
+}
+
+#[test]
+fn removing_the_last_cached_range_keeps_its_access_history() {
     let cache = cache(1);
     let key = ObjectKey::from("object");
     insert(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
-    cache.record_access(&key, range(0, 1));
+    cache.access_histories.record_access(&key, range(0, 1));
 
     assert_eq!(access_history_len(&cache, &key), 1);
     assert!(cache.remove(&key, range(0, 1)));
-    assert_eq!(access_history_len(&cache, &key), 0);
+    assert_eq!(access_history_len(&cache, &key), 1);
+    let history = cache.access_histories.clone();
+    drop(cache);
+    assert!(history.retention_score(&key, range(0, 1)) > 0.0);
 }
 
 #[test]
 fn shared_evidence_survives_memory_eviction_and_records_disk_only_requests() {
     let cache = cache(1);
     let key = "object".to_owned();
-    cache.insert_and_record(
-        key.clone(),
-        download(range(0, 1), Bytes::from_static(b"a")),
-        range(0, 1),
-    );
-    let disk_access_history = cache.access_histories().for_key(&key);
+    cache.insert(key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
+    let history = cache.access_histories.clone();
+    history.record_access(&key, range(0, 1));
     assert!(cache.remove(&key, range(0, 1)));
-    cache.record_access(&key, range(10, 11));
-    assert_eq!(disk_access_history.lock().generation(), 2);
+    history.record_access(&key, range(10, 11));
+    assert_eq!(history.clock(), 2);
     insert(&cache, key.clone(), download(range(0, 1), Bytes::from_static(b"a")));
     assert_eq!(accessed_ranges(&cache, &key), vec![range(0, 1), range(10, 11)]);
     assert!(cache.get(&key, range(0, 1)).is_some());
-    assert_eq!(disk_access_history.lock().generation(), 3);
+    assert_eq!(history.clock(), 2, "raw lookups do not record requests");
 }
 
 #[test]
@@ -709,7 +773,7 @@ fn configured_target_is_divided_without_losing_remainder_bytes() {
 
 #[test]
 fn shard_targets_can_collectively_exceed_the_configured_capacity() {
-    let cache = MemoryCache::with_shard_count(2, MemoryMetrics::noop(), 2);
+    let cache = MemoryCache::with_shard_count(2, MemoryMetrics::noop(), 2, Arc::new(ObjectAccessHistories::new()));
     let mut keys = [None, None];
     for candidate in 0..100 {
         let key = ObjectKey::from(format!("object-{candidate}"));
@@ -732,7 +796,12 @@ fn shard_targets_can_collectively_exceed_the_configured_capacity() {
 
 #[test]
 fn concurrent_shards_respect_their_targets_for_regular_entries() {
-    let cache = Arc::new(MemoryCache::with_shard_count(256, MemoryMetrics::noop(), 8));
+    let cache = Arc::new(MemoryCache::with_shard_count(
+        256,
+        MemoryMetrics::noop(),
+        8,
+        Arc::new(ObjectAccessHistories::new()),
+    ));
     let mut threads = Vec::new();
     for worker in 0..8_u64 {
         let cache = cache.clone();

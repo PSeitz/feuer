@@ -36,7 +36,7 @@ async fn open_paused(directory: &Path, capacity: u64) -> DiskRangeCache {
             file,
             shards,
             recovery,
-            access_histories: Arc::new(ObjectAccessHistories::new(count)),
+            access_histories: Arc::new(ObjectAccessHistories::new()),
             metrics: DiskMetrics::noop(),
         }),
     }
@@ -116,7 +116,7 @@ async fn incrementally_recovers_shared_chunks_and_multi_chunk_entries() {
     }
     for (key, source) in &inputs {
         assert_eq!(cache.get(key, source.downloaded_range()).await.unwrap(), source.bytes());
-        assert_eq!(cache.access_histories().for_key(key).lock().generation(), 0);
+        assert_eq!(cache.access_histories().clock(), 0);
     }
     // Metadata-only chunks and partially occupied chunks must remain fully reserved.
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 8 * CHUNK_BYTES - end);

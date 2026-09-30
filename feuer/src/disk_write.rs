@@ -10,7 +10,7 @@ use std::{sync::Arc, time::Instant};
 
 use feuer_memory::MemoryCache;
 use feuer_storage::DiskRangeCache;
-use feuer_types::{ByteRange, Download, ObjectKey, retention::ObjectAccessHistory};
+use feuer_types::{ByteRange, Download, ObjectKey};
 use tokio::sync::mpsc;
 
 const MAX_QUEUED_ENTRIES: usize = 256;
@@ -27,7 +27,6 @@ struct DiskWriteSource {
     key: ObjectKey,
     range: ByteRange,
     entry_id: u64,
-    _accesses: Arc<ObjectAccessHistory>,
     queued_at: Option<Instant>,
     metrics: Arc<DiskWriteQueueMetrics>,
 }
@@ -92,13 +91,7 @@ impl DiskWriteQueue {
 
     /// Enqueues a disk write if the queue has capacity, without waiting for space.
     /// Full or closed queues discard the download and record the corresponding outcome.
-    pub(crate) fn enqueue_if_capacity(
-        &self,
-        key: ObjectKey,
-        download: Download,
-        entry_id: u64,
-        accesses: Arc<ObjectAccessHistory>,
-    ) {
+    pub(crate) fn enqueue_if_capacity(&self, key: ObjectKey, download: Download, entry_id: u64) {
         let permit = match self.sender.try_reserve() {
             Ok(permit) => permit,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -117,7 +110,6 @@ impl DiskWriteQueue {
             key,
             range: download.downloaded_range(),
             entry_id,
-            _accesses: accesses,
             queued_at: Some(Instant::now()),
             metrics: self.metrics.clone(),
         };

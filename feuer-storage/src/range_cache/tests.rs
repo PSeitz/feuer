@@ -177,7 +177,6 @@ async fn mixed_batch_groups_small_entries_and_records_every_metadata_start() {
 fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighbors() {
     let allocator = DiskChunkAllocator::for_disk_range(0..8 * CHUNK_BYTES).unwrap();
     let mut batch = UnwrittenShardBatch::default();
-    let histories = ObjectAccessHistories::new(1);
     // Exercise boundaries in input order, including small entries after exclusive tails.
     for (key, length) in [
         ("first".to_owned(), 600_000),
@@ -187,9 +186,7 @@ fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighb
         ("k".repeat(CHUNK_BYTES as usize), 1),
         ("small after metadata-only chunk".to_owned(), 1),
     ] {
-        batch
-            .pack_download(&allocator, &key, &download(0, length), &histories.for_key(&key))
-            .unwrap();
+        batch.pack_download(&allocator, &key, &download(0, length)).unwrap();
     }
     let mut owners = BTreeMap::<u64, Vec<usize>>::new();
     for (entry_number, (_, entry)) in batch.entries.iter().enumerate() {
@@ -222,23 +219,16 @@ fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighb
 fn metadata_must_fit_before_an_entry_can_share_a_chunk() {
     let allocator = DiskChunkAllocator::for_disk_range(0..2 * CHUNK_BYTES).unwrap();
     let mut batch = UnwrittenShardBatch::default();
-    let histories = ObjectAccessHistories::new(1);
     batch
         .pack_download(
             &allocator,
             &"first".to_owned(),
             &download(0, CHUNK_BYTES as usize - 3 * METADATA_PAGE_BYTES),
-            &histories.for_key(&"first".to_owned()),
         )
         .unwrap();
     // The remaining page fits payload, but not its metadata. Both must go in a new chunk.
     batch
-        .pack_download(
-            &allocator,
-            &"second".to_owned(),
-            &download(0, 1),
-            &histories.for_key(&"second".to_owned()),
-        )
+        .pack_download(&allocator, &"second".to_owned(), &download(0, 1))
         .unwrap();
     assert_eq!(batch.entries[0].1.single_chunk_start(), Some(0));
     assert_eq!(batch.entries[1].1.single_chunk_start(), Some(CHUNK_BYTES));
@@ -344,15 +334,15 @@ async fn eviction_budgets_and_active_reservations_bound_reclamation() {
     let shard = &cache.disk.shards[0];
     let mut attempts_left = 0;
     let mut regions_left = MAX_EVICTION_REGIONS;
-    assert!(!shard.evict_candidate(&mut attempts_left, &mut regions_left));
+    assert!(!shard.evict_candidate(&cache.disk.access_histories, &mut attempts_left, &mut regions_left));
     attempts_left = 1;
     regions_left = 1;
-    assert!(shard.evict_candidate(&mut attempts_left, &mut regions_left));
+    assert!(shard.evict_candidate(&cache.disk.access_histories, &mut attempts_left, &mut regions_left));
     assert_eq!(attempts_left, 0);
     assert!(cache.get(&key, range(0, 1)).await.is_some());
     attempts_left = 1;
     regions_left = MAX_EVICTION_REGIONS;
-    assert!(shard.evict_candidate(&mut attempts_left, &mut regions_left));
+    assert!(shard.evict_candidate(&cache.disk.access_histories, &mut attempts_left, &mut regions_left));
     let active = shard.allocator.reserve_chunks(2).unwrap();
     assert!(!cache.insert("blocked".to_owned(), download(0, 1)).await.unwrap());
     drop(active);
@@ -386,7 +376,7 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
     let shard = &cache.disk.shards[0];
     let mut attempts_left = 1;
     let mut regions_left = MAX_EVICTION_REGIONS;
-    assert!(shard.evict_candidate(&mut attempts_left, &mut regions_left));
+    assert!(shard.evict_candidate(&cache.disk.access_histories, &mut attempts_left, &mut regions_left));
     assert!(cache.get(&cold, range(0, 1)).await.is_none());
     assert!(cache.get(&hot, range(0, 1)).await.is_some());
     assert_eq!(shard.allocator.available_bytes(), 0); // Hot neighbor still owns the chunk.
@@ -430,9 +420,8 @@ async fn pressure_replacement_preserves_evidence_while_the_last_old_entry_is_rem
     let key = "object".to_owned();
     cache.insert(key.clone(), download(5, 10)).await.unwrap();
     cache.access_histories().record_access(&key, range(6, 7));
-    let history = Arc::downgrade(&cache.access_histories().for_key(&key));
     assert!(cache.insert(key.clone(), download(0, 20)).await.unwrap());
-    assert_eq!(history.upgrade().unwrap().lock().generation(), 1);
+    assert_eq!(cache.access_histories().active_ranges(&key), vec![range(6, 7)]);
     assert!(cache.get(&key, range(0, 20)).await.is_some());
 }
 
@@ -444,20 +433,19 @@ async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
     cache.insert(key.clone(), download(0, 100)).await.unwrap();
     cache.insert(key.clone(), download(200, 100)).await.unwrap();
     let histories = cache.access_histories();
-    let evidence = histories.for_key(&key);
     for _ in 0..3 {
         histories.record_access(&key, range(0, 1));
     }
-    let original_cost = evidence.retention_score(range(0, 100));
+    let original_cost = histories.retention_score(&key, range(0, 100));
     assert!(original_cost > 0.0);
-    assert_eq!(evidence.retention_score(range(200, 300)), 0.0);
+    assert_eq!(histories.retention_score(&key, range(200, 300)), 0.0);
     // Successful lookups are recorded explicitly; raw storage reads/writes do not double-count.
     assert!(cache.get(&key, range(0, 1)).await.is_some());
-    assert_eq!(evidence.lock().generation(), 3);
+    assert_eq!(histories.clock(), 3);
     for _ in 0..*ACCESS_COUNT_HALF_LIFE {
         histories.record_access(&key, range(200, 201));
     }
-    assert_eq!(evidence.retention_score(range(0, 100)), original_cost * 0.5);
+    assert_eq!(histories.retention_score(&key, range(0, 100)), original_cost * 0.5);
     assert!(cache.insert("new".to_owned(), download(0, 1)).await.unwrap());
     assert!(cache.get(&key, range(0, 1)).await.is_none());
     assert!(cache.get(&key, range(200, 201)).await.is_some());
@@ -465,40 +453,47 @@ async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
 
 #[tokio::test]
 async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
-    let memory = feuer_memory::MemoryCache::new(4096);
+    let history = Arc::new(ObjectAccessHistories::new());
+    let (_, registry) = crate::test_metrics::registry();
+    let memory = feuer_memory::MemoryCache::with_access_histories(
+        4096,
+        feuer_memory::MemoryMetrics::new(&registry),
+        history.clone(),
+    );
     let directory = tempfile::tempdir().unwrap();
     let cache = DiskRangeCache::open_with_access_histories(
         directory.path(),
         2 * CHUNK_BYTES,
         IoMetrics::noop(),
-        memory.access_histories(),
+        history.clone(),
     )
     .await
     .unwrap();
     let hot = "hot".to_owned();
     let cold = "cold".to_owned();
-    memory.insert_and_record(hot.clone(), download(0, 100), range(0, 1));
+    memory.insert(hot.clone(), download(0, 100));
+    history.record_access(&hot, range(0, 1));
     cache.insert(hot.clone(), download(0, 100)).await.unwrap();
     cache.insert(cold.clone(), download(0, 100)).await.unwrap();
-    memory.record_access(&cold, range(0, 1)); // A disk-only key.
+    history.record_access(&cold, range(0, 1)); // A disk-only key.
     for _ in 0..3 {
         assert!(memory.get(&hot, range(0, 1)).is_some());
+        history.record_access(&hot, range(0, 1));
     }
-    let history = cache.access_histories().for_key(&hot);
-    assert_eq!(history.lock().generation(), 4);
+    assert_eq!(history.clock(), 5);
     assert!(cache.insert("new".to_owned(), download(0, 100)).await.unwrap());
     assert!(cache.get(&cold, range(0, 1)).await.is_none());
     assert!(memory.remove(&hot, range(0, 100)));
     assert!(memory.get(&hot, range(0, 1)).is_none());
     assert!(cache.get(&hot, range(50, 51)).await.is_some());
-    assert_eq!(history.lock().generation(), 4); // Raw storage reads do not record a second event.
-    memory.record_access(&hot, range(50, 51));
-    assert_eq!(history.lock().generation(), 5);
-    let released = Arc::downgrade(&history);
-    drop(history);
+    assert_eq!(history.clock(), 5); // Raw storage reads do not record a second event.
+    history.record_access(&hot, range(50, 51));
+    assert_eq!(history.clock(), 6);
     cache.disk.shards[0].entry_index.lock().unwrap().remove(&hot, 0);
-    assert!(released.upgrade().is_none());
-    assert_eq!(cache.access_histories().for_key(&hot).lock().generation(), 0);
+    drop(memory);
+    drop(cache);
+    assert_eq!(history.active_ranges(&hot).len(), 5);
+    assert!(history.retention_score(&hot, range(0, 100)) > 0.0);
 }
 
 #[tokio::test]
@@ -915,7 +910,7 @@ async fn completed_write_revalidates_memory_identity_before_publication() {
         let key = key.to_owned();
         let source = download(0, length);
         let range = source.downloaded_range();
-        let id = memory.insert_and_record(key.clone(), source.clone(), range).unwrap();
+        let id = memory.insert(key.clone(), source.clone()).unwrap();
         entries.push((key.clone(), source, (key, range, id)));
     }
     let published = cache
@@ -1102,22 +1097,11 @@ async fn failed_chunk_write_releases_the_batch_without_publication() {
 fn chunk_write_owner_holds_shared_storage_until_released() {
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
     let mut batch = UnwrittenShardBatch::default();
-    let histories = ObjectAccessHistories::new(1);
     batch
-        .pack_download(
-            &allocator,
-            &"a".to_owned(),
-            &download(0, 10),
-            &histories.for_key(&"a".to_owned()),
-        )
+        .pack_download(&allocator, &"a".to_owned(), &download(0, 10))
         .unwrap();
     batch
-        .pack_download(
-            &allocator,
-            &"b".to_owned(),
-            &download(0, 10),
-            &histories.for_key(&"b".to_owned()),
-        )
+        .pack_download(&allocator, &"b".to_owned(), &download(0, 10))
         .unwrap();
     let owners: Vec<_> = batch
         .chunks
@@ -1235,7 +1219,6 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
                 read_result: Weak::new(),
                 eviction_position: 0,
                 publication_id: 0,
-                accesses: ObjectAccessHistories::new(1).for_key(&"object".to_owned()),
                 object_range: range(0, 3),
                 payload_checksum: blake3::hash(replacement),
                 payload_regions: Vec::new(),

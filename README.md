@@ -71,20 +71,28 @@ For each request fully contained in a cached range, the score adds:
 decayed access count × (fixed request cost + requested bytes)
 ```
 
-Successful lookups update the shared access history. Decay is measured in successful
-accesses to the same shard. Storing downloaded bytes alone does not count as an access.
+Each started request records its requested range once, before any lookup, in standalone history shared
+by both tiers. Failed requests, invalid downloads, and requests canceled after starting all count as demand.
+History has its own lock and one access clock across all keys; it is not part of a cache shard.
+Raw cache reads, insertions, and evictions do not record accesses or delete history.
+
+Every distinct `(object key, requested range)` counter is retained for the history object's lifetime,
+even after both tiers evict the object. Repeated exact requests update the same counter. This metadata
+has no capacity limit and is not persisted across restarts; its memory grows with distinct keys and ranges.
+Scores still decay, measured in requests across all keys.
 
 Memory may trim an entry to previously requested ranges instead of evicting it.
-Trimming uses a separate history with an event cap and age limit. Scoring counters
-have no per-object cap and live until the last history owner is released.
+Trimming uses bounded recent-access events with an age limit, not the full counter set.
+A trimming plan uses a history snapshot; newer accesses do not invalidate it. Cached-range changes
+are still checked before publishing bytes copied outside the memory shard lock.
 
 ## Environment variables
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Candidates per eviction decision. |
-| `FEUER_ACCESS_COUNT_HALF_LIFE` | `8192` | Score decay half-life in successful same-shard accesses. |
-| `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Trimming history lifetime in successful same-shard accesses. |
+| `FEUER_ACCESS_COUNT_HALF_LIFE` | `8192` | Score decay half-life in requests across all keys. |
+| `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Trimming event age limit in requests across all keys. |
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Trimming events retained per key. |
 | `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed request cost in equivalent bytes. `0` scores bytes only. |
 | `FEUER_SMALL_IO_BUFFER_POOL_BYTES` | `128MiB` | Idle buffer budget per read queue, allocations ≤ 1 MiB. |

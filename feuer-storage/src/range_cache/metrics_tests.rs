@@ -12,7 +12,7 @@ async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache, pr
         directory.path(),
         capacity,
         IoMetrics::new(&backend),
-        Arc::new(ObjectAccessHistories::new(1)),
+        Arc::new(ObjectAccessHistories::new()),
         DiskMetrics::new(&backend),
         RECLAIM_SAMPLE_SIZE,
     )
@@ -40,7 +40,7 @@ async fn recovery_counts_indexed_entries_not_writes_or_reads() {
         directory.path(),
         capacity,
         IoMetrics::noop(),
-        Arc::new(ObjectAccessHistories::new(1)),
+        Arc::new(ObjectAccessHistories::new()),
         metrics,
         RECLAIM_SAMPLE_SIZE,
     )

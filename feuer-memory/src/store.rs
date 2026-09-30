@@ -3,7 +3,12 @@ mod shard;
 #[cfg(test)]
 mod tests;
 
-use std::{fmt, sync::Arc};
+use std::{
+    collections::hash_map::DefaultHasher,
+    fmt,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use feuer_types::{ByteRange, Download, ObjectKey, retention::ObjectAccessHistories};
@@ -22,8 +27,8 @@ const MAX_SHARDS: usize = 64;
 /// from disjoint ranges. A lookup succeeds only when one retained range covers
 /// the exact request and returns a [`Bytes`] slice containing only those
 /// requested bytes. The result can share the retained allocation and never
-/// holds an entry guard. Decayed access counts and bounded range-trimming history
-/// are recorded separately from downloaded-range insertion.
+/// holds an entry guard. Request history is supplied separately: cache operations
+/// consult it for retention decisions but never record accesses or remove history.
 ///
 /// The configured capacity is divided among independently locked shards. Each
 /// shard evicts locally before insertion. A payload larger than its shard's
@@ -52,32 +57,51 @@ impl fmt::Debug for MemoryCache {
 }
 
 impl MemoryCache {
-    /// Creates a cache with a soft payload-byte target and no-op metrics.
+    /// Creates a cache with a soft payload-byte target, empty history, and no-op metrics.
+    /// Use [`Self::with_access_histories`] to supply request history for access-aware retention.
     pub fn new(capacity: u64) -> Self {
         Self::with_metrics(capacity, MemoryMetrics::noop())
     }
 
-    /// Creates a cache with a soft payload-byte target and registered metrics.
+    /// Creates a cache with a soft payload-byte target, empty history, and registered metrics.
+    /// Use [`Self::with_access_histories`] to supply request history for access-aware retention.
     pub fn with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self {
-        Self::with_shard_count(capacity, metrics, default_shard_count())
+        Self::with_access_histories(capacity, metrics, Arc::new(ObjectAccessHistories::new()))
+    }
+
+    /// Creates a cache that consults standalone request history for retention decisions.
+    /// The caller records requests directly in that history before lookup, independently of cache operations.
+    pub fn with_access_histories(
+        capacity: u64,
+        metrics: Arc<MemoryMetrics>,
+        access_histories: Arc<ObjectAccessHistories>,
+    ) -> Self {
+        Self::with_shard_count(capacity, metrics, default_shard_count(), access_histories)
     }
 
     /// Creates a cache with an explicit shard count for controlled benchmarks.
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
-    pub fn with_shards_for_benchmark(capacity: u64, num_shards: usize) -> Self {
-        Self::with_shard_count(capacity, MemoryMetrics::noop(), num_shards)
+    pub fn with_shards_for_benchmark(
+        capacity: u64,
+        num_shards: usize,
+        access_histories: Arc<ObjectAccessHistories>,
+    ) -> Self {
+        Self::with_shard_count(capacity, MemoryMetrics::noop(), num_shards, access_histories)
     }
 
-    fn with_shard_count(capacity: u64, metrics: Arc<MemoryMetrics>, num_shards: usize) -> Self {
+    fn with_shard_count(
+        capacity: u64,
+        metrics: Arc<MemoryMetrics>,
+        num_shards: usize,
+        access_histories: Arc<ObjectAccessHistories>,
+    ) -> Self {
         assert!(num_shards > 0, "memory cache requires at least one shard");
-        let access_histories = Arc::new(ObjectAccessHistories::new(num_shards));
         let shards = (0..num_shards)
             .map(|shard_index| {
                 Mutex::new(MemoryCacheShard::new(
                     shard_capacity_for(capacity, num_shards, shard_index),
                     metrics.clone(),
-                    access_histories.clone(),
                 ))
             })
             .collect();
@@ -98,11 +122,6 @@ impl MemoryCache {
         self
     }
 
-    /// Shared per-object evidence for attaching a disk tier to this memory cache.
-    pub fn access_histories(&self) -> Arc<ObjectAccessHistories> {
-        self.access_histories.clone()
-    }
-
     /// Returns the configured soft payload-byte target.
     pub const fn capacity(&self) -> u64 {
         self.capacity
@@ -113,7 +132,7 @@ impl MemoryCache {
         self.shards.iter().map(|shard| shard.lock().used_bytes()).sum()
     }
 
-    /// Looks up one covering range and records its exact request on a hit.
+    /// Looks up one covering range without recording an access.
     pub fn get(&self, object_key: &ObjectKey, requested_range: ByteRange) -> Option<Bytes> {
         let shard_index = self.shard_index(object_key);
         self.shards[shard_index].lock().get(object_key, requested_range)
@@ -124,27 +143,10 @@ impl MemoryCache {
     /// If an existing entry contains the download, the supplied payload is
     /// discarded. A larger download replaces entries it fully contains, while
     /// partial overlaps coexist.
-    pub fn insert(&self, object_key: ObjectKey, download: Download) {
-        let (downloaded_range, bytes) = download.into_parts();
-        self.admit_download(object_key, downloaded_range, bytes, None);
-    }
-
-    /// Caches one callback download and records its successful request atomically.
-    ///
-    /// Insertion and access remain distinct policy events, but sharing one
-    /// shard lock prevents an intervening admission from losing the callback's
-    /// attribution. The request contributes to shared access history even when
-    /// an existing entry contains the download.
     /// Returns the new shard-local entry identity, or `None` for a redundant download.
-    pub fn insert_and_record(
-        &self,
-        object_key: ObjectKey,
-        download: Download,
-        requested_range: ByteRange,
-    ) -> Option<u64> {
+    pub fn insert(&self, object_key: ObjectKey, download: Download) -> Option<u64> {
         let (downloaded_range, bytes) = download.into_parts();
-        debug_assert!(downloaded_range.contains(requested_range));
-        self.admit_download(object_key, downloaded_range, bytes, Some(requested_range))
+        self.admit_download(object_key, downloaded_range, bytes)
     }
 
     /// Runs a short synchronous action only while this exact admission remains cached.
@@ -161,13 +163,7 @@ impl MemoryCache {
         shard.contains_entry(object_key, range, entry_id).then(action)
     }
 
-    fn admit_download(
-        &self,
-        object_key: ObjectKey,
-        downloaded_range: ByteRange,
-        bytes: Bytes,
-        requested_range: Option<ByteRange>,
-    ) -> Option<u64> {
+    fn admit_download(&self, object_key: ObjectKey, downloaded_range: ByteRange, bytes: Bytes) -> Option<u64> {
         let shard_index = self.shard_index(&object_key);
         let mut allow_range_trim = true;
         let mut evicted_any_entry = false;
@@ -176,7 +172,7 @@ impl MemoryCache {
                 &object_key,
                 downloaded_range,
                 &bytes,
-                requested_range,
+                &self.access_histories,
                 allow_range_trim,
             );
             match admission_progress {
@@ -190,29 +186,20 @@ impl MemoryCache {
                 AdmissionProgress::Retry => continue,
                 AdmissionProgress::Trim(source) => {
                     // Payload copying is deliberately outside the shard lock.
-                    // Publication revalidates both the source and its object's
-                    // access/structure generation before changing the index.
+                    // Publication revalidates the source and cached-range structure, not history.
                     let replacement = source.copy_retained_payloads();
-                    if !self.shards[shard_index].lock().publish_range_trim(replacement) {
-                        // A hot source can invalidate every copy. Fall back to
-                        // bounded eviction for this admission so it cannot
-                        // starve while concurrent lookups keep succeeding.
+                    let access_clock = self.access_histories.clock();
+                    if !self.shards[shard_index]
+                        .lock()
+                        .publish_range_trim(replacement, access_clock)
+                    {
+                        // Concurrent insertions/removals may invalidate copies. Fall back to
+                        // bounded eviction so this admission cannot starve.
                         allow_range_trim = false;
                     }
                 }
             }
         }
-    }
-
-    /// Records one successful lookup's exact requested range.
-    ///
-    /// This event is independent of the downloaded range that satisfied the
-    /// lookup. Callers must invoke it exactly once for each successful lookup.
-    pub fn record_access(&self, object_key: &ObjectKey, requested_range: ByteRange) {
-        let shard_index = self.shard_index(object_key);
-        self.shards[shard_index]
-            .lock()
-            .record_access(object_key, requested_range);
     }
 
     /// Removes one entry with exactly the supplied key and range.
@@ -225,7 +212,9 @@ impl MemoryCache {
     ///
     /// The hash is not stable across Rust releases and must never be persisted.
     fn shard_index(&self, object_key: &ObjectKey) -> usize {
-        self.access_histories.shard_index(object_key)
+        let mut hasher = DefaultHasher::new();
+        object_key.hash(&mut hasher);
+        (hasher.finish() % self.shards.len() as u64) as usize
     }
 
     #[cfg(test)]

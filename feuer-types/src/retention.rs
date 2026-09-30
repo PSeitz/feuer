@@ -2,12 +2,8 @@
 
 use std::{
     cmp::Ordering,
-    collections::{HashMap, VecDeque, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
-    sync::{
-        Arc, LazyLock, Mutex, MutexGuard, Weak,
-        atomic::{AtomicU64, Ordering as AtomicOrdering},
-    },
+    collections::{HashMap, VecDeque},
+    sync::{LazyLock, Mutex},
 };
 
 use fnv::FnvHashMap;
@@ -33,109 +29,60 @@ pub fn compare_cost_per_byte(left_cost: f64, left_bytes: u64, right_cost: f64, r
     (left_cost * right_bytes as f64).total_cmp(&(right_cost * left_bytes as f64))
 }
 
-/// Per-object access histories shared by memory and disk entries. Not persisted.
-/// The registry holds weak references; removing the last entry owner releases its history.
+/// Standalone request history shared by both cache tiers, independent of their shards and entries.
+/// Every distinct key and requested-range counter is retained for this object's lifetime, even after
+/// cache eviction. Recent trimming events remain bounded. History is not persisted across restarts.
+#[derive(Default)]
 pub struct ObjectAccessHistories {
-    shards: Box<[Arc<AccessHistoryShard>]>,
+    state: Mutex<AccessHistoryState>,
 }
 
 #[derive(Default)]
-struct AccessHistoryShard {
-    objects: Mutex<HashMap<ObjectKey, Weak<ObjectAccessHistory>>>,
-    clock: AtomicU64,
+struct AccessHistoryState {
+    objects: HashMap<ObjectKey, RangeAccessHistory>,
+    clock: u64,
 }
 
 impl ObjectAccessHistories {
-    /// Creates independently clocked shards. Use the memory tier's shard count.
-    pub fn new(num_shards: usize) -> Self {
-        assert!(num_shards > 0);
-        Self {
-            shards: (0..num_shards)
-                .map(|_| Arc::new(AccessHistoryShard::default()))
-                .collect(),
-        }
+    /// Creates empty request history with one clock across all keys and cache tiers.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    /// Keeps a key's history alive for a cached entry or active cache insertion.
-    pub fn for_key(&self, key: &ObjectKey) -> Arc<ObjectAccessHistory> {
-        let shard = &self.shards[self.shard_index(key)];
-        let mut objects = shard.objects.lock().unwrap();
-        if let Some(history) = objects.get(key).and_then(Weak::upgrade) {
-            return history;
-        }
-        let history = Arc::new(ObjectAccessHistory {
-            key: key.clone(),
-            shard: shard.clone(),
-            history: Mutex::new(RangeAccessHistory::default()),
-        });
-        objects.insert(key.clone(), Arc::downgrade(&history));
-        history
-    }
-
-    /// Records one successful public lookup, regardless of which tier supplied it.
-    /// Insertion alone must not call this. With no entry owners, the evidence is immediately released.
+    /// Records one request when it starts, before any cache lookup or source fetch.
+    /// Failed and canceled requests contribute to demand just like successful requests.
+    /// Distinct requested ranges for an object must not overlap; exact repeats update the same counter.
+    /// Cache insertion and eviction do not record or remove history.
     pub fn record_access(&self, key: &ObjectKey, requested: ByteRange) {
-        self.for_key(key).record(requested);
+        let mut state = self.state.lock().unwrap();
+        state.clock = state.clock.saturating_add(1);
+        let clock = state.clock;
+        state.objects.entry(key.clone()).or_default().record(requested, clock);
     }
 
-    /// Selects the shared evidence shard by complete key identity.
-    pub fn shard_index(&self, key: &ObjectKey) -> usize {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        (hasher.finish() % self.shards.len() as u64) as usize
-    }
-}
-
-/// One object's exact access evidence, retained by entries in either tier.
-pub struct ObjectAccessHistory {
-    key: ObjectKey,
-    shard: Arc<AccessHistoryShard>,
-    history: Mutex<RangeAccessHistory>,
-}
-
-impl ObjectAccessHistory {
-    /// Records exactly one request and advances the shared shard's successful-access clock.
-    /// Distinct requested ranges for an object must not overlap; exact repeats are allowed.
-    pub fn record(&self, requested: ByteRange) {
-        let mut history = self.lock();
-        let clock = self
-            .shard
-            .clock
-            .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |clock| {
-                Some(clock.saturating_add(1))
-            })
-            .unwrap()
-            .saturating_add(1);
-        history.record(requested, clock);
-    }
-
-    /// Current successful-access clock, shared across both tiers.
+    /// Number of requests recorded across all keys and cache tiers.
     pub fn clock(&self) -> u64 {
-        self.shard.clock.load(AtomicOrdering::Relaxed)
-    }
-
-    /// Locks evidence for scoring or compaction generation validation. Never acquire a tier lock while held.
-    pub fn lock(&self) -> MutexGuard<'_, RangeAccessHistory> {
-        self.history.lock().unwrap()
+        self.state.lock().unwrap().clock
     }
 
     /// Sums decay-weighted retrieval costs for requests fully contained in `cached_range`.
-    /// Eviction compares this score per payload byte.
-    pub fn retention_score(&self, cached_range: ByteRange) -> f64 {
-        self.lock().retention_score(cached_range, self.clock())
+    /// Eviction compares this score per payload byte. Unknown keys have zero score.
+    pub fn retention_score(&self, key: &ObjectKey, cached_range: ByteRange) -> f64 {
+        let state = self.state.lock().unwrap();
+        state
+            .objects
+            .get(key)
+            .map_or(0.0, |history| history.retention_score(cached_range, state.clock))
     }
-}
 
-impl Drop for ObjectAccessHistory {
-    fn drop(&mut self) {
-        let mut objects = self.shard.objects.lock().unwrap();
-        // A concurrent admission may already have replaced an expired weak reference.
-        if objects
-            .get(&self.key)
-            .is_some_and(|entry| std::ptr::eq(entry.as_ptr(), self))
-        {
-            objects.remove(&self.key);
-        }
+    /// Snapshots recent requested ranges for trimming. Later accesses do not invalidate the snapshot:
+    /// it guides a retention policy, not the correctness of the cached bytes.
+    pub fn active_ranges(&self, key: &ObjectKey) -> Vec<ByteRange> {
+        let state = self.state.lock().unwrap();
+        state
+            .objects
+            .get(key)
+            .map_or_else(Vec::new, |history| history.active_ranges(state.clock).collect())
     }
 }
 
@@ -151,21 +98,21 @@ pub static FIXED_RETRIEVAL_EQUIVALENT_BYTES: LazyLock<u64> = LazyLock::new(|| {
 pub static MAX_ACCESS_EVENTS_PER_KEY: LazyLock<usize> = LazyLock::new(|| {
     read_env_number("FEUER_MAX_ACCESS_EVENTS_PER_KEY", 64, 1).unwrap_or_else(|error| panic!("{error}"))
 });
-/// Maximum same-shard successful-access age that still contributes to range trimming.
+/// Maximum age in requests across all keys that still contributes to range trimming.
 /// Reads `FEUER_MAX_ACCESS_AGE_ACCESSES` once on first use, defaulting to 262,144.
 /// Accepts size suffixes as multipliers; panics unless the result is positive and fits `u64`.
 pub static MAX_ACCESS_AGE_ACCESSES: LazyLock<u64> = LazyLock::new(|| {
     read_env_number("FEUER_MAX_ACCESS_AGE_ACCESSES", 262_144, 1).unwrap_or_else(|error| panic!("{error}"))
 });
 
-/// One exact requested interval and its shard-local observation clock.
+/// One exact requested interval and its observation clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RangeAccess {
     range: ByteRange,
     observed_at_access: u64,
 }
 
-/// Half-life of access counts, in successful accesses to the same shard.
+/// Half-life of access counts, in requests across all keys.
 /// Reads `FEUER_ACCESS_COUNT_HALF_LIFE` once on first use, defaulting to 8192.
 /// Accepts size suffixes as multipliers; panics unless the result is positive and fits `u64`.
 pub static ACCESS_COUNT_HALF_LIFE: LazyLock<u64> = LazyLock::new(|| {
@@ -180,7 +127,7 @@ struct DecayedAccessCount {
 
 impl DecayedAccessCount {
     fn decayed_count(&self, access_clock: u64) -> f64 {
-        // Age is measured in successful accesses to the same shard, not wall-clock time.
+        // Age is measured in requests across all keys, not wall-clock time.
         // An earlier clock leaves the count unchanged rather than increasing it.
         let elapsed_accesses = access_clock.saturating_sub(self.observed_at_access);
         let half_lives_elapsed = elapsed_accesses as f64 / *ACCESS_COUNT_HALF_LIFE as f64;
@@ -202,12 +149,10 @@ impl DecayedAccessCount {
 
 /// Per-range decayed counts for scoring and bounded request events for range trimming.
 /// Distinct requested ranges must not overlap; cached ranges may cover several requests.
-/// Counts are retained until the object's final history owner is released; unlike
-/// trimming events, their number is not capped per object.
+/// Unlike trimming events, distinct counters are never removed or capped.
 #[derive(Default)]
-pub struct RangeAccessHistory {
+struct RangeAccessHistory {
     events: VecDeque<RangeAccess>,
-    generation: u64,
     access_count_indices: FnvHashMap<ByteRange, usize>,
     // Each counter is stored once: indexed for exact matches, scanned for expanded ranges.
     access_counts: Vec<(ByteRange, DecayedAccessCount)>,
@@ -215,7 +160,6 @@ pub struct RangeAccessHistory {
 
 impl RangeAccessHistory {
     fn record(&mut self, range: ByteRange, access_clock: u64) {
-        self.generation = self.generation.saturating_add(1);
         let count_index = *self.access_count_indices.entry(range).or_insert_with(|| {
             let count_index = self.access_counts.len();
             self.access_counts.push((range, DecayedAccessCount::default()));
@@ -260,11 +204,6 @@ impl RangeAccessHistory {
             .sum()
     }
 
-    /// Changes on every recorded request, including accesses served by the other tier.
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
     /// Removes expired trimming events without discarding the decayed access counts.
     fn remove_expired_events(&mut self, access_clock: u64) {
         while self
@@ -288,7 +227,7 @@ impl RangeAccessHistory {
 }
 
 /// Checks whether the access is within the configured range-trimming age limit,
-/// measured in successful accesses to the same shard rather than elapsed time.
+/// measured in requests across all keys rather than elapsed time.
 fn is_within_range_trim_age_limit(event: RangeAccess, access_clock: u64) -> bool {
     access_clock.saturating_sub(event.observed_at_access) <= *MAX_ACCESS_AGE_ACCESSES
 }
@@ -310,10 +249,7 @@ mod tests {
             let mut history = RangeAccessHistory::default();
             history.record(range(0, 4), 0);
             history.record(range(0, 4), 0);
-            assert_eq!(
-                history.retention_score(range(0, 8), 0),
-                (fixed_cost as f64 + 4.0) * 2.0
-            );
+            assert_eq!(history.retention_score(range(0, 8), 0), (fixed_cost as f64 + 4.0) * 2.0);
             assert_eq!(history.retention_score(range(4, 8), 0), 0.0);
             return;
         }
@@ -411,48 +347,65 @@ mod tests {
     }
 
     #[test]
-    fn owners_share_evidence_and_release_registry_state() {
-        let histories = ObjectAccessHistories::new(1);
+    fn history_needs_no_cached_entry_and_keeps_distinct_counters() {
+        let histories = ObjectAccessHistories::new();
         let key = "object".to_owned();
-        let memory = histories.for_key(&key);
-        let disk = histories.for_key(&key);
-        assert!(Arc::ptr_eq(&memory, &disk));
+        assert_eq!(histories.retention_score(&key, range(0, 1)), 0.0);
+        assert!(histories.active_ranges(&key).is_empty());
+        assert!(histories.state.lock().unwrap().objects.is_empty());
         histories.record_access(&key, range(0, 1));
-        assert_eq!(disk.lock().generation(), 1);
-        drop(memory);
-        histories.record_access(&key, range(2, 3));
-        assert_eq!(disk.lock().generation(), 2);
-        assert!(disk.retention_score(range(0, 1)) > 0.0);
-        drop(disk);
-        assert!(histories.shards[0].objects.lock().unwrap().is_empty());
-        // Lookup evidence without any retained entry must not leave an unbounded key registry.
-        histories.record_access(&key, range(0, 1));
-        assert!(histories.shards[0].objects.lock().unwrap().is_empty());
-        let fresh = histories.for_key(&key);
-        assert_eq!(fresh.lock().generation(), 0);
-        assert_eq!(fresh.retention_score(range(0, 1)), 0.0);
+        for _ in 0..*MAX_ACCESS_EVENTS_PER_KEY + 1 {
+            histories.record_access(&key, range(2, 3));
+        }
+        assert!(!histories.active_ranges(&key).contains(&range(0, 1)));
+        assert!(histories.retention_score(&key, range(0, 1)) > 0.0);
+        let state = histories.state.lock().unwrap();
+        assert_eq!(state.objects.len(), 1);
+        assert_eq!(state.objects[&key].access_counts.len(), 2);
     }
 
     #[test]
-    fn concurrent_last_owner_release_does_not_remove_a_new_history() {
-        let histories = Arc::new(ObjectAccessHistories::new(1));
+    fn concurrent_recording_deduplicates_ranges_and_counts_every_request() {
+        let histories = std::sync::Arc::new(ObjectAccessHistories::new());
         let mut threads = Vec::new();
         for _ in 0..8 {
             let histories = histories.clone();
             threads.push(std::thread::spawn(move || {
-                let key = "object".to_owned();
                 for _ in 0..1000 {
-                    let first = histories.for_key(&key);
-                    first.record(range(0, 1));
-                    let second = histories.for_key(&key);
-                    assert!(Arc::ptr_eq(&first, &second));
+                    histories.record_access(&"object".to_owned(), range(0, 1));
                 }
             }));
         }
         for thread in threads {
             thread.join().unwrap();
         }
-        assert!(histories.shards[0].objects.lock().unwrap().is_empty());
+        assert_eq!(histories.clock(), 8000);
+        let state = histories.state.lock().unwrap();
+        assert_eq!(state.objects.len(), 1);
+        let actual = &state.objects["object"];
+        assert_eq!(actual.access_counts.len(), 1);
+        let mut expected = RangeAccessHistory::default();
+        for clock in 1..=8000 {
+            expected.record(range(0, 1), clock);
+        }
+        assert_eq!(
+            actual.retention_score(range(0, 1), 8000),
+            expected.retention_score(range(0, 1), 8000)
+        );
+    }
+
+    #[test]
+    fn all_keys_advance_the_same_clock_without_expiring_counters() {
+        let histories = ObjectAccessHistories::new();
+        let old = "old".to_owned();
+        histories.record_access(&old, range(0, 1));
+        for _ in 0..*MAX_ACCESS_AGE_ACCESSES + 1 {
+            histories.record_access(&"other".to_owned(), range(0, 1));
+        }
+        assert!(histories.active_ranges(&old).is_empty());
+        assert_eq!(histories.state.lock().unwrap().objects[&old].access_counts.len(), 1);
+        histories.record_access(&old, range(0, 1));
+        assert_eq!(histories.state.lock().unwrap().objects[&old].access_counts.len(), 1);
     }
 
     #[test]
@@ -563,10 +516,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(
-            RangeAccessHistory::default().retention_score(range(0, 1), 0),
-            0.0
-        );
+        assert_eq!(RangeAccessHistory::default().retention_score(range(0, 1), 0), 0.0);
     }
 
     #[test]

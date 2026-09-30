@@ -99,12 +99,12 @@ requested bytes. A subrange lookup may therefore read a complete larger download
 in one allocation chunk does not require reading the neighboring entries. Returned disk results do not retain
 disk storage, allocation guards, or file mappings.
 
-Every successful lookup appends its exact requested range once to the accessed ranges for its complete cache
-key. Accessed ranges are independent of the downloaded or cached range that happened to satisfy the lookup.
+Every started request records its exact range once, before checking either cache tier. Failed requests,
+invalid downloads, and cancellation after starting still count as demand for the complete cache key. Accessed ranges are independent of the downloaded or cached range that happened to satisfy the lookup.
 Policy and compaction may project them onto currently cached ranges. Download insertion, replacement, and
 redundant-insertion suppression create no accesses.
 
-When application callbacks share one source download, every successful waiter still contributes its own
+When application callbacks share one source download, every started request still contributes its own
 accessed range, while Feuer caches at most the downloaded ranges selected by its ordinary containment rules.
 
 ## 5. Target workload and retention objective
@@ -157,9 +157,9 @@ enter the score's denominator. Repeated access must
 increase retention value, stale evidence must eventually expire, and only the exact requested interval receives
 observed-access credit.
 
-Access evidence is held in RAM per object key and shared by both tiers. Each successful lookup records once,
-regardless of its source. Disk reads and writes do not record additional events. Evidence survives memory
-eviction while a disk entry or active disk write retains it, and is released after its last owner disappears.
+Access evidence is held in a standalone RAM object shared by both tiers. Each request records once before
+lookup, regardless of its eventual outcome. Disk reads and writes do not record additional events.
+Distinct counters survive all cache evictions for the history object's lifetime and have no capacity limit.
 It is not persisted: recovered entries start without pre-restart access evidence.
 
 Every admission gets a short, deterministic shard-local grace before compaction. Policy keeps no separate
@@ -195,17 +195,18 @@ Feuer has one sharded in-memory cache with a soft payload-byte target.
 - Usage is charged to payload bytes retained by the cache. Metadata, allocator overhead, callback-owned source
   buffers, transient copies, and caller-held results are outside that accounting.
 
-In-memory compaction remains an MVP feature. Feuer observes exact accessed ranges from successful lookups and
+In-memory compaction remains an MVP feature. Feuer observes exact ranges from incoming requests and
 can replace a cached larger download with smaller cached payloads biased toward observed requests, releasing
 unrequested cache memory.
 
 Compaction is pressure-driven. Policy samples at most 64 cached ranges and selects the one with the lowest recent
 retrieval value per retained byte, using independent exact-range access counts with a half-life of
-4,096 successful same-shard accesses. Counters live with the object's history and are not capped per object.
+8,192 requests across all keys. Standalone history owns every distinct counter for its full
+in-process lifetime, independently of cache shards and eviction. Counter metadata has no capacity limit.
 For range trimming only, exact events are bounded to 64 per object by default
-(`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this) and expire after 262,144 later successful
-same-shard accesses by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this).
-Once its grace of 64 successful same-shard accesses expires, that same
+(`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this) and expire after 262,144 later
+requests across all keys by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this).
+Once its grace of 64 requests across all keys expires, that same
 victim is trimmed when its observed requests can release at least one quarter of its payload. Otherwise it is
 evicted.
 Compacted replacements use only observed requests, merge only overlapping or adjacent intervals, preserve gaps,
@@ -213,7 +214,8 @@ create no access, and cannot affect lookup results or caller-held slices.
 
 Lookup and access recording must not scan every live shard entry. Victim selection samples a bounded number
 of entries. Scoring work depends on the distinct requested ranges each candidate covers.
-Copies made outside the metadata lock require generation revalidation.
+Copies made outside the metadata lock require entry-identity and cached-range generation revalidation.
+Access history is only policy input: newer accesses do not invalidate a trimming snapshot.
 
 ## 7. Best-effort disk writes
 
@@ -344,10 +346,10 @@ The MVP is complete when tests demonstrate that:
 - each callback returns one start offset and non-empty `Bytes`, the downloaded range is derived from them, and Feuer rejects a result that does not cover the requested range.
 - callback errors are returned without Feuer performing source retries.
 - a callback result already contained by cached data is not inserted or written again.
-- every successful lookup appends its exact requested range once to its key's accessed ranges, independent of downloaded-range insertion.
+- every started request records its exact range once before lookup, including failures and cancellation; downloaded-range insertion records nothing.
 - controlled policy tests credit only the requested interval, favor repeated reuse, age stale frequency, and
   bound never-requested prefetch.
-- a broader memory admission cannot be compacted until 64 successful accesses in its shard have elapsed, while
+- a broader memory admission cannot be compacted until 64 requests across all keys have elapsed, while
   pressure may still evict it.
 - after that grace, pressure can trim the selected victim to its observed exact requests without separate
   promotion or prefetch-reuse state.

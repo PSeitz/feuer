@@ -8,7 +8,7 @@ use feuer_memory::MemoryCache;
 use feuer_memory::MemoryMetrics;
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskRangeCache, DiskRangeCacheError, IoMetrics};
-use feuer_types::{ByteRange, Download, ObjectKey};
+use feuer_types::{ByteRange, Download, ObjectKey, retention::ObjectAccessHistories};
 #[cfg(target_os = "linux")]
 use mixtrics::metrics::BoxedRegistry;
 use thiserror::Error;
@@ -22,6 +22,7 @@ use crate::{
 struct CacheState {
     config: CacheConfig,
     memory: Arc<MemoryCache>,
+    access_histories: Arc<ObjectAccessHistories>,
     metrics: LookupMetrics,
     #[cfg(target_os = "linux")]
     disk: DiskRangeCache,
@@ -64,15 +65,20 @@ impl TieredMemoryDiskCache {
     /// sharing a registry contribute to the same counters and aggregate gauges.
     #[cfg(target_os = "linux")]
     pub async fn open_with_metrics(config: CacheConfig, registry: &BoxedRegistry) -> Result<Self, DiskRangeCacheError> {
+        let access_histories = Arc::new(ObjectAccessHistories::new());
         let memory = Arc::new(
-            MemoryCache::with_metrics(config.memory_capacity(), MemoryMetrics::new(registry))
-                .with_reclaim_sample_size(config.reclaim_sample_size()),
+            MemoryCache::with_access_histories(
+                config.memory_capacity(),
+                MemoryMetrics::new(registry),
+                access_histories.clone(),
+            )
+            .with_reclaim_sample_size(config.reclaim_sample_size()),
         );
         let disk = DiskRangeCache::open_with_metrics(
             config.directory(),
             config.disk_capacity(),
             IoMetrics::new(registry),
-            memory.access_histories(),
+            access_histories.clone(),
             feuer_storage::DiskMetrics::new(registry),
             config.reclaim_sample_size(),
         )
@@ -82,6 +88,7 @@ impl TieredMemoryDiskCache {
             state: Arc::new(CacheState {
                 config,
                 memory,
+                access_histories,
                 metrics: LookupMetrics::new(registry),
                 disk,
                 disk_write_queue,
@@ -103,7 +110,8 @@ impl TieredMemoryDiskCache {
     /// one valid [`Download`] covering `requested_range`. The memory target is
     /// soft, so callback results are not rejected solely for exceeding it.
     ///
-    /// Every success records `requested_range` exactly once. Downloaded-range
+    /// Every started request records `requested_range` exactly once, before checking either tier.
+    /// Failures and cancellation after the request starts still count. Downloaded-range
     /// insertion is separate and creates no access.
     /// The returned [`Bytes`] contains exactly the request and may share the
     /// download's allocation.
@@ -118,21 +126,18 @@ impl TieredMemoryDiskCache {
         Fut: Future<Output = Result<Download, E>>,
     {
         let started = Instant::now();
+        self.state.access_histories.record_access(&object_key, requested_range);
         let metrics = &self.state.metrics;
         if let Some(bytes) = self.state.memory.get(&object_key, requested_range) {
             metrics.record(LookupOutcome::MemoryHit, started.elapsed(), requested_range.len());
             return Ok(bytes);
         }
 
-        // Keep evidence alive across disk reads, callback execution and cache insertion,
-        // including concurrent eviction of the last entry for this object.
-        let accesses = self.state.memory.access_histories().for_key(&object_key);
         #[cfg(target_os = "linux")]
         if let Some(bytes) = self.state.disk.get(&object_key, requested_range).await {
-            self.state.memory.insert_and_record(
-                object_key,
+            self.state.memory.insert(
+                object_key.clone(),
                 Download::new(requested_range.start(), bytes.clone()).expect("disk result covers the request"),
-                requested_range,
             );
             metrics.record(LookupOutcome::DiskHit, started.elapsed(), requested_range.len());
             return Ok(bytes);
@@ -158,24 +163,20 @@ impl TieredMemoryDiskCache {
         #[cfg(target_os = "linux")]
         if self.state.disk.contains(&object_key, downloaded_range) {
             self.state.disk_write_queue.record_already_covered();
-            self.state.memory.record_access(&object_key, requested_range);
             metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
             return Ok(requested_bytes);
         }
-        let entry_id = self
-            .state
-            .memory
-            .insert_and_record(object_key.clone(), download.clone(), requested_range);
+        let entry_id = self.state.memory.insert(object_key.clone(), download.clone());
         #[cfg(target_os = "linux")]
         if let Some(entry_id) = entry_id {
             self.state
                 .disk_write_queue
-                .enqueue_if_capacity(object_key, download, entry_id, accesses);
+                .enqueue_if_capacity(object_key, download, entry_id);
         } else {
             self.state.disk_write_queue.record_redundant_admission();
         }
         #[cfg(not(target_os = "linux"))]
-        let _ = (entry_id, accesses);
+        let _ = entry_id;
 
         metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
         Ok(requested_bytes)
@@ -206,6 +207,9 @@ fn requested_slice(bytes: &Bytes, downloaded_range: ByteRange, requested_range: 
         .expect("an offset within a callback Bytes payload must fit in usize");
     bytes.slice(start..end)
 }
+
+#[cfg(all(test, not(target_os = "linux")))]
+mod request_history_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
@@ -301,6 +305,11 @@ mod tests {
             value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),
             1.0
         );
+        assert_eq!(
+            cache.state.access_histories.clock(),
+            5,
+            "every request is recorded, including errors and invalid downloads"
+        );
         // Closing the cache also releases the detached disk-write worker's gauges.
         drop(cache);
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -342,7 +351,7 @@ mod tests {
     async fn disk_hit_after_memory_pressure_promotes_only_request_and_records_once() {
         let (_directory, cache) = cache(32).await;
         let key = ObjectKey::from("object");
-        let history = cache.state.memory.access_histories().for_key(&key);
+        let history = &cache.state.access_histories;
         let source = Download::new(10, Bytes::from_static(b"abcdefghij")).unwrap();
         let result = cache
             .get_or_fetch(key.clone(), range(13, 17), || async {
@@ -352,7 +361,7 @@ mod tests {
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"defg"));
         wait_for_disk(&cache, &key, source.downloaded_range()).await;
-        assert_eq!(history.lock().generation(), 1);
+        assert_eq!(history.clock(), 1);
 
         // The same key selects the same memory shard; an oversized disjoint range
         // forces the original download out without contributing an access.
@@ -361,7 +370,7 @@ mod tests {
             .memory
             .insert(key.clone(), Download::new(100, Bytes::from(vec![0; 64])).unwrap());
         assert!(cache.state.memory.get(&key, range(13, 17)).is_none());
-        for generation in [2, 3] {
+        for accesses in [2, 3] {
             let hit = cache
                 .get_or_fetch(key.clone(), range(13, 17), || async {
                     Err::<Download, _>("callback must not run")
@@ -369,7 +378,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(hit, result);
-            assert_eq!(history.lock().generation(), generation);
+            assert_eq!(history.clock(), accesses);
         }
         assert_eq!(cache.state.memory.used_bytes(), 4);
     }
@@ -378,7 +387,7 @@ mod tests {
     async fn callback_covered_by_a_racing_disk_write_is_not_inserted_again() {
         let (_directory, cache) = cache(32).await;
         let key = ObjectKey::from("object");
-        let history = cache.state.memory.access_histories().for_key(&key);
+        let history = &cache.state.access_histories;
         let bytes = cache
             .get_or_fetch(key.clone(), range(2, 4), || async {
                 // Simulate another disk write finishing while this callback is pending.
@@ -397,14 +406,14 @@ mod tests {
             .unwrap();
         assert_eq!(bytes, Bytes::from_static(b"cd"));
         assert_eq!(cache.state.memory.used_bytes(), 0);
-        assert_eq!(history.lock().generation(), 1);
+        assert_eq!(history.clock(), 1);
     }
 
     #[tokio::test]
-    async fn callback_cancellation_does_not_insert_or_record_an_access() {
+    async fn callback_cancellation_keeps_the_recorded_request_without_inserting() {
         let (_directory, cache) = cache(32).await;
         let key = ObjectKey::from("canceled");
-        let history = cache.state.memory.access_histories().for_key(&key);
+        let history = &cache.state.access_histories;
         let entered = Arc::new(Notify::new());
         let task = {
             let cache = cache.clone();
@@ -420,11 +429,12 @@ mod tests {
             })
         };
         entered.notified().await;
+        assert_eq!(history.clock(), 1, "recorded before the callback completes");
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(cache.state.memory.get(&key, range(0, 1)).is_none());
         assert!(!cache.state.disk.contains(&key, range(0, 1)));
-        assert_eq!(history.lock().generation(), 0);
+        assert_eq!(history.clock(), 1);
     }
 
     #[tokio::test]
