@@ -22,7 +22,7 @@ async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache, pr
 }
 
 #[tokio::test]
-async fn recovery_counts_indexed_entries_not_writes_or_reads() {
+async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     let capacity = 8 * CHUNK_BYTES;
     let (directory, cache, registry) = measured_cache(capacity).await;
     let inputs = vec![
@@ -31,7 +31,9 @@ async fn recovery_counts_indexed_entries_not_writes_or_reads() {
         ("large".to_owned(), download(2 * CHUNK_BYTES as usize + 17)),
     ];
     cache.insert_batch(inputs.clone()).await.unwrap();
-    assert_eq!(value(&registry, "feuer_disk_recovery_entries_total", &[]), 0.0);
+    assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), 0.0);
+    let written_chunks = value(&registry, "feuer_disk_chunks", &[("state", "allocated")]);
+    assert_eq!(written_chunks, 4.0); // One shared chunk and three chunks for the large entry.
     cache.disk.save_recovery_ends().unwrap();
     let metrics = cache.disk.metrics.clone();
     drop(cache);
@@ -47,15 +49,16 @@ async fn recovery_counts_indexed_entries_not_writes_or_reads() {
     .await
     .unwrap();
     recovery::tests::wait_for_recovery(&cache).await;
-    assert_eq!(value(&registry, "feuer_disk_recovery_entries_total", &[]), 3.0);
+    assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), written_chunks);
     for (key, source) in inputs {
         assert_eq!(
             cache.get(&key, source.downloaded_range()).await.unwrap(),
             source.bytes()
         );
     }
+    assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), written_chunks);
     drop(cache);
-    assert_eq!(value(&registry, "feuer_disk_recovery_entries_total", &[]), 3.0);
+    assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), 0.0);
 }
 
 #[tokio::test]

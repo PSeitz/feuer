@@ -57,14 +57,21 @@ impl RecoveryBounds {
         bytes
     }
 
-    fn decode(bytes: &[u8], capacity: u64, shards: usize) -> Option<Self> {
-        let length = 40 + 8 * shards;
-        if bytes.len() != length + 32
-            || &bytes[..8] != BOUNDS_TAG
-            || bytes[24..32] != capacity.to_le_bytes()
-            || bytes[32..40] != (shards as u64).to_le_bytes()
-            || bytes[length..] != *blake3::hash(&bytes[..length]).as_bytes()
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 80 || &bytes[..8] != BOUNDS_TAG {
+            return None;
+        }
+        let capacity = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
+        let shards = usize::try_from(u64::from_le_bytes(bytes[32..40].try_into().unwrap())).ok()?;
+        if !(1..=64).contains(&shards)
+            || capacity == 0
+            || capacity > i64::MAX as u64
+            || !capacity.is_multiple_of(CHUNK_BYTES)
         {
+            return None;
+        }
+        let length = 40 + 8 * shards;
+        if bytes.len() != length + 32 || bytes[length..] != *blake3::hash(&bytes[..length]).as_bytes() {
             return None;
         }
         let ends: Vec<_> = bytes[40..length]
@@ -103,13 +110,32 @@ impl RecoveryState {
         // The inventory is tiny even at the maximum shard count. Never read an unbounded file.
         let mut bytes = Vec::new();
         let saved = File::open(&path).and_then(|file| file.take(1024).read_to_end(&mut bytes));
-        let bounds = match saved
-            .ok()
-            .and_then(|_| RecoveryBounds::decode(&bytes, capacity, shards))
-        {
-            Some(bounds) => bounds,
-            None => {
-                tracing::info!(target: "feuer::storage", "resetting disk cache: recovery ends missing, invalid, or incompatible");
+        let bounds = match saved.ok().and_then(|_| RecoveryBounds::decode(&bytes)) {
+            Some(bounds) if bounds.capacity == capacity && bounds.ends.len() == shards => bounds,
+            previous => {
+                if let Some(previous) = previous {
+                    let reason = if previous.ends.len() != shards {
+                        "shard count changed"
+                    } else {
+                        "capacity changed"
+                    };
+                    tracing::warn!(
+                        target: "feuer::storage",
+                        recovery_file = %path.display(),
+                        reason,
+                        previous_shard_count = previous.ends.len(),
+                        shard_count = shards,
+                        previous_capacity_bytes = previous.capacity,
+                        capacity_bytes = capacity,
+                        "discarding entire disk cache: incompatible recovery layout"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "feuer::storage",
+                        recovery_file = %path.display(),
+                        "resetting disk cache: recovery ends missing, invalid, or incompatible"
+                    );
+                }
                 let bounds = RecoveryBounds {
                     generation: random_identity()?,
                     capacity,
@@ -170,9 +196,27 @@ impl DiskRangeCacheState {
         if self.recovery.running.load(Ordering::Relaxed) {
             let weak = Arc::downgrade(self);
             let capacity = self.file.capacity();
+            let started = Instant::now();
+            tracing::info!(
+                target: "feuer::storage",
+                recovery_file = %self.recovery.path.display(),
+                shard_count = ends.len(),
+                capacity_bytes = capacity,
+                "starting disk cache recovery"
+            );
             tokio::spawn(async move {
                 for (index, &end) in ends.iter().enumerate() {
-                    let start = shard_range(capacity, ends.len(), index).start;
+                    let range = shard_range(capacity, ends.len(), index);
+                    let start = range.start;
+                    tracing::debug!(
+                        target: "feuer::storage",
+                        shard_index = index,
+                        shard_capacity_bytes = range.end - start,
+                        scan_start = start,
+                        scan_end = end,
+                        scan_chunks = (end - start) / CHUNK_BYTES,
+                        "starting disk shard recovery scan"
+                    );
                     for address in (start..end).step_by(CHUNK_BYTES as usize) {
                         {
                             let Some(disk) = weak.upgrade() else { return };
@@ -186,9 +230,20 @@ impl DiskRangeCacheState {
                 }
                 if let Some(disk) = weak.upgrade() {
                     disk.recovery.running.store(false, Ordering::Release);
-                    tracing::info!(target: "feuer::storage", "disk cache recovery finished");
+                    tracing::info!(
+                        target: "feuer::storage",
+                        recovery_file = %disk.recovery.path.display(),
+                        elapsed_seconds = started.elapsed().as_secs_f64(),
+                        "disk cache recovery finished"
+                    );
                 }
             });
+        } else {
+            tracing::debug!(
+                target: "feuer::storage",
+                recovery_file = %self.recovery.path.display(),
+                "skipping disk cache recovery: no saved chunks to scan"
+            );
         }
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
@@ -275,7 +330,6 @@ impl DiskRangeCacheState {
                     continue; // Never displace an already indexed entry.
                 }
                 index.insert(key, storage);
-                self.metrics.recovered_entries.increase(1);
             }
             // Our reservations survive publication and even concurrent eviction. Mark before releasing
             // them, so this scan cannot resurrect the copy after its final owner releases it.

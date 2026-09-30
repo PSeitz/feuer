@@ -53,6 +53,39 @@ fn writes_and_recovery_cannot_reserve_the_same_chunk_concurrently() {
 }
 
 #[test]
+fn recovered_chunks_exclude_inspection_and_follow_shared_ownership_until_reuse() {
+    let (registry, backend) = registry();
+    let allocator = DiskChunkAllocator::with_metrics(0..CHUNK_BYTES, DiskMetrics::new(&backend)).unwrap();
+    let recovered_chunks = || value(&registry, "feuer_disk_recovered_chunks", &[]);
+    allocator.start_recovery(0, CHUNK_BYTES);
+    let inspected = allocator.reserve_for_recovery(0).unwrap();
+    assert_eq!(recovered_chunks(), 0.0);
+    drop(inspected);
+    assert_eq!(recovered_chunks(), 0.0);
+
+    let recovered = allocator.reserve_for_recovery(0).unwrap();
+    let shared = recovered.slice(0..4096);
+    recovered.mark_recovered();
+    shared.mark_recovered();
+    assert_eq!(recovered_chunks(), 1.0);
+    let guard = shared.read_guard();
+    let other_guard = guard.clone();
+    allocator.finish_recovery();
+    drop(recovered);
+    drop(shared);
+    drop(guard);
+    assert_eq!(recovered_chunks(), 1.0);
+    drop(other_guard);
+    assert_eq!(recovered_chunks(), 0.0);
+
+    let written = allocator.reserve_chunks(1).unwrap();
+    assert_eq!(recovered_chunks(), 0.0);
+    drop(written);
+    drop(allocator);
+    assert_eq!(recovered_chunks(), 0.0);
+}
+
+#[test]
 fn capacity_metrics_follow_whole_chunk_ownership_and_allocator_drop() {
     let (registry, backend) = registry();
     let metrics = DiskMetrics::new(&backend);

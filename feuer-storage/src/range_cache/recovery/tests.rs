@@ -50,23 +50,32 @@ fn scan_ends_validate_checksum_layout_and_bounds() {
         ends: vec![CHUNK_BYTES, 129 * CHUNK_BYTES],
     };
     let bytes = bounds.encode();
-    let decoded = RecoveryBounds::decode(&bytes, bounds.capacity, 2).unwrap();
+    let decoded = RecoveryBounds::decode(&bytes).unwrap();
     assert_eq!(decoded.ends, bounds.ends);
+    assert_eq!(decoded.capacity, bounds.capacity);
     for index in 0..bytes.len() {
         let mut corrupt = bytes.clone();
         corrupt[index] ^= 1;
-        assert!(RecoveryBounds::decode(&corrupt, bounds.capacity, 2).is_none());
+        assert!(RecoveryBounds::decode(&corrupt).is_none());
     }
-    assert!(RecoveryBounds::decode(&bytes, bounds.capacity, 1).is_none());
-    assert!(RecoveryBounds::decode(&bytes, bounds.capacity + CHUNK_BYTES, 2).is_none());
-    assert!(RecoveryBounds::decode(&bytes[..16], bounds.capacity, 2).is_none());
+    assert!(RecoveryBounds::decode(&bytes[..16]).is_none());
+    for capacity in [0, 1, u64::MAX] {
+        let invalid = RecoveryBounds {
+            capacity,
+            ends: vec![0],
+            ..bounds
+        };
+        assert!(RecoveryBounds::decode(&invalid.encode()).is_none());
+    }
     for ends in [
+        vec![],
+        vec![0; 65],
         vec![1, 129 * CHUNK_BYTES],
         vec![129 * CHUNK_BYTES, 129 * CHUNK_BYTES],
         vec![0, 0],
     ] {
         let invalid = RecoveryBounds { ends, ..bounds };
-        assert!(RecoveryBounds::decode(&invalid.encode(), bounds.capacity, 2).is_none());
+        assert!(RecoveryBounds::decode(&invalid.encode()).is_none());
     }
 }
 
@@ -87,9 +96,74 @@ fn resets_are_persistent_and_interrupted_updates_leave_the_previous_file() {
     assert_eq!(ends, vec![0]);
     let (again, _) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 1).unwrap();
     assert_eq!(reset.generation, again.generation);
+
+    let (resized, ends) = RecoveryState::open(directory.path(), 128 * CHUNK_BYTES, 1).unwrap();
+    assert_ne!(reset.generation, resized.generation);
+    assert_eq!(ends, vec![0]);
+
     fs::write(&reset.path, b"torn inventory").unwrap();
     let (corrupt_reset, _) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 1).unwrap();
-    assert_ne!(reset.generation, corrupt_reset.generation);
+    assert_ne!(resized.generation, corrupt_reset.generation);
+}
+
+#[test]
+fn layout_change_warnings_describe_previous_and_current_layouts() {
+    let directory = tempfile::tempdir().unwrap();
+    let log_path = directory.path().join("recovery.log");
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(Mutex::new(File::create(&log_path).unwrap()))
+        .finish();
+    let _logs = tracing::subscriber::set_default(subscriber);
+
+    RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 2).unwrap();
+    RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 1).unwrap();
+    RecoveryState::open(directory.path(), 128 * CHUNK_BYTES, 1).unwrap();
+    fs::write(directory.path().join(BOUNDS_FILE), b"torn inventory").unwrap();
+    RecoveryState::open(directory.path(), 128 * CHUNK_BYTES, 1).unwrap();
+
+    let log = fs::read_to_string(log_path).unwrap();
+    let warnings: Vec<_> = log
+        .lines()
+        .filter(|line| line.contains("discarding entire disk cache"))
+        .collect();
+    assert_eq!(warnings.len(), 2);
+    assert!(warnings[0].contains("reason=\"shard count changed\""));
+    assert!(warnings[0].contains("previous_shard_count=2"));
+    assert!(warnings[0].contains("shard_count=1"));
+    assert!(warnings[1].contains("reason=\"capacity changed\""));
+    assert!(warnings[1].contains("previous_capacity_bytes=268435456"));
+    assert!(warnings[1].contains("capacity_bytes=134217728"));
+}
+
+#[tokio::test]
+async fn recovery_logs_start_and_completion_at_info() {
+    let (directory, cache) = open_test_cache(8 * CHUNK_BYTES).await;
+    cache.insert("object".to_owned(), download(0, 100)).await.unwrap();
+    cache.disk.save_recovery_ends().unwrap();
+    drop(cache);
+
+    let log_path = directory.path().join("recovery.log");
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .with_writer(Mutex::new(File::create(&log_path).unwrap()))
+        .finish();
+    let _logs = tracing::subscriber::set_default(subscriber);
+    let cache = DiskRangeCache::open(directory.path(), 8 * CHUNK_BYTES, IoMetrics::noop())
+        .await
+        .unwrap();
+    wait_for_recovery(&cache).await;
+
+    let log = fs::read_to_string(log_path).unwrap();
+    assert!(log.contains("starting disk cache recovery"));
+    assert!(log.contains("shard_count=1"));
+    assert!(log.contains("capacity_bytes=8388608"));
+    assert!(log.contains("disk cache recovery finished"));
+    assert!(log.contains("elapsed_seconds="));
+    assert!(!log.contains("starting disk shard recovery scan"));
 }
 
 #[tokio::test]

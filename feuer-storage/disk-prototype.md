@@ -79,7 +79,9 @@ Whole-chunk reuse replaces it.
 `recovery-ends` is a small checksummed file containing the layout, cache generation, and one scan end
 per shard. Growing ends are checkpointed by atomic replacement every ten seconds; stale ends may omit
 recent writes. Recovery snapshots those ends at open and stops there, regardless of new writes.
-Missing, invalid, or incompatible inventory resets the cache generation and logs a cold start. The reset
+Missing, invalid, or incompatible inventory resets the cache generation and logs a cold start. A changed
+shard count or capacity logs a warning with the previous and current layout: the entire old cache is discarded.
+Recovery logs startup and completion time at info level; per-shard capacity and scan bounds are debug details. The reset
 is synchronized before serving; old-generation chunks cannot reappear on later restarts. No payload
 synchronization or final checkpoint on close is promised.
 

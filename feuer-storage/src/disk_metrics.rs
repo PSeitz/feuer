@@ -29,7 +29,7 @@ pub struct DiskMetrics {
     write_entries: [BoxedCounter; 6],
     eviction_triggering_insertions: BoxedCounter,
     pub(crate) written_entries: BoxedCounter,
-    pub(crate) recovered_entries: BoxedCounter,
+    pub(crate) recovered_chunks: BoxedGauge,
     pub(crate) free_chunks: BoxedGauge,
     pub(crate) allocated_chunks: BoxedGauge,
     pub(crate) payload_bytes: BoxedGauge,
@@ -67,9 +67,9 @@ impl DiskMetrics {
             "Entries in successfully written shard batches, whether published or discarded".into(),
             &[],
         );
-        let recovered = registry.register_counter_vec(
-            "feuer_disk_recovery_entries_total".into(),
-            "Entries added to the disk index by recovery; payload checksums are verified on read".into(),
+        let recovered = registry.register_gauge_vec(
+            "feuer_disk_recovered_chunks".into(),
+            "Currently allocated chunks retained by recovery, excluding temporary scan reservations".into(),
             &[],
         );
         let chunks = registry.register_gauge_vec(
@@ -104,7 +104,7 @@ impl DiskMetrics {
             .map(|label| write_entries.counter(&[label.into()])),
             eviction_triggering_insertions: eviction_triggering_insertions.counter(&[]),
             written_entries: written.counter(&[]),
-            recovered_entries: recovered.counter(&[]),
+            recovered_chunks: recovered.gauge(&[]),
             free_chunks: chunks.gauge(&["free".into()]),
             allocated_chunks: chunks.gauge(&["allocated".into()]),
             payload_bytes: payload.gauge(&[]),

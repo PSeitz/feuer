@@ -62,17 +62,37 @@ individual kernel submissions.
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `feuer_disk_recovery_entries_total` | Counter | Entries added to the disk index by background recovery; no labels |
+| `feuer_disk_recovered_chunks` | Gauge | Currently allocated 1-MiB chunks retained by recovery; no labels |
 
-This counter increases as recovery publishes entries, not for normal writes
-or skipped candidates. It does not decrease on eviction. Recovered entries are
-metadata-validated candidates; payload checksums are verified on read. Disk hits
-confirm that recovered payloads are readable.
+Recovered chunks are a subset of `feuer_disk_chunks{state="allocated"}`, not
+additional capacity. Each chunk counts once, including shared chunks and every
+chunk of a multi-chunk entry. Temporary scan reservations and normal writes do
+not increase this gauge. A chunk stops counting only after all entry owners and
+read guards release it; reuse by a new write does not count as recovered.
 
-A positive value shows that recovery restored entries. Zero can mean an empty
-cache, an unfinished scan, or no recoverable entries; this counter does not report
-scan completion. The `disk cache recovery finished` log reports completion of a
-nonempty scan.
+Recovery validates metadata; payload checksums are verified on read. A positive
+value shows that recovery restored chunks still held by owners or read guards,
+not that their payloads have been verified. Zero can mean recovery has not yet
+restored anything, or that all recovered chunks have since been released.
+
+### Recovery logs
+
+Enable `feuer::storage=info` in the application's tracing filter:
+
+- `starting disk cache recovery`: backing recovery file, shard count, and total
+  capacity in bytes.
+- `disk cache recovery finished`: scan completed, with elapsed seconds. This
+  does not guarantee any chunks were restored.
+- `discarding entire disk cache: incompatible recovery layout` (warning):
+  `reason="shard count changed"` or `reason="capacity changed"`, with previous
+  and current shard counts and capacities. All old entries are invalidated by a
+  new cache generation; recovery does not salvage individual shards.
+- `resetting disk cache: recovery ends missing, invalid, or incompatible`:
+  starts a new cache generation when the saved layout cannot be read or validated.
+
+Enable `feuer::storage=debug` for per-shard scan details (shard index, capacity,
+scan start/end byte offsets, and chunk count) and skipped-recovery messages.
+Scan size is bounded by the saved write end, not the shard's full capacity.
 
 ## Insertions that trigger eviction
 

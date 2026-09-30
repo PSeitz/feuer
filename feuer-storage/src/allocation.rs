@@ -3,7 +3,10 @@
 use std::{
     collections::BTreeMap,
     ops::Range,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::DiskMetrics;
@@ -170,6 +173,7 @@ impl DiskChunkAllocator {
             reservation: Arc::new(ChunkReservation {
                 free: self.free.clone(),
                 chunk_number: chunk,
+                recovered: AtomicBool::new(false),
             }),
         })
     }
@@ -189,6 +193,7 @@ impl DiskChunkAllocator {
                         reservation: Arc::new(ChunkReservation {
                             free: self.free.clone(),
                             chunk_number,
+                            recovered: AtomicBool::new(false),
                         }),
                     }
                 })
@@ -209,6 +214,7 @@ pub(super) struct DiskRegion {
 struct ChunkReservation {
     free: Arc<Mutex<DiskChunkAvailability>>,
     chunk_number: u64,
+    recovered: AtomicBool,
 }
 
 impl DiskRegion {
@@ -225,13 +231,14 @@ impl DiskRegion {
         }
     }
 
-    /// Prevents this chunk's old contents from being recovered again after its owners release it.
+    /// Counts this successfully recovered chunk until its last owner/read guard releases it,
+    /// and prevents its old contents from being recovered again during this scan.
     pub(super) fn mark_recovered(&self) {
-        self.reservation
-            .free
-            .lock()
-            .unwrap()
-            .mark_claimed(self.reservation.chunk_number);
+        let mut free = self.reservation.free.lock().unwrap();
+        free.mark_claimed(self.reservation.chunk_number);
+        if !self.reservation.recovered.swap(true, Ordering::Relaxed) {
+            free.metrics.recovered_chunks.increase(1);
+        }
     }
 
     pub(super) fn read_guard(&self) -> DiskRegionReadGuard {
@@ -261,7 +268,11 @@ impl DiskRegionReadGuard {
 
 impl Drop for ChunkReservation {
     fn drop(&mut self) {
-        self.free.lock().unwrap().release_chunk(self.chunk_number);
+        let mut free = self.free.lock().unwrap();
+        if *self.recovered.get_mut() {
+            free.metrics.recovered_chunks.decrease(1);
+        }
+        free.release_chunk(self.chunk_number);
     }
 }
 
