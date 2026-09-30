@@ -24,6 +24,45 @@ Every engine uses the same downloader rules. The benchmark runs two policies:
   8 MiB respectively.
 - `exact`: every callback downloads only its requested range.
 
+## History-only contention benchmark
+
+```bash
+cargo test --release -p feuer-memory-bench history_recording_contention -- --ignored --nocapture
+```
+
+This isolates `ObjectAccessHistories::record_access` using the same dump, with 1 and 32 threads
+sharing one history object. Each trial distributes one complete trace across the workers, taking
+every Nth request per worker; concurrent execution does not preserve the global request order.
+It compares empty history with history prepopulated by one untimed trace pass, so the latter
+updates only existing counters. Parsing, prepopulation, thread startup, and thread joining are
+outside the timed section; start/finish barriers are included. There are no cache operations or
+payload allocations. Output reports median throughput and the timing range over five trials.
+
+Measured on a 16-core Apple M4 Max (32 threads oversubscribe this host), using 165,435 requests,
+13,036 object keys, and 90,108 distinct key/range pairs:
+
+| History locking | Threads | Initial history | Median time | Aggregate requests/s |
+| --- | --- | --- | --- | --- |
+| Previous single mutex | 1 | Empty | 13.500 ms | 12,254,294 |
+| Previous single mutex | 1 | Prepopulated | 11.284 ms | 14,660,915 |
+| Previous single mutex | 32 | Empty | 69.109 ms | 2,393,811 |
+| Previous single mutex | 32 | Prepopulated | 59.754 ms | 2,768,617 |
+| 64 history shards, DefaultHasher selector | 1 | Empty | 17.034 ms | 9,712,284 |
+| 64 history shards, DefaultHasher selector | 1 | Prepopulated | 15.047 ms | 10,994,703 |
+| 64 history shards, DefaultHasher selector | 32 | Empty | 31.223 ms | 5,298,477 |
+| 64 history shards, DefaultHasher selector | 32 | Prepopulated | 31.019 ms | 5,333,380 |
+| 64 history shards, FNV selector | 1 | Empty | 16.572 ms | 9,982,602 |
+| 64 history shards, FNV selector | 1 | Prepopulated | 12.691 ms | 13,036,001 |
+| 64 history shards, FNV selector | 32 | Empty | 31.901 ms | 5,185,874 |
+| 64 history shards, FNV selector | 32 | Prepopulated | 31.791 ms | 5,203,859 |
+
+With prepopulated history, switching only the shard selector to FNV improves single-thread throughput
+by 19% versus DefaultHasher; 32-thread throughput is similar in these runs. Compared with the original
+single mutex, the FNV-sharded version has 1.88x the 32-thread throughput and 11% less single-thread
+throughput. History shards are selected by object key, independent of cache shards; the maps keep their
+standard hashers and the global request clock remains shared through an atomic. This measures recording
+throughput, not end-to-end cache latency.
+
 ## Compared engines
 
 - `feuer-value-density`: `MemoryCache` with independent exact-range access counts

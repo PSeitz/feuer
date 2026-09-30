@@ -4,7 +4,6 @@ mod shard;
 mod tests;
 
 use std::{
-    collections::hash_map::DefaultHasher,
     fmt,
     hash::{Hash, Hasher},
     sync::Arc,
@@ -12,6 +11,7 @@ use std::{
 
 use bytes::Bytes;
 use feuer_types::{ByteRange, Download, ObjectKey, retention::ObjectAccessHistories};
+use fnv::FnvHasher;
 use parking_lot::Mutex;
 
 use self::shard::{AdmissionProgress, MemoryCacheShard};
@@ -210,9 +210,9 @@ impl MemoryCache {
 
     /// Selects this process's in-memory shard for an object.
     ///
-    /// The hash is not stable across Rust releases and must never be persisted.
+    /// The shard assignment is process-local and must never be persisted.
     fn shard_index(&self, object_key: &ObjectKey) -> usize {
-        let mut hasher = DefaultHasher::new();
+        let mut hasher = FnvHasher::default();
         object_key.hash(&mut hasher);
         (hasher.finish() % self.shards.len() as u64) as usize
     }

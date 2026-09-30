@@ -73,7 +73,8 @@ decayed access count × (fixed request cost + requested bytes)
 
 Each started request records its requested range once, before any lookup, in standalone history shared
 by both tiers. Failed requests, invalid downloads, and requests canceled after starting all count as demand.
-History has its own lock and one access clock across all keys; it is not part of a cache shard.
+History hashes object keys into 64 independently locked maps, separate from cache shards.
+One atomic request clock across all history shards preserves global request-age decay.
 Raw cache reads, insertions, and evictions do not record accesses or delete history.
 
 Every distinct `(object key, requested range)` counter is retained for the history object's lifetime,

@@ -958,6 +958,9 @@ fn parse_byte_count_usize(value: &str) -> Result<usize, String> {
 }
 
 #[cfg(test)]
+mod history_bench;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

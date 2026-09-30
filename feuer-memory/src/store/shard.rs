@@ -301,7 +301,7 @@ impl MemoryCacheShard {
             admitted_at_access: access_clock,
         };
 
-        entries.object_generation = entries.object_generation.saturating_add(1);
+        entries.object_generation += 1;
         let replaced = entries.by_start.insert(range.start(), entry);
         debug_assert!(replaced.is_none());
         id
@@ -330,7 +330,7 @@ impl MemoryCacheShard {
             candidate_slot,
             admitted_at_access: access_clock,
         };
-        entries.object_generation = entries.object_generation.saturating_add(1);
+        entries.object_generation += 1;
         let replaced = entries.by_start.insert(range.start(), entry);
         debug_assert!(replaced.is_none());
     }
@@ -383,7 +383,7 @@ impl MemoryCacheShard {
                 .by_start
                 .remove(&range.start())
                 .expect("the exact entry was checked immediately before removal");
-            object_cached_ranges.object_generation = object_cached_ranges.object_generation.saturating_add(1);
+            object_cached_ranges.object_generation += 1;
             let object_has_no_cached_ranges = object_cached_ranges.by_start.is_empty();
             (removed_range, object_has_no_cached_ranges)
         };

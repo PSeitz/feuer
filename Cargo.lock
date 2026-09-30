@@ -378,6 +378,7 @@ version = "0.23.0-dev"
 dependencies = [
  "bytes",
  "feuer-types",
+ "fnv",
  "mixtrics",
  "parking_lot",
  "prometheus",

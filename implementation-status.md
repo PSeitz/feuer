@@ -41,8 +41,9 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 ### Memory retention and compaction
 
 - Cost-aware scoring uses exact-range access counts with an 8,192-request half-life by default,
-  measured across all keys. Both tiers consult standalone history in `feuer-types::retention`, with its own
-  lock and clock independent of cache shards. Every distinct counter survives all cache evictions for the
+  measured across all keys. Both tiers consult standalone history in `feuer-types::retention`, with 64
+  independently locked maps selected by object key and one global atomic request clock, separate from cache
+  shards. Every distinct counter survives all cache evictions for the
   history object's lifetime; metadata has no capacity limit. History is volatile, not persisted.
   Separately, range trimming retains at most 64 repeated events per object by default
   (`FEUER_MAX_ACCESS_EVENTS_PER_KEY`), expiring after 262,144 requests across all keys
