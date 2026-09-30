@@ -2,6 +2,8 @@ use std::{fmt, sync::Arc};
 
 use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedRegistry};
 
+use crate::buffer::BUFFER_SIZES;
+
 /// Internal metric handles for Feuer's in-memory range tier.
 ///
 /// Operations use a fixed set of labels. Object identities and caller-defined
@@ -14,7 +16,11 @@ pub struct MemoryMetrics {
     pub(crate) eviction_triggering_insertions: BoxedCounter,
     trim: BoxedCounter,
     trimmed_payload_bytes: BoxedCounter,
-    payload_bytes: BoxedGauge,
+    used_bytes: BoxedGauge,
+    pub(crate) capacity_bytes: BoxedGauge,
+    pub(crate) idle_buffer_bytes: [BoxedGauge; BUFFER_SIZES.len()],
+    pub(crate) returned_buffers: [BoxedCounter; BUFFER_SIZES.len()],
+    pub(crate) dropped_buffers: [BoxedCounter; BUFFER_SIZES.len()],
     entries: BoxedGauge,
 }
 
@@ -39,13 +45,28 @@ impl MemoryMetrics {
         );
         let trimmed_payload_bytes = registry.register_counter_vec(
             "feuer_memory_compacted_payload_bytes_total".into(),
-            "Downloaded payload bytes released by in-memory compaction".into(),
+            "Cached allocation bytes released by in-memory compaction".into(),
             &[],
         );
-        let payload_bytes = registry.register_gauge_vec(
-            "feuer_memory_payload_bytes".into(),
-            "Downloaded payload bytes retained in Feuer's memory tier".into(),
+        let used_bytes = registry.register_gauge_vec(
+            "feuer_memory_used_bytes".into(),
+            "Allocation bytes retained by cached entries and idle buffers".into(),
             &[],
+        );
+        let capacity_bytes = registry.register_gauge_vec(
+            "feuer_memory_capacity_bytes".into(),
+            "Shared capacity of live memory caches and their buffer pools".into(),
+            &[],
+        );
+        let idle_buffer_bytes = registry.register_gauge_vec(
+            "feuer_io_buffer_pool_idle_bytes".into(),
+            "Idle aligned buffer bytes included in memory cache usage".into(),
+            &["bucket"],
+        );
+        let returns = registry.register_counter_vec(
+            "feuer_io_buffer_pool_returns_total".into(),
+            "Released buffers retained or dropped at the idle-pool or shared memory limit".into(),
+            &["bucket", "outcome"],
         );
         let entries = registry.register_gauge_vec(
             "feuer_memory_entries".into(),
@@ -62,7 +83,11 @@ impl MemoryMetrics {
             eviction_triggering_insertions: eviction_triggering_insertions.counter(&[]),
             trim: operation_counter("compact"),
             trimmed_payload_bytes: trimmed_payload_bytes.counter(&[]),
-            payload_bytes: payload_bytes.gauge(&[]),
+            used_bytes: used_bytes.gauge(&[]),
+            capacity_bytes: capacity_bytes.gauge(&[]),
+            idle_buffer_bytes: BUFFER_SIZES.map(|size| idle_buffer_bytes.gauge(&[size.to_string().into()])),
+            returned_buffers: BUFFER_SIZES.map(|size| returns.counter(&[size.to_string().into(), "returned".into()])),
+            dropped_buffers: BUFFER_SIZES.map(|size| returns.counter(&[size.to_string().into(), "dropped".into()])),
             entries: entries.gauge(&[]),
         })
     }
@@ -88,13 +113,13 @@ impl MemoryMetrics {
         self.trimmed_payload_bytes.increase(reclaimed_bytes);
     }
 
-    pub(crate) fn increase_usage(&self, payload_bytes: u64, entry_count: u64) {
-        self.payload_bytes.increase(payload_bytes);
+    pub(crate) fn increase_usage(&self, allocation_bytes: u64, entry_count: u64) {
+        self.used_bytes.increase(allocation_bytes);
         self.entries.increase(entry_count);
     }
 
-    pub(crate) fn decrease_usage(&self, payload_bytes: u64, entry_count: u64) {
-        self.payload_bytes.decrease(payload_bytes);
+    pub(crate) fn decrease_usage(&self, allocation_bytes: u64, entry_count: u64) {
+        self.used_bytes.decrease(allocation_bytes);
         self.entries.decrease(entry_count);
     }
 

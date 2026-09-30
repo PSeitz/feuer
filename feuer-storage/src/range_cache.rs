@@ -20,6 +20,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use feuer_memory::BufferPool;
 use feuer_types::{
     ByteRange, Download, ObjectKey,
     retention::{ObjectAccessHistories, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates},
@@ -113,7 +114,7 @@ impl EntryMetadataStartBitmap {
 }
 
 /// Verified bytes or failure shared by concurrent reads of one stored entry.
-type EntryReadResult = OnceCell<Result<Bytes, DiskLookupOutcome>>;
+type EntryReadResult = OnceCell<Result<(Bytes, usize), DiskLookupOutcome>>;
 
 /// Disk storage reserved for one object range, with its expected payload checksum.
 struct ObjectRangeDiskStorage {
@@ -200,13 +201,35 @@ impl DiskRangeCache {
         metrics: Arc<DiskMetrics>,
         reclaim_sample_size: usize,
     ) -> Result<Self, DiskRangeCacheError> {
+        Self::open_with_buffer_pool(
+            directory,
+            capacity,
+            io_metrics,
+            access_histories,
+            metrics,
+            reclaim_sample_size,
+            BufferPool::unpooled(),
+        )
+        .await
+    }
+
+    /// Opens a disk tier sharing its memory cache's aligned buffer pool.
+    pub async fn open_with_buffer_pool(
+        directory: impl AsRef<Path>,
+        capacity: u64,
+        io_metrics: Arc<IoMetrics>,
+        access_histories: Arc<ObjectAccessHistories>,
+        metrics: Arc<DiskMetrics>,
+        reclaim_sample_size: usize,
+        buffer_pool: Arc<BufferPool>,
+    ) -> Result<Self, DiskRangeCacheError> {
         assert!(reclaim_sample_size > 0, "reclaim sample size must be greater than zero");
         if capacity < CHUNK_BYTES || capacity > i64::MAX as u64 {
             return Err(DiskRangeCacheError::InvalidCapacity);
         }
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
         let directory = directory.as_ref().to_path_buf();
-        let file = DataFile::open(&directory, capacity, io_metrics).await?;
+        let file = DataFile::open_with_buffer_pool(&directory, capacity, io_metrics, buffer_pool).await?;
         let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
         let lock_owner = file.clone();
         let (recovery, ends) = tokio::task::spawn_blocking(move || {
@@ -389,6 +412,11 @@ impl DiskRangeCache {
     /// Concurrent reads of one stored entry share whole-entry I/O and checksum verification.
     /// Reads no neighboring entries or metadata. Results retain no disk ownership.
     pub async fn get(&self, key: &ObjectKey, requested: ByteRange) -> Option<Bytes> {
+        self.get_with_capacity(key, requested).await.map(|(bytes, _)| bytes)
+    }
+
+    /// Returns the requested slice and its whole backing allocation capacity for memory admission.
+    pub async fn get_with_capacity(&self, key: &ObjectKey, requested: ByteRange) -> Option<(Bytes, usize)> {
         let started = Instant::now();
         let metrics = &self.disk.metrics;
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
@@ -444,10 +472,10 @@ impl DiskRangeCache {
             })
             .await;
         match result {
-            Ok(bytes) => {
+            Ok((bytes, capacity)) => {
                 metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
                 let start = (requested.start() - guarded_read.object_range.start()) as usize;
-                Some(bytes.slice(start..start + requested.len() as usize))
+                Some((bytes.slice(start..start + requested.len() as usize), *capacity))
             }
             Err(outcome) => {
                 metrics.record_lookup(*outcome, started.elapsed());
@@ -807,15 +835,19 @@ impl UnwrittenShardBatch {
 
 impl GuardedObjectRangeRead {
     /// Reads the whole entry, verifies its checksum, and returns only the requested byte range.
-    async fn read_verified_range(&self, file: &DataFile, requested: ByteRange) -> DataFileResult<Option<Bytes>> {
+    async fn read_verified_range(
+        &self,
+        file: &DataFile,
+        requested: ByteRange,
+    ) -> DataFileResult<Option<(Bytes, usize)>> {
         let start = requested.start() - self.object_range.start();
         let end = requested.end() - self.object_range.start();
-        let bytes = file
+        let (bytes, capacity) = file
             .read_regions(self.payload_regions.clone(), self.object_range.len() as usize)
             .await?;
         if XxHash64::oneshot(0, &bytes) != self.payload_checksum {
             return Ok(None);
         }
-        Ok(Some(bytes.slice(start as usize..end as usize)))
+        Ok(Some((bytes.slice(start as usize..end as usize), capacity)))
     }
 }

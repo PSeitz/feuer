@@ -15,7 +15,7 @@ use fnv::FnvHasher;
 use parking_lot::Mutex;
 
 use self::shard::{InsertOrReclaimResult, MemoryCacheShard};
-use crate::MemoryMetrics;
+use crate::{BufferPool, MemoryMetrics};
 
 /// Caps lock partitioning to avoid excessive per-cache metadata.
 const MAX_SHARDS: usize = 64;
@@ -30,11 +30,11 @@ const MAX_SHARDS: usize = 64;
 /// holds an entry guard. Request history is supplied separately: cache operations
 /// consult it for retention decisions but never record accesses or remove history.
 ///
-/// The configured capacity is divided among independently locked shards. Each
-/// shard evicts locally before insertion. A payload larger than its shard's
-/// target is retained after that shard is emptied, so total usage can exceed the
-/// configured capacity. Victims are selected shard-locally by recent
-/// modeled retrieval value per retained byte. A rotating sample selects one victim;
+/// Cached allocations and idle read buffers share the configured capacity.
+/// Each shard evicts locally against its share before insertion; admission also
+/// frees idle buffers when needed. An allocation larger than its shard's target
+/// is retained after that shard is emptied, so total usage can exceed capacity.
+/// Victims are selected shard-locally by recent modeled retrieval value per retained byte. A rotating sample selects one victim;
 /// if its observed requests form a useful smaller payload, Feuer trims that victim
 /// outside the shard lock.
 pub struct MemoryCache {
@@ -44,6 +44,7 @@ pub struct MemoryCache {
     shards: Box<[Mutex<MemoryCacheShard>]>,
     access_histories: Arc<ObjectAccessHistories>,
     metrics: Arc<MemoryMetrics>,
+    buffer_pool: Arc<BufferPool>,
 }
 
 impl fmt::Debug for MemoryCache {
@@ -57,13 +58,13 @@ impl fmt::Debug for MemoryCache {
 }
 
 impl MemoryCache {
-    /// Creates a cache with a soft payload-byte target, empty history, and no-op metrics.
+    /// Creates a cache with a shared allocation-byte target, empty history, and no-op metrics.
     /// Use [`Self::with_access_histories`] to supply request history for access-aware retention.
     pub fn new(capacity: u64) -> Self {
         Self::with_metrics(capacity, MemoryMetrics::noop())
     }
 
-    /// Creates a cache with a soft payload-byte target, empty history, and registered metrics.
+    /// Creates a cache with a shared allocation-byte target, empty history, and registered metrics.
     /// Use [`Self::with_access_histories`] to supply request history for access-aware retention.
     pub fn with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self {
         Self::with_access_histories(capacity, metrics, Arc::new(ObjectAccessHistories::new()))
@@ -97,11 +98,13 @@ impl MemoryCache {
         access_histories: Arc<ObjectAccessHistories>,
     ) -> Self {
         assert!(num_shards > 0, "memory cache requires at least one shard");
+        let buffer_pool = BufferPool::new(capacity, metrics.clone());
         let shards = (0..num_shards)
             .map(|shard_index| {
                 Mutex::new(MemoryCacheShard::new(
                     shard_capacity_for(capacity, num_shards, shard_index),
                     metrics.clone(),
+                    buffer_pool.clone(),
                 ))
             })
             .collect();
@@ -110,6 +113,7 @@ impl MemoryCache {
             shards,
             access_histories,
             metrics,
+            buffer_pool,
         }
     }
 
@@ -122,14 +126,20 @@ impl MemoryCache {
         self
     }
 
-    /// Returns the configured soft payload-byte target.
+    /// Returns the shared capacity for cached allocations and idle buffers.
     pub const fn capacity(&self) -> u64 {
         self.capacity
     }
 
-    /// Returns the sum of payload bytes currently retained by all shards.
+    /// Returns cached allocation capacity plus idle buffer capacity.
+    /// Active reads and caller-only results are excluded.
     pub fn used_bytes(&self) -> u64 {
-        self.shards.iter().map(|shard| shard.lock().used_bytes()).sum()
+        self.buffer_pool.used_bytes()
+    }
+
+    /// The aligned buffer pool shared by this cache's storage readers.
+    pub fn buffer_pool(&self) -> Arc<BufferPool> {
+        self.buffer_pool.clone()
     }
 
     /// Looks up one covering range without recording an access.
@@ -138,15 +148,24 @@ impl MemoryCache {
         self.shards[shard_index].lock().get(object_key, requested_range)
     }
 
-    /// Caches one downloaded range without creating an access.
+    /// Caches one downloaded range without creating an access, charging its payload length.
+    /// Use `insert_with_capacity` when the backing allocation capacity is known.
     ///
     /// If an existing entry contains the download, the supplied payload is
     /// discarded. A larger download replaces entries it fully contains, while
     /// partial overlaps coexist.
     /// Returns the new shard-local entry identity, or `None` for a redundant download.
     pub fn insert(&self, object_key: ObjectKey, download: Download) -> Option<u64> {
+        let capacity = download.bytes().len();
+        self.insert_with_capacity(object_key, download, capacity)
+    }
+
+    /// Caches bytes while charging their backing allocation, even if they are a smaller slice.
+    /// Shared allocations are conservatively charged once per cached entry.
+    pub fn insert_with_capacity(&self, object_key: ObjectKey, download: Download, capacity: usize) -> Option<u64> {
         let (downloaded_range, bytes) = download.into_parts();
-        self.admit_download(object_key, downloaded_range, bytes)
+        assert!(capacity >= bytes.len());
+        self.admit_download(object_key, downloaded_range, bytes, capacity as u64)
     }
 
     /// Runs a short synchronous action only while this exact admission remains cached.
@@ -163,7 +182,13 @@ impl MemoryCache {
         shard.contains_entry(object_key, range, entry_id).then(action)
     }
 
-    fn admit_download(&self, object_key: ObjectKey, downloaded_range: ByteRange, bytes: Bytes) -> Option<u64> {
+    fn admit_download(
+        &self,
+        object_key: ObjectKey,
+        downloaded_range: ByteRange,
+        bytes: Bytes,
+        capacity: u64,
+    ) -> Option<u64> {
         let shard_index = self.shard_index(&object_key);
         let mut allow_range_trim = true;
         let mut evicted_any_entry = false;
@@ -172,6 +197,7 @@ impl MemoryCache {
                 &object_key,
                 downloaded_range,
                 &bytes,
+                capacity,
                 &self.access_histories,
                 allow_range_trim,
             );

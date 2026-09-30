@@ -45,9 +45,12 @@ Feuer leaves request coalescing, scheduling, and retries to your downloader.
 
 ## Capacity and disk writes
 
-Memory capacity is a soft payload target split across shards. An oversized download
-empties its shard and remains cached. Caller-held bytes survive eviction and may
-keep larger allocations alive. Metadata and pending disk writes use additional memory.
+Memory capacity covers cached allocation charges and idle read buffers in one cache instance.
+Disk promotions are charged for the whole backing allocation, even when only a small slice is
+cached. Callback downloads are charged by payload length because `Bytes` does not expose capacity.
+Entry targets remain split across shards; an oversized entry empties its shard and remains cached.
+Active reads and caller-only results are outside the budget. Metadata and pending disk writes
+can also keep additional memory alive.
 
 Disk capacity is fixed and must be a positive multiple of 1 MiB, including metadata
 and alignment overhead. The backing file is exclusively locked while open. Disk
@@ -64,7 +67,8 @@ queues. See the [disk layout](feuer-storage/disk-prototype.md) for details.
 
 ## Eviction
 
-Both tiers sample entries and evict the lowest retention score per payload byte.
+Both tiers sample entries and evict the lowest retention score per retained byte:
+allocation capacity in memory, payload length on disk.
 For each request fully contained in a cached range, the score adds:
 
 ```text
@@ -96,7 +100,7 @@ are still checked before publishing bytes copied outside the memory shard lock.
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Trimming event age limit in requests across all keys. |
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Trimming events retained per key. |
 | `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed request cost in equivalent bytes. `0` scores bytes only. |
-| `FEUER_IO_BUFFER_POOL_BYTES` | `1408MiB` | Shared idle buffer budget per read queue. `0` disables retention. |
+| `FEUER_IDLE_BUFFER_POOL_PERCENT` | `7` | Maximum idle buffers as a percentage of memory capacity, shared by all six buckets. Range 0–100; `0` disables idle retention. |
 
 Values accept integers or size suffixes such as `8KiB`, `1.5 GiB`, and `5GB`.
 Binary suffixes use powers of 1024 and decimal suffixes use powers of 1000.
@@ -107,15 +111,23 @@ The first four settings require positive values. The rest allow zero.
 `.with_reclaim_sample_size(n)` overrides it for that cache. The other settings are
 process-wide, read once on first use, and panic on invalid values.
 
-Each read queue has one idle buffer pool with fixed allocation sizes of 32 KiB,
-256 KiB, 4 MiB, 16 MiB, 32 MiB, and 64 MiB. Aligned read lengths round up to the
-smallest fitting size; callers receive only the requested bytes. All sizes share
-the budget, charged by allocation capacity. Larger buffers are allocated at the
-required size and freed rather than pooled. Writes do not retain idle buffers.
-Active buffers and caller-owned results use additional memory.
+### Read buffers
 
-`FEUER_IO_BUFFER_POOL_BYTES` replaces the former small/medium/large settings;
-the default preserves their combined budget. The old settings are no longer read.
+`feuer-memory` owns one aligned buffer pool per cache instance, shared by its storage
+readers. Allocation sizes are 32 KiB, 256 KiB, 4 MiB, 16 MiB, 32 MiB, and 64 MiB.
+Aligned read lengths round up to the smallest fitting size; callers receive only the
+requested bytes. Larger allocations are exact-size and unpooled.
+
+Cached entries and idle buffers share the configured memory capacity. The idle pool is
+capped at 7% of that capacity by default. All six size buckets share this limit;
+there are no per-bucket caps or reservations. Cached entries can use the full capacity.
+Released buffers are freed if the idle pool or the shared memory budget has no room. Admission
+frees idle buffers before retaining new cached allocations; returning buffers never evicts
+cached entries. Writes use unpooled scratch buffers, and standalone storage without a
+memory cache retains no idle buffers.
+
+Set `FEUER_IDLE_BUFFER_POOL_PERCENT` to change the idle ceiling. `FEUER_IO_BUFFER_POOL_BYTES`
+and the former small/medium/large settings are no longer read.
 
 ### Memory benchmark only
 

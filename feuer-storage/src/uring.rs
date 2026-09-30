@@ -2,30 +2,28 @@
 //! Requests must be nonempty, with offsets and lengths aligned to DIRECT_IO_ALIGNMENT_BYTES.
 
 use std::{
-    alloc::{Layout, alloc_zeroed, dealloc},
     collections::VecDeque,
     fs::File,
     io,
     ops::Range,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    ptr::NonNull,
-    sync::{Arc, LazyLock, Mutex, Weak, mpsc},
+    sync::{Arc, mpsc},
     thread::{self, JoinHandle},
 };
 
 use bytes::Bytes;
+use feuer_memory::{AlignedBuffer, BufferPool};
 use io_uring::{IoUring, opcode, squeue, types};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 
 use crate::{
-    IoMetrics, IoOperation,
+    IoOperation,
     allocation::{DiskRegion, DiskRegionReadGuard},
-    metrics::IoBufferPoolMetrics,
 };
 
 // Buffer addresses, physical offsets, and I/O lengths use this alignment.
 // Opening verifies that the filesystem's direct-I/O requirements divide it.
-pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = 4096;
+pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = feuer_memory::BUFFER_ALIGNMENT;
 // Maximum physical bytes per chunk, including alignment padding. DataFile
 // reduces the logical chunk size when its starting offset is unaligned.
 pub(crate) const MAX_IO_CHUNK_BYTES: usize = 1024 * 1024;
@@ -35,21 +33,6 @@ const MAX_IN_FLIGHT_READS: usize = 64;
 // throughput, but raised write p99 from 4.6 to 47 ms and worsened small-read latency.
 // See benchmarks/ssd/uring-20260928/REPORT.md.
 const MAX_IN_FLIGHT_WRITES: usize = 8;
-// Fixed allocation capacities. Larger reads use exact-size, unpooled buffers.
-const IO_BUFFER_SIZES: [usize; 6] = [
-    32 * 1024,
-    256 * 1024,
-    4 * 1024 * 1024,
-    16 * 1024 * 1024,
-    32 * 1024 * 1024,
-    64 * 1024 * 1024,
-];
-// Shared read-queue idle budget, separate from active I/O and caller-owned results.
-// Read once on first use; zero disables retention.
-static IDLE_IO_BUFFER_CAPACITY: LazyLock<usize> = LazyLock::new(|| {
-    feuer_types::config::read_env_number("FEUER_IO_BUFFER_POOL_BYTES", 1408 * 1024 * 1024, 0)
-        .unwrap_or_else(|error| panic!("{error}"))
-});
 
 #[cfg(test)]
 mod tests;
@@ -73,23 +56,18 @@ struct IoQueueResources {
     // Limit covering preparing, queued, and active requests.
     request_slots: Arc<Semaphore>,
     // Writes retain input slices or use unpooled scratch buffers.
-    idle_buffers: Option<Arc<Mutex<IdleIoBuffers>>>,
+    idle_buffers: Option<Arc<BufferPool>>,
 }
 
 impl IoQueueResources {
-    fn new(max_in_flight: usize, operation: IoOperation, metrics: &IoMetrics) -> Self {
+    fn new(max_in_flight: usize, operation: IoOperation, buffer_pool: Arc<BufferPool>) -> Self {
         Self {
             request_slots: Arc::new(Semaphore::new(max_in_flight)),
-            idle_buffers: (operation == IoOperation::Read).then(|| {
-                Arc::new(Mutex::new(IdleIoBuffers::new(
-                    *IDLE_IO_BUFFER_CAPACITY,
-                    metrics.read_buffer_pool.clone(),
-                )))
-            }),
+            idle_buffers: (operation == IoOperation::Read).then_some(buffer_pool),
         }
     }
 
-    fn buffer_pool(&self) -> &Arc<Mutex<IdleIoBuffers>> {
+    fn buffer_pool(&self) -> &Arc<BufferPool> {
         self.idle_buffers.as_ref().expect("only reads use buffer pools")
     }
 }
@@ -99,7 +77,7 @@ impl IoQueueHandle {
         file: Arc<File>,
         directory_lock: Arc<File>,
         operation: IoOperation,
-        metrics: &IoMetrics,
+        buffer_pool: Arc<BufferPool>,
     ) -> io::Result<Self> {
         let (thread_name, max_in_flight) = match operation {
             IoOperation::Read => ("feuer-read-io", MAX_IN_FLIGHT_READS),
@@ -115,7 +93,7 @@ impl IoQueueHandle {
         // SAFETY: fd was just created and has no other owner.
         let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
         let (sender, receiver) = mpsc::sync_channel(max_in_flight);
-        let resources = Arc::new(IoQueueResources::new(max_in_flight, operation, metrics));
+        let resources = Arc::new(IoQueueResources::new(max_in_flight, operation, buffer_pool));
         let mut queue = IoQueue {
             resources: resources.clone(),
             ring,
@@ -269,149 +247,39 @@ fn queue_stopped_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "io_uring queue stopped")
 }
 
-/// Idle aligned buffers in fixed-size buckets sharing one byte budget.
-struct IdleIoBuffers {
-    by_size: [Vec<AlignedIoBuffer>; IO_BUFFER_SIZES.len()],
-    bytes: usize,
-    capacity: usize,
-    metrics: Arc<IoBufferPoolMetrics>,
-}
-
-impl IdleIoBuffers {
-    fn new(capacity: usize, metrics: Arc<IoBufferPoolMetrics>) -> Self {
-        metrics.capacity_bytes.increase(capacity as u64);
-        Self {
-            by_size: std::array::from_fn(|_| Vec::new()),
-            bytes: 0,
-            capacity,
-            metrics,
-        }
-    }
-}
-
-impl Drop for IdleIoBuffers {
-    fn drop(&mut self) {
-        self.metrics.idle_bytes.decrease(self.bytes as u64);
-        self.metrics.capacity_bytes.decrease(self.capacity as u64);
-    }
-}
-
+/// Read memory and disk ownership retained until kernel I/O completes.
 pub(crate) struct AlignedIoBuffer {
-    // Owned, aligned allocation whose address stays stable while the kernel uses it.
-    ptr: NonNull<u8>,
-    // Allocation capacity/alignment for matching deallocation and idle-byte accounting.
-    layout: Layout,
-    // Requested bytes; spare allocation capacity must not be read or exposed.
-    length: usize,
-    // Whole-entry reads retain disk ownership even if the waiting caller is canceled.
+    // Release disk ownership before the allocation can return to its memory pool.
     read_guards: Vec<DiskRegionReadGuard>,
-    // Results do not keep the read pool alive. Idle buffers and write scratch have an empty Weak.
-    idle_buffers: Weak<Mutex<IdleIoBuffers>>,
+    buffer: AlignedBuffer,
 }
 
 impl AlignedIoBuffer {
-    fn new(
-        length: usize,
-        read_guards: Vec<DiskRegionReadGuard>,
-        idle_buffers: &Arc<Mutex<IdleIoBuffers>>,
-    ) -> io::Result<Self> {
-        assert!(length > 0);
-        let bucket = IO_BUFFER_SIZES.iter().position(|&size| length <= size);
-        let capacity = bucket.map_or(length, |index| IO_BUFFER_SIZES[index]);
-        let reused_buffer = bucket.and_then(|index| {
-            let mut idle = idle_buffers.lock().unwrap();
-            let buffer = idle.by_size[index].pop();
-            if buffer.is_some() {
-                idle.bytes -= capacity;
-                idle.metrics.idle_bytes.decrease(capacity as u64);
-            }
-            buffer
-        });
-        // Reused memory is initialized but not zeroed; reads overwrite it before exposure.
-        let mut buffer = match reused_buffer {
-            Some(buffer) => buffer,
-            None => Self::allocate_zeroed(capacity)?,
-        };
-        buffer.length = length;
-        buffer.read_guards = read_guards;
-        if bucket.is_some() {
-            buffer.idle_buffers = Arc::downgrade(idle_buffers);
-        }
-        Ok(buffer)
-    }
-
-    /// Allocates fresh, zeroed aligned memory, freed rather than pooled when its owner is dropped.
-    fn allocate_zeroed(length: usize) -> io::Result<Self> {
-        assert!(length > 0);
-        let layout = Layout::from_size_align(length, DIRECT_IO_ALIGNMENT_BYTES).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "I/O buffer length exceeds allocation limit",
-            )
-        })?;
-        // SAFETY: layout is non-zero with a valid power-of-two alignment.
-        let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
-            .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "direct I/O buffer allocation failed"))?;
+    fn new(length: usize, read_guards: Vec<DiskRegionReadGuard>, pool: &Arc<BufferPool>) -> io::Result<Self> {
         Ok(Self {
-            ptr,
-            layout,
-            length,
-            read_guards: Vec::new(),
-            idle_buffers: Weak::new(),
+            read_guards,
+            buffer: pool.allocate(length)?,
         })
     }
 
-    pub(crate) fn into_bytes(mut self) -> Bytes {
+    pub(crate) fn capacity(&self) -> usize {
+        self.buffer.capacity()
+    }
+
+    pub(crate) fn into_bytes(self) -> Bytes {
         // No I/O owns the buffer now; returned bytes must not retain disk regions.
-        self.read_guards.clear();
-        Bytes::from_owner(self)
+        drop(self.read_guards);
+        self.buffer.into_bytes()
     }
 
     fn as_mut_slice(&mut self) -> &mut [u8] {
-        // SAFETY: this allocation is initialized and exclusively accessed by its owner.
-        // Called only before submission or after the corresponding CQE has been consumed.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.length) }
+        self.buffer.as_mut_slice()
     }
 }
 
 impl AsRef<[u8]> for AlignedIoBuffer {
     fn as_ref(&self) -> &[u8] {
-        // SAFETY: the allocation is initialized and remains owned by self.
-        // Called only after I/O completes, when the kernel no longer accesses it.
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.length) }
-    }
-}
-
-// SAFETY: AlignedIoBuffer uniquely owns its allocation; moving it does not move the allocation.
-unsafe impl Send for AlignedIoBuffer {}
-
-impl Drop for AlignedIoBuffer {
-    fn drop(&mut self) {
-        // Dropping an abandoned I/O result must release disk ownership even when memory is pooled.
-        self.read_guards.clear();
-        if let Some(idle_buffers) = self.idle_buffers.upgrade() {
-            let mut idle = idle_buffers.lock().unwrap();
-            let length = self.layout.size();
-            if length <= idle.capacity - idle.bytes {
-                // Transfer allocation ownership to the pool. Its empty Weak ensures that
-                // destroying the pool frees this allocation instead of returning it again.
-                let index = IO_BUFFER_SIZES.iter().position(|&size| size == length).unwrap();
-                idle.by_size[index].push(Self {
-                    ptr: self.ptr,
-                    layout: self.layout,
-                    length: self.length,
-                    read_guards: Vec::new(),
-                    idle_buffers: Weak::new(),
-                });
-                idle.bytes += length;
-                idle.metrics.idle_bytes.increase(length as u64);
-                idle.metrics.returned.increase(1);
-                return;
-            }
-            idle.metrics.dropped.increase(1);
-        }
-        // SAFETY: the matching allocation remains owned, and no kernel operation references it.
-        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
+        self.buffer.as_ref()
     }
 }
 
@@ -446,7 +314,7 @@ impl IoBuffers {
             }
             let copy_length = end - offset - aligned_length;
             if copy_length > 0 {
-                let mut buffer = AlignedIoBuffer::allocate_zeroed(copy_length)?;
+                let mut buffer = AlignedBuffer::allocate_zeroed(copy_length)?;
                 buffer.as_mut_slice()[..bytes.len() - aligned_length].copy_from_slice(&bytes[aligned_length..]);
                 buffers.push(buffer.into_bytes());
             }
@@ -461,9 +329,8 @@ impl IoBuffers {
     fn submission_entry(&mut self, fd: types::Fd, offset: u64, range: Range<usize>) -> squeue::Entry {
         match self {
             Self::Read(buffer) => {
-                // SAFETY: the destination is in bounds and exclusively owned by the
-                // active request until its completion has been consumed.
-                let ptr = unsafe { buffer.ptr.as_ptr().add(range.start) };
+                // The active request exclusively owns this destination through completion.
+                let ptr = buffer.as_mut_slice()[range.start..range.end].as_mut_ptr();
                 opcode::Read::new(fd, ptr, range.len() as u32).offset(offset).build()
             }
             Self::Write { bytes, vectors, .. } => {
@@ -533,7 +400,7 @@ impl IoRequest {
         let length = destination.len();
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         match &buffers {
-            IoBuffers::Read(buffer) => assert!(destination.end <= buffer.length),
+            IoBuffers::Read(buffer) => assert!(destination.end <= buffer.as_ref().len()),
             IoBuffers::Write { bytes, .. } => assert_eq!(destination, 0..bytes.iter().map(Bytes::len).sum()),
         }
         assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);

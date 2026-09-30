@@ -19,6 +19,7 @@ io-bench = []
 [dependencies]
 blake3 = "1"
 bytes = { workspace = true }
+feuer-memory = { workspace = true }
 feuer-types = { workspace = true }
 fs4 = { workspace = true, features = ["sync"] }
 mixtrics = { workspace = true }
@@ -34,7 +35,6 @@ libc = "0.2"
 [dev-dependencies]
 mixtrics = { workspace = true, features = ["prometheus"] }
 prometheus = { workspace = true }
-feuer-memory = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }

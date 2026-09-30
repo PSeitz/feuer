@@ -14,6 +14,123 @@ use super::{
 use crate::MemoryMetrics;
 
 #[test]
+fn cached_slices_and_idle_buffers_share_allocation_accounting() {
+    use crate::test_metrics::{registry, value};
+
+    let (registry, backend) = registry();
+    let capacity = 256 * 1024;
+    let cache = MemoryCache::with_shard_count(
+        100 * capacity as u64,
+        MemoryMetrics::new(&backend),
+        1,
+        Arc::new(ObjectAccessHistories::new()),
+    );
+    let pool = cache.buffer_pool();
+    assert!(Arc::ptr_eq(&pool, &cache.buffer_pool()));
+    let other_cache = MemoryCache::new(cache.capacity());
+    assert!(!Arc::ptr_eq(&pool, &other_cache.buffer_pool()));
+    let buffer = pool.allocate(capacity).unwrap();
+    let bytes = buffer.into_bytes().slice(17..18);
+    let key = "slice".to_owned();
+    cache.insert_with_capacity(key.clone(), Download::new(0, bytes.clone()).unwrap(), capacity);
+    assert_eq!(cache.used_bytes(), capacity as u64);
+    assert_eq!(pool.idle_bytes(), 0);
+    assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), capacity as f64);
+    assert_eq!(cache.get(&key, range(0, 1)).unwrap().as_ptr(), bytes.as_ptr());
+    // A redundant insertion does not charge the shared allocation again.
+    assert_eq!(
+        cache.insert_with_capacity(key.clone(), Download::new(0, bytes.clone()).unwrap(), capacity),
+        None
+    );
+    assert_eq!(cache.used_bytes(), capacity as u64);
+    cache.remove(&key, range(0, 1));
+    assert_eq!(cache.used_bytes(), 0); // caller-only results are outside the budget
+    drop(bytes);
+    assert_eq!(cache.used_bytes(), capacity as u64);
+    assert_eq!(pool.idle_bytes(), capacity as u64);
+    assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), capacity as f64);
+    drop(pool);
+    drop(cache);
+    assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 0.0);
+    assert_eq!(value(&registry, "feuer_memory_capacity_bytes", &[]), 0.0);
+}
+
+#[test]
+fn cached_capacity_drives_eviction_not_slice_length() {
+    let cache = cache(32 * 1024);
+    for key in ["first", "second"] {
+        let buffer = cache.buffer_pool().allocate(1).unwrap();
+        let capacity = buffer.capacity();
+        cache.insert_with_capacity(key.into(), Download::new(0, buffer.into_bytes()).unwrap(), capacity);
+    }
+    assert!(cache.get(&"first".into(), range(0, 1)).is_none());
+    assert!(cache.get(&"second".into(), range(0, 1)).is_some());
+    assert_eq!(cache.used_bytes(), 32 * 1024);
+    assert_eq!(cache.buffer_pool().idle_bytes(), 0);
+    cache.remove(&"second".into(), range(0, 1));
+    assert_eq!(cache.used_bytes(), 0); // even one idle buffer exceeds the pool's limit
+}
+
+#[test]
+fn cached_entries_displace_idle_buffers_and_released_bursts_cannot_displace_entries() {
+    let buffer_capacity = 256 * 1024;
+    let capacity = 100 * buffer_capacity;
+    let cache = cache(capacity as u64);
+    let pool = cache.buffer_pool();
+    let burst: Vec<_> = (0..8).map(|_| pool.allocate(buffer_capacity).unwrap()).collect();
+    drop(burst);
+    assert_eq!(pool.idle_bytes(), capacity as u64 * 7 / 100);
+    drop(pool.allocate(1).unwrap()); // another bucket cannot exceed the shared idle ceiling
+    assert_eq!(pool.idle_bytes(), capacity as u64 * 7 / 100);
+    let waiting = pool.allocate(buffer_capacity).unwrap();
+    cache.insert("full".into(), Download::new(0, Bytes::from(vec![0; capacity])).unwrap());
+    assert_eq!(pool.idle_bytes(), 0);
+    drop(waiting);
+    assert_eq!(pool.idle_bytes(), 0);
+    assert_eq!(cache.used_bytes(), capacity as u64);
+    assert!(cache.get(&"full".into(), range(0, 1)).is_some());
+}
+
+#[test]
+fn replacement_releases_the_old_allocation_charge() {
+    let capacity = 256 * 1024;
+    let cache = cache(100 * capacity as u64);
+    let key = "replace".to_owned();
+    let buffer = cache.buffer_pool().allocate(capacity).unwrap();
+    cache.insert_with_capacity(
+        key.clone(),
+        Download::new(1, buffer.into_bytes().slice(..1)).unwrap(),
+        capacity,
+    );
+    cache.insert(key.clone(), Download::new(0, Bytes::from_static(b"abc")).unwrap());
+    assert_eq!(cache.shards[0].lock().used_bytes(), 3);
+    assert_eq!(cache.buffer_pool().idle_bytes(), capacity as u64);
+    assert_eq!(cache.used_bytes(), capacity as u64 + 3);
+    cache.remove(&key, range(0, 3));
+    assert_eq!(cache.used_bytes(), capacity as u64);
+}
+
+#[test]
+fn trimming_replaces_allocation_capacity_with_copied_payload_capacity() {
+    let capacity = 256 * 1024;
+    let cache = cache(capacity as u64);
+    let key = "trim".to_owned();
+    let buffer = cache.buffer_pool().allocate(capacity).unwrap();
+    cache.insert_with_capacity(
+        key.clone(),
+        Download::new(0, buffer.into_bytes().slice(..100)).unwrap(),
+        capacity,
+    );
+    for _ in 0..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+        cache.access_histories.record_access(&key, range(10, 20));
+    }
+    cache.insert("incoming".into(), Download::new(0, Bytes::from_static(b"x")).unwrap());
+    assert_eq!(cache.used_bytes(), 11);
+    assert_eq!(cache.buffer_pool().idle_bytes(), 0);
+    assert_eq!(cache.get(&key, range(10, 20)).unwrap().len(), 10);
+}
+
+#[test]
 fn disk_write_identity_expires_on_removal_replacement_and_reinsertion() {
     let cache = cache(1024);
     let key = ObjectKey::from("disk-source");
@@ -136,14 +253,14 @@ fn reclaim_sampling_advances_past_contained_ranges() {
     let replacement = Bytes::from_static(b"abc");
     for expected_entries in [3, 3, 2] {
         assert!(matches!(
-            shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, &cache.access_histories, false),
+            shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, 3, &cache.access_histories, false),
             InsertOrReclaimResult::Retry | InsertOrReclaimResult::Evicted
         ));
         assert_eq!(shard.entry_count(), expected_entries);
     }
     // The partial overlap is eligible; the two ranges fully contained in the incoming download were skipped.
     assert!(matches!(
-        shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, &cache.access_histories, false),
+        shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, 3, &cache.access_histories, false),
         InsertOrReclaimResult::Complete(Some(_))
     ));
     assert_eq!(shard.entry_count(), 1);
@@ -643,9 +760,14 @@ fn new_accesses_do_not_invalidate_a_copied_range_trim() {
     let incoming_bytes = Bytes::from_static(b"xy");
     let replacement = {
         let mut shard = cache.shards[0].lock();
-        let InsertOrReclaimResult::Trim(source) =
-            shard.try_admit_or_reclaim(&incoming, range(0, 2), &incoming_bytes, &cache.access_histories, true)
-        else {
+        let InsertOrReclaimResult::Trim(source) = shard.try_admit_or_reclaim(
+            &incoming,
+            range(0, 2),
+            &incoming_bytes,
+            2,
+            &cache.access_histories,
+            true,
+        ) else {
             panic!("pressure should select the cold compactable cached range");
         };
         drop(shard);
@@ -679,6 +801,7 @@ fn cached_range_changes_still_invalidate_copied_trimming() {
                 &"incoming".to_owned(),
                 range(0, 11),
                 &Bytes::from_static(b"01234567890"),
+                11,
                 &cache.access_histories,
                 true,
             ) else {

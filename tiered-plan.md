@@ -185,15 +185,21 @@ the comparison demonstrates the claim without violating correctness or the state
 
 ## 6. In-memory cache
 
-Feuer has one sharded in-memory cache with a soft payload-byte target.
+Feuer has one sharded in-memory cache sharing its allocation-byte target with an aligned buffer pool.
 
 - The configured target is divided among shards. Admission evicts only from the selected shard.
 - A download larger than its shard target is admitted after the shard is emptied. One oversized entry can
-  therefore make a shard, and aggregate retained payload, exceed the configured target.
+  therefore make a shard, and aggregate retained allocation charges, exceed the configured target.
 - No memory entry is protected merely because it is queued for disk writes.
 - Memory pressure does not wait for disk throughput.
-- Usage is charged to payload bytes retained by the cache. Metadata, allocator overhead, callback-owned source
-  buffers, transient copies, and caller-held results are outside that accounting.
+- Disk promotions charge their whole backing allocation capacity, even when the cached range is a small slice.
+  Callback downloads use payload length when allocation capacity is unknown. Charges are per cached entry.
+- One buffer pool per cache instance retains 32 KiB, 256 KiB, 4 MiB, 16 MiB, 32 MiB, and 64 MiB allocations.
+  The idle pool is capped at 7% of configured memory capacity by default, shared by all six buckets
+  without per-bucket caps or reservations. `FEUER_IDLE_BUFFER_POOL_PERCENT` configures this percentage (0–100; zero disables
+  idle retention). Cached entries and idle buffers together share the full memory capacity. Admission frees
+  idle buffers first; released buffers never evict entries. Allocations above 64 MiB are not pooled.
+- Metadata, allocator overhead, active reads, transient copies, and caller-only results are outside accounting.
 
 In-memory compaction remains an MVP feature. Feuer observes exact ranges from incoming requests and
 can replace a cached larger download with smaller cached payloads biased toward observed requests, releasing

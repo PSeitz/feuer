@@ -34,9 +34,15 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 - Tier orchestration records each started request's exact range once, before lookup, in standalone shared
   history. Failures, invalid downloads, and cancellation after starting still count as demand.
   Raw memory/disk lookups and insertions do not record accesses; history takes no cache shard lock.
-- Capacity is a soft payload-byte target divided among shards. An oversized download empties its shard and
-  remains admitted even when retained payload exceeds the target. Caller-held results survive eviction and
-  are outside cache accounting.
+- Cached allocations and idle buffers share the configured memory capacity. Disk promotions carry the
+  whole backing allocation capacity through slicing into memory admission. Callback downloads use payload
+  length when allocation capacity is unknown. Entry targets remain divided among shards, preserving the
+  existing oversized-entry exception. Caller-only results survive eviction outside cache accounting.
+- `feuer-memory` owns one aligned buffer pool per cache instance: 32 KiB, 256 KiB, 4 MiB, 16 MiB,
+  32 MiB, and 64 MiB. The idle pool is capped at 7% of memory capacity by default, shared by all six
+  buckets without per-bucket caps or reservations. `FEUER_IDLE_BUFFER_POOL_PERCENT` configures this percentage
+  (0–100; zero disables idle retention).
+  Admission frees idle buffers as needed; returns never evict cached entries. Above 64 MiB is unpooled.
 
 ### Memory retention and compaction
 

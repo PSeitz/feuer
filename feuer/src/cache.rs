@@ -74,13 +74,14 @@ impl TieredMemoryDiskCache {
             )
             .with_reclaim_sample_size(config.reclaim_sample_size()),
         );
-        let disk = DiskRangeCache::open_with_metrics(
+        let disk = DiskRangeCache::open_with_buffer_pool(
             config.directory(),
             config.disk_capacity(),
             IoMetrics::new(registry),
             access_histories.clone(),
             feuer_storage::DiskMetrics::new(registry),
             config.reclaim_sample_size(),
+            memory.buffer_pool(),
         )
         .await?;
         let disk_write_queue = DiskWriteQueue::with_metrics(memory.clone(), disk.clone(), registry);
@@ -134,10 +135,11 @@ impl TieredMemoryDiskCache {
         }
 
         #[cfg(target_os = "linux")]
-        if let Some(bytes) = self.state.disk.get(&object_key, requested_range).await {
-            self.state.memory.insert(
+        if let Some((bytes, capacity)) = self.state.disk.get_with_capacity(&object_key, requested_range).await {
+            self.state.memory.insert_with_capacity(
                 object_key.clone(),
                 Download::new(requested_range.start(), bytes.clone()).expect("disk result covers the request"),
+                capacity,
             );
             metrics.record(LookupOutcome::DiskHit, started.elapsed(), requested_range.len());
             return Ok(bytes);
@@ -321,7 +323,7 @@ mod tests {
         .unwrap();
         assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 0.0);
         assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);
-        assert_eq!(value(&registry, "feuer_memory_payload_bytes", &[]), 0.0);
+        assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 0.0);
         assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
     }
 
@@ -380,7 +382,38 @@ mod tests {
             assert_eq!(hit, result);
             assert_eq!(history.clock(), accesses);
         }
-        assert_eq!(cache.state.memory.used_bytes(), 4);
+        assert_eq!(cache.state.memory.used_bytes(), 32 * 1024);
+    }
+
+    #[tokio::test]
+    async fn disk_promotion_charges_the_whole_rounded_allocation_for_a_small_slice() {
+        let (_directory, cache) = cache(32).await;
+        let key = "large-entry".to_owned();
+        cache
+            .state
+            .disk
+            .insert_batch(vec![(
+                key.clone(),
+                Download::new(0, Bytes::from(vec![0x77; 40 * 1024])).unwrap(),
+            )])
+            .await
+            .unwrap();
+        let bytes = cache
+            .get_or_fetch(key.clone(), range(5, 9), || async {
+                Err::<Download, _>("disk hit must not fetch")
+            })
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], &[0x77; 4]);
+        assert_eq!(cache.state.memory.used_bytes(), 256 * 1024);
+        assert_eq!(
+            cache.state.memory.get(&key, range(5, 9)).unwrap().as_ptr(),
+            bytes.as_ptr()
+        );
+        assert_eq!(cache.state.memory.buffer_pool().idle_bytes(), 0);
+        cache.state.memory.remove(&key, range(5, 9));
+        assert_eq!(cache.state.memory.used_bytes(), 0);
+        assert_eq!(&bytes[..], &[0x77; 4]);
     }
 
     #[tokio::test]

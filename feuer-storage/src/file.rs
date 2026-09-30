@@ -11,6 +11,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use feuer_memory::BufferPool;
 use fs4::fs_std::FileExt as LockFileExt;
 use tokio::runtime::Handle;
 use tracing::{Instrument, Span, field};
@@ -84,6 +85,16 @@ impl DataFile {
     /// directory is created if needed and the file is set to exactly `capacity`.
     /// A second concurrent open fails with [`crate::DataFileErrorKind::AlreadyOpen`].
     pub async fn open(directory: impl AsRef<Path>, capacity: u64, metrics: Arc<IoMetrics>) -> DataFileResult<Self> {
+        Self::open_with_buffer_pool(directory, capacity, metrics, BufferPool::unpooled()).await
+    }
+
+    /// Opens storage using the buffer pool belonging to its memory-cache instance.
+    pub async fn open_with_buffer_pool(
+        directory: impl AsRef<Path>,
+        capacity: u64,
+        metrics: Arc<IoMetrics>,
+        buffer_pool: Arc<BufferPool>,
+    ) -> DataFileResult<Self> {
         let directory = directory.as_ref().to_path_buf();
         let runtime = Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
         let started = Instant::now();
@@ -96,9 +107,8 @@ impl DataFile {
             duration_seconds = field::Empty,
         );
         let result = async {
-            let queue_metrics = metrics.clone();
             let state = runtime
-                .spawn_blocking(move || open_file_state(directory, capacity, &queue_metrics))
+                .spawn_blocking(move || open_file_state(directory, capacity, buffer_pool))
                 .await
                 .map_err(|source| DataFileError::Task {
                     operation: IoOperation::OpenDataFile,
@@ -143,20 +153,24 @@ impl DataFile {
             let alignment = uring::DIRECT_IO_ALIGNMENT_BYTES as u64;
             let leading_padding_bytes = offset % alignment;
             let aligned_range = offset - leading_padding_bytes..(offset + length as u64).next_multiple_of(alignment);
-            let bytes = self.read_aligned_ranges(&[aligned_range], Vec::new()).await?;
+            let (bytes, _) = self.read_aligned_ranges(&[aligned_range], Vec::new()).await?;
             Ok(bytes.slice(leading_padding_bytes as usize..leading_padding_bytes as usize + length))
         })
         .await
     }
 
     /// Reads payload regions into one buffer, omitting metadata gaps and final padding.
-    pub(crate) async fn read_regions(&self, regions: Vec<DiskRegionReadGuard>, length: usize) -> DataFileResult<Bytes> {
+    pub(crate) async fn read_regions(
+        &self,
+        regions: Vec<DiskRegionReadGuard>,
+        length: usize,
+    ) -> DataFileResult<(Bytes, usize)> {
         let ranges: Vec<_> = regions.iter().map(DiskRegionReadGuard::range).collect();
         let offset = ranges.first().map_or(0, |range| range.start);
         self.measure_io(IoOperation::Read, offset, length, async {
-            let bytes = self.read_aligned_ranges(&ranges, regions).await?;
+            let (bytes, capacity) = self.read_aligned_ranges(&ranges, regions).await?;
             assert_eq!(bytes.len(), length.next_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
-            Ok(bytes.slice(..length))
+            Ok((bytes.slice(..length), capacity))
         })
         .await
     }
@@ -277,7 +291,7 @@ impl DataFile {
         &self,
         ranges: &[Range<u64>],
         read_guards: Vec<DiskRegionReadGuard>,
-    ) -> DataFileResult<Bytes> {
+    ) -> DataFileResult<(Bytes, usize)> {
         let operation = IoOperation::Read;
         let mut buffer_length = 0usize;
         for range in ranges {
@@ -313,11 +327,12 @@ impl DataFile {
                 destination_offset += read_length;
             }
         }
-        Ok(buffer.into_bytes())
+        let capacity = buffer.capacity();
+        Ok((buffer.into_bytes(), capacity))
     }
 }
 
-fn open_file_state(directory: PathBuf, capacity: u64, metrics: &IoMetrics) -> DataFileResult<DataFileState> {
+fn open_file_state(directory: PathBuf, capacity: u64, buffer_pool: Arc<BufferPool>) -> DataFileResult<DataFileState> {
     if capacity == 0 || capacity > i64::MAX as u64 || !capacity.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64)
     {
         return Err(DataFileError::InvalidCapacity);
@@ -372,9 +387,9 @@ fn open_file_state(directory: PathBuf, capacity: u64, metrics: &IoMetrics) -> Da
     // Construct both rings before resizing, so unavailable io_uring does not resize an existing cache.
     let file = Arc::new(file);
     let lock_file = Arc::new(lock_file);
-    let read_queue = uring::IoQueueHandle::new(file.clone(), lock_file.clone(), IoOperation::Read, metrics)
+    let read_queue = uring::IoQueueHandle::new(file.clone(), lock_file.clone(), IoOperation::Read, buffer_pool.clone())
         .map_err(|source| error(IoOperation::OpenDataFile, source))?;
-    let write_queue = uring::IoQueueHandle::new(file.clone(), lock_file, IoOperation::Write, metrics)
+    let write_queue = uring::IoQueueHandle::new(file.clone(), lock_file, IoOperation::Write, buffer_pool)
         .map_err(|source| error(IoOperation::OpenDataFile, source))?;
     file.set_len(capacity)
         .map_err(|source| error(IoOperation::ResizeDataFile, source))?;

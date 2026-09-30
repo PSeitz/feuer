@@ -311,7 +311,8 @@ async fn multi_chunk_eviction_preserves_an_in_progress_read_until_its_guards_dro
         read.read_verified_range(&cache.disk.file, range(3, 20))
             .await
             .unwrap()
-            .unwrap(),
+            .unwrap()
+            .0,
         source.bytes().slice(..17)
     );
     drop(read);

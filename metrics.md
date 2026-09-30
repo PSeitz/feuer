@@ -144,42 +144,62 @@ Use `0.50` or `0.99` for p50 or p99. Percentiles are estimated from the buckets.
 
 ## I/O buffer pools
 
-Each read queue has one pool with fixed allocation sizes of 32 KiB, 256 KiB,
-4 MiB, 16 MiB, 32 MiB, and 64 MiB sharing one idle-byte budget. Accounting uses
-allocation capacity, not requested length. Larger allocations are not pooled.
-Writes reuse aligned input slices or allocate unpooled scratch buffers.
-The metrics below have no `pool` or `operation` label. The former
-`pool=small|medium|large` labels have been removed; update dashboard filters.
+Each memory-cache instance owns one pool with fixed allocation sizes of 32 KiB,
+256 KiB, 4 MiB, 16 MiB, 32 MiB, and 64 MiB. Cached allocation charges and idle
+buffers share the configured memory capacity. The idle pool is capped at 7% of that
+capacity by default. All six buckets share this ceiling, without per-bucket caps or reservations.
+`FEUER_IDLE_BUFFER_POOL_PERCENT` sets this percentage (0–100); zero disables idle retention.
+Larger allocations are not pooled. Writes use aligned input slices or unpooled scratch.
+These metrics are registered by `MemoryMetrics`, not `IoMetrics`, and have no `pool`
+or `operation` label. The former `pool=small|medium|large` labels have been removed.
+Idle bytes and return counters have a `bucket` label containing allocation capacity in bytes:
+`32768`, `262144`, `4194304`, `16777216`, `33554432`, or `67108864`.
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `feuer_io_buffer_pool_idle_bytes` | Gauge | Bytes retained for reuse, excluding active buffers and caller-owned results |
-| `feuer_io_buffer_pool_capacity_bytes` | Gauge | Configured idle-byte limit of live pools, including environment overrides |
-| `feuer_io_buffer_pool_returns_total` | Counter | Released buffers with `outcome`: `returned` (kept in the pool for reuse) or `dropped` (freed due to insufficient idle-byte capacity) |
+| `feuer_memory_used_bytes` | Gauge | Cached allocation charges plus idle allocation capacity; excludes active reads and caller-only results |
+| `feuer_memory_capacity_bytes` | Gauge | Configured shared capacity of live memory caches and their pools |
+| `feuer_io_buffer_pool_idle_bytes` | Gauge | Idle allocation capacity per `bucket`, already included in `feuer_memory_used_bytes` |
+| `feuer_io_buffer_pool_returns_total` | Counter | Released buffers per `bucket`, with `outcome`: `returned` (retained) or `dropped` (freed at the idle-pool or shared memory limit) |
 
-**Utilization (%)** — retained idle bytes as a percentage of capacity:
+`feuer_memory_used_bytes` replaces `feuer_memory_payload_bytes`; the separate
+`feuer_io_buffer_pool_capacity_bytes` gauge has been removed. Update dashboards.
+Disk promotions charge the whole allocation, including padding and unused bytes outside
+the promoted slice. Callback downloads without capacity metadata use their payload length.
+Shared allocations are conservatively charged per cached entry. The existing oversized-entry
+exception can still make cached charges exceed the target.
+
+**Memory utilization (%)** — cached and idle allocation charges relative to capacity:
 
 ```promql
-100 * sum(feuer_io_buffer_pool_idle_bytes)
-  / sum(feuer_io_buffer_pool_capacity_bytes)
+100 * sum(feuer_memory_used_bytes)
+  / sum(feuer_memory_capacity_bytes)
 ```
 
-**Dropped (%) over the last 5 minutes** — counts released buffers, not bytes:
+**Idle allocation bytes per bucket:**
 
 ```promql
-100 * sum(rate(feuer_io_buffer_pool_returns_total{outcome="dropped"}[5m]))
-  / sum(rate(feuer_io_buffer_pool_returns_total[5m]))
+sum by (bucket) (feuer_io_buffer_pool_idle_bytes)
 ```
+
+**Dropped (%) per bucket over the last 5 minutes** — counts released buffers, not bytes:
+
+```promql
+100 * sum by (bucket) (rate(feuer_io_buffer_pool_returns_total{outcome="dropped"}[5m]))
+  / sum by (bucket) (rate(feuer_io_buffer_pool_returns_total[5m]))
+```
+
+Omit `by (bucket)` to aggregate across all sizes.
 
 Utilization is undefined for zero capacity. Dropped percentage is undefined when
 no buffers return during the window.
 
 Buffers return only after their last owner releases them. A zero-capacity pool
 frees all returned buffers (100%). Allocations above 64 MiB bypass the pool and
-its return counters. Shutdown removes the pool's gauge
-contributions. Neither freeing idle buffers at shutdown nor freeing results
-that outlive the pool counts as a return. Gauges sum across queues sharing a
-registry. The direct-read check during file opening also uses the read pool.
+its return counters. Admission frees idle buffers as necessary before retaining
+cached allocations. Those frees, shutdown frees, and results outliving the pool
+are not counted as returns. Gauges sum across cache instances sharing a registry.
+Standalone storage without a memory cache retains no idle buffers.
 
 ## Best-effort disk writes
 
@@ -214,8 +234,9 @@ completion release their counts along with the associated payload budget.
 - `feuer_memory_operations_total{operation}`: `insert`, `replace`, `redundant`,
   `remove`, `compact`. Internal access/hit/miss counters are not emitted.
   Use public lookup counters for hit ratios.
-- `feuer_memory_payload_bytes`, `feuer_memory_entries`,
-  `feuer_memory_compacted_payload_bytes_total`.
+- `feuer_memory_entries`: retained entries (not idle buffers).
+- `feuer_memory_compacted_payload_bytes_total`: cached allocation charges released
+  by compaction; does not guarantee the allocation was freed if callers still hold it.
 - `feuer_disk_io_total{operation,outcome}`: operations `read` and `write`,
   outcomes `success` and `error`.
 - `feuer_disk_io_duration_seconds{operation,outcome}`: operations `read` and

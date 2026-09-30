@@ -8,7 +8,7 @@ use feuer_types::{
 use rustc_hash::FxHashMap;
 
 use super::range_trim::{RangeTrimPlan, plan_range_trim};
-use crate::MemoryMetrics;
+use crate::{BufferPool, MemoryMetrics};
 
 /// Minimum requests across all keys since admission before payload compaction is allowed.
 pub(super) const MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION: u64 = 64;
@@ -21,6 +21,8 @@ struct CachedRange {
     range: ByteRange,
     /// Retained payload; lookup results share slices of this allocation.
     bytes: Bytes,
+    /// Capacity of the backing allocation, possibly larger than the visible payload.
+    capacity: u64,
     /// Slot in the bounded-work policy candidate ring.
     candidate_slot: usize,
     /// Request clock at admission.
@@ -58,30 +60,30 @@ impl ObjectCachedRanges {
         entry.range.contains(range).then_some(entry)
     }
 
-    /// Collects cached ranges contained by the incoming range and their payload bytes.
+    /// Collects cached ranges contained by the incoming range and their allocation charges.
     fn ranges_contained_by(&self, range: ByteRange) -> ContainedCachedRanges {
         let mut contained_ranges = ContainedCachedRanges::default();
         for (_, entry) in self.by_start.range(range.start()..range.end()) {
             if range.contains(entry.range) {
                 contained_ranges.ranges.push(entry.range);
-                contained_ranges.payload_bytes += entry.bytes.len() as u64;
+                contained_ranges.allocation_bytes += entry.capacity;
             }
         }
         contained_ranges
     }
 }
 
-/// Cached ranges fully contained in an incoming download, with their total payload bytes.
+/// Cached ranges fully contained in an incoming download, with their allocation charges.
 #[derive(Default)]
 struct ContainedCachedRanges {
     ranges: Vec<ByteRange>,
-    payload_bytes: u64,
+    allocation_bytes: u64,
 }
 
 /// Usage removed while admitting one download.
 #[derive(Default)]
 struct RemovedCacheUsage {
-    payload_bytes: u64,
+    allocation_bytes: u64,
     entry_count: u64,
 }
 
@@ -188,7 +190,7 @@ pub(super) enum InsertOrReclaimResult {
     Trim(RangeTrimSource),
 }
 
-/// One memory-cache shard's range indexes and payload accounting.
+/// One memory-cache shard's range indexes and allocation accounting.
 pub(super) struct MemoryCacheShard {
     capacity: u64,
     pub(super) reclaim_sample_size: usize,
@@ -198,10 +200,11 @@ pub(super) struct MemoryCacheShard {
     /// Object keys, range starts, and entry IDs, sampled in rotation to choose a range to trim or evict.
     candidates: ReclaimCandidateRing,
     metrics: Arc<MemoryMetrics>,
+    buffer_pool: Arc<BufferPool>,
 }
 
 impl MemoryCacheShard {
-    pub(super) fn new(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self {
+    pub(super) fn new(capacity: u64, metrics: Arc<MemoryMetrics>, buffer_pool: Arc<BufferPool>) -> Self {
         Self {
             capacity,
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
@@ -210,9 +213,11 @@ impl MemoryCacheShard {
             next_entry_id: 0,
             candidates: ReclaimCandidateRing::default(),
             metrics,
+            buffer_pool,
         }
     }
 
+    #[cfg(test)]
     pub(super) const fn used_bytes(&self) -> u64 {
         self.used_bytes
     }
@@ -234,6 +239,7 @@ impl MemoryCacheShard {
         object_key: &ObjectKey,
         range: ByteRange,
         bytes: &Bytes,
+        capacity: u64,
         access_histories: &ObjectAccessHistories,
         allow_range_trim: bool,
     ) -> InsertOrReclaimResult {
@@ -245,17 +251,24 @@ impl MemoryCacheShard {
             Some(entries) => entries.ranges_contained_by(range),
             None => ContainedCachedRanges::default(),
         };
-        let added_bytes = bytes.len() as u64;
-        let used_bytes_without_contained_ranges = self.used_bytes - contained_ranges.payload_bytes;
+        let added_bytes = capacity;
+        let used_bytes_without_contained_ranges = self.used_bytes - contained_ranges.allocation_bytes;
         let max_existing_bytes = self.capacity.saturating_sub(added_bytes);
 
         if used_bytes_without_contained_ranges <= max_existing_bytes {
             let removal = self.remove_contained_ranges(object_key, &contained_ranges.ranges);
-            debug_assert_eq!(removal.payload_bytes, contained_ranges.payload_bytes);
-            let id = self.insert_downloaded_range(object_key.clone(), range, bytes.clone(), access_histories.clock());
+            debug_assert_eq!(removal.allocation_bytes, contained_ranges.allocation_bytes);
+            let id = self.insert_downloaded_range(
+                object_key.clone(),
+                range,
+                bytes.clone(),
+                capacity,
+                access_histories.clock(),
+            );
 
             if removal.entry_count != 0 {
-                self.metrics.decrease_usage(removal.payload_bytes, removal.entry_count);
+                self.metrics
+                    .decrease_usage(removal.allocation_bytes, removal.entry_count);
             }
             self.metrics.increase_usage(added_bytes, 1);
             self.metrics.record_insert(removal.entry_count != 0);
@@ -271,22 +284,24 @@ impl MemoryCacheShard {
             return InsertOrReclaimResult::Trim(source);
         }
 
-        let removed_payload_bytes = self
+        let removed_bytes = self
             .remove_entry(&candidate.object_key, candidate.range, Some(candidate.id))
             .expect("a sampled pressure candidate cannot disappear while its shard is locked");
-        self.metrics.decrease_usage(removed_payload_bytes, 1);
+        self.metrics.decrease_usage(removed_bytes, 1);
         InsertOrReclaimResult::Evicted
     }
 
-    /// Inserts a downloaded range into the index and candidate ring, charging its payload bytes.
+    /// Inserts a downloaded range, charging its backing allocation capacity.
     fn insert_downloaded_range(
         &mut self,
         object_key: ObjectKey,
         range: ByteRange,
         bytes: Bytes,
+        capacity: u64,
         access_clock: u64,
     ) -> u64 {
-        self.used_bytes += bytes.len() as u64;
+        self.used_bytes += capacity;
+        self.buffer_pool.add_cached(capacity);
         let id = self.allocate_entry_id();
         let candidate_slot = self.candidates.register(ObjectKeyRangeStartAndEntryId {
             object_key: object_key.clone(),
@@ -298,6 +313,7 @@ impl MemoryCacheShard {
             id,
             range,
             bytes,
+            capacity,
             candidate_slot,
             admitted_at_access: access_clock,
         };
@@ -317,6 +333,8 @@ impl MemoryCacheShard {
 
     /// Inserts a trimmed range into the index and candidate ring; the caller accounts for its bytes.
     fn insert_trimmed_range(&mut self, object_key: &ObjectKey, range: ByteRange, bytes: Bytes, access_clock: u64) {
+        let capacity = bytes.len() as u64;
+        self.buffer_pool.add_cached(capacity);
         let id = self.allocate_entry_id();
         let candidate_slot = self.candidates.register(ObjectKeyRangeStartAndEntryId {
             object_key: object_key.clone(),
@@ -328,6 +346,7 @@ impl MemoryCacheShard {
             id,
             range,
             bytes,
+            capacity,
             candidate_slot,
             admitted_at_access: access_clock,
         };
@@ -348,25 +367,25 @@ impl MemoryCacheShard {
     fn remove_contained_ranges(&mut self, object_key: &ObjectKey, ranges: &[ByteRange]) -> RemovedCacheUsage {
         let mut removal = RemovedCacheUsage::default();
         for &range in ranges {
-            let removed_payload_bytes = self
+            let removed_bytes = self
                 .remove_entry(object_key, range, None)
                 .expect("the contained cached range was just found");
-            removal.payload_bytes += removed_payload_bytes;
+            removal.allocation_bytes += removed_bytes;
             removal.entry_count += 1;
         }
         removal
     }
 
     pub(super) fn remove(&mut self, object_key: &ObjectKey, range: ByteRange) -> bool {
-        let Some(removed_payload_bytes) = self.remove_entry(object_key, range, None) else {
+        let Some(removed_bytes) = self.remove_entry(object_key, range, None) else {
             return false;
         };
-        self.metrics.decrease_usage(removed_payload_bytes, 1);
+        self.metrics.decrease_usage(removed_bytes, 1);
         self.metrics.record_remove();
         true
     }
 
-    /// Removes one entry from the shard and returns its payload byte count.
+    /// Removes one entry from the shard and returns its allocation charge.
     /// Subtracts those bytes from shard usage; the caller updates metrics.
     fn remove_entry(
         &mut self,
@@ -393,9 +412,10 @@ impl MemoryCacheShard {
         if object_has_no_cached_ranges {
             self.ranges.remove(object_key);
         }
-        let removed_payload_bytes = removed_range.bytes.len() as u64;
-        self.used_bytes -= removed_payload_bytes;
-        Some(removed_payload_bytes)
+        let removed_bytes = removed_range.capacity;
+        self.used_bytes -= removed_bytes;
+        self.buffer_pool.remove_cached(removed_bytes);
+        Some(removed_bytes)
     }
 
     fn remove_eviction_candidate(&mut self, slot: usize, expected_id: u64) {
@@ -440,16 +460,11 @@ impl MemoryCacheShard {
 
             let retrieval_cost = access_histories.retention_score(&candidate.object_key, entry.range);
             if selected_candidate.is_none_or(|(selected_key, selected_entry, selected_cost)| {
-                compare_cost_per_byte(
-                    retrieval_cost,
-                    entry.bytes.len() as u64,
-                    selected_cost,
-                    selected_entry.bytes.len() as u64,
-                )
-                .then_with(|| entry.id.cmp(&selected_entry.id))
-                .then_with(|| candidate.object_key.cmp(selected_key))
-                .then_with(|| entry.range.cmp(&selected_entry.range))
-                .is_lt()
+                compare_cost_per_byte(retrieval_cost, entry.capacity, selected_cost, selected_entry.capacity)
+                    .then_with(|| entry.id.cmp(&selected_entry.id))
+                    .then_with(|| candidate.object_key.cmp(selected_key))
+                    .then_with(|| entry.range.cmp(&selected_entry.range))
+                    .is_lt()
             }) {
                 selected_candidate = Some((&candidate.object_key, entry, retrieval_cost));
             }
@@ -557,6 +572,7 @@ impl Drop for MemoryCacheShard {
         let entry_count = self.entry_count() as u64;
         if entry_count != 0 {
             self.metrics.decrease_usage(self.used_bytes, entry_count);
+            self.buffer_pool.remove_cached(self.used_bytes);
         }
     }
 }

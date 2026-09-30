@@ -5,11 +5,13 @@
 //! the requested bytes, access evidence is separate from insertion, and
 //! shard-local retention and range trimming remain private policy.
 
+mod buffer;
 mod metrics;
 mod store;
 #[cfg(test)]
 #[path = "../../test_support/metrics.rs"]
 mod test_metrics;
 
+pub use buffer::{AlignedBuffer, BUFFER_ALIGNMENT, BufferPool};
 pub use metrics::MemoryMetrics;
 pub use store::MemoryCache;

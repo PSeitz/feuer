@@ -1,17 +1,8 @@
 use std::{fmt, sync::Arc, time::Duration};
 
-use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedHistogram, BoxedRegistry, Buckets};
+use mixtrics::metrics::{BoxedCounter, BoxedHistogram, BoxedRegistry, Buckets};
 
 use crate::IoOperation;
-
-/// Metrics for idle aligned I/O buffers sharing a byte budget.
-#[derive(Debug)]
-pub(crate) struct IoBufferPoolMetrics {
-    pub(crate) idle_bytes: BoxedGauge,
-    pub(crate) capacity_bytes: BoxedGauge,
-    pub(crate) returned: BoxedCounter,
-    pub(crate) dropped: BoxedCounter,
-}
 
 struct IoOperationMetrics {
     success: BoxedCounter,
@@ -36,7 +27,6 @@ pub struct IoMetrics {
     read: IoOperationMetrics,
     write: IoOperationMetrics,
     read_size: BoxedHistogram,
-    pub(crate) read_buffer_pool: Arc<IoBufferPoolMetrics>,
 }
 
 impl IoMetrics {
@@ -66,22 +56,6 @@ impl IoMetrics {
             Buckets::exponential(1024.0, 2.0, 21),
         );
 
-        let idle_bytes = registry.register_gauge_vec(
-            "feuer_io_buffer_pool_idle_bytes".into(),
-            "Idle aligned read buffer bytes available for reuse".into(),
-            &[],
-        );
-        let capacity_bytes = registry.register_gauge_vec(
-            "feuer_io_buffer_pool_capacity_bytes".into(),
-            "Live read buffer pools' configured idle byte capacity".into(),
-            &[],
-        );
-        let returns = registry.register_counter_vec(
-            "feuer_io_buffer_pool_returns_total".into(),
-            "Released buffers returned to live read pools or dropped due to insufficient idle capacity".into(),
-            &["outcome"],
-        );
-
         let operation_metrics = |label: &'static str| IoOperationMetrics {
             success: operations.counter(&[label.into(), "success".into()]),
             error: operations.counter(&[label.into(), "error".into()]),
@@ -93,12 +67,6 @@ impl IoMetrics {
             read: operation_metrics(IoOperation::Read.as_str()),
             write: operation_metrics(IoOperation::Write.as_str()),
             read_size: read_size.histogram(&[]),
-            read_buffer_pool: Arc::new(IoBufferPoolMetrics {
-                idle_bytes: idle_bytes.gauge(&[]),
-                capacity_bytes: capacity_bytes.gauge(&[]),
-                returned: returns.counter(&["returned".into()]),
-                dropped: returns.counter(&["dropped".into()]),
-            }),
         })
     }
 
