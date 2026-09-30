@@ -4,10 +4,10 @@ use std::{fs::File, io, os::fd::AsRawFd, sync::Arc};
 
 use bytes::Bytes;
 
-use crate::{IoOperation, uring::IoQueueHandle};
+use crate::uring;
 
 /// One production read queue and its driver thread, without a memory cache or idle retention.
-pub struct ReadQueue(IoQueueHandle);
+pub struct ReadQueue(uring::ReadQueue);
 
 impl ReadQueue {
     /// Uses an already-open read-only file; does not create, resize, or write it.
@@ -25,13 +25,7 @@ impl ReadQueue {
         }
         // Raw read-only benchmarks need no cache directory lock. Retain the same
         // file in that ownership slot; leave queue and buffer lifetime logic intact.
-        IoQueueHandle::new(
-            file.clone(),
-            file,
-            IoOperation::Read,
-            feuer_memory::BufferPool::unpooled(),
-        )
-        .map(Self)
+        uring::ReadQueue::new(file.clone(), file, feuer_memory::BufferPool::unpooled()).map(Self)
     }
 
     /// Reads through the production admission, allocation, notification, and completion path.

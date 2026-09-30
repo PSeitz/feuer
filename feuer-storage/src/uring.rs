@@ -37,26 +37,17 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;
 mod tests;
 
 /// A handle that submits I/O requests and owns the queue thread's lifetime.
-pub(crate) struct IoQueueHandle {
-    // Every request on this queue has this direction.
-    operation: IoOperation,
+struct IoQueueHandle {
     // Sends admitted requests; taken on drop to signal shutdown before joining.
     sender: Option<mpsc::Sender<IoRequest>>,
     // Shared eventfd wakes the queue for new work or shutdown.
     wake_fd: Arc<OwnedFd>,
     // Queue thread; taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
-    // Writes retain input slices or use unpooled scratch buffers.
-    buffer_pool: Option<Arc<BufferPool>>,
 }
 
 impl IoQueueHandle {
-    pub(crate) fn new(
-        file: Arc<File>,
-        directory_lock: Arc<File>,
-        operation: IoOperation,
-        buffer_pool: Arc<BufferPool>,
-    ) -> io::Result<Self> {
+    fn new(file: Arc<File>, directory_lock: Arc<File>, operation: IoOperation) -> io::Result<Self> {
         let (thread_name, max_in_flight) = match operation {
             IoOperation::Read => ("feuer-read-io", MAX_IN_FLIGHT_READS),
             IoOperation::Write => ("feuer-write-io", MAX_IN_FLIGHT_WRITES),
@@ -85,11 +76,9 @@ impl IoQueueHandle {
             }
         })?;
         Ok(Self {
-            operation,
             sender: Some(sender),
             wake_fd,
             thread: Some(thread),
-            buffer_pool: (operation == IoOperation::Read).then_some(buffer_pool),
         })
     }
 
@@ -101,82 +90,6 @@ impl IoQueueHandle {
             .reserve()
             .await
             .map_err(|_| queue_stopped_error())
-    }
-
-    pub(crate) fn allocate_buffer(
-        &self,
-        length: usize,
-        read_guard: Option<DiskRegionReadGuard>,
-    ) -> io::Result<AlignedIoBuffer> {
-        AlignedIoBuffer::new(
-            length,
-            read_guard,
-            self.buffer_pool.as_ref().expect("only reads use buffer pools"),
-        )
-    }
-
-    pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
-        assert_eq!(self.operation, IoOperation::Read);
-        let permit = self.reserve_request().await?;
-        let buffer = self.allocate_buffer(length, None)?;
-        Ok(self
-            .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
-            .await?
-            .into_read()
-            .into_bytes())
-    }
-
-    /// One metadata read. Never waits for channel capacity or allocates a buffer without it.
-    /// The scanner retries later when the channel is full; admitted requests run in FIFO order.
-    pub(crate) async fn try_read_recovery_page(&self, region: DiskRegionReadGuard) -> io::Result<Option<Bytes>> {
-        let length = DIRECT_IO_ALIGNMENT_BYTES;
-        let offset = region.range().start;
-        assert_eq!(region.range().end - offset, length as u64);
-        let permit = match self.sender.as_ref().unwrap().try_reserve() {
-            Ok(permit) => permit,
-            Err(mpsc::error::TrySendError::Full(_)) => return Ok(None),
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err(queue_stopped_error()),
-        };
-        let buffer = self.allocate_buffer(length, Some(region))?;
-        Ok(Some(
-            self.submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
-                .await?
-                .into_read()
-                .into_bytes(),
-        ))
-    }
-
-    /// Writes parts at aligned offsets, starting at zero; gaps become zero.
-    /// Aligned payload slices are retained directly; only other bytes need a copy.
-    pub(crate) async fn write_parts(
-        &self,
-        offset: u64,
-        length: usize,
-        parts: &[(usize, Bytes)],
-        region: Option<DiskRegion>,
-    ) -> io::Result<()> {
-        assert_eq!(self.operation, IoOperation::Write);
-        assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);
-        assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
-        let permit = self.reserve_request().await?;
-        let buffers = IoBuffers::from_write_parts(length, parts, region)?;
-        self.submit_and_wait(offset, buffers, 0..length, permit).await?;
-        Ok(())
-    }
-
-    /// Transfers exclusive buffer ownership to the queue until this slice completes.
-    pub(crate) async fn read_into(
-        &self,
-        offset: u64,
-        buffer: AlignedIoBuffer,
-        destination: Range<usize>,
-    ) -> io::Result<AlignedIoBuffer> {
-        assert_eq!(self.operation, IoOperation::Read);
-        let permit = self.reserve_request().await?;
-        Ok(self
-            .submit_and_wait(offset, IoBuffers::Read(buffer), destination, permit)
-            .await?
-            .into_read())
     }
 
     /// Submits the admitted request to the queue and waits for its buffers or an I/O error.
@@ -202,6 +115,106 @@ impl Drop for IoQueueHandle {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+/// Submits reads and allocates their buffers.
+pub(crate) struct ReadQueue {
+    handle: IoQueueHandle,
+    buffer_pool: Arc<BufferPool>,
+}
+
+impl ReadQueue {
+    pub(crate) fn new(file: Arc<File>, directory_lock: Arc<File>, buffer_pool: Arc<BufferPool>) -> io::Result<Self> {
+        Ok(Self {
+            handle: IoQueueHandle::new(file, directory_lock, IoOperation::Read)?,
+            buffer_pool,
+        })
+    }
+
+    pub(crate) fn allocate_buffer(
+        &self,
+        length: usize,
+        read_guard: Option<DiskRegionReadGuard>,
+    ) -> io::Result<AlignedIoBuffer> {
+        AlignedIoBuffer::new(length, read_guard, &self.buffer_pool)
+    }
+
+    pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
+        let permit = self.handle.reserve_request().await?;
+        let buffer = self.allocate_buffer(length, None)?;
+        Ok(self
+            .handle
+            .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
+            .await?
+            .into_read()
+            .into_bytes())
+    }
+
+    /// One metadata read. Never waits for channel capacity or allocates a buffer without it.
+    /// The scanner retries later when the channel is full; admitted requests run in FIFO order.
+    pub(crate) async fn try_read_recovery_page(&self, region: DiskRegionReadGuard) -> io::Result<Option<Bytes>> {
+        let length = DIRECT_IO_ALIGNMENT_BYTES;
+        let offset = region.range().start;
+        assert_eq!(region.range().end - offset, length as u64);
+        let permit = match self.handle.sender.as_ref().unwrap().try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(_)) => return Ok(None),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(queue_stopped_error()),
+        };
+        let buffer = self.allocate_buffer(length, Some(region))?;
+        Ok(Some(
+            self.handle
+                .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
+                .await?
+                .into_read()
+                .into_bytes(),
+        ))
+    }
+
+    /// Transfers exclusive buffer ownership to the queue until this slice completes.
+    pub(crate) async fn read_into(
+        &self,
+        offset: u64,
+        buffer: AlignedIoBuffer,
+        destination: Range<usize>,
+    ) -> io::Result<AlignedIoBuffer> {
+        let permit = self.handle.reserve_request().await?;
+        Ok(self
+            .handle
+            .submit_and_wait(offset, IoBuffers::Read(buffer), destination, permit)
+            .await?
+            .into_read())
+    }
+}
+
+/// Submits writes, retaining input slices or using unpooled scratch buffers.
+pub(crate) struct WriteQueue {
+    handle: IoQueueHandle,
+}
+
+impl WriteQueue {
+    pub(crate) fn new(file: Arc<File>, directory_lock: Arc<File>) -> io::Result<Self> {
+        Ok(Self {
+            handle: IoQueueHandle::new(file, directory_lock, IoOperation::Write)?,
+        })
+    }
+
+    /// Writes parts at aligned offsets, starting at zero; gaps become zero.
+    /// Aligned payload slices are retained directly; only other bytes need a copy.
+    pub(crate) async fn write_parts(
+        &self,
+        offset: u64,
+        length: usize,
+        parts: &[(usize, Bytes)],
+        region: Option<DiskRegion>,
+    ) -> io::Result<()> {
+        assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);
+        assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
+        let permit = self.handle.reserve_request().await?;
+        let buffers = IoBuffers::from_write_parts(length, parts, region)?;
+        self.handle.submit_and_wait(offset, buffers, 0..length, permit).await?;
+        Ok(())
     }
 }
 

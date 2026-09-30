@@ -27,8 +27,8 @@ const LOCK_FILE_NAME: &str = ".feuer.lock";
 
 /// Queues, path, and capacity state shared by cloned data-file handles.
 struct DataFileState {
-    read_queue: uring::IoQueueHandle,
-    write_queue: uring::IoQueueHandle,
+    read_queue: uring::ReadQueue,
+    write_queue: uring::WriteQueue,
     data_path: PathBuf,
     capacity: u64,
 }
@@ -377,10 +377,10 @@ fn open_file_state(directory: PathBuf, capacity: u64, buffer_pool: Arc<BufferPoo
     // Construct both rings before resizing, so unavailable io_uring does not resize an existing cache.
     let file = Arc::new(file);
     let lock_file = Arc::new(lock_file);
-    let read_queue = uring::IoQueueHandle::new(file.clone(), lock_file.clone(), IoOperation::Read, buffer_pool.clone())
+    let read_queue = uring::ReadQueue::new(file.clone(), lock_file.clone(), buffer_pool)
         .map_err(|source| error(IoOperation::OpenDataFile, source))?;
-    let write_queue = uring::IoQueueHandle::new(file.clone(), lock_file, IoOperation::Write, buffer_pool)
-        .map_err(|source| error(IoOperation::OpenDataFile, source))?;
+    let write_queue =
+        uring::WriteQueue::new(file.clone(), lock_file).map_err(|source| error(IoOperation::OpenDataFile, source))?;
     file.set_len(capacity)
         .map_err(|source| error(IoOperation::ResizeDataFile, source))?;
     Ok(DataFileState {

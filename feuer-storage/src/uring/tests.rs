@@ -187,9 +187,8 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
     let file = queue.file.as_ref().unwrap();
     let lock = queue.directory_lock.as_ref().unwrap();
     let pool = buffer_pool();
-    let read_queue = IoQueueHandle::new(file.clone(), lock.clone(), IoOperation::Read, pool.clone()).unwrap();
-    let write_queue = IoQueueHandle::new(file.clone(), lock.clone(), IoOperation::Write, pool).unwrap();
-    assert!(write_queue.buffer_pool.is_none());
+    let read_queue = ReadQueue::new(file.clone(), lock.clone(), pool).unwrap();
+    let write_queue = WriteQueue::new(file.clone(), lock.clone()).unwrap();
     write_queue
         .write_parts(
             0,
@@ -199,9 +198,10 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
         )
         .await
         .unwrap();
-    assert_eq!(read_queue.sender.as_ref().unwrap().capacity(), 64);
-    assert_eq!(write_queue.sender.as_ref().unwrap().capacity(), 8);
+    assert_eq!(read_queue.handle.sender.as_ref().unwrap().capacity(), 64);
+    assert_eq!(write_queue.handle.sender.as_ref().unwrap().capacity(), 8);
     let reservations = write_queue
+        .handle
         .sender
         .as_ref()
         .unwrap()
@@ -209,7 +209,7 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
         .await
         .unwrap();
     assert!(matches!(
-        write_queue.sender.as_ref().unwrap().try_reserve(),
+        write_queue.handle.sender.as_ref().unwrap().try_reserve(),
         Err(mpsc::error::TrySendError::Full(_))
     ));
     let bytes = tokio::time::timeout(
@@ -295,10 +295,9 @@ fn requests_are_submitted_in_channel_order_and_drained_on_shutdown() {
 async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
     let (queue, _) = queue();
     let pool = buffer_pool();
-    let handle = IoQueueHandle::new(
+    let handle = ReadQueue::new(
         queue.file.as_ref().unwrap().clone(),
         queue.directory_lock.as_ref().unwrap().clone(),
-        IoOperation::Read,
         pool.clone(),
     )
     .unwrap();
@@ -306,6 +305,7 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
     let chunk = allocator.reserve_chunks(1).unwrap();
     let page = chunk.slice(0..DIRECT_IO_ALIGNMENT_BYTES as u64);
     let reservations = handle
+        .handle
         .sender
         .as_ref()
         .unwrap()
@@ -336,7 +336,7 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
         // Cancel the admission waiter before releasing capacity.
     }
     drop(reservations);
-    assert_eq!(handle.sender.as_ref().unwrap().capacity(), MAX_IN_FLIGHT_READS);
+    assert_eq!(handle.handle.sender.as_ref().unwrap().capacity(), MAX_IN_FLIGHT_READS);
     assert!(
         handle
             .try_read_recovery_page(page.read_guard())
@@ -349,17 +349,18 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
 #[tokio::test]
 async fn queue_exit_releases_admission_waiters_and_queued_requests() {
     let (queue, sender) = queue();
-    let handle = IoQueueHandle {
-        operation: IoOperation::Read,
-        sender: Some(sender),
-        wake_fd: queue.wake_fd.clone(),
-        thread: None,
-        buffer_pool: Some(buffer_pool()),
+    let handle = ReadQueue {
+        handle: IoQueueHandle {
+            sender: Some(sender),
+            wake_fd: queue.wake_fd.clone(),
+            thread: None,
+        },
+        buffer_pool: buffer_pool(),
     };
     let mut replies = Vec::new();
     for _ in 0..MAX_IN_FLIGHT_READS {
         let (request, reply) = request(IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
-        handle.sender.as_ref().unwrap().try_send(request).unwrap();
+        handle.handle.sender.as_ref().unwrap().try_send(request).unwrap();
         replies.push(reply);
     }
     let read = handle.read(0, DIRECT_IO_ALIGNMENT_BYTES);
@@ -426,8 +427,8 @@ async fn reads_into_consecutive_slices_without_reallocating() {
     let file = queue.file.as_ref().unwrap();
     let lock = queue.directory_lock.as_ref().unwrap();
     let pool = buffer_pool();
-    let read = IoQueueHandle::new(file.clone(), lock.clone(), IoOperation::Read, pool.clone()).unwrap();
-    let write = IoQueueHandle::new(file.clone(), lock.clone(), IoOperation::Write, pool).unwrap();
+    let read = ReadQueue::new(file.clone(), lock.clone(), pool).unwrap();
+    let write = WriteQueue::new(file.clone(), lock.clone()).unwrap();
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     write
         .write_parts(0, page, &[(0, Bytes::from(vec![0x99; page]))], None)
