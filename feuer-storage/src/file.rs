@@ -35,9 +35,9 @@ struct DataFileState {
 
 /// One exclusively owned, fixed-capacity Linux direct-I/O payload file.
 ///
-/// Reads and writes have separate io_uring rings and worker threads, admitting
-/// up to 64 reads and 8 writes. Foreground reads precede pending recovery reads;
-/// otherwise queues schedule in arrival order without checking for conflicts.
+/// Reads and writes have separate io_uring rings and worker threads, with up to
+/// 64 active reads and 8 active writes plus equally sized bounded waiting channels.
+/// Queues schedule in arrival order without checking for conflicts.
 /// Submission order does not guarantee completion order.
 /// Each I/O request transfers at most 1 MiB. Request limits do not bound full read-result allocations.
 ///
@@ -175,8 +175,8 @@ impl DataFile {
         .await
     }
 
-    /// Recovery issues only one metadata read at a time. It does not queue for admission ahead of
-    /// foreground reads, and its guard prevents concurrent writes from overwriting this page.
+    /// Recovery issues only one metadata read at a time and retries when the read channel is full.
+    /// Its guard prevents concurrent writes from overwriting this page.
     pub(crate) async fn read_recovery_page(&self, region: &DiskRegion, address: u64) -> DataFileResult<Bytes> {
         let length = uring::DIRECT_IO_ALIGNMENT_BYTES;
         let page = region.slice(address..address + length as u64);

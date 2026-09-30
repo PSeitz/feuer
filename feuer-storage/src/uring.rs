@@ -2,19 +2,18 @@
 //! Requests must be nonempty, with offsets and lengths aligned to DIRECT_IO_ALIGNMENT_BYTES.
 
 use std::{
-    collections::VecDeque,
     fs::File,
     io,
     ops::Range,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    sync::{Arc, mpsc},
+    sync::Arc,
     thread::{self, JoinHandle},
 };
 
 use bytes::Bytes;
 use feuer_memory::{AlignedBuffer, BufferPool};
 use io_uring::{IoUring, opcode, squeue, types};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     IoOperation,
@@ -27,7 +26,7 @@ pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = feuer_memory::BUFFER_ALIGNME
 // Maximum physical bytes per chunk, including alignment padding. DataFile
 // reduces the logical chunk size when its starting offset is unaligned.
 pub(crate) const MAX_IO_CHUNK_BYTES: usize = 1024 * 1024;
-// Maximum number of admitted read requests.
+// Each direction has this many active slots plus an equally sized waiting channel.
 const MAX_IN_FLIGHT_READS: usize = 64;
 // Local-SSD benchmarks saturated 1-MiB writes at QD8. QD64 added no write-only
 // throughput, but raised write p99 from 4.6 to 47 ms and worsened small-read latency.
@@ -42,34 +41,13 @@ pub(crate) struct IoQueueHandle {
     // Every request on this queue has this direction.
     operation: IoOperation,
     // Sends admitted requests; taken on drop to signal shutdown before joining.
-    sender: Option<mpsc::SyncSender<IoRequest>>,
+    sender: Option<mpsc::Sender<IoRequest>>,
     // Shared eventfd wakes the queue for new work or shutdown.
     wake_fd: Arc<OwnedFd>,
     // Queue thread; taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
-    // Request slots and reusable buffers for this queue.
-    resources: Arc<IoQueueResources>,
-}
-
-/// Request slots and reusable buffers for an I/O queue.
-struct IoQueueResources {
-    // Limit covering preparing, queued, and active requests.
-    request_slots: Arc<Semaphore>,
     // Writes retain input slices or use unpooled scratch buffers.
-    idle_buffers: Option<Arc<BufferPool>>,
-}
-
-impl IoQueueResources {
-    fn new(max_in_flight: usize, operation: IoOperation, buffer_pool: Arc<BufferPool>) -> Self {
-        Self {
-            request_slots: Arc::new(Semaphore::new(max_in_flight)),
-            idle_buffers: (operation == IoOperation::Read).then_some(buffer_pool),
-        }
-    }
-
-    fn buffer_pool(&self) -> &Arc<BufferPool> {
-        self.idle_buffers.as_ref().expect("only reads use buffer pools")
-    }
+    buffer_pool: Option<Arc<BufferPool>>,
 }
 
 impl IoQueueHandle {
@@ -92,16 +70,13 @@ impl IoQueueHandle {
         }
         // SAFETY: fd was just created and has no other owner.
         let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
-        let (sender, receiver) = mpsc::sync_channel(max_in_flight);
-        let resources = Arc::new(IoQueueResources::new(max_in_flight, operation, buffer_pool));
+        let (sender, receiver) = mpsc::channel(max_in_flight);
         let mut queue = IoQueue {
-            resources: resources.clone(),
             ring,
             file: Some(file),
             directory_lock: Some(directory_lock),
             wake_fd: wake_fd.clone(),
             receiver,
-            pending: VecDeque::new(),
             active: (0..max_in_flight).map(|_| None).collect(),
         };
         let thread = thread::Builder::new().name(thread_name.into()).spawn(move || {
@@ -114,16 +89,16 @@ impl IoQueueHandle {
             sender: Some(sender),
             wake_fd,
             thread: Some(thread),
-            resources,
+            buffer_pool: (operation == IoOperation::Read).then_some(buffer_pool),
         })
     }
 
-    /// Acquires a request slot before preparing or queueing I/O.
-    async fn acquire_request_slot(&self) -> io::Result<OwnedSemaphorePermit> {
-        self.resources
-            .request_slots
-            .clone()
-            .acquire_owned()
+    /// Reserves channel capacity before preparing I/O buffers.
+    async fn reserve_request(&self) -> io::Result<mpsc::Permit<'_, IoRequest>> {
+        self.sender
+            .as_ref()
+            .unwrap()
+            .reserve()
             .await
             .map_err(|_| queue_stopped_error())
     }
@@ -133,46 +108,39 @@ impl IoQueueHandle {
         length: usize,
         read_guards: Vec<DiskRegionReadGuard>,
     ) -> io::Result<AlignedIoBuffer> {
-        AlignedIoBuffer::new(length, read_guards, self.resources.buffer_pool())
+        AlignedIoBuffer::new(
+            length,
+            read_guards,
+            self.buffer_pool.as_ref().expect("only reads use buffer pools"),
+        )
     }
 
     pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
         assert_eq!(self.operation, IoOperation::Read);
-        let request_permit = self.acquire_request_slot().await?;
+        let permit = self.reserve_request().await?;
         let buffer = self.allocate_buffer(length, Vec::new())?;
         Ok(self
-            .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, request_permit)
+            .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
             .await?
             .into_read()
             .into_bytes())
     }
 
-    /// One low-priority metadata read. Never joins the foreground admission waiters or allocates
-    /// a buffer without a request slot. The scanner retries later when foreground traffic owns all slots.
+    /// One metadata read. Never waits for channel capacity or allocates a buffer without it.
+    /// The scanner retries later when the channel is full; admitted requests run in FIFO order.
     pub(crate) async fn try_read_recovery_page(&self, region: DiskRegionReadGuard) -> io::Result<Option<Bytes>> {
         let length = DIRECT_IO_ALIGNMENT_BYTES;
         let offset = region.range().start;
         assert_eq!(region.range().end - offset, length as u64);
-        if self.resources.request_slots.is_closed() {
-            return Err(queue_stopped_error());
-        }
-        let Ok(request_permit) = self.resources.request_slots.clone().try_acquire_owned() else {
-            return Ok(None);
+        let permit = match self.sender.as_ref().unwrap().try_reserve() {
+            Ok(permit) => permit,
+            Err(mpsc::error::TrySendError::Full(_)) => return Ok(None),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(queue_stopped_error()),
         };
         let buffer = self.allocate_buffer(length, vec![region])?;
-        let (reply, receive) = oneshot::channel();
-        let mut request = IoRequest::new(offset, IoBuffers::Read(buffer), 0..length, reply, request_permit);
-        request.recovery = true;
-        self.sender
-            .as_ref()
-            .unwrap()
-            .try_send(request)
-            .map_err(|_| queue_stopped_error())?;
-        wake_queue(&self.wake_fd);
         Ok(Some(
-            receive
-                .await
-                .map_err(|_| queue_stopped_error())??
+            self.submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
+                .await?
                 .into_read()
                 .into_bytes(),
         ))
@@ -190,9 +158,9 @@ impl IoQueueHandle {
         assert_eq!(self.operation, IoOperation::Write);
         assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
-        let request_permit = self.acquire_request_slot().await?;
+        let permit = self.reserve_request().await?;
         let buffers = IoBuffers::from_write_parts(length, parts, region)?;
-        self.submit_and_wait(offset, buffers, 0..length, request_permit).await?;
+        self.submit_and_wait(offset, buffers, 0..length, permit).await?;
         Ok(())
     }
 
@@ -204,9 +172,9 @@ impl IoQueueHandle {
         destination: Range<usize>,
     ) -> io::Result<AlignedIoBuffer> {
         assert_eq!(self.operation, IoOperation::Read);
-        let request_permit = self.acquire_request_slot().await?;
+        let permit = self.reserve_request().await?;
         Ok(self
-            .submit_and_wait(offset, IoBuffers::Read(buffer), destination, request_permit)
+            .submit_and_wait(offset, IoBuffers::Read(buffer), destination, permit)
             .await?
             .into_read())
     }
@@ -217,16 +185,10 @@ impl IoQueueHandle {
         offset: u64,
         buffers: IoBuffers,
         destination: Range<usize>,
-        request_permit: OwnedSemaphorePermit,
+        permit: mpsc::Permit<'_, IoRequest>,
     ) -> io::Result<IoBuffers> {
         let (result_sender, result_receiver) = oneshot::channel();
-        let request = IoRequest::new(offset, buffers, destination, result_sender, request_permit);
-        // All queued + active requests hold a permit, so this cannot wait for space.
-        self.sender
-            .as_ref()
-            .unwrap()
-            .try_send(request)
-            .map_err(|_| queue_stopped_error())?;
+        permit.send(IoRequest::new(offset, buffers, destination, result_sender));
         wake_queue(&self.wake_fd);
         result_receiver.await.map_err(|_| queue_stopped_error())?
     }
@@ -369,7 +331,7 @@ impl IoBuffers {
 // immutable Bytes. Moving either does not move payload memory. Only the queue submits them.
 unsafe impl Send for IoBuffers {}
 
-/// One admitted I/O request, owning its buffers and request slot through completion.
+/// One I/O request, owning its buffers through completion.
 struct IoRequest {
     // Aligned physical start, used for kernel offsets.
     offset: u64,
@@ -381,10 +343,6 @@ struct IoRequest {
     completed_bytes: usize,
     // Caller result channel; taken on finish/failure, also detects cancellation.
     reply: Option<oneshot::Sender<io::Result<IoBuffers>>>,
-    // Foreground reads precede recovery reads that have not been submitted yet.
-    recovery: bool,
-    // Holds request admission until this request is dropped.
-    _request_permit: OwnedSemaphorePermit,
 }
 
 impl IoRequest {
@@ -393,7 +351,6 @@ impl IoRequest {
         buffers: IoBuffers,
         destination: Range<usize>,
         reply: oneshot::Sender<io::Result<IoBuffers>>,
-        request_permit: OwnedSemaphorePermit,
     ) -> Self {
         assert!(offset.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES as u64));
         assert!(destination.start.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
@@ -410,8 +367,6 @@ impl IoRequest {
             destination,
             completed_bytes: 0,
             reply: Some(reply),
-            recovery: false,
-            _request_permit: request_permit,
         }
     }
 
@@ -460,7 +415,7 @@ impl IoRequest {
         )
     }
 
-    /// Sends the buffers or error as the request result, releasing its request slot.
+    /// Sends the buffers or error as the request result.
     fn send_result(mut self, result: io::Result<()>) {
         let result = result.map(|()| self.buffers);
         let _ = self.reply.take().unwrap().send(result);
@@ -468,8 +423,6 @@ impl IoRequest {
 }
 
 struct IoQueue {
-    // Closes request slots on exit to release waiters.
-    resources: Arc<IoQueueResources>,
     // Thread-owned kernel submission/completion queues; no cross-thread ring access.
     ring: IoUring,
     // Direct-I/O payload file; taken to retain ownership on abnormal exit.
@@ -478,10 +431,8 @@ struct IoQueue {
     directory_lock: Option<Arc<File>>,
     // Eventfd polled alongside the ring so new work need not wait for completion.
     wake_fd: Arc<OwnedFd>,
-    // Incoming admitted requests; disconnection starts draining shutdown.
+    // Bounded waiting requests; receive only into free active slots to preserve backpressure.
     receiver: mpsc::Receiver<IoRequest>,
-    // Unsubmitted requests in arrival order; callers prevent conflicting I/O.
-    pending: VecDeque<IoRequest>,
     // Owns in-flight requests through completion; CQEs identify their slot indices.
     active: Vec<Option<IoRequest>>,
 }
@@ -489,7 +440,6 @@ struct IoQueue {
 impl IoQueue {
     /// Processes requests until the sender disconnects and all queued and active I/O drains.
     fn process_requests_until_disconnected(&mut self) -> io::Result<()> {
-        let mut disconnected = false;
         let mut completions = Vec::with_capacity(self.active.len());
         loop {
             completions.extend(self.ring.completion().map(|cqe| (cqe.user_data(), cqe.result())));
@@ -501,19 +451,9 @@ impl IoQueue {
                     result => self.active[slot].take().unwrap().send_result(result.map(|_| ())),
                 }
             }
-            loop {
-                match self.receiver.try_recv() {
-                    Ok(request) => self.pending.push_back(request),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
-            self.queue_pending_requests();
+            let disconnected = self.receive_requests();
             let has_active_requests = self.active.iter().any(Option::is_some);
-            if disconnected && !has_active_requests && self.pending.is_empty() {
+            if disconnected && !has_active_requests {
                 return Ok(());
             }
             // submit() never waits for a completion. poll watches BOTH completions and
@@ -532,24 +472,25 @@ impl IoQueue {
         }
     }
 
-    /// Queues pending, uncanceled requests in free active slots and the ring's submission queue.
-    /// The caller submits them to the kernel separately.
-    fn queue_pending_requests(&mut self) {
-        self.pending
-            .retain(|request| !request.reply.as_ref().unwrap().is_closed());
-        // Callers own conflict prevention and disk-region lifetime through completion.
-        // Cancellation discards pending requests, but never releases active requests.
+    /// Receives uncanceled requests into free active slots and prepares their submissions.
+    /// Returns true when the channel is disconnected and drained.
+    fn receive_requests(&mut self) -> bool {
         for slot in 0..self.active.len() {
             if self.active[slot].is_some() {
                 continue;
             }
-            let position = self.pending.iter().position(|request| !request.recovery).unwrap_or(0);
-            let Some(request) = self.pending.remove(position) else {
-                break;
+            let request = loop {
+                match self.receiver.try_recv() {
+                    Ok(request) if request.reply.as_ref().unwrap().is_closed() => continue,
+                    Ok(request) => break request,
+                    Err(mpsc::error::TryRecvError::Empty) => return false,
+                    Err(mpsc::error::TryRecvError::Disconnected) => return true,
+                }
             };
             self.active[slot] = Some(request);
             self.queue_active_request(slot);
         }
+        false
     }
 
     /// Queues the active request's remaining I/O in the ring without submitting it to the kernel yet.
@@ -609,7 +550,7 @@ impl IoQueue {
 
 impl Drop for IoQueue {
     fn drop(&mut self) {
-        self.resources.request_slots.close();
+        self.receiver.close();
         if self.active.iter().any(Option::is_some) {
             // An abnormal queue exit cannot prove the kernel has stopped using pointers.
             // Closing a ring may tear it down asynchronously. Leak only the bounded active
