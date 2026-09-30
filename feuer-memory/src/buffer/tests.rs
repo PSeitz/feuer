@@ -136,27 +136,34 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         let pool = BufferPool::new(capacity, metrics.clone());
         let gauge = |name| value(&registry, name, &[]);
         let bucket = size.to_string();
-        let idle = || value(&registry, "feuer_io_buffer_pool_idle_bytes", &[("bucket", &bucket)]);
-        let returns = |outcome| {
+        let buffer_bytes = |status| {
             value(
                 &registry,
-                "feuer_io_buffer_pool_returns_total",
-                &[("bucket", &bucket), ("outcome", outcome)],
+                "feuer_io_buffer_pool_bytes",
+                &[("bucket", &bucket), ("status", status)],
             )
         };
+        assert_eq!(buffer_bytes("idle"), 0.0);
+        assert_eq!(buffer_bytes("used"), 0.0);
         assert_eq!(gauge("feuer_memory_capacity_bytes"), capacity as f64);
         let bytes = pool.allocate(size - BUFFER_ALIGNMENT).unwrap().into_bytes();
         let slice = bytes.slice(1..);
         drop(bytes);
+        assert_eq!(buffer_bytes("used"), size as f64);
+        assert_eq!(buffer_bytes("idle"), 0.0);
         assert_eq!(gauge("feuer_memory_used_bytes"), 0.0);
         let other = pool.allocate(size).unwrap();
+        assert_eq!(buffer_bytes("used"), (2 * size) as f64);
         drop(slice);
+        assert_eq!(buffer_bytes("used"), size as f64);
+        assert_eq!(buffer_bytes("idle"), size as f64);
         drop(other);
-        assert_eq!(idle(), size as f64);
+        assert_eq!(buffer_bytes("idle"), size as f64);
+        assert_eq!(buffer_bytes("used"), 0.0);
         assert_eq!(gauge("feuer_memory_used_bytes"), size as f64);
-        assert_eq!(returns("returned"), 1.0);
-        assert_eq!(returns("dropped"), 1.0);
         let reused = pool.allocate(size).unwrap();
+        assert_eq!(buffer_bytes("idle"), 0.0);
+        assert_eq!(buffer_bytes("used"), size as f64);
         assert_eq!(gauge("feuer_memory_used_bytes"), 0.0);
         drop(reused);
         let outstanding = pool.allocate(size).unwrap();
@@ -164,13 +171,14 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         drop(second.allocate(size).unwrap());
         assert_eq!(gauge("feuer_memory_capacity_bytes"), (2 * capacity) as f64);
         drop(pool);
+        assert_eq!(buffer_bytes("used"), size as f64);
+        assert_eq!(buffer_bytes("idle"), size as f64);
         drop(outstanding);
+        assert_eq!(buffer_bytes("used"), 0.0);
         drop(second);
-        assert_eq!(returns("returned"), 3.0);
-        assert_eq!(returns("dropped"), 1.0);
         assert_eq!(gauge("feuer_memory_capacity_bytes"), 0.0);
         assert_eq!(gauge("feuer_memory_used_bytes"), 0.0);
-        assert_eq!(idle(), 0.0);
+        assert_eq!(buffer_bytes("idle"), 0.0);
     }
 }
 
@@ -182,8 +190,8 @@ fn bucket_gauges_follow_pressure_reclamation_and_shutdown_independently() {
     let idle = |size: usize| {
         value(
             &registry,
-            "feuer_io_buffer_pool_idle_bytes",
-            &[("bucket", &size.to_string())],
+            "feuer_io_buffer_pool_bytes",
+            &[("bucket", &size.to_string()), ("status", "idle")],
         )
     };
     for &size in &BUFFER_SIZES[..3] {
@@ -203,8 +211,7 @@ fn bucket_gauges_follow_pressure_reclamation_and_shutdown_independently() {
     }
     for family in registry.gather() {
         match family.name() {
-            "feuer_io_buffer_pool_idle_bytes" => assert_eq!(family.get_metric().len(), 6),
-            "feuer_io_buffer_pool_returns_total" => assert_eq!(family.get_metric().len(), 12),
+            "feuer_io_buffer_pool_bytes" => assert_eq!(family.get_metric().len(), 12),
             _ => {}
         }
     }

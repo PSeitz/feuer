@@ -152,15 +152,14 @@ capacity by default. All six buckets share this ceiling, without per-bucket caps
 Larger allocations are not pooled. Writes use aligned input slices or unpooled scratch.
 These metrics are registered by `MemoryMetrics`, not `IoMetrics`, and have no `pool`
 or `operation` label. The former `pool=small|medium|large` labels have been removed.
-Idle bytes and return counters have a `bucket` label containing allocation capacity in bytes:
+The buffer gauge has a `bucket` label containing allocation capacity in bytes:
 `32768`, `262144`, `4194304`, `16777216`, `33554432`, or `67108864`.
 
 | Metric | Type | Meaning |
 |---|---|---|
 | `feuer_memory_used_bytes` | Gauge | Cached allocation charges plus idle allocation capacity; excludes active reads and caller-only results |
 | `feuer_memory_capacity_bytes` | Gauge | Configured shared capacity of live memory caches and their pools |
-| `feuer_io_buffer_pool_idle_bytes` | Gauge | Idle allocation capacity per `bucket`, already included in `feuer_memory_used_bytes` |
-| `feuer_io_buffer_pool_returns_total` | Counter | Released buffers per `bucket`, with `outcome`: `returned` (retained) or `dropped` (freed at the idle-pool or shared memory limit) |
+| `feuer_io_buffer_pool_bytes` | Gauge | Allocation capacity per `bucket` and `status`: `idle` (available for reuse) or `used` (held by readers, cached entries, or callers) |
 
 `feuer_memory_used_bytes` replaces `feuer_memory_payload_bytes`; the separate
 `feuer_io_buffer_pool_capacity_bytes` gauge has been removed. Update dashboards.
@@ -176,30 +175,22 @@ exception can still make cached charges exceed the target.
   / sum(feuer_memory_capacity_bytes)
 ```
 
-**Idle allocation bytes per bucket:**
+**Allocation bytes per bucket and status:**
 
 ```promql
-sum by (bucket) (feuer_io_buffer_pool_idle_bytes)
+sum by (bucket, status) (feuer_io_buffer_pool_bytes)
 ```
 
-**Dropped (%) per bucket over the last 5 minutes** — counts released buffers, not bytes:
+Omit `bucket` to aggregate across all sizes. Utilization is undefined for zero capacity.
 
-```promql
-100 * sum by (bucket) (rate(feuer_io_buffer_pool_returns_total{outcome="dropped"}[5m]))
-  / sum by (bucket) (rate(feuer_io_buffer_pool_returns_total[5m]))
-```
-
-Omit `by (bucket)` to aggregate across all sizes.
-
-Utilization is undefined for zero capacity. Dropped percentage is undefined when
-no buffers return during the window.
-
-Buffers return only after their last owner releases them. A zero-capacity pool
-frees all returned buffers (100%). Allocations above 64 MiB bypass the pool and
-its return counters. Admission frees idle buffers as necessary before retaining
-cached allocations. Those frees, shutdown frees, and results outliving the pool
-are not counted as returns. Gauges sum across cache instances sharing a registry.
-Standalone storage without a memory cache retains no idle buffers.
+Buffers remain `used` until their last owner releases them, even if the pool has
+already been destroyed. They then become `idle` if retained, or leave the gauge
+if freed. Idle bytes are included in `feuer_memory_used_bytes`; used buffer bytes
+are charged there only when retained as cached entries. Do not add the two gauges.
+Allocations above 64 MiB and write scratch bypass the pool gauge. Admission frees
+idle buffers as necessary before retaining cached allocations. Gauges sum across
+cache instances sharing a registry. Standalone storage without a memory cache
+retains no idle buffers.
 
 ## Best-effort disk writes
 

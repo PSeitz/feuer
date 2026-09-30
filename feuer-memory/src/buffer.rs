@@ -91,8 +91,10 @@ impl BufferPool {
             None => AlignedBuffer::allocate_zeroed(capacity)?,
         };
         buffer.length = length;
-        if bucket.is_some() {
+        if let Some(index) = bucket {
             buffer.pool = Arc::downgrade(self);
+            self.metrics.used_buffer_bytes[index].increase(capacity as u64);
+            buffer.metrics = Some(self.metrics.clone());
         }
         Ok(buffer)
     }
@@ -154,6 +156,8 @@ pub struct AlignedBuffer {
     layout: Layout,
     length: usize,
     pool: Weak<BufferPool>,
+    // Checked-out buffers retain metrics, but not the pool, until their last owner releases them.
+    metrics: Option<Arc<MemoryMetrics>>,
 }
 
 impl AlignedBuffer {
@@ -170,6 +174,7 @@ impl AlignedBuffer {
             layout,
             length,
             pool: Weak::new(),
+            metrics: None,
         })
     }
 
@@ -202,6 +207,10 @@ unsafe impl Send for AlignedBuffer {}
 
 impl Drop for AlignedBuffer {
     fn drop(&mut self) {
+        if let Some(metrics) = self.metrics.take() {
+            let index = BUFFER_SIZES.iter().position(|&size| size == self.capacity()).unwrap();
+            metrics.used_buffer_bytes[index].decrease(self.capacity() as u64);
+        }
         if let Some(pool) = self.pool.upgrade() {
             let mut state = pool.state.lock();
             let capacity = self.capacity() as u64;
@@ -213,14 +222,13 @@ impl Drop for AlignedBuffer {
                     layout: self.layout,
                     length: self.length,
                     pool: Weak::new(),
+                    metrics: None,
                 });
                 state.idle_bytes += capacity;
                 pool.metrics.idle_buffer_bytes[index].increase(capacity);
                 pool.metrics.increase_usage(capacity, 0);
-                pool.metrics.returned_buffers[index].increase(1);
                 return;
             }
-            pool.metrics.dropped_buffers[index].increase(1);
         }
         // SAFETY: this owner holds the allocation made with exactly this layout.
         unsafe { dealloc(self.ptr.as_ptr(), self.layout) };

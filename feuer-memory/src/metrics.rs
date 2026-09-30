@@ -19,8 +19,7 @@ pub struct MemoryMetrics {
     used_bytes: BoxedGauge,
     pub(crate) capacity_bytes: BoxedGauge,
     pub(crate) idle_buffer_bytes: [BoxedGauge; BUFFER_SIZES.len()],
-    pub(crate) returned_buffers: [BoxedCounter; BUFFER_SIZES.len()],
-    pub(crate) dropped_buffers: [BoxedCounter; BUFFER_SIZES.len()],
+    pub(crate) used_buffer_bytes: [BoxedGauge; BUFFER_SIZES.len()],
     entries: BoxedGauge,
 }
 
@@ -58,15 +57,10 @@ impl MemoryMetrics {
             "Shared capacity of live memory caches and their buffer pools".into(),
             &[],
         );
-        let idle_buffer_bytes = registry.register_gauge_vec(
-            "feuer_io_buffer_pool_idle_bytes".into(),
-            "Idle aligned buffer bytes included in memory cache usage".into(),
-            &["bucket"],
-        );
-        let returns = registry.register_counter_vec(
-            "feuer_io_buffer_pool_returns_total".into(),
-            "Released buffers retained or dropped at the idle-pool or shared memory limit".into(),
-            &["bucket", "outcome"],
+        let buffer_bytes = registry.register_gauge_vec(
+            "feuer_io_buffer_pool_bytes".into(),
+            "Aligned buffer allocation bytes by size and status".into(),
+            &["bucket", "status"],
         );
         let entries = registry.register_gauge_vec(
             "feuer_memory_entries".into(),
@@ -85,9 +79,8 @@ impl MemoryMetrics {
             trimmed_payload_bytes: trimmed_payload_bytes.counter(&[]),
             used_bytes: used_bytes.gauge(&[]),
             capacity_bytes: capacity_bytes.gauge(&[]),
-            idle_buffer_bytes: BUFFER_SIZES.map(|size| idle_buffer_bytes.gauge(&[size.to_string().into()])),
-            returned_buffers: BUFFER_SIZES.map(|size| returns.counter(&[size.to_string().into(), "returned".into()])),
-            dropped_buffers: BUFFER_SIZES.map(|size| returns.counter(&[size.to_string().into(), "dropped".into()])),
+            idle_buffer_bytes: BUFFER_SIZES.map(|size| buffer_bytes.gauge(&[size.to_string().into(), "idle".into()])),
+            used_buffer_bytes: BUFFER_SIZES.map(|size| buffer_bytes.gauge(&[size.to_string().into(), "used".into()])),
             entries: entries.gauge(&[]),
         })
     }
