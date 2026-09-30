@@ -126,6 +126,25 @@ fn v4_inventory_resets_generation() {
 }
 
 #[test]
+fn v5_inventory_resets_generation() {
+    let directory = tempfile::tempdir().unwrap();
+    let bounds = RecoveryBounds {
+        generation: [1; 16],
+        capacity: CHUNK_BYTES,
+        ends: vec![CHUNK_BYTES],
+    };
+    let mut bytes = bounds.encode();
+    bytes[..8].copy_from_slice(b"FEUEND05");
+    let length = bytes.len() - 8;
+    let checksum = XxHash64::oneshot(0, &bytes[..length]);
+    bytes[length..].copy_from_slice(&checksum.to_le_bytes());
+    fs::write(directory.path().join(BOUNDS_FILE), bytes).unwrap();
+    let (reset, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
+    assert_ne!(reset.generation, bounds.generation);
+    assert_eq!(ends, vec![0]);
+}
+
+#[test]
 fn layout_change_warnings_describe_previous_and_current_layouts() {
     let directory = tempfile::tempdir().unwrap();
     let log_path = directory.path().join("recovery.log");
@@ -337,7 +356,7 @@ async fn torn_metadata_and_reused_multi_chunk_addresses_are_rejected() {
                 .await
                 .unwrap();
         } else {
-            // Reuse just a payload chunk while old metadata survives elsewhere on disk.
+            // Reuse the beginning of an old multi-chunk allocation.
             cache.disk.shards[0].entry_index.lock().unwrap().remove(&key, 0);
             assert!(cache.insert("replacement".to_owned(), download(0, 100)).await.unwrap());
             assert_eq!(entry_disk_ranges(&cache, "replacement").0[0].start, payload[0].start);
@@ -353,7 +372,7 @@ async fn torn_metadata_and_reused_multi_chunk_addresses_are_rejected() {
 }
 
 #[tokio::test]
-async fn a_payload_chunk_from_another_batch_cannot_join_old_entry_metadata() {
+async fn allocation_header_and_entry_metadata_must_have_the_same_batch() {
     let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     let key = "large".to_owned();
     cache
@@ -362,7 +381,7 @@ async fn a_payload_chunk_from_another_batch_cannot_join_old_entry_metadata() {
         .unwrap();
     let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
     let mut contents = page[48..48 + page_format::CHUNK_METADATA_CONTENT_BYTES].to_vec();
-    assert_eq!(&contents[..32], &[0; 32]); // Payload-only chunk, no entry to recover independently.
+    assert_eq!(contents[0], 2); // The entry metadata starts immediately after the allocation header.
     contents[48] ^= 1; // Valid page for a different batch, not just a checksum failure.
     let mut replaced = vec![0; METADATA_PAGE_BYTES];
     page_format::encode_page(
@@ -382,6 +401,61 @@ async fn a_payload_chunk_from_another_batch_cannot_join_old_entry_metadata() {
         .unwrap();
     wait_for_recovery(&cache).await;
     assert!(!cache.contains(&key, range(0, 1)));
+    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 4 * CHUNK_BYTES);
+}
+
+#[tokio::test]
+async fn recovery_bounds_the_whole_run_before_claiming_it() {
+    let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
+    cache
+        .insert("large".to_owned(), download(0, 2 * CHUNK_BYTES as usize))
+        .await
+        .unwrap();
+    cache.disk.save_recovery_ends().unwrap();
+    drop(cache);
+    let cache = open_paused(directory.path(), 4 * CHUNK_BYTES).await;
+    assert!(cache.disk.recover_chunk(0, 0, CHUNK_BYTES).await.is_none());
+    let original = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
+    for count in [0u64, 1, u64::MAX] {
+        let mut contents = original[48..48 + page_format::CHUNK_METADATA_CONTENT_BYTES].to_vec();
+        contents[64..72].copy_from_slice(&count.to_le_bytes());
+        let mut page = vec![0; METADATA_PAGE_BYTES];
+        page_format::encode_page(
+            &mut page,
+            page_format::CHUNK_METADATA_PAGE_TAG,
+            XxHash64::oneshot(0, &contents),
+            0,
+            0,
+            0,
+            &contents,
+        );
+        cache.disk.file.write_at(0, &Bytes::from(page)).await.unwrap();
+        cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await;
+        assert!(!cache.contains(&"large".to_owned(), range(0, 1)));
+        assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 4 * CHUNK_BYTES);
+    }
+    cache.disk.file.write_at(0, &original).await.unwrap();
+    cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await.unwrap();
+    assert!(cache.contains(&"large".to_owned(), range(0, 1)));
+    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), CHUNK_BYTES);
+}
+
+#[tokio::test]
+async fn recovery_cannot_claim_a_run_with_a_reused_continuation_chunk() {
+    let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
+    cache
+        .insert("old".to_owned(), download(0, 2 * CHUNK_BYTES as usize))
+        .await
+        .unwrap();
+    cache.disk.save_recovery_ends().unwrap();
+    drop(cache);
+    let cache = open_paused(directory.path(), 4 * CHUNK_BYTES).await;
+    let head = cache.disk.shards[0].allocator.reserve_for_recovery(0, 1).unwrap();
+    cache.insert("new".to_owned(), download(0, 100)).await.unwrap();
+    cache.disk.shards[0].entry_index.lock().unwrap().remove("new", 0);
+    drop(head);
+    assert!(cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await.is_none());
+    assert!(!cache.contains(&"old".to_owned(), range(0, 1)));
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 4 * CHUNK_BYTES);
 }
 
@@ -412,10 +486,10 @@ async fn generation_reset_rejects_old_chunks_even_when_new_scan_bounds_cover_the
 }
 
 #[test]
-fn decoder_rejects_malformed_lengths_ranges_mappings_keys_and_batch_ids() {
+fn decoder_rejects_malformed_lengths_ranges_addresses_keys_and_batch_ids() {
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
-    let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
-    let payload = vec![chunk.slice(4096..8192)];
+    let chunk = allocator.reserve_chunks(1).unwrap();
+    let payload = chunk.slice(8192..12288);
     let bytes = page_format::encode_entry_metadata(
         "key",
         range(7, 17),
@@ -431,17 +505,20 @@ fn decoder_rejects_malformed_lengths_ranges_mappings_keys_and_batch_ids() {
         (16, 17),
         (24, 7),
         (32, u64::MAX),
-        (48, 0),
-        (48, 4097),
-        (56, 2 * CHUNK_BYTES),
-        (56, 4096),
+        (32, 0),
+        (32, 4097),
+        (32, CHUNK_BYTES),
+        (40, 0),
+        (40, 4097),
+        (40, 8192),
+        (40, u64::MAX),
     ] {
         let mut invalid = bytes.to_vec();
         invalid[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
         assert!(decode_entry(&invalid, &[1; 16], 0..CHUNK_BYTES).is_none());
     }
     let mut invalid = bytes.to_vec();
-    invalid[64] = 0xff;
+    invalid[56] = 0xff;
     assert!(decode_entry(&invalid, &[1; 16], 0..CHUNK_BYTES).is_none());
     for length in 0..bytes.len() {
         assert!(decode_entry(&bytes[..length], &[1; 16], 0..CHUNK_BYTES).is_none());

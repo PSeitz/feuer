@@ -11,7 +11,7 @@ use std::{
 
 use super::*;
 
-const BOUNDS_TAG: &[u8; 8] = b"FEUEND05";
+const BOUNDS_TAG: &[u8; 8] = b"FEUEND06";
 const BOUNDS_FILE: &str = "recovery-ends";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -267,18 +267,25 @@ impl DiskRangeCacheState {
 
     async fn recover_chunk(&self, shard_index: usize, address: u64, scan_end: u64) -> Option<()> {
         let shard = &self.shards[shard_index];
-        let chunk = shard.allocator.reserve_for_recovery(address / CHUNK_BYTES)?;
-        let header = self.read_chunk_header(&chunk).await?;
+        let mut region = shard.allocator.reserve_for_recovery(address / CHUNK_BYTES, 1)?;
+        let header = self.read_chunk_header(&region).await?;
+        if address.checked_add(header.chunk_count.checked_mul(CHUNK_BYTES)?)? > scan_end {
+            return None;
+        }
+        if header.chunk_count > 1 {
+            drop(region);
+            // Any intervening write marks its chunks claimed, even if it releases them again.
+            region = shard
+                .allocator
+                .reserve_for_recovery(address / CHUNK_BYTES, header.chunk_count)?;
+        }
         let mut occupied = Vec::<Range<u64>>::new();
         for bit in 1..256 {
             if header.bitmap[bit / 8] & (1 << (bit % 8)) == 0 {
                 continue;
             }
             let head = address + (bit * METADATA_PAGE_BYTES) as u64;
-            let Some(entry) = self
-                .read_recovery_entry(shard_index, &chunk, &header, head, scan_end)
-                .await
-            else {
+            let Some(entry) = self.read_recovery_entry(shard_index, &region, &header, head).await else {
                 continue;
             };
             let RecoveredEntry {
@@ -287,32 +294,21 @@ impl DiskRangeCacheState {
                 checksum,
                 payload,
                 metadata,
-                chunks,
             } = entry;
             // Shared-chunk candidates may not overlap one another's payload or metadata.
-            if payload
+            if [&payload, &metadata]
                 .iter()
-                .chain(&metadata)
                 .any(|range| occupied.iter().any(|used| overlaps(range, used)))
             {
                 continue;
             }
-            let slice = |range: &Range<u64>| {
-                let start = range.start / CHUNK_BYTES * CHUNK_BYTES;
-                if start == address {
-                    chunk.slice(range.clone())
-                } else {
-                    chunks[&start].slice(range.clone())
-                }
-            };
             let storage = ObjectRangeDiskStorage {
                 read_result: Weak::new(),
                 eviction_position: 0,
                 publication_id: 0,
                 object_range,
                 payload_checksum: checksum,
-                payload_regions: payload.iter().map(slice).collect(),
-                entry_metadata_regions: metadata.iter().map(slice).collect(),
+                payload_region: region.slice(payload.clone()),
             };
             {
                 let mut index = shard.entry_index.lock().unwrap();
@@ -330,12 +326,9 @@ impl DiskRangeCacheState {
             }
             // Our reservations survive publication and even concurrent eviction. Mark before releasing
             // them, so this scan cannot resurrect the copy after its final owner releases it.
-            chunk.mark_recovered();
-            for region in chunks.values() {
-                region.mark_recovered();
-            }
-            occupied.extend(payload);
-            occupied.extend(metadata);
+            region.mark_recovered();
+            occupied.push(payload);
+            occupied.push(metadata);
         }
         Some(())
     }
@@ -361,24 +354,27 @@ impl DiskRangeCacheState {
         {
             return None;
         }
+        let chunk_count = read_u64(contents, 64)?;
+        if chunk_count == 0 || (chunk_count > 1 && (contents[0] != 2 || contents[1..32].iter().any(|&byte| byte != 0)))
+        {
+            return None;
+        }
         Some(ChunkHeader {
             bitmap: contents[..32].try_into().ok()?,
             batch_id: contents[48..64].try_into().ok()?,
+            chunk_count,
         })
     }
 
     async fn read_recovery_entry(
         &self,
         shard_index: usize,
-        head_chunk: &DiskRegion,
+        region: &DiskRegion,
         header: &ChunkHeader,
         head: u64,
-        scan_end: u64,
     ) -> Option<RecoveredEntry> {
-        let shard = &self.shards[shard_index];
-        let shard_start = shard_range(self.file.capacity(), self.shards.len(), shard_index).start;
-        let mut chunks = BTreeMap::<u64, DiskRegion>::new();
-        let mut metadata = Vec::new();
+        let bounds = region.range();
+        let mut ordinal = 0;
         let mut contents = Vec::new();
         let mut address = head;
         let mut checksum = None;
@@ -386,42 +382,23 @@ impl DiskRangeCacheState {
         loop {
             if !valid_allocation(
                 &(address..address.checked_add(METADATA_PAGE_BYTES as u64)?),
-                shard_start..scan_end,
+                bounds.clone(),
             ) {
                 return None;
             }
-            let chunk_address = address / CHUNK_BYTES * CHUNK_BYTES;
-            if chunk_address != head_chunk.range().start && !chunks.contains_key(&chunk_address) {
-                let chunk = shard.allocator.reserve_for_recovery(chunk_address / CHUNK_BYTES)?;
-                let other = self.read_chunk_header(&chunk).await?;
-                if other.batch_id != header.batch_id || other.bitmap != [0; 32] {
-                    return None;
-                }
-                chunks.insert(chunk_address, chunk);
-            }
-            let chunk = if chunk_address == head_chunk.range().start {
-                head_chunk
-            } else {
-                &chunks[&chunk_address]
-            };
-            let page = self.file.read_recovery_page(chunk, address).await.ok()?;
+            let page = self.file.read_recovery_page(region, address).await.ok()?;
             let checksum = *checksum.get_or_insert(read_u64(&page, 8)?);
-            let (next, bytes) = page_format::validate_page(
-                &page,
-                page_format::ENTRY_METADATA_PAGE_TAG,
-                checksum,
-                address,
-                metadata.len() as u64,
-            )?;
-            if metadata.is_empty() {
+            let (next, bytes) =
+                page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG, checksum, address, ordinal)?;
+            if ordinal == 0 {
                 content_length = usize::try_from(read_u64(bytes, 0)?).ok()?;
-                if content_length < 64 {
+                if content_length < 72 || content_length as u64 > bounds.end - head {
                     return None;
                 }
             }
             let take = (content_length - contents.len()).min(bytes.len());
             contents.extend_from_slice(&bytes[..take]);
-            metadata.push(address..address + METADATA_PAGE_BYTES as u64);
+            ordinal += 1;
             if contents.len() == content_length {
                 if next != 0
                     || bytes[take..].iter().any(|&byte| byte != 0)
@@ -431,33 +408,18 @@ impl DiskRangeCacheState {
                 }
                 break;
             }
-            if next == 0 {
+            if next != address + METADATA_PAGE_BYTES as u64 {
                 return None;
             }
             address = next;
         }
-        let (key, object_range, checksum, payload) = decode_entry(&contents, &header.batch_id, shard_start..scan_end)?;
-        if self.shard_index_for_key(&key) != shard_index {
+        let (key, object_range, checksum, payload) = decode_entry(&contents, &header.batch_id, bounds.clone())?;
+        let metadata = head..address + METADATA_PAGE_BYTES as u64;
+        if self.shard_index_for_key(&key) != shard_index
+            || payload.start != metadata.end
+            || (header.chunk_count > 1 && payload.end.next_multiple_of(CHUNK_BYTES) != bounds.end)
+        {
             return None;
-        }
-        let mut ranges: Vec<_> = payload.iter().chain(&metadata).cloned().collect();
-        ranges.sort_unstable_by_key(|range| range.start);
-        if ranges.windows(2).any(|pair| overlaps(&pair[0], &pair[1])) {
-            return None;
-        }
-        for range in &payload {
-            let chunk_address = range.start / CHUNK_BYTES * CHUNK_BYTES;
-            if chunk_address != head_chunk.range().start && !chunks.contains_key(&chunk_address) {
-                let chunk = shard.allocator.reserve_for_recovery(chunk_address / CHUNK_BYTES)?;
-                let other = self.read_chunk_header(&chunk).await?;
-                if other.batch_id != header.batch_id || other.bitmap != [0; 32] {
-                    return None;
-                }
-                chunks.insert(chunk_address, chunk);
-            }
-        }
-        if !chunks.is_empty() && header.bitmap.iter().map(|byte| byte.count_ones()).sum::<u32>() != 1 {
-            return None; // A multi-chunk entry owns every chunk exclusively.
         }
         Some(RecoveredEntry {
             key,
@@ -465,7 +427,6 @@ impl DiskRangeCacheState {
             checksum,
             payload,
             metadata,
-            chunks,
         })
     }
 }
@@ -473,15 +434,15 @@ impl DiskRangeCacheState {
 struct ChunkHeader {
     bitmap: [u8; 32],
     batch_id: [u8; 16],
+    chunk_count: u64,
 }
 
 struct RecoveredEntry {
     key: ObjectKey,
     object_range: ByteRange,
     checksum: u64,
-    payload: Vec<Range<u64>>,
-    metadata: Vec<Range<u64>>,
-    chunks: BTreeMap<u64, DiskRegion>,
+    payload: Range<u64>,
+    metadata: Range<u64>,
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
@@ -494,46 +455,34 @@ fn overlaps(a: &Range<u64>, b: &Range<u64>) -> bool {
 
 fn valid_allocation(range: &Range<u64>, bounds: Range<u64>) -> bool {
     range.start < range.end
-        && range.start >= bounds.start
+        && range.start >= bounds.start + METADATA_PAGE_BYTES as u64
         && range.end <= bounds.end
         && range.start.is_multiple_of(PAYLOAD_ALIGNMENT_BYTES)
         && range.end.is_multiple_of(PAYLOAD_ALIGNMENT_BYTES)
-        && range.start % CHUNK_BYTES >= METADATA_PAGE_BYTES as u64
-        && range.start / CHUNK_BYTES == (range.end - 1) / CHUNK_BYTES
 }
 
-type DecodedEntry = (ObjectKey, ByteRange, u64, Vec<Range<u64>>);
+type DecodedEntry = (ObjectKey, ByteRange, u64, Range<u64>);
 
 fn decode_entry(bytes: &[u8], batch_id: &[u8; 16], bounds: Range<u64>) -> Option<DecodedEntry> {
     let length = usize::try_from(read_u64(bytes, 0)?).ok()?;
     let key_length = usize::try_from(read_u64(bytes, 8)?).ok()?;
     let range = ByteRange::new(read_u64(bytes, 16)?, read_u64(bytes, 24)?).ok()?;
-    let count = usize::try_from(read_u64(bytes, 32)?).ok()?;
     if length != bytes.len()
-        || count == 0
-        || 64usize.checked_add(count.checked_mul(16)?)?.checked_add(key_length)? != length
+        || 72usize.checked_add(key_length)? != length
         || bytes.get(length.checked_sub(16)?..)? != batch_id
     {
         return None;
     }
-    let checksum = read_u64(bytes, 40)?;
-    let mut payload = Vec::new();
-    let mut remaining =
+    let checksum = read_u64(bytes, 48)?;
+    let start = read_u64(bytes, 32)?;
+    let payload_length = read_u64(bytes, 40)?;
+    let payload = start..start.checked_add(payload_length)?;
+    let aligned_length =
         range.len().checked_add(PAYLOAD_ALIGNMENT_BYTES - 1)? / PAYLOAD_ALIGNMENT_BYTES * PAYLOAD_ALIGNMENT_BYTES;
-    for index in 0..count {
-        let allocation = read_u64(bytes, 48 + index * 16)?..read_u64(bytes, 56 + index * 16)?;
-        if !valid_allocation(&allocation, bounds.clone()) {
-            return None;
-        }
-        remaining = remaining.checked_sub(allocation.end - allocation.start)?;
-        payload.push(allocation);
-    }
-    if remaining != 0 {
+    if payload_length != aligned_length || !valid_allocation(&payload, bounds) {
         return None;
     }
-    let key = std::str::from_utf8(&bytes[48 + count * 16..length - 16])
-        .ok()?
-        .to_owned();
+    let key = std::str::from_utf8(&bytes[56..length - 16]).ok()?.to_owned();
     Some((key, range, checksum, payload))
 }
 

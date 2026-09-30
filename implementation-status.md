@@ -126,7 +126,7 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
 background recovery and remaining crash testing. `DiskRangeCache::insert_batch` groups smaller entries together within each
 shard, assembles whole chunks including entry metadata and chunk metadata, writes each chunk once, and then
 publishes after containment revalidation. Partial final chunks are finalized too. Later batches cannot fill them. Full keys and exact
-object ranges map to ordered physical regions. Payload bytes have no interleaved headers. Entry metadata stores
+object ranges map to one contiguous physical range each. Payload bytes have no metadata gaps, including at chunk boundaries. Entry metadata stores
 one XXHash64 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
 entry while copying only requested bytes into the result. It does not read neighboring entries or metadata.
 
@@ -140,18 +140,20 @@ Entries within a batch share 1-MiB chunks with 4-KiB-aligned storage only when e
 and metadata fit inside that chunk. Multi-chunk entries own their chunks exclusively, including unused tails. Small entries use at least 4 KiB of payload
 plus 4 KiB of metadata inside their batch's chunks. Metadata pages are not shared between entries. A single-entry
 batch costs at least one chunk. Removed entries leave holes that cannot be reused individually.
-The v5 format uses XXHash64 for all on-disk checksums, checksums complete entry metadata and records a bitmap of entry metadata starts.
-Cache generations isolate resets; batch IDs reject metadata referencing chunks reused by another batch.
+The v6 format uses XXHash64 for all on-disk checksums. Each contiguous allocation starts with one metadata page
+recording its chunk count and a bitmap of entry metadata starts. Entry metadata precedes the payload and records
+one payload address and length; continuation chunks have no headers. Allocation refuses scattered free chunks.
+Cache generations isolate resets; batch IDs bind allocation headers to entry metadata. Older formats cold-reset.
 Read invalidation compares expected payload checksums. Discarding a newer identical copy is an allowed miss.
 Pressure eviction samples up to 64 live entries and selects the lowest recent retrieval value per payload
 byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.
 Alignment, metadata and chunk overhead do not enter the score. Only selected entries are removed. Neighbors
 remain indexed and may keep a partially empty chunk unavailable. No eviction metadata reads are needed.
-Each shard batch is limited to 64 sampled decisions and 4,096 removed region references. Guarded or active
+Each shard batch is limited to 64 sampled decisions and 4,096 chunks charged to removed entries. Guarded or active
 storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
 disk cache to a memory cache's evidence. Public tier orchestration now uses it.
 Recovery scans up to saved per-shard ends and publishes validated entries incrementally. New writes can
-claim unscanned chunks; foreground reads take priority over scan I/O. Layout changes start a new cache
+claim unscanned chunks; recovery retries when the read channel is full and admitted reads run in FIFO order. Layout changes start a new cache
 generation and log a cold reset. See the prototype document for checkpoint and validation details.
 No comparative layout/performance claim is established.
 
@@ -160,7 +162,7 @@ cancellation, corruption/reused payload, partial batch failure, metadata-only ch
 mixed-size packing, exclusive multi-chunk ownership, finalized chunk metadata, whole-chunk ownership/reuse,
 bounded value-aware entry eviction, shared evidence across tiers, payload-only scoring, mixed-size churn,
 concurrent eviction/reads,
-fragmented chunks and whole-entry
+rejection of scattered free chunks, contiguous payloads across chunk boundaries, and whole-entry
 validation of 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable.
 Unrelated entries and metadata are not loaded. Before background recovery was added, on `m8g-32cpu-local-ssd`,
 all 71 storage tests and all 135 workspace tests passed with real direct I/O

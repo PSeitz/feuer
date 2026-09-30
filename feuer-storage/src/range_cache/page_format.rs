@@ -1,6 +1,6 @@
-//! Experimental v5 metadata pages. Payload has no page headers: its whole-entry checksum lives in entry metadata.
+//! Experimental v6 metadata pages. Payload has no page headers: its whole-entry checksum lives in entry metadata.
 //! All checksums are XXHash64 with seed zero, stored as little-endian u64s.
-//! Each entry metadata page carries the checksum of the complete entry metadata, including its key and mappings.
+//! Each entry metadata page carries the checksum of the complete entry metadata, including its key and payload address.
 //! Page checksums additionally bind tag, address, ordinal, links and contents.
 //! Chunk metadata binds a cache generation and batch ID; completion is not persistence.
 
@@ -15,9 +15,9 @@ use crate::allocation::DiskRegion;
 pub(super) const METADATA_PAGE_BYTES: usize = 4096;
 const PAGE_HEADER_BYTES: usize = 48;
 pub(super) const PAGE_CONTENT_BYTES: usize = METADATA_PAGE_BYTES - PAGE_HEADER_BYTES;
-pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES05";
-pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX05";
-pub(super) const CHUNK_METADATA_CONTENT_BYTES: usize = 64;
+pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES06";
+pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX06";
+pub(super) const CHUNK_METADATA_CONTENT_BYTES: usize = 72;
 
 /// Content checksum covers complete entry metadata, or the chunk's bitmap and identities.
 pub(super) fn encode_page(
@@ -64,32 +64,29 @@ pub(super) fn validate_page<'a>(
     ))
 }
 
-/// Content length, key length, exact object range, region count, payload checksum, physical ranges, full key, batch ID.
-/// All integers are little-endian u64s. Page links describe the entry metadata's own allocations.
-/// The payload checksum covers exactly the entry bytes in region order, excluding final alignment padding.
+/// Content length, key length, object range, payload address and aligned length, checksum, full key, batch ID.
+/// All integers are little-endian u64s. Metadata pages are consecutive and precede the payload.
+/// The payload checksum covers exactly the entry bytes, excluding final alignment padding.
 pub(super) fn encode_entry_metadata(
     key: &str,
     object_range: ByteRange,
-    payload_regions: &[DiskRegion],
+    payload_region: &DiskRegion,
     payload_checksum: u64,
     batch_id: &[u8; 16],
 ) -> Bytes {
-    let length = 64 + 16 * payload_regions.len() + key.len();
+    let length = 72 + key.len();
+    let payload = payload_region.range();
     let mut bytes = Vec::with_capacity(length);
     for value in [
         length as u64,
         key.len() as u64,
         object_range.start(),
         object_range.end(),
-        payload_regions.len() as u64,
+        payload.start,
+        payload.end - payload.start,
+        payload_checksum,
     ] {
         bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes.extend_from_slice(&payload_checksum.to_le_bytes());
-    for region in payload_regions {
-        let disk_range = region.range();
-        bytes.extend_from_slice(&disk_range.start.to_le_bytes());
-        bytes.extend_from_slice(&disk_range.end.to_le_bytes());
     }
     bytes.extend_from_slice(key.as_bytes());
     bytes.extend_from_slice(batch_id);

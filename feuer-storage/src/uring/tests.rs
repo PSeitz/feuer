@@ -15,7 +15,7 @@ fn request(operation: IoOperation, offset: u64, length: usize) -> (IoRequest, Io
             _region: None,
         }
     } else {
-        IoBuffers::Read(AlignedIoBuffer::new(length, Vec::new(), &buffer_pool()).unwrap())
+        IoBuffers::Read(AlignedIoBuffer::new(length, None, &buffer_pool()).unwrap())
     };
     (IoRequest::new(offset, buffers, 0..length, reply), receive)
 }
@@ -60,8 +60,8 @@ fn pooled_buffers_release_read_guards() {
     let pool = buffer_pool();
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
     for return_bytes in [false, true] {
-        let region = allocator.reserve_chunks(1).unwrap().pop().unwrap();
-        let buffer = AlignedIoBuffer::new(page, vec![region.read_guard()], &pool).unwrap();
+        let region = allocator.reserve_chunks(1).unwrap();
+        let buffer = AlignedIoBuffer::new(page, Some(region.read_guard()), &pool).unwrap();
         drop(region);
         assert_eq!(allocator.available_bytes(), 0);
         if return_bytes {
@@ -239,7 +239,7 @@ fn canceled_submitted_write_retains_resources() {
     let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
     let (mut write, reply) = request(IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
     if let IoBuffers::Write { _region: region, .. } = &mut write.buffers {
-        *region = allocator.reserve_chunks(1).unwrap().pop();
+        *region = allocator.reserve_chunks(1);
     }
     sender.try_send(write).unwrap();
     drop(sender);
@@ -303,7 +303,7 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
     )
     .unwrap();
     let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
-    let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
+    let chunk = allocator.reserve_chunks(1).unwrap();
     let page = chunk.slice(0..DIRECT_IO_ALIGNMENT_BYTES as u64);
     let reservations = handle
         .sender
@@ -321,7 +321,7 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
     assert!(result.is_none());
     assert_eq!(pool.idle_bytes(), 0);
     // An available pooled buffer must remain untouched while a foreground read waits.
-    drop(handle.allocate_buffer(DIRECT_IO_ALIGNMENT_BYTES, Vec::new()).unwrap());
+    drop(handle.allocate_buffer(DIRECT_IO_ALIGNMENT_BYTES, None).unwrap());
     let idle_bytes = pool.idle_bytes();
     assert!(idle_bytes > 0);
     {
@@ -375,7 +375,7 @@ async fn queue_exit_releases_admission_waiters_and_queued_requests() {
         assert!(matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
     }
     let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
-    let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
+    let chunk = allocator.reserve_chunks(1).unwrap();
     let page = chunk.slice(0..DIRECT_IO_ALIGNMENT_BYTES as u64);
     assert_eq!(
         handle
@@ -437,7 +437,7 @@ async fn reads_into_consecutive_slices_without_reallocating() {
         .write_parts((2 * page) as u64, page, &[(0, Bytes::from(vec![0x77; page]))], None)
         .await
         .unwrap();
-    let mut buffer = read.allocate_buffer(3 * page, Vec::new()).unwrap();
+    let mut buffer = read.allocate_buffer(3 * page, None).unwrap();
     buffer.as_mut_slice().fill(0x55);
     let address = buffer.as_ref().as_ptr() as usize;
     buffer = read.read_into(0, buffer, 0..page).await.unwrap();
@@ -454,11 +454,11 @@ async fn reads_into_consecutive_slices_without_reallocating() {
 fn canceled_read_retains_destination_and_disk_guard_until_completion() {
     use crate::allocation::{CHUNK_BYTES, DiskChunkAllocator};
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
-    let region = allocator.reserve_chunks(1).unwrap().pop().unwrap();
+    let region = allocator.reserve_chunks(1).unwrap();
     let (mut queue, sender) = queue();
     let pool = buffer_pool();
     let (mut read, reply) = request(IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
-    let buffer = AlignedIoBuffer::new(2 * DIRECT_IO_ALIGNMENT_BYTES, vec![region.read_guard()], &pool).unwrap();
+    let buffer = AlignedIoBuffer::new(2 * DIRECT_IO_ALIGNMENT_BYTES, Some(region.read_guard()), &pool).unwrap();
     let address = buffer.as_ref().as_ptr();
     read.buffers = IoBuffers::Read(buffer);
     read.destination = DIRECT_IO_ALIGNMENT_BYTES..2 * DIRECT_IO_ALIGNMENT_BYTES;
@@ -483,11 +483,11 @@ fn canceled_read_retains_destination_and_disk_guard_until_completion() {
 fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     let pool = buffer_pool();
-    let mut source = AlignedIoBuffer::new(2 * page, Vec::new(), &pool).unwrap();
+    let mut source = AlignedIoBuffer::new(2 * page, None, &pool).unwrap();
     source.as_mut_slice().fill(0x77);
     let source = source.into_bytes();
     for length in [17, page] {
-        let mut dirty = AlignedIoBuffer::new(2 * page, Vec::new(), &pool).unwrap();
+        let mut dirty = AlignedIoBuffer::new(2 * page, None, &pool).unwrap();
         dirty.as_mut_slice().fill(0xff);
         drop(dirty);
         let parts = [(0, source.slice(1..length + 1)), (page, source.slice(..page + 17))];
@@ -545,7 +545,7 @@ fn completion_state_handles_short_io_and_errors() {
 #[should_panic(expected = "destination.end <= buffer.as_ref().len()")]
 fn rejects_read_into_spare_capacity() {
     let page = DIRECT_IO_ALIGNMENT_BYTES;
-    let buffer = AlignedIoBuffer::new(page, Vec::new(), &buffer_pool()).unwrap();
+    let buffer = AlignedIoBuffer::new(page, None, &buffer_pool()).unwrap();
     let (reply, _receive) = oneshot::channel();
     IoRequest::new(0, IoBuffers::Read(buffer), 0..2 * page, reply);
 }

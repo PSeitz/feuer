@@ -8,17 +8,19 @@ incrementally while ordinary reads and writes continue.
 
 ## Layout and ownership
 
-- The file contains 1-MiB chunks, each starting with a reserved 4-KiB chunk metadata page.
-  The remaining 1,020 KiB holds payload bytes and entry metadata.
-- Payload is plain bytes in 4-KiB-aligned allocations. Only metadata uses 4-KiB pages.
+- The file contains 1-MiB chunks. Each allocation reserves one consecutive run of whole chunks
+  and starts with one 4-KiB metadata page. Continuation chunks have no headers.
+- Each payload is one uninterrupted, 4-KiB-aligned disk byte range. Entry metadata precedes it;
+  no metadata is inserted at payload chunk boundaries. Only metadata uses 4-KiB pages.
   Each entry requires at least one metadata page. Entries do not share metadata pages.
 - Small entries share a chunk only when each entry's complete payload and metadata fit inside it.
   Multi-chunk entries own all their chunks exclusively, including unused tails.
-- Written chunks are immutable. A whole chunk becomes reusable only after all entry owners and
-  `DiskRegionReadGuard`s release it. Individual holes are never reused.
+- Written chunks are immutable. The entire allocation becomes reusable only after all entry owners and
+  `DiskRegionReadGuard`s release it. Individual holes and individual chunks of a live allocation are never reused.
 
 `src/allocation.rs` tracks free chunks as coalesced runs. `DiskRegion` subranges share ownership
-of their containing chunk. Allocation and the range index are sharded by full-key hash.
+of the entire contiguous allocation. Scattered free chunks are never combined for an entry.
+Allocation and the range index are sharded by full-key hash.
 Free capacity in another shard cannot satisfy an admission. No metadata lock is held across I/O.
 
 ## Writes
@@ -50,7 +52,7 @@ entry's entire payload against its XXHash64 checksum, excluding alignment paddin
 metadata nor neighboring entries. Small subrange requests can therefore cause large reads, though
 only requested bytes are retained in the result.
 
-Reads acquire `DiskRegionReadGuard`s under the range-index lock and retain them through verification.
+Each read acquires one `DiskRegionReadGuard` under the range-index lock and retains it through verification.
 Returned bytes retain no disk ownership. A checksum mismatch invalidates the indexed entry if its
 expected checksum still matches the failed read's expected checksum. This can discard a newer identical copy.
 
@@ -67,15 +69,15 @@ for readers or writers. There is no relocation or cleaning.
 
 ## Metadata and recovery
 
-`src/range_cache/page_format.rs` defines the experimental v5 format. All on-disk checksums use
+`src/range_cache/page_format.rs` defines the experimental v6 format. All on-disk checksums use
 XXHash64 with seed zero, stored as 8-byte little-endian integers. Metadata page headers are 48 bytes;
-entry metadata uses 64 bytes plus the key and 16 bytes per payload region. Opening a v4 cache resets
-its generation instead of recovering the old format. Linked entry metadata pages
-store the full key, object range, ordered payload regions, payload checksum, and batch ID. Each page has
-a checksum, and each chain carries a checksum of the complete entry metadata. Chunk metadata records
-the cache generation and batch ID, binding an entry to the batch that wrote all its chunks.
+entry metadata uses 72 bytes plus the key. Opening an older cache resets its generation rather than
+recovering the old format. Consecutive entry metadata pages store the full key, object range, one payload
+address and aligned length, payload checksum, and batch ID. Each page has a checksum, and each chain
+carries a checksum of the complete entry metadata. The allocation's first chunk metadata page records
+the cache generation, batch ID, and consecutive chunk count.
 
-Each chunk metadata page contains a bitmap of metadata starts at 4-KiB-aligned offsets. These are
+The allocation header contains a bitmap of entry metadata starts within its first chunk. These are
 recovery candidates, not live-entry or free-space bits. Removal does not update the bitmap.
 Whole-chunk reuse replaces it.
 
@@ -90,12 +92,12 @@ synchronization or final checkpoint on close is promised.
 
 The allocator records chunks claimed during recovery, even if their owners later release them. New writes
 may claim unscanned chunks immediately. Recovery reserves only chunks being inspected, validates their
-metadata chains, generation, batch IDs, mappings, and ownership, then publishes without displacing indexed
-ranges. Shared-chunk entries retain shared ownership; multi-chunk entries reserve every chunk exclusively.
+metadata chains, generation, batch IDs, the payload range, and ownership, then publishes without displacing indexed
+ranges. Shared-chunk entries retain shared ownership; multi-chunk entries reserve their complete contiguous run.
 Inspection alone does not permanently claim a chunk. These temporary claim bitmaps disappear after the scan.
 
-The scan issues one 4-KiB read at a time. It retries admission rather than queueing ahead of foreground
-waiters, and pending foreground requests precede pending scan requests. Index locks never span scan I/O.
+The scan issues one 4-KiB read at a time. It retries admission when the bounded read channel is full;
+admitted requests run in FIFO order. Index locks never span scan I/O.
 Already-submitted scan I/O can still contend for the device.
 
 **Chunk writes are neither atomic nor durability barriers.** Bad metadata is skipped. Payload integrity is
@@ -112,7 +114,8 @@ TMPDIR=/mnt/local-ssd/<isolated-test-directory> cargo test --locked -p feuer-sto
 ```
 
 Tests cover incremental recovery, concurrent allocation claims, stale scan ends, generation resets,
-metadata corruption, reused multi-chunk addresses, and foreground I/O priority. Real Linux execution of
+metadata corruption, reused multi-chunk addresses, contiguous payloads, rejection of fragmented free space,
+and bounded FIFO I/O admission. Real Linux execution of
 the new recovery tests and device power-loss testing remain outstanding, along with buffered mode and
 tier-aware retention tuning.
 Measure chunk utilization, metadata overhead, read/write amplification, and retention quality before

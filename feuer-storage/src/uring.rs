@@ -106,11 +106,11 @@ impl IoQueueHandle {
     pub(crate) fn allocate_buffer(
         &self,
         length: usize,
-        read_guards: Vec<DiskRegionReadGuard>,
+        read_guard: Option<DiskRegionReadGuard>,
     ) -> io::Result<AlignedIoBuffer> {
         AlignedIoBuffer::new(
             length,
-            read_guards,
+            read_guard,
             self.buffer_pool.as_ref().expect("only reads use buffer pools"),
         )
     }
@@ -118,7 +118,7 @@ impl IoQueueHandle {
     pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
         assert_eq!(self.operation, IoOperation::Read);
         let permit = self.reserve_request().await?;
-        let buffer = self.allocate_buffer(length, Vec::new())?;
+        let buffer = self.allocate_buffer(length, None)?;
         Ok(self
             .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
             .await?
@@ -137,7 +137,7 @@ impl IoQueueHandle {
             Err(mpsc::error::TrySendError::Full(_)) => return Ok(None),
             Err(mpsc::error::TrySendError::Closed(_)) => return Err(queue_stopped_error()),
         };
-        let buffer = self.allocate_buffer(length, vec![region])?;
+        let buffer = self.allocate_buffer(length, Some(region))?;
         Ok(Some(
             self.submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
                 .await?
@@ -212,14 +212,14 @@ fn queue_stopped_error() -> io::Error {
 /// Read memory and disk ownership retained until kernel I/O completes.
 pub(crate) struct AlignedIoBuffer {
     // Release disk ownership before the allocation can return to its memory pool.
-    read_guards: Vec<DiskRegionReadGuard>,
+    read_guard: Option<DiskRegionReadGuard>,
     buffer: AlignedBuffer,
 }
 
 impl AlignedIoBuffer {
-    fn new(length: usize, read_guards: Vec<DiskRegionReadGuard>, pool: &Arc<BufferPool>) -> io::Result<Self> {
+    fn new(length: usize, read_guard: Option<DiskRegionReadGuard>, pool: &Arc<BufferPool>) -> io::Result<Self> {
         Ok(Self {
-            read_guards,
+            read_guard,
             buffer: pool.allocate(length)?,
         })
     }
@@ -230,7 +230,7 @@ impl AlignedIoBuffer {
 
     pub(crate) fn into_bytes(self) -> Bytes {
         // No I/O owns the buffer now; returned bytes must not retain disk regions.
-        drop(self.read_guards);
+        drop(self.read_guard);
         self.buffer.into_bytes()
     }
 

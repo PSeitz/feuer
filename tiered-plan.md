@@ -262,13 +262,16 @@ grouping smaller entries together. Each chunk's payload, entry metadata and chun
 its only write. Later batches cannot append to it or reuse holes left by removed entries. A chunk becomes
 reusable only after all entry owners and read guards release it. Partially filled final chunks consume their
 full capacity. Payload starts and allocated lengths are rounded to 4 KiB. Small entries consume at least
-4 KiB of payload storage plus metadata within their batch's chunks. Large entries may span chunks. Payload
-bytes have no interleaved page headers, and each entry's expected checksum lives in separate metadata.
+4 KiB of payload storage plus metadata within their batch's chunks. Large entries span consecutive chunks.
+Each entry's payload is one contiguous disk byte range with no metadata gaps. The allocation header and
+entry metadata precede its payload; continuation chunks have no headers. Entry metadata stores one payload
+address and length plus its checksum. One read guard retains the entire contiguous allocation.
 Multiple entries may share a chunk only when each entry's complete payload and metadata fit inside that chunk.
 An entry spanning multiple chunks owns those chunks exclusively. Its unused tail cannot hold another entry.
 Disk pressure selects individual entries by sampled retrieval value per payload byte, not all owners of a
 shared chunk together. Removing an entry may free no whole chunk. If bounded eviction cannot reclaim enough
-capacity, the write is skipped. Still-retained neighbors are not removed merely to empty the chunk.
+contiguous capacity, the write is skipped rather than scattered across free chunks. Still-retained neighbors
+are not removed merely to empty the chunk.
 The allocator must handle the full size distribution, reclaim
 fragmented capacity with bounded work and rewrite traffic, remain practical at 1-TiB-plus capacities, and
 avoid a cache-wide hot lock. Free-space structures, relocation, and cleaning remain private mechanisms.

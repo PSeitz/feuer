@@ -214,8 +214,9 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
     assert_eq!(triggering(), 1.0);
 
     // Evictions still count when a read guard prevents reuse and insertion fails.
-    let guard =
-        cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key["third"][&0].payload_regions[0].read_guard();
+    let guard = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key["third"][&0]
+        .payload_region
+        .read_guard();
     assert_eq!(
         cache.insert_batch(vec![("blocked".into(), download(4))]).await.unwrap(),
         0
@@ -245,7 +246,8 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
     let request = ByteRange::new(0, 1).unwrap();
     let key = "corrupt".to_owned();
     cache.insert_batch(vec![(key.clone(), download(4))]).await.unwrap();
-    let address = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key][&0].payload_regions[0]
+    let address = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key][&0]
+        .payload_region
         .range()
         .start;
     cache
@@ -256,11 +258,7 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
         .unwrap();
     assert!(cache.get(&key, request).await.is_none());
     assert_eq!(
-        value(
-            &registry,
-            "feuer_disk_lookup_total",
-            &[("outcome", "checksum_failed")]
-        ),
+        value(&registry, "feuer_disk_lookup_total", &[("outcome", "checksum_failed")]),
         1.0
     );
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);

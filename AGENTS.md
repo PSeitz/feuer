@@ -8,6 +8,8 @@ Implement only what the stated requirements need. Do not add features, abstracti
 
 A written chunk is immutable until all entry owners and read guards release it. Explicit batches group small entries into chunks and finalize payload, entry metadata, and chunk metadata before writing. Do not append to written chunks or reuse individual entry holes.
 
+Each entry's payload occupies one contiguous disk byte range, with no metadata gaps. Allocate consecutive whole chunks; never assemble an entry from scattered free chunks. Metadata records one payload address and length. One read guard retains the entire allocation. Multi-chunk allocations have metadata only before their payload, not at each chunk boundary.
+
 # Naming
 
 - Naming is important. Prefer concrete, descriptive names that explain what something represents or protects.

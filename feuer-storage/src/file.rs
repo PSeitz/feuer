@@ -153,22 +153,21 @@ impl DataFile {
             let alignment = uring::DIRECT_IO_ALIGNMENT_BYTES as u64;
             let leading_padding_bytes = offset % alignment;
             let aligned_range = offset - leading_padding_bytes..(offset + length as u64).next_multiple_of(alignment);
-            let (bytes, _) = self.read_aligned_ranges(&[aligned_range], Vec::new()).await?;
+            let (bytes, _) = self.read_aligned_range(aligned_range, None).await?;
             Ok(bytes.slice(leading_padding_bytes as usize..leading_padding_bytes as usize + length))
         })
         .await
     }
 
-    /// Reads payload regions into one buffer, omitting metadata gaps and final padding.
-    pub(crate) async fn read_regions(
+    /// Reads one contiguous payload into a buffer, omitting final alignment padding.
+    pub(crate) async fn read_region(
         &self,
-        regions: Vec<DiskRegionReadGuard>,
+        region: DiskRegionReadGuard,
         length: usize,
     ) -> DataFileResult<(Bytes, usize)> {
-        let ranges: Vec<_> = regions.iter().map(DiskRegionReadGuard::range).collect();
-        let offset = ranges.first().map_or(0, |range| range.start);
-        self.measure_io(IoOperation::Read, offset, length, async {
-            let (bytes, capacity) = self.read_aligned_ranges(&ranges, regions).await?;
+        let range = region.range();
+        self.measure_io(IoOperation::Read, range.start, length, async {
+            let (bytes, capacity) = self.read_aligned_range(range, Some(region)).await?;
             assert_eq!(bytes.len(), length.next_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
             Ok((bytes.slice(..length), capacity))
         })
@@ -287,23 +286,17 @@ impl DataFile {
         result
     }
 
-    async fn read_aligned_ranges(
+    async fn read_aligned_range(
         &self,
-        ranges: &[Range<u64>],
-        read_guards: Vec<DiskRegionReadGuard>,
+        range: Range<u64>,
+        read_guard: Option<DiskRegionReadGuard>,
     ) -> DataFileResult<(Bytes, usize)> {
         let operation = IoOperation::Read;
-        let mut buffer_length = 0usize;
-        for range in ranges {
-            check_file_bounds(operation, range.start, range.end - range.start, self.state.capacity)?;
-            buffer_length =
-                buffer_length
-                    .checked_add((range.end - range.start) as usize)
-                    .ok_or(DataFileError::LengthOverflow {
-                        operation,
-                        length: buffer_length,
-                    })?;
-        }
+        check_file_bounds(operation, range.start, range.end - range.start, self.state.capacity)?;
+        let buffer_length = usize::try_from(range.end - range.start).map_err(|_| DataFileError::LengthOverflow {
+            operation,
+            length: usize::MAX,
+        })?;
         let io_error = |source| DataFileError::Io {
             operation,
             path: self.state.data_path.clone(),
@@ -312,20 +305,17 @@ impl DataFile {
         let mut buffer = self
             .state
             .read_queue
-            .allocate_buffer(buffer_length, read_guards)
+            .allocate_buffer(buffer_length, read_guard)
             .map_err(io_error)?;
-        let mut destination_offset = 0;
-        for range in ranges {
-            for offset in (range.start..range.end).step_by(uring::MAX_IO_CHUNK_BYTES) {
-                let read_length = (range.end - offset).min(uring::MAX_IO_CHUNK_BYTES as u64) as usize;
-                buffer = self
-                    .state
-                    .read_queue
-                    .read_into(offset, buffer, destination_offset..destination_offset + read_length)
-                    .await
-                    .map_err(io_error)?;
-                destination_offset += read_length;
-            }
+        for offset in (range.start..range.end).step_by(uring::MAX_IO_CHUNK_BYTES) {
+            let destination_offset = (offset - range.start) as usize;
+            let read_length = (range.end - offset).min(uring::MAX_IO_CHUNK_BYTES as u64) as usize;
+            buffer = self
+                .state
+                .read_queue
+                .read_into(offset, buffer, destination_offset..destination_offset + read_length)
+                .await
+                .map_err(io_error)?;
         }
         let capacity = buffer.capacity();
         Ok((buffer.into_bytes(), capacity))
