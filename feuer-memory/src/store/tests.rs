@@ -8,13 +8,13 @@ use feuer_types::{
 
 use super::{
     MemoryCache,
-    shard::{AdmissionProgress, MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION},
+    shard::{InsertOrReclaimResult, MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION},
     shard_capacity_for,
 };
 use crate::MemoryMetrics;
 
 #[test]
-fn disk_write_identity_expires_on_removal_replacement_and_readmission() {
+fn disk_write_identity_expires_on_removal_replacement_and_reinsertion() {
     let cache = cache(1024);
     let key = ObjectKey::from("disk-source");
     let payload = Download::new(10, Bytes::from_static(b"abcd")).unwrap();
@@ -137,14 +137,14 @@ fn reclaim_sampling_advances_past_contained_ranges() {
     for expected_entries in [3, 3, 2] {
         assert!(matches!(
             shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, &cache.access_histories, false),
-            AdmissionProgress::Retry | AdmissionProgress::Evicted
+            InsertOrReclaimResult::Retry | InsertOrReclaimResult::Evicted
         ));
         assert_eq!(shard.entry_count(), expected_entries);
     }
     // The partial overlap is eligible; the two ranges fully contained in the incoming download were skipped.
     assert!(matches!(
         shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, &cache.access_histories, false),
-        AdmissionProgress::Complete(Some(_))
+        InsertOrReclaimResult::Complete(Some(_))
     ));
     assert_eq!(shard.entry_count(), 1);
     assert_eq!(shard.used_bytes(), 3);
@@ -643,7 +643,7 @@ fn new_accesses_do_not_invalidate_a_copied_range_trim() {
     let incoming_bytes = Bytes::from_static(b"xy");
     let replacement = {
         let mut shard = cache.shards[0].lock();
-        let AdmissionProgress::Trim(source) =
+        let InsertOrReclaimResult::Trim(source) =
             shard.try_admit_or_reclaim(&incoming, range(0, 2), &incoming_bytes, &cache.access_histories, true)
         else {
             panic!("pressure should select the cold compactable cached range");
@@ -675,7 +675,7 @@ fn cached_range_changes_still_invalidate_copied_trimming() {
         }
         let trim_source = {
             let mut shard = cache.shards[0].lock();
-            let AdmissionProgress::Trim(source) = shard.try_admit_or_reclaim(
+            let InsertOrReclaimResult::Trim(source) = shard.try_admit_or_reclaim(
                 &"incoming".to_owned(),
                 range(0, 11),
                 &Bytes::from_static(b"01234567890"),

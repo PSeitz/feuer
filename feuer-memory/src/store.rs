@@ -14,7 +14,7 @@ use feuer_types::{ByteRange, Download, ObjectKey, retention::ObjectAccessHistori
 use fnv::FnvHasher;
 use parking_lot::Mutex;
 
-use self::shard::{AdmissionProgress, MemoryCacheShard};
+use self::shard::{InsertOrReclaimResult, MemoryCacheShard};
 use crate::MemoryMetrics;
 
 /// Caps lock partitioning to avoid excessive per-cache metadata.
@@ -168,23 +168,23 @@ impl MemoryCache {
         let mut allow_range_trim = true;
         let mut evicted_any_entry = false;
         loop {
-            let admission_progress = self.shards[shard_index].lock().try_admit_or_reclaim(
+            let insert_or_reclaim_result = self.shards[shard_index].lock().try_admit_or_reclaim(
                 &object_key,
                 downloaded_range,
                 &bytes,
                 &self.access_histories,
                 allow_range_trim,
             );
-            match admission_progress {
-                AdmissionProgress::Complete(entry_id) => {
+            match insert_or_reclaim_result {
+                InsertOrReclaimResult::Complete(entry_id) => {
                     if evicted_any_entry {
                         self.metrics.eviction_triggering_insertions.increase(1);
                     }
                     return entry_id;
                 }
-                AdmissionProgress::Evicted => evicted_any_entry = true,
-                AdmissionProgress::Retry => continue,
-                AdmissionProgress::Trim(source) => {
+                InsertOrReclaimResult::Evicted => evicted_any_entry = true,
+                InsertOrReclaimResult::Retry => continue,
+                InsertOrReclaimResult::Trim(source) => {
                     // Payload copying is deliberately outside the shard lock.
                     // Publication revalidates the source and cached-range structure, not history.
                     let replacement = source.copy_retained_payloads();

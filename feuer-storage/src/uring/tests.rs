@@ -6,9 +6,9 @@ type IoResultReceiver = oneshot::Receiver<io::Result<IoBuffers>>;
 
 fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) -> (IoRequest, IoResultReceiver) {
     let (reply, receive) = oneshot::channel();
-    let request_permit = queue.admission.request_slots.clone().try_acquire_owned().unwrap();
+    let request_permit = queue.resources.request_slots.clone().try_acquire_owned().unwrap();
     let buffer_memory_permit = queue
-        .admission
+        .resources
         .buffer_memory
         .clone()
         .try_acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
@@ -22,7 +22,7 @@ fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) 
             _region: None,
         }
     } else {
-        IoBuffers::Read(AlignedIoBuffer::new(length, Vec::new(), queue.admission.buffer_pool(length)).unwrap())
+        IoBuffers::Read(AlignedIoBuffer::new(length, Vec::new(), queue.resources.buffer_pool(length)).unwrap())
     };
     (
         IoRequest::new(
@@ -52,7 +52,7 @@ fn queue() -> IoQueue {
     let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
     let (_, receiver) = mpsc::sync_channel(MAX_IN_FLIGHT_READS); // disconnected: processing requests will drain and exit
     IoQueue {
-        admission: Arc::new(IoAdmissionBudgets::new(
+        resources: Arc::new(IoQueueResources::new(
             MAX_IN_FLIGHT_READS,
             IoOperation::Read,
             &IoMetrics::noop(),
@@ -133,11 +133,11 @@ fn buffer_pool_metrics_follow_reuse_capacity_and_pool_lifetime() {
 }
 
 #[test]
-fn write_admission_has_no_buffer_pools() {
+fn write_queue_has_no_buffer_pools() {
     let (registry, backend) = crate::test_metrics::registry();
     let metrics = IoMetrics::new(&backend);
-    let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_WRITES, IoOperation::Write, &metrics);
-    assert!(admission.idle_buffers.is_none());
+    let resources = IoQueueResources::new(MAX_IN_FLIGHT_WRITES, IoOperation::Write, &metrics);
+    assert!(resources.idle_buffers.is_none());
     for family in registry.gather() {
         if family.name().starts_with("feuer_io_buffer_pool_") {
             for metric in family.get_metric() {
@@ -244,7 +244,7 @@ fn io_buffer_pool_capacities_follow_environment() {
     if let Ok(expected_small) = std::env::var("FEUER_TEST_IO_BUFFER_POOLS_CHILD") {
         let (registry, backend) = crate::test_metrics::registry();
         let metrics = IoMetrics::new(&backend);
-        let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_READS, IoOperation::Read, &metrics);
+        let resources = IoQueueResources::new(MAX_IN_FLIGHT_READS, IoOperation::Read, &metrics);
         for (index, name) in ["small", "medium", "large"].into_iter().enumerate() {
             assert_eq!(
                 crate::test_metrics::value(&registry, "feuer_io_buffer_pool_capacity_bytes", &[("pool", name)]),
@@ -252,7 +252,7 @@ fn io_buffer_pool_capacities_follow_environment() {
             );
         }
         let expected = [expected_small.parse::<usize>().unwrap(), 8192, 5 * 1024 * 1024 * 1024];
-        for (pool, capacity) in admission.idle_buffers.as_ref().unwrap().iter().zip(expected) {
+        for (pool, capacity) in resources.idle_buffers.as_ref().unwrap().iter().zip(expected) {
             assert_eq!(pool.lock().unwrap().capacity, capacity);
             drop(AlignedIoBuffer::new(DIRECT_IO_ALIGNMENT_BYTES, Vec::new(), pool).unwrap());
             let retained = if capacity >= DIRECT_IO_ALIGNMENT_BYTES {
@@ -299,8 +299,8 @@ fn io_buffer_pool_capacities_follow_environment() {
 
 #[test]
 fn small_medium_and_large_buffer_pools_have_independent_budgets() {
-    let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_READS, IoOperation::Read, &IoMetrics::noop());
-    let pools = admission.idle_buffers.as_ref().unwrap();
+    let resources = IoQueueResources::new(MAX_IN_FLIGHT_READS, IoOperation::Read, &IoMetrics::noop());
+    let pools = resources.idle_buffers.as_ref().unwrap();
     let mib = 1024 * 1024;
     for (length, index) in [
         (DIRECT_IO_ALIGNMENT_BYTES, 0),
@@ -310,12 +310,12 @@ fn small_medium_and_large_buffer_pools_have_independent_budgets() {
         (10 * mib, 2),
         (20 * mib, 2),
     ] {
-        let pool = admission.buffer_pool(length);
+        let pool = resources.buffer_pool(length);
         assert!(Arc::ptr_eq(pool, &pools[index]));
         assert_eq!(pool.lock().unwrap().capacity, IDLE_IO_BUFFER_CAPACITIES[index]);
     }
     for length in [DIRECT_IO_ALIGNMENT_BYTES, 2 * mib, 10 * mib] {
-        let pool = admission.buffer_pool(length);
+        let pool = resources.buffer_pool(length);
         // Exercise each independent cap without allocating gigabytes for the test.
         pool.lock().unwrap().capacity = length;
         let first = AlignedIoBuffer::new(length, Vec::new(), pool).unwrap();
@@ -387,8 +387,8 @@ fn full_ring_does_not_block_the_other_direction() {
         full_queue.queue_pending_requests();
         full_queue.ring.submit().unwrap();
         assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
-        assert_eq!(full_queue.admission.request_slots.available_permits(), 0);
-        assert!(full_queue.admission.request_slots.clone().try_acquire_owned().is_err());
+        assert_eq!(full_queue.resources.request_slots.available_permits(), 0);
+        assert!(full_queue.resources.request_slots.clone().try_acquire_owned().is_err());
 
         for i in 0..MAX_IN_FLIGHT_READS {
             // Use disjoint physical pages on the same backing file.
@@ -417,9 +417,9 @@ fn full_ring_does_not_block_the_other_direction() {
         }
         for queue in [&full_queue, &other_queue] {
             assert!(queue.active.iter().all(Option::is_none));
-            assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
+            assert_eq!(queue.resources.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
             assert_eq!(
-                queue.admission.buffer_memory.available_permits(),
+                queue.resources.buffer_memory.available_permits(),
                 MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
             );
         }
@@ -427,7 +427,7 @@ fn full_ring_does_not_block_the_other_direction() {
 }
 
 #[test]
-fn full_write_admission_and_buffers_leave_full_read_capacity() {
+fn exhausted_write_request_slots_and_buffer_permits_leave_read_capacity() {
     let write_queue = queue();
     let read_queue = queue();
     let mut writes = Vec::new();
@@ -435,25 +435,25 @@ fn full_write_admission_and_buffers_leave_full_read_capacity() {
     for _ in 0..MAX_IN_FLIGHT_READS {
         writes.push(request(&write_queue, IoOperation::Write, 0, MAX_IO_CHUNK_BYTES));
     }
-    assert_eq!(write_queue.admission.request_slots.available_permits(), 0);
-    assert_eq!(write_queue.admission.buffer_memory.available_permits(), 0);
+    assert_eq!(write_queue.resources.request_slots.available_permits(), 0);
+    assert_eq!(write_queue.resources.buffer_memory.available_permits(), 0);
     for _ in 0..MAX_IN_FLIGHT_READS {
         reads.push(request(&read_queue, IoOperation::Read, 0, MAX_IO_CHUNK_BYTES));
     }
-    assert_eq!(read_queue.admission.request_slots.available_permits(), 0);
-    assert_eq!(read_queue.admission.buffer_memory.available_permits(), 0);
+    assert_eq!(read_queue.resources.request_slots.available_permits(), 0);
+    assert_eq!(read_queue.resources.buffer_memory.available_permits(), 0);
     drop((reads, writes));
     for queue in [&read_queue, &write_queue] {
-        assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
+        assert_eq!(queue.resources.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
         assert_eq!(
-            queue.admission.buffer_memory.available_permits(),
+            queue.resources.buffer_memory.available_permits(),
             MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
         );
     }
 }
 
 #[tokio::test]
-async fn read_worker_progresses_with_write_admission_exhausted_and_after_write_shutdown() {
+async fn reads_progress_with_write_resources_exhausted_and_after_write_shutdown() {
     let queue = queue();
     let file = queue.file.as_ref().unwrap();
     let lock = queue.directory_lock.as_ref().unwrap();
@@ -468,17 +468,17 @@ async fn read_worker_progresses_with_write_admission_exhausted_and_after_write_s
         )
         .await
         .unwrap();
-    assert_eq!(read_queue.admission.request_slots.available_permits(), 64);
-    assert_eq!(write_queue.admission.request_slots.available_permits(), 8);
+    assert_eq!(read_queue.resources.request_slots.available_permits(), 64);
+    assert_eq!(write_queue.resources.request_slots.available_permits(), 8);
     let _requests = write_queue
-        .admission
+        .resources
         .request_slots
         .clone()
         .acquire_many_owned(MAX_IN_FLIGHT_WRITES as u32)
         .await
         .unwrap();
     let _buffer_memory = write_queue
-        .admission
+        .resources
         .buffer_memory
         .clone()
         .acquire_many_owned((MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES) as u32)
@@ -520,16 +520,19 @@ fn canceled_submitted_write_retains_resources() {
     queue.queue_pending_requests();
     assert!(allocator.reserve_chunks(1).is_none());
     assert!(queue.active[0].is_some());
-    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS - 1);
     assert_eq!(
-        queue.admission.buffer_memory.available_permits(),
+        queue.resources.request_slots.available_permits(),
+        MAX_IN_FLIGHT_READS - 1
+    );
+    assert_eq!(
+        queue.resources.buffer_memory.available_permits(),
         MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES - 1
     );
     queue.process_requests_until_disconnected().unwrap();
     assert!(queue.active.iter().all(Option::is_none));
-    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
+    assert_eq!(queue.resources.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
     assert_eq!(
-        queue.admission.buffer_memory.available_permits(),
+        queue.resources.buffer_memory.available_permits(),
         MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
     );
 
@@ -570,7 +573,7 @@ fn foreground_reads_are_submitted_before_queued_recovery_reads() {
 }
 
 #[tokio::test]
-async fn recovery_does_not_wait_for_or_allocate_ahead_of_foreground_admission() {
+async fn recovery_skips_read_without_request_slot_or_buffer_permit() {
     let queue = queue();
     let handle = IoQueueHandle::new(
         queue.file.as_ref().unwrap().clone(),
@@ -582,7 +585,7 @@ async fn recovery_does_not_wait_for_or_allocate_ahead_of_foreground_admission() 
     let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
     let page = chunk.slice(0..DIRECT_IO_ALIGNMENT_BYTES as u64);
-    for budget in [&handle.admission.request_slots, &handle.admission.buffer_memory] {
+    for budget in [&handle.resources.request_slots, &handle.resources.buffer_memory] {
         let permits = budget
             .clone()
             .acquire_many_owned(budget.available_permits() as u32)
@@ -596,7 +599,7 @@ async fn recovery_does_not_wait_for_or_allocate_ahead_of_foreground_admission() 
         assert!(result.is_none());
         assert!(
             handle
-                .admission
+                .resources
                 .buffer_pool(DIRECT_IO_ALIGNMENT_BYTES)
                 .lock()
                 .unwrap()
@@ -624,7 +627,7 @@ fn discarded_queued_requests_never_reach_the_ring() {
     assert!(queue.pending.is_empty());
     assert!(queue.active.iter().all(Option::is_none));
     assert!(queue.ring.submission().is_empty());
-    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
+    assert_eq!(queue.resources.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
 }
 
 #[test]
@@ -642,9 +645,9 @@ fn finished_read_transfers_buffer_ownership() {
     let bytes = reply.try_recv().unwrap().unwrap().into_read().into_bytes();
     assert_eq!(bytes.as_ptr(), ptr);
     assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
-    assert_eq!(queue.admission.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
+    assert_eq!(queue.resources.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
     assert_eq!(
-        queue.admission.buffer_memory.available_permits(),
+        queue.resources.buffer_memory.available_permits(),
         MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
     );
 
@@ -694,7 +697,7 @@ fn canceled_read_retains_destination_and_disk_guard_until_completion() {
     let buffer = AlignedIoBuffer::new(
         2 * DIRECT_IO_ALIGNMENT_BYTES,
         vec![region.read_guard()],
-        queue.admission.buffer_pool(2 * DIRECT_IO_ALIGNMENT_BYTES),
+        queue.resources.buffer_pool(2 * DIRECT_IO_ALIGNMENT_BYTES),
     )
     .unwrap();
     let address = buffer.ptr.as_ptr();
@@ -710,7 +713,7 @@ fn canceled_read_retains_destination_and_disk_guard_until_completion() {
     assert!(queue.active[0].is_some());
     assert!(
         !queue
-            .admission
+            .resources
             .buffer_pool(2 * DIRECT_IO_ALIGNMENT_BYTES)
             .lock()
             .unwrap()
@@ -721,7 +724,7 @@ fn canceled_read_retains_destination_and_disk_guard_until_completion() {
     assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
     assert_eq!(
         queue
-            .admission
+            .resources
             .buffer_pool(2 * DIRECT_IO_ALIGNMENT_BYTES)
             .lock()
             .unwrap()
@@ -735,8 +738,8 @@ fn canceled_read_retains_destination_and_disk_guard_until_completion() {
 #[test]
 fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
     let page = DIRECT_IO_ALIGNMENT_BYTES;
-    let admission = IoAdmissionBudgets::new(MAX_IN_FLIGHT_READS, IoOperation::Read, &IoMetrics::noop());
-    let pool = admission.buffer_pool(4 * page);
+    let resources = IoQueueResources::new(MAX_IN_FLIGHT_READS, IoOperation::Read, &IoMetrics::noop());
+    let pool = resources.buffer_pool(4 * page);
     let mut source = AlignedIoBuffer::new(2 * page, Vec::new(), pool).unwrap();
     source.as_mut_slice().fill(0x77);
     let source = source.into_bytes();

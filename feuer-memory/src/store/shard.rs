@@ -179,8 +179,9 @@ pub(super) struct RangeTrimReplacement {
     retained_payloads: Vec<(ByteRange, Bytes)>,
 }
 
-/// Progress after a bounded admission action, distinguishing eviction from a retry without removal.
-pub(super) enum AdmissionProgress {
+/// Result of trying to insert a download or reclaim space:
+/// finished, evicted an entry, retry, or trim a range.
+pub(super) enum InsertOrReclaimResult {
     Complete(Option<u64>),
     Evicted,
     Retry,
@@ -235,11 +236,11 @@ impl MemoryCacheShard {
         bytes: &Bytes,
         access_histories: &ObjectAccessHistories,
         allow_range_trim: bool,
-    ) -> AdmissionProgress {
+    ) -> InsertOrReclaimResult {
         let contained_ranges = match self.ranges.get(object_key) {
             Some(entries) if entries.covering_range(range).is_some() => {
                 self.metrics.record_redundant();
-                return AdmissionProgress::Complete(None);
+                return InsertOrReclaimResult::Complete(None);
             }
             Some(entries) => entries.ranges_contained_by(range),
             None => ContainedCachedRanges::default(),
@@ -258,23 +259,23 @@ impl MemoryCacheShard {
             }
             self.metrics.increase_usage(added_bytes, 1);
             self.metrics.record_insert(removal.entry_count != 0);
-            return AdmissionProgress::Complete(Some(id));
+            return InsertOrReclaimResult::Complete(Some(id));
         }
 
         let Some(candidate) = self.select_reclaim_candidate(object_key, range, access_histories) else {
             // The sample cursor advanced, but no eligible victim was found.
             // Return to the caller so it can release the lock before sampling again.
-            return AdmissionProgress::Retry;
+            return InsertOrReclaimResult::Retry;
         };
         if allow_range_trim && let Some(source) = self.prepare_range_trim(&candidate, access_histories) {
-            return AdmissionProgress::Trim(source);
+            return InsertOrReclaimResult::Trim(source);
         }
 
         let removed_payload_bytes = self
             .remove_entry(&candidate.object_key, candidate.range, Some(candidate.id))
             .expect("a sampled pressure candidate cannot disappear while its shard is locked");
         self.metrics.decrease_usage(removed_payload_bytes, 1);
-        AdmissionProgress::Evicted
+        InsertOrReclaimResult::Evicted
     }
 
     /// Inserts a downloaded range into the index and candidate ring, charging its payload bytes.

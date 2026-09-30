@@ -65,11 +65,12 @@ pub(crate) struct IoQueueHandle {
     wake_fd: Arc<OwnedFd>,
     // Queue thread; taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
-    // Queue-local budgets, enforced before allocating or queueing work.
-    admission: Arc<IoAdmissionBudgets>,
+    // Request slots, buffer-memory permits, and reusable buffers for this queue.
+    resources: Arc<IoQueueResources>,
 }
 
-struct IoAdmissionBudgets {
+/// Request slots, buffer-memory permits, and reusable buffers for an I/O queue.
+struct IoQueueResources {
     // Limit covering preparing, queued, and active requests.
     request_slots: Arc<Semaphore>,
     // Aligned I/O buffer memory budget: each permit covers 4 KiB.
@@ -79,7 +80,7 @@ struct IoAdmissionBudgets {
     idle_buffers: Option<[Arc<Mutex<IdleIoBuffers>>; 3]>,
 }
 
-impl IoAdmissionBudgets {
+impl IoQueueResources {
     fn new(max_in_flight: usize, operation: IoOperation, metrics: &IoMetrics) -> Self {
         Self {
             request_slots: Arc::new(Semaphore::new(max_in_flight)),
@@ -128,9 +129,9 @@ impl IoQueueHandle {
         // SAFETY: fd was just created and has no other owner.
         let wake_fd = Arc::new(unsafe { OwnedFd::from_raw_fd(fd) });
         let (sender, receiver) = mpsc::sync_channel(max_in_flight);
-        let admission = Arc::new(IoAdmissionBudgets::new(max_in_flight, operation, metrics));
+        let resources = Arc::new(IoQueueResources::new(max_in_flight, operation, metrics));
         let mut queue = IoQueue {
-            admission: admission.clone(),
+            resources: resources.clone(),
             ring,
             file: Some(file),
             directory_lock: Some(directory_lock),
@@ -149,7 +150,7 @@ impl IoQueueHandle {
             sender: Some(sender),
             wake_fd,
             thread: Some(thread),
-            admission,
+            resources,
         })
     }
 
@@ -159,14 +160,14 @@ impl IoQueueHandle {
         length: usize,
     ) -> io::Result<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
         let request_permit = self
-            .admission
+            .resources
             .request_slots
             .clone()
             .acquire_owned()
             .await
             .map_err(|_| queue_stopped_error())?;
         let buffer_memory_permit = self
-            .admission
+            .resources
             .buffer_memory
             .clone()
             .acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
@@ -180,7 +181,7 @@ impl IoQueueHandle {
         length: usize,
         read_guards: Vec<DiskRegionReadGuard>,
     ) -> io::Result<AlignedIoBuffer> {
-        AlignedIoBuffer::new(length, read_guards, self.admission.buffer_pool(length))
+        AlignedIoBuffer::new(length, read_guards, self.resources.buffer_pool(length))
     }
 
     pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
@@ -200,13 +201,13 @@ impl IoQueueHandle {
         let length = DIRECT_IO_ALIGNMENT_BYTES;
         let offset = region.range().start;
         assert_eq!(region.range().end - offset, length as u64);
-        if self.admission.request_slots.is_closed() {
+        if self.resources.request_slots.is_closed() {
             return Err(queue_stopped_error());
         }
-        let Ok(request_permit) = self.admission.request_slots.clone().try_acquire_owned() else {
+        let Ok(request_permit) = self.resources.request_slots.clone().try_acquire_owned() else {
             return Ok(None);
         };
-        let Ok(buffer_permit) = self.admission.buffer_memory.clone().try_acquire_owned() else {
+        let Ok(buffer_permit) = self.resources.buffer_memory.clone().try_acquire_owned() else {
             return Ok(None);
         };
         let buffer = self.allocate_buffer(length, vec![region])?;
@@ -631,7 +632,7 @@ impl IoRequest {
 
 struct IoQueue {
     // Closes budgets on exit to release admission waiters.
-    admission: Arc<IoAdmissionBudgets>,
+    resources: Arc<IoQueueResources>,
     // Thread-owned kernel submission/completion queues; no cross-thread ring access.
     ring: IoUring,
     // Direct-I/O payload file; taken to retain ownership on abnormal exit.
@@ -771,8 +772,8 @@ impl IoQueue {
 
 impl Drop for IoQueue {
     fn drop(&mut self) {
-        self.admission.request_slots.close();
-        self.admission.buffer_memory.close();
+        self.resources.request_slots.close();
+        self.resources.buffer_memory.close();
         if self.active.iter().any(Option::is_some) {
             // An abnormal queue exit cannot prove the kernel has stopped using pointers.
             // Closing a ring may tear it down asynchronously. Leak only the bounded active

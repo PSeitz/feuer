@@ -173,7 +173,7 @@ impl TieredMemoryDiskCache {
                 .disk_write_queue
                 .enqueue_if_capacity(object_key, download, entry_id);
         } else {
-            self.state.disk_write_queue.record_redundant_admission();
+            self.state.disk_write_queue.record_already_in_memory();
         }
         #[cfg(not(target_os = "linux"))]
         let _ = entry_id;

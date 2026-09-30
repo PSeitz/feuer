@@ -84,8 +84,8 @@ impl DiskWriteQueue {
         self.metrics.record(DiskWriteQueueOutcome::AlreadyCovered);
     }
 
-    /// Records a download skipped because its memory admission was redundant.
-    pub(crate) fn record_redundant_admission(&self) {
+    /// Records a download skipped because memory already contains its range.
+    pub(crate) fn record_already_in_memory(&self) {
         self.metrics.record(DiskWriteQueueOutcome::Redundant);
     }
 

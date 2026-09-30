@@ -4,7 +4,7 @@ use bytes::Bytes;
 use feuer_storage::IoMetrics;
 
 #[test]
-fn queue_metrics_cover_admission_pressure_dequeue_and_cancellation() {
+fn queue_metrics_cover_enqueue_pressure_dequeue_and_cancellation() {
     let (registry, backend) = registry();
     let metrics = DiskWriteQueueMetrics::new(&backend);
     let memory = MemoryCache::new(1024);
@@ -69,7 +69,7 @@ fn queue_saturation_is_nonblocking_and_bounded_by_entries() {
 }
 
 #[tokio::test]
-async fn queued_eviction_and_readmission_cancel_old_writes_while_live_entries_batch_together() {
+async fn eviction_and_reinsertion_cancel_old_queued_writes_while_current_entries_batch_together() {
     let directory = tempfile::tempdir().unwrap();
     let memory = Arc::new(MemoryCache::new(4096));
     let disk = DiskRangeCache::open(directory.path(), 1 << 20, IoMetrics::noop())
