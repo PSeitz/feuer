@@ -126,7 +126,7 @@ fn v4_inventory_resets_generation() {
 }
 
 #[test]
-fn v5_inventory_resets_generation() {
+fn v6_inventory_resets_generation() {
     let directory = tempfile::tempdir().unwrap();
     let bounds = RecoveryBounds {
         generation: [1; 16],
@@ -134,7 +134,7 @@ fn v5_inventory_resets_generation() {
         ends: vec![CHUNK_BYTES],
     };
     let mut bytes = bounds.encode();
-    bytes[..8].copy_from_slice(b"FEUEND05");
+    bytes[..8].copy_from_slice(b"FEUEND06");
     let length = bytes.len() - 8;
     let checksum = XxHash64::oneshot(0, &bytes[..length]);
     bytes[length..].copy_from_slice(&checksum.to_le_bytes());
@@ -235,6 +235,47 @@ async fn incrementally_recovers_shared_chunks_and_multi_chunk_entries() {
 }
 
 #[tokio::test]
+async fn packed_records_cross_pages_and_corruption_rejects_the_shared_prefix() {
+    for corrupt in [false, true] {
+        let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+        let inputs: Vec<_> = (0..130).map(|i| (format!("small-{i}"), download(i, 1024))).collect();
+        assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
+        let (_, metadata) = entry_disk_ranges(&cache, "small-0").await;
+        assert!(metadata[0].end - metadata[0].start > METADATA_PAGE_BYTES as u64);
+        if corrupt {
+            cache
+                .disk
+                .file
+                .write_at(
+                    metadata[0].end - METADATA_PAGE_BYTES as u64,
+                    &Bytes::from(vec![0; METADATA_PAGE_BYTES]),
+                )
+                .await
+                .unwrap();
+        }
+        cache.insert("independent".to_owned(), download(0, 17)).await.unwrap();
+        cache.disk.save_recovery_ends().unwrap();
+        drop(cache);
+        let cache = DiskRangeCache::open(directory.path(), 2 * CHUNK_BYTES, IoMetrics::noop())
+            .await
+            .unwrap();
+        wait_for_recovery(&cache).await;
+        for (key, source) in &inputs {
+            if corrupt {
+                assert!(!cache.contains(key, source.downloaded_range()));
+            } else {
+                assert_eq!(cache.get(key, source.downloaded_range()).await.unwrap(), source.bytes());
+            }
+        }
+        assert!(cache.contains(&"independent".to_owned(), range(0, 17)));
+        assert_eq!(
+            cache.disk.shards[0].allocator.available_bytes(),
+            if corrupt { CHUNK_BYTES } else { 0 }
+        );
+    }
+}
+
+#[tokio::test]
 async fn recovers_metadata_larger_than_16_mib() {
     let capacity = 32 * CHUNK_BYTES;
     let (directory, cache) = open_test_cache(capacity).await;
@@ -320,7 +361,7 @@ async fn stale_ends_bound_recovery_and_new_writes_do_not_extend_the_scan() {
 async fn corrupt_payload_is_recovered_only_as_a_candidate_and_misses_on_read() {
     let (directory, cache) = open_test_cache(CHUNK_BYTES).await;
     cache.insert("object".to_owned(), download(0, 100)).await.unwrap();
-    let payload = entry_disk_ranges(&cache, "object").0[0].clone();
+    let payload = entry_disk_ranges(&cache, "object").await.0[0].clone();
     cache
         .disk
         .file
@@ -347,7 +388,7 @@ async fn torn_metadata_and_reused_multi_chunk_addresses_are_rejected() {
             .insert(key.clone(), download(0, 2 * CHUNK_BYTES as usize))
             .await
             .unwrap();
-        let (payload, metadata) = entry_disk_ranges(&cache, &key);
+        let (payload, metadata) = entry_disk_ranges(&cache, &key).await;
         if corrupt_metadata {
             cache
                 .disk
@@ -359,7 +400,10 @@ async fn torn_metadata_and_reused_multi_chunk_addresses_are_rejected() {
             // Reuse the beginning of an old multi-chunk allocation.
             cache.disk.shards[0].entry_index.lock().unwrap().remove(&key, 0);
             assert!(cache.insert("replacement".to_owned(), download(0, 100)).await.unwrap());
-            assert_eq!(entry_disk_ranges(&cache, "replacement").0[0].start, payload[0].start);
+            assert_eq!(
+                entry_disk_ranges(&cache, "replacement").await.0[0].start,
+                payload[0].start
+            );
         }
         cache.disk.save_recovery_ends().unwrap();
         drop(cache);
@@ -381,8 +425,7 @@ async fn allocation_header_and_entry_metadata_must_have_the_same_batch() {
         .unwrap();
     let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
     let mut contents = page[48..48 + page_format::CHUNK_METADATA_CONTENT_BYTES].to_vec();
-    assert_eq!(contents[0], 2); // The entry metadata starts immediately after the allocation header.
-    contents[48] ^= 1; // Valid page for a different batch, not just a checksum failure.
+    contents[16] ^= 1; // Valid page for a different batch, not just a checksum failure.
     let mut replaced = vec![0; METADATA_PAGE_BYTES];
     page_format::encode_page(
         &mut replaced,
@@ -416,9 +459,17 @@ async fn recovery_bounds_the_whole_run_before_claiming_it() {
     let cache = open_paused(directory.path(), 4 * CHUNK_BYTES).await;
     assert!(cache.disk.recover_chunk(0, 0, CHUNK_BYTES).await.is_none());
     let original = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
-    for count in [0u64, 1, u64::MAX] {
+    for (offset, value) in [
+        (32, 0u64),
+        (32, 1),
+        (32, u64::MAX),
+        (40, 0),
+        (40, 71),
+        (40, 3 * CHUNK_BYTES),
+        (40, u64::MAX),
+    ] {
         let mut contents = original[48..48 + page_format::CHUNK_METADATA_CONTENT_BYTES].to_vec();
-        contents[64..72].copy_from_slice(&count.to_le_bytes());
+        contents[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
         let mut page = vec![0; METADATA_PAGE_BYTES];
         page_format::encode_page(
             &mut page,

@@ -1,6 +1,7 @@
-//! Experimental v6 metadata pages. Payload has no page headers: its whole-entry checksum lives in entry metadata.
+//! Experimental v7 metadata pages. Variable-length entry records, with inline keys, are packed
+//! into consecutive pages before all payloads in an allocation. Records may cross page boundaries.
 //! All checksums are XXHash64 with seed zero, stored as little-endian u64s.
-//! Each entry metadata page carries the checksum of the complete entry metadata, including its key and payload address.
+//! Each record page carries the checksum of the complete packed metadata prefix.
 //! Page checksums additionally bind tag, address, ordinal, links and contents.
 //! Chunk metadata binds a cache generation and batch ID; completion is not persistence.
 
@@ -11,15 +12,15 @@ use twox_hash::XxHash64;
 use crate::allocation::DiskRegion;
 
 /// Size in bytes of a metadata page, including its header and padding.
-/// An entry's metadata may span multiple linked pages.
+/// Pages hold multiple records; large records continue into subsequent pages.
 pub(super) const METADATA_PAGE_BYTES: usize = 4096;
 const PAGE_HEADER_BYTES: usize = 48;
 pub(super) const PAGE_CONTENT_BYTES: usize = METADATA_PAGE_BYTES - PAGE_HEADER_BYTES;
-pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES06";
-pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX06";
-pub(super) const CHUNK_METADATA_CONTENT_BYTES: usize = 72;
+pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES07";
+pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX07";
+pub(super) const CHUNK_METADATA_CONTENT_BYTES: usize = 48;
 
-/// Content checksum covers complete entry metadata, or the chunk's bitmap and identities.
+/// Content checksum covers the packed records, or the allocation's identities and lengths.
 pub(super) fn encode_page(
     page: &mut [u8],
     page_tag: &[u8; 8],
@@ -65,7 +66,7 @@ pub(super) fn validate_page<'a>(
 }
 
 /// Content length, key length, object range, payload address and aligned length, checksum, full key, batch ID.
-/// All integers are little-endian u64s. Metadata pages are consecutive and precede the payload.
+/// All integers are little-endian u64s. Records are packed together before the allocation's payloads.
 /// The payload checksum covers exactly the entry bytes, excluding final alignment padding.
 pub(super) fn encode_entry_metadata(
     key: &str,

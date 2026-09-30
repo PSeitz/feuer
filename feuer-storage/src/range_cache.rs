@@ -85,10 +85,12 @@ struct DiskEntryIndex {
 /// One contiguous disk region's metadata and retained payload slices, before writing.
 struct UnwrittenRegion {
     region: DiskRegion,
-    // Ordered 4-KiB-aligned byte positions within the region; I/O zero-fills alignment padding.
+    // Header placeholder, then payload slices at 4-KiB-aligned offsets. Finalization inserts metadata pages.
     parts: Vec<(usize, Bytes)>,
     used_bytes: u64,
-    metadata_starts: EntryMetadataStartBitmap,
+    // Encoded record bytes, excluding page headers and padding.
+    metadata_bytes: usize,
+    entry_start: usize,
 }
 
 /// Entries and their chunk contents prepared for one shard's batch write.
@@ -97,19 +99,6 @@ struct UnwrittenShardBatch {
     batch_id: [u8; 16],
     regions: Vec<UnwrittenRegion>,
     entries: Vec<(ObjectKey, ObjectRangeDiskStorage)>,
-}
-
-/// Candidate entry metadata start positions within one chunk, encoded as a bitmap.
-#[derive(Default)]
-struct EntryMetadataStartBitmap {
-    bitmap: [u8; 32],
-}
-
-impl EntryMetadataStartBitmap {
-    fn insert(&mut self, offset_in_chunk: u64) {
-        let bit_index = (offset_in_chunk / METADATA_PAGE_BYTES as u64) as usize;
-        self.bitmap[bit_index / 8] |= 1 << (bit_index % 8);
-    }
 }
 
 /// Verified bytes or failure shared by concurrent reads of one stored entry.
@@ -647,54 +636,52 @@ impl UnwrittenShardBatch {
         let object_range = download.downloaded_range();
         let bytes = download.bytes();
         let aligned_payload_bytes = (bytes.len() as u64).next_multiple_of(PAYLOAD_ALIGNMENT_BYTES);
-        let metadata_bytes = metadata_storage_bytes(72 + key.len()).ok_or(u64::MAX)?;
-        let entry_bytes = metadata_bytes + aligned_payload_bytes;
-        let free_tail_bytes = self.regions.last().map_or(0, |region| {
-            if region.region.chunk_count() == 1 {
-                CHUNK_BYTES - region.used_bytes
-            } else {
-                0
-            }
+        let metadata_bytes = 72 + key.len();
+        let shares_chunk = self.regions.last().is_some_and(|region| {
+            region.region.chunk_count() == 1
+                && region.used_bytes
+                    + aligned_payload_bytes
+                    + metadata_storage_bytes(region.metadata_bytes + metadata_bytes).unwrap()
+                    - metadata_storage_bytes(region.metadata_bytes).unwrap()
+                    <= CHUNK_BYTES
         });
-        if entry_bytes > free_tail_bytes {
+        if !shares_chunk {
+            let entry_bytes = metadata_storage_bytes(metadata_bytes).ok_or(u64::MAX)? + aligned_payload_bytes;
             let count = (METADATA_PAGE_BYTES as u64 + entry_bytes).div_ceil(CHUNK_BYTES);
             let region = allocator.reserve_chunks(count).ok_or(count)?;
             self.regions.push(UnwrittenRegion {
                 region,
                 parts: vec![(0, Bytes::new())],
                 used_bytes: METADATA_PAGE_BYTES as u64,
-                metadata_starts: EntryMetadataStartBitmap::default(),
+                metadata_bytes: 0,
+                entry_start: self.entries.len(),
             });
         }
         let prepared = self.regions.last_mut().unwrap();
         let base = prepared.region.range().start;
-        let metadata_start = base + prepared.used_bytes;
-        let payload_start = metadata_start + metadata_bytes;
+        let metadata_growth = metadata_storage_bytes(prepared.metadata_bytes + metadata_bytes).unwrap()
+            - metadata_storage_bytes(prepared.metadata_bytes).unwrap();
+        // The prefix can grow until writing starts. Move payload addresses, not payload bytes.
+        if metadata_growth != 0 {
+            for (offset, _) in &mut prepared.parts[1..] {
+                *offset += metadata_growth as usize;
+            }
+            for (_, entry) in &mut self.entries[prepared.entry_start..] {
+                let payload = entry.payload_region.range();
+                entry.payload_region = prepared
+                    .region
+                    .slice(payload.start + metadata_growth..payload.end + metadata_growth);
+            }
+        }
+        prepared.metadata_bytes += metadata_bytes;
+        prepared.used_bytes += metadata_growth;
+        let payload_start = base + prepared.used_bytes;
         let payload_region = prepared
             .region
             .slice(payload_start..payload_start + aligned_payload_bytes);
-        prepared.metadata_starts.insert(prepared.used_bytes);
         let payload_checksum = XxHash64::oneshot(0, bytes);
-        let contents =
-            page_format::encode_entry_metadata(key, object_range, &payload_region, payload_checksum, &self.batch_id);
-        let content_checksum = XxHash64::oneshot(0, &contents);
-        for (ordinal, content) in contents.chunks(PAGE_CONTENT_BYTES).enumerate() {
-            let address = metadata_start + (ordinal * METADATA_PAGE_BYTES) as u64;
-            let next = address + METADATA_PAGE_BYTES as u64;
-            let mut page = vec![0; METADATA_PAGE_BYTES];
-            page_format::encode_page(
-                &mut page,
-                page_format::ENTRY_METADATA_PAGE_TAG,
-                content_checksum,
-                address,
-                ordinal as u64,
-                if next < payload_start { next } else { 0 },
-                content,
-            );
-            prepared.parts.push(((address - base) as usize, Bytes::from(page)));
-        }
         prepared.parts.push(((payload_start - base) as usize, bytes.clone()));
-        prepared.used_bytes += entry_bytes;
+        prepared.used_bytes += aligned_payload_bytes;
         self.entries.push((
             key.clone(),
             ObjectRangeDiskStorage {
@@ -723,12 +710,42 @@ impl UnwrittenShardBatch {
     ) -> Result<Vec<(ObjectKey, ObjectRangeDiskStorage)>, DiskRangeCacheError> {
         for prepared in &mut self.regions {
             let address = prepared.region.range().start;
+            let entry_end = prepared.entry_start + prepared.parts.len() - 1;
+            let mut metadata = Vec::with_capacity(prepared.metadata_bytes);
+            for (key, entry) in &self.entries[prepared.entry_start..entry_end] {
+                metadata.extend_from_slice(&page_format::encode_entry_metadata(
+                    key,
+                    entry.object_range,
+                    &entry.payload_region,
+                    entry.payload_checksum,
+                    &self.batch_id,
+                ));
+            }
+            let content_checksum = XxHash64::oneshot(0, &metadata);
+            let payload_start = address + METADATA_PAGE_BYTES as u64 + metadata_storage_bytes(metadata.len()).unwrap();
+            let mut metadata_parts = Vec::new();
+            for (ordinal, content) in metadata.chunks(PAGE_CONTENT_BYTES).enumerate() {
+                let offset = (ordinal + 1) * METADATA_PAGE_BYTES;
+                let next = address + offset as u64 + METADATA_PAGE_BYTES as u64;
+                let mut page = vec![0; METADATA_PAGE_BYTES];
+                page_format::encode_page(
+                    &mut page,
+                    page_format::ENTRY_METADATA_PAGE_TAG,
+                    content_checksum,
+                    address + offset as u64,
+                    ordinal as u64,
+                    if next < payload_start { next } else { 0 },
+                    content,
+                );
+                metadata_parts.push((offset, Bytes::from(page)));
+            }
+            prepared.parts.splice(1..1, metadata_parts);
             let mut page = vec![0; METADATA_PAGE_BYTES];
             let mut contents = [0; page_format::CHUNK_METADATA_CONTENT_BYTES];
-            contents[..32].copy_from_slice(&prepared.metadata_starts.bitmap);
-            contents[32..48].copy_from_slice(generation);
-            contents[48..64].copy_from_slice(&self.batch_id);
-            contents[64..72].copy_from_slice(&prepared.region.chunk_count().to_le_bytes());
+            contents[..16].copy_from_slice(generation);
+            contents[16..32].copy_from_slice(&self.batch_id);
+            contents[32..40].copy_from_slice(&prepared.region.chunk_count().to_le_bytes());
+            contents[40..48].copy_from_slice(&(metadata.len() as u64).to_le_bytes());
             page_format::encode_page(
                 &mut page,
                 page_format::CHUNK_METADATA_PAGE_TAG,

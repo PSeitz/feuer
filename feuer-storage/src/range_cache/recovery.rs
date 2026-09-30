@@ -11,7 +11,7 @@ use std::{
 
 use super::*;
 
-const BOUNDS_TAG: &[u8; 8] = b"FEUEND06";
+const BOUNDS_TAG: &[u8; 8] = b"FEUEND07";
 const BOUNDS_FILE: &str = "recovery-ends";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -279,29 +279,23 @@ impl DiskRangeCacheState {
                 .allocator
                 .reserve_for_recovery(address / CHUNK_BYTES, header.chunk_count)?;
         }
-        let mut occupied = Vec::<Range<u64>>::new();
-        for bit in 1..256 {
-            if header.bitmap[bit / 8] & (1 << (bit % 8)) == 0 {
-                continue;
-            }
-            let head = address + (bit * METADATA_PAGE_BYTES) as u64;
-            let Some(entry) = self.read_recovery_entry(shard_index, &region, &header, head).await else {
-                continue;
-            };
-            let RecoveredEntry {
-                key,
-                object_range,
-                checksum,
-                payload,
-                metadata,
-            } = entry;
-            // Shared-chunk candidates may not overlap one another's payload or metadata.
-            if [&payload, &metadata]
-                .iter()
-                .any(|range| occupied.iter().any(|used| overlaps(range, used)))
+        let metadata = self.read_metadata(&region, &header).await?;
+        let mut records = metadata.as_slice();
+        let mut payload_start = address + METADATA_PAGE_BYTES as u64 + metadata_storage_bytes(metadata.len())?;
+        while !records.is_empty() {
+            let length = usize::try_from(read_u64(records, 0)?).ok()?;
+            let (key, object_range, checksum, payload) =
+                decode_entry(records.get(..length)?, &header.batch_id, region.range())?;
+            // Payloads follow the shared metadata prefix and each other, without overlap or gaps.
+            if self.shard_index_for_key(&key) != shard_index
+                || payload.start != payload_start
+                || (header.chunk_count > 1
+                    && (length != metadata.len() || payload.end.next_multiple_of(CHUNK_BYTES) != region.range().end))
             {
-                continue;
+                return None;
             }
+            records = &records[length..];
+            payload_start = payload.end;
             let storage = ObjectRangeDiskStorage {
                 read_result: Weak::new(),
                 eviction_position: 0,
@@ -327,8 +321,6 @@ impl DiskRangeCacheState {
             // Our reservations survive publication and even concurrent eviction. Mark before releasing
             // them, so this scan cannot resurrect the copy after its final owner releases it.
             region.mark_recovered();
-            occupied.push(payload);
-            occupied.push(metadata);
         }
         Some(())
     }
@@ -345,8 +337,7 @@ impl DiskRangeCacheState {
             address / CHUNK_BYTES,
         )?;
         if next != 0
-            || contents[0] & 1 != 0
-            || contents[32..48] != self.recovery.generation
+            || contents[..16] != self.recovery.generation
             || XxHash64::oneshot(0, &contents[..page_format::CHUNK_METADATA_CONTENT_BYTES]) != checksum
             || contents[page_format::CHUNK_METADATA_CONTENT_BYTES..]
                 .iter()
@@ -354,103 +345,57 @@ impl DiskRangeCacheState {
         {
             return None;
         }
-        let chunk_count = read_u64(contents, 64)?;
-        if chunk_count == 0 || (chunk_count > 1 && (contents[0] != 2 || contents[1..32].iter().any(|&byte| byte != 0)))
-        {
+        let chunk_count = read_u64(contents, 32)?;
+        let metadata_bytes = usize::try_from(read_u64(contents, 40)?).ok()?;
+        let prefix_bytes = (METADATA_PAGE_BYTES as u64).checked_add(metadata_storage_bytes(metadata_bytes)?)?;
+        if chunk_count == 0 || metadata_bytes < 72 || prefix_bytes >= chunk_count.checked_mul(CHUNK_BYTES)? {
             return None;
         }
         Some(ChunkHeader {
-            bitmap: contents[..32].try_into().ok()?,
-            batch_id: contents[48..64].try_into().ok()?,
+            batch_id: contents[16..32].try_into().ok()?,
             chunk_count,
+            metadata_bytes,
         })
     }
 
-    async fn read_recovery_entry(
-        &self,
-        shard_index: usize,
-        region: &DiskRegion,
-        header: &ChunkHeader,
-        head: u64,
-    ) -> Option<RecoveredEntry> {
-        let bounds = region.range();
-        let mut ordinal = 0;
+    /// Reads and validates the allocation's packed records before publishing any entries.
+    async fn read_metadata(&self, region: &DiskRegion, header: &ChunkHeader) -> Option<Vec<u8>> {
         let mut contents = Vec::new();
-        let mut address = head;
         let mut checksum = None;
-        let mut content_length = 0;
-        loop {
-            if !valid_allocation(
-                &(address..address.checked_add(METADATA_PAGE_BYTES as u64)?),
-                bounds.clone(),
-            ) {
-                return None;
-            }
+        for ordinal in 0..header.metadata_bytes.div_ceil(PAGE_CONTENT_BYTES) {
+            let address = region.range().start + ((ordinal + 1) * METADATA_PAGE_BYTES) as u64;
             let page = self.file.read_recovery_page(region, address).await.ok()?;
             let checksum = *checksum.get_or_insert(read_u64(&page, 8)?);
-            let (next, bytes) =
-                page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG, checksum, address, ordinal)?;
-            if ordinal == 0 {
-                content_length = usize::try_from(read_u64(bytes, 0)?).ok()?;
-                if content_length < 72 || content_length as u64 > bounds.end - head {
-                    return None;
-                }
-            }
-            let take = (content_length - contents.len()).min(bytes.len());
+            let (next, bytes) = page_format::validate_page(
+                &page,
+                page_format::ENTRY_METADATA_PAGE_TAG,
+                checksum,
+                address,
+                ordinal as u64,
+            )?;
+            let take = (header.metadata_bytes - contents.len()).min(bytes.len());
             contents.extend_from_slice(&bytes[..take]);
-            ordinal += 1;
-            if contents.len() == content_length {
-                if next != 0
-                    || bytes[take..].iter().any(|&byte| byte != 0)
-                    || XxHash64::oneshot(0, &contents) != checksum
-                {
-                    return None;
-                }
-                break;
-            }
-            if next != address + METADATA_PAGE_BYTES as u64 {
+            let expected_next = if contents.len() == header.metadata_bytes {
+                0
+            } else {
+                address + METADATA_PAGE_BYTES as u64
+            };
+            if next != expected_next || bytes[take..].iter().any(|&byte| byte != 0) {
                 return None;
             }
-            address = next;
         }
-        let (key, object_range, checksum, payload) = decode_entry(&contents, &header.batch_id, bounds.clone())?;
-        let metadata = head..address + METADATA_PAGE_BYTES as u64;
-        if self.shard_index_for_key(&key) != shard_index
-            || payload.start != metadata.end
-            || (header.chunk_count > 1 && payload.end.next_multiple_of(CHUNK_BYTES) != bounds.end)
-        {
-            return None;
-        }
-        Some(RecoveredEntry {
-            key,
-            object_range,
-            checksum,
-            payload,
-            metadata,
-        })
+        (XxHash64::oneshot(0, &contents) == checksum?).then_some(contents)
     }
 }
 
 struct ChunkHeader {
-    bitmap: [u8; 32],
     batch_id: [u8; 16],
     chunk_count: u64,
-}
-
-struct RecoveredEntry {
-    key: ObjectKey,
-    object_range: ByteRange,
-    checksum: u64,
-    payload: Range<u64>,
-    metadata: Range<u64>,
+    metadata_bytes: usize,
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?))
-}
-
-fn overlaps(a: &Range<u64>, b: &Range<u64>) -> bool {
-    a.start < b.end && b.start < a.end
 }
 
 fn valid_allocation(range: &Range<u64>, bounds: Range<u64>) -> bool {

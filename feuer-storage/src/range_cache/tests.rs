@@ -33,28 +33,43 @@ pub(super) async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskRa
 }
 
 impl ObjectRangeDiskStorage {
-    // Metadata immediately precedes the payload; the format stores 72 fixed bytes plus the key.
-    fn metadata_range(&self, key: &str) -> std::ops::Range<u64> {
-        let end = self.payload_region.range().start;
-        end - metadata_storage_bytes(72 + key.len()).unwrap()..end
-    }
-
     fn single_chunk_start(&self) -> Option<u64> {
         (self.payload_region.chunk_count() == 1)
             .then_some(self.payload_region.range().start / CHUNK_BYTES * CHUNK_BYTES)
     }
 }
 
-pub(super) fn entry_disk_ranges(
+pub(super) async fn entry_disk_ranges(
     cache: &DiskRangeCache,
     key: &str,
 ) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
-    let index = cache.disk.shards[cache.disk.shard_index_for_key(key)]
-        .entry_index
-        .lock()
-        .unwrap();
-    let storage = index.ranges_by_key[key].first_key_value().unwrap().1;
-    (vec![storage.payload_region.range()], vec![storage.metadata_range(key)])
+    let payload = {
+        let index = cache.disk.shards[cache.disk.shard_index_for_key(key)]
+            .entry_index
+            .lock()
+            .unwrap();
+        index.ranges_by_key[key]
+            .first_key_value()
+            .unwrap()
+            .1
+            .payload_region
+            .range()
+    };
+    // Shared entries stay in one chunk; exclusive entries have only their own metadata prefix.
+    let chunk_start = (payload.start - metadata_storage_bytes(72 + key.len()).unwrap()) / CHUNK_BYTES * CHUNK_BYTES;
+    let header = cache.disk.file.read_at(chunk_start, METADATA_PAGE_BYTES).await.unwrap();
+    let (_, contents) = page_format::validate_page(
+        &header,
+        page_format::CHUNK_METADATA_PAGE_TAG,
+        u64::from_le_bytes(header[8..16].try_into().unwrap()),
+        chunk_start,
+        chunk_start / CHUNK_BYTES,
+    )
+    .unwrap();
+    let metadata_bytes = u64::from_le_bytes(contents[40..48].try_into().unwrap()) as usize;
+    let start = chunk_start + METADATA_PAGE_BYTES as u64;
+    let metadata = start..start + metadata_storage_bytes(metadata_bytes).unwrap();
+    (vec![payload], vec![metadata])
 }
 
 #[tokio::test]
@@ -103,14 +118,14 @@ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers()
             .unwrap(),
         lengths.len()
     );
-    let mut previous_end = METADATA_PAGE_BYTES as u64;
+    let mut previous_end = 2 * METADATA_PAGE_BYTES as u64;
     for length in [1, 1024, 4016, 4096, 4097, 3 * 4096 + 9] {
         let key = format!("entry-{length}");
         let source = download(17, length);
-        let (payload, entry_metadata) = entry_disk_ranges(&cache, &key);
+        let (payload, entry_metadata) = entry_disk_ranges(&cache, &key).await;
         assert_eq!(payload.len(), 1);
         let allocated = &payload[0];
-        assert!(allocated.start >= previous_end);
+        assert_eq!(allocated.start, previous_end);
         assert!(allocated.start.is_multiple_of(PAYLOAD_ALIGNMENT_BYTES));
         assert!(allocated.end <= CHUNK_BYTES);
         assert_eq!(
@@ -129,53 +144,37 @@ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers()
             cache.get(&key, source.downloaded_range()).await.unwrap(),
             source.bytes()
         );
-        assert_eq!(entry_metadata[0].end, allocated.start);
+        assert_eq!(
+            entry_metadata[0],
+            METADATA_PAGE_BYTES as u64..2 * METADATA_PAGE_BYTES as u64
+        );
         previous_end = allocated.end;
     }
 }
 
 #[tokio::test]
-async fn mixed_batch_groups_small_entries_and_records_every_metadata_start() {
+async fn mixed_batch_packs_small_entry_metadata_before_payloads() {
     let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     assert_eq!(cache.insert_batch(Vec::new()).await.unwrap(), 0);
     let mut inputs = vec![("large".to_owned(), download(0, CHUNK_BYTES as usize))];
     inputs.extend((0..130).map(|i| (format!("small-{i}"), download(i, 1024))));
     assert_eq!(cache.insert_batch(inputs).await.unwrap(), 131);
-    let large_start = entry_disk_ranges(&cache, "large").0[0].start;
-    let mut expected = BTreeMap::<u64, EntryMetadataStartBitmap>::new();
+    let large_start = entry_disk_ranges(&cache, "large").await.0[0].start;
+    let metadata_bytes: usize = (0..130).map(|i| 72 + format!("small-{i}").len()).sum();
+    let metadata_end = METADATA_PAGE_BYTES as u64 + metadata_storage_bytes(metadata_bytes).unwrap();
     for i in 0..130 {
         let key = format!("small-{i}");
         assert_eq!(
             cache.get(&key, range(i, i + 1024)).await.unwrap(),
             download(i, 1024).bytes()
         );
-        assert!(entry_disk_ranges(&cache, &key).0[0].start < large_start);
+        assert!(entry_disk_ranges(&cache, &key).await.0[0].start < large_start);
     }
-    {
-        let index = cache.disk.shards[0].entry_index.lock().unwrap();
-        for (key, entries) in &index.ranges_by_key {
-            for entry in entries.values() {
-                let address = entry.metadata_range(key).start;
-                expected
-                    .entry(address / CHUNK_BYTES * CHUNK_BYTES)
-                    .or_default()
-                    .insert(address % CHUNK_BYTES);
-            }
-        }
-    }
-    for (address, starts) in expected {
-        let page = cache.disk.file.read_at(address, METADATA_PAGE_BYTES).await.unwrap();
-        let (_, contents) = page_format::validate_page(
-            &page,
-            page_format::CHUNK_METADATA_PAGE_TAG,
-            u64::from_le_bytes(page[8..16].try_into().unwrap()),
-            address,
-            address / CHUNK_BYTES,
-        )
-        .unwrap();
-        assert_eq!(&contents[..32], &starts.bitmap);
-    }
-    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 0);
+    let (first_payload, metadata) = entry_disk_ranges(&cache, "small-0").await;
+    assert_eq!(metadata[0], METADATA_PAGE_BYTES as u64..metadata_end);
+    assert_eq!(first_payload[0].start, metadata_end);
+    assert_eq!(large_start, CHUNK_BYTES + 2 * METADATA_PAGE_BYTES as u64);
+    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), CHUNK_BYTES);
     assert_eq!(
         cache.get(&"large".to_owned(), range(0, CHUNK_BYTES)).await.unwrap(),
         download(0, CHUNK_BYTES as usize).bytes()
@@ -199,7 +198,8 @@ fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighb
     }
     let mut owners = BTreeMap::<u64, Vec<usize>>::new();
     for (entry_number, (key, entry)) in batch.entries.iter().enumerate() {
-        let first_chunk = entry.metadata_range(key).start / CHUNK_BYTES;
+        let first_chunk =
+            (entry.payload_region.range().start - metadata_storage_bytes(72 + key.len()).unwrap()) / CHUNK_BYTES;
         let end_chunk = entry.payload_region.range().end.div_ceil(CHUNK_BYTES);
         assert_eq!(entry.single_chunk_start().is_some(), end_chunk - first_chunk == 1);
         for chunk in first_chunk..end_chunk {
@@ -219,7 +219,7 @@ fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighb
 }
 
 #[test]
-fn metadata_must_fit_before_an_entry_can_share_a_chunk() {
+fn metadata_growth_must_fit_before_an_entry_can_share_a_chunk() {
     let allocator = DiskChunkAllocator::for_disk_range(0..2 * CHUNK_BYTES).unwrap();
     let mut batch = UnwrittenShardBatch::default();
     batch
@@ -229,13 +229,41 @@ fn metadata_must_fit_before_an_entry_can_share_a_chunk() {
             &download(0, CHUNK_BYTES as usize - 3 * METADATA_PAGE_BYTES),
         )
         .unwrap();
-    // The remaining page fits payload, but not its metadata. Both must go in a new chunk.
+    // The remaining page fits payload, but this key grows the shared prefix by another page.
     batch
-        .pack_download(&allocator, &"second".to_owned(), &download(0, 1))
+        .pack_download(&allocator, &"k".repeat(PAGE_CONTENT_BYTES), &download(0, 1))
         .unwrap();
     assert_eq!(batch.entries[0].1.single_chunk_start(), Some(0));
     assert_eq!(batch.entries[1].1.single_chunk_start(), Some(CHUNK_BYTES));
     assert_eq!(batch.regions[0].used_bytes, CHUNK_BYTES - METADATA_PAGE_BYTES as u64);
+}
+
+#[test]
+fn packed_metadata_reuses_page_space_and_failed_growth_leaves_addresses_unchanged() {
+    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
+    let mut batch = UnwrittenShardBatch::default();
+    batch
+        .pack_download(
+            &allocator,
+            &"first".to_owned(),
+            &download(0, CHUNK_BYTES as usize - 3 * METADATA_PAGE_BYTES),
+        )
+        .unwrap();
+    let payload = batch.entries[0].1.payload_region.range();
+    assert_eq!(
+        batch.pack_download(&allocator, &"k".repeat(PAGE_CONTENT_BYTES), &download(0, 1)),
+        Err(1)
+    );
+    assert_eq!(batch.entries.len(), 1);
+    assert_eq!(batch.entries[0].1.payload_region.range(), payload);
+    // A short record fits in the existing metadata page, so its payload can use the final page.
+    batch
+        .pack_download(&allocator, &"second".to_owned(), &download(0, 1))
+        .unwrap();
+    assert_eq!(batch.entries[0].1.payload_region.range(), payload);
+    assert_eq!(batch.entries[1].1.payload_region.range(), payload.end..CHUNK_BYTES);
+    assert_eq!(batch.regions[0].used_bytes, CHUNK_BYTES);
+    assert_eq!(batch.chunk_count(), 1);
 }
 
 #[tokio::test]
@@ -561,7 +589,7 @@ async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk_or_its_entry_met
             .unwrap(),
         2
     );
-    let (payload, _) = entry_disk_ranges(&cache, &key);
+    let (payload, _) = entry_disk_ranges(&cache, &key).await;
     assert_eq!(payload[0].end - payload[0].start, PAYLOAD_ALIGNMENT_BYTES);
     // A read reaching beyond this entry's alignment boundary would now fail with short I/O.
     std::fs::OpenOptions::new()
@@ -582,7 +610,7 @@ async fn alignment_padding_is_not_part_of_the_entry_checksum() {
     let key = "small entry".to_owned();
     let source = download(3, 1024);
     cache.insert(key.clone(), source.clone()).await.unwrap();
-    let (payload, _) = entry_disk_ranges(&cache, &key);
+    let (payload, _) = entry_disk_ranges(&cache, &key).await;
     let address = payload[0].start;
     let mut bytes = cache
         .disk
@@ -643,7 +671,7 @@ async fn multi_chunk_payload_has_no_metadata_gaps() {
     let key = "contiguous".to_owned();
     let source = download(100, 2 * CHUNK_BYTES as usize + 17);
     assert!(cache.insert(key.clone(), source.clone()).await.unwrap());
-    let (payload, metadata) = entry_disk_ranges(&cache, &key);
+    let (payload, metadata) = entry_disk_ranges(&cache, &key).await;
     assert_eq!(payload.len(), 1);
     assert_eq!(metadata[0].end, payload[0].start);
     // Read the disk bytes directly across physical chunk boundaries: no assembly or skipped headers.
@@ -706,29 +734,13 @@ async fn partial_overlaps_coexist_without_assembly_and_a_covering_range_replaces
     assert_eq!(cache.get(&key, range(10, 40)).await.unwrap(), download(10, 30).bytes());
 }
 
-#[test]
-fn entry_metadata_starts_preserve_bitmap_encoding() {
-    let mut starts = EntryMetadataStartBitmap::default();
-    assert_eq!(starts.bitmap, [0; 32]);
-    for slot in [1, 7, 8, 63, 64, 255, 1] {
-        starts.insert(slot * METADATA_PAGE_BYTES as u64);
-    }
-    let mut expected = [0; 32];
-    expected[0] = 0b1000_0010;
-    expected[1] = 1;
-    expected[7] = 0b1000_0000;
-    expected[8] = 1;
-    expected[31] = 0b1000_0000;
-    assert_eq!(starts.bitmap, expected);
-}
-
 #[tokio::test]
 async fn writes_full_key_range_and_payload_address_in_linked_entry_metadata() {
     let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     let key = "long immutable key/".repeat(700);
     let source = download(17, (CHUNK_BYTES + 7) as usize);
     assert!(cache.insert(key.clone(), source.clone()).await.unwrap());
-    let (payload, entry_metadata) = entry_disk_ranges(&cache, &key);
+    let (payload, entry_metadata) = entry_disk_ranges(&cache, &key).await;
     let entry_metadata_start_address = entry_metadata[0].start;
     let chunk_address = entry_metadata_start_address / CHUNK_BYTES * CHUNK_BYTES;
     let chunk_metadata_page = cache
@@ -737,23 +749,25 @@ async fn writes_full_key_range_and_payload_address_in_linked_entry_metadata() {
         .read_at(chunk_address, METADATA_PAGE_BYTES)
         .await
         .unwrap();
-    let bitmap_checksum = u64::from_le_bytes(chunk_metadata_page[8..16].try_into().unwrap());
-    let (next_entry_metadata_page_address, entry_metadata_starts) = page_format::validate_page(
+    let header_checksum = u64::from_le_bytes(chunk_metadata_page[8..16].try_into().unwrap());
+    let (next_entry_metadata_page_address, contents) = page_format::validate_page(
         &chunk_metadata_page,
         page_format::CHUNK_METADATA_PAGE_TAG,
-        bitmap_checksum,
+        header_checksum,
         chunk_address,
         chunk_address / CHUNK_BYTES,
     )
     .unwrap();
     assert_eq!(next_entry_metadata_page_address, 0);
-    let bit_index = ((entry_metadata_start_address - chunk_address) / METADATA_PAGE_BYTES as u64) as usize;
     assert_eq!(
-        XxHash64::oneshot(0, &entry_metadata_starts[..page_format::CHUNK_METADATA_CONTENT_BYTES]),
-        bitmap_checksum
+        XxHash64::oneshot(0, &contents[..page_format::CHUNK_METADATA_CONTENT_BYTES]),
+        header_checksum
     );
-    assert_ne!(entry_metadata_starts[bit_index / 8] & (1 << (bit_index % 8)), 0);
-    assert_eq!(entry_metadata_starts[0] & 1, 0);
+    assert_eq!(u64::from_le_bytes(contents[32..40].try_into().unwrap()), 2);
+    assert_eq!(
+        u64::from_le_bytes(contents[40..48].try_into().unwrap()) as usize,
+        72 + key.len()
+    );
     let head = cache
         .disk
         .file
@@ -829,7 +843,7 @@ async fn metadata_only_chunks_remain_owned_until_the_entry_is_removed() {
     let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
     let key = "k".repeat(CHUNK_BYTES as usize);
     assert!(cache.insert(key.clone(), download(0, 1)).await.unwrap());
-    let (payload, metadata) = entry_disk_ranges(&cache, &key);
+    let (payload, metadata) = entry_disk_ranges(&cache, &key).await;
     assert_eq!(payload.len(), 1);
     assert_eq!(metadata.len(), 1);
     assert!(metadata[0].end - metadata[0].start > CHUNK_BYTES);
@@ -1031,7 +1045,7 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
         let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
         let key = "object".to_owned();
         cache.insert(key.clone(), download(3, 50)).await.unwrap();
-        let (payload, _) = entry_disk_ranges(&cache, &key);
+        let (payload, _) = entry_disk_ranges(&cache, &key).await;
         let address = payload[0].start;
         let mut bytes = cache
             .disk
@@ -1044,7 +1058,7 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
             // Another valid entry's payload must not match this entry metadata's expected checksum.
             let other = "other object".to_owned();
             cache.insert(other.clone(), download(100, 50)).await.unwrap();
-            let (other_payload, _) = entry_disk_ranges(&cache, &other);
+            let (other_payload, _) = entry_disk_ranges(&cache, &other).await;
             bytes = cache
                 .disk
                 .file
@@ -1150,7 +1164,7 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
     let key = "large object".to_owned();
     let source = download(3, 100 * CHUNK_BYTES as usize + 17);
     assert!(cache.insert(key.clone(), source.clone()).await.unwrap());
-    let boundary = 3 + CHUNK_BYTES - entry_disk_ranges(&cache, &key).0[0].start;
+    let boundary = 3 + CHUNK_BYTES - entry_disk_ranges(&cache, &key).await.0[0].start;
     for request in [
         source.downloaded_range(),
         range(7, 33),
@@ -1164,7 +1178,7 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
                 .slice((request.start() - 3) as usize..(request.end() - 3) as usize)
         );
     }
-    let (payload, _) = entry_disk_ranges(&cache, &key);
+    let (payload, _) = entry_disk_ranges(&cache, &key).await;
     let last_aligned_offset = payload.last().unwrap().end - PAYLOAD_ALIGNMENT_BYTES;
     cache
         .disk
@@ -1198,8 +1212,8 @@ async fn shards_are_disjoint_and_recover_independently() {
             .unwrap(),
         2
     );
-    let first = entry_disk_ranges(&cache, &keys[0]).0;
-    let second = entry_disk_ranges(&cache, &keys[1]).0;
+    let first = entry_disk_ranges(&cache, &keys[0]).await.0;
+    let second = entry_disk_ranges(&cache, &keys[1]).await.0;
     assert!(first.last().unwrap().end <= 128 * CHUNK_BYTES);
     assert!(second[0].start >= 128 * CHUNK_BYTES);
     let returned = cache.get(&keys[0], range(0, 100)).await.unwrap();

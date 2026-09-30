@@ -10,9 +10,10 @@ incrementally while ordinary reads and writes continue.
 
 - The file contains 1-MiB chunks. Each allocation reserves one consecutive run of whole chunks
   and starts with one 4-KiB metadata page. Continuation chunks have no headers.
-- Each payload is one uninterrupted, 4-KiB-aligned disk byte range. Entry metadata precedes it;
-  no metadata is inserted at payload chunk boundaries. Only metadata uses 4-KiB pages.
-  Each entry requires at least one metadata page. Entries do not share metadata pages.
+- Variable-length entry records, with inline keys, are packed into shared 4-KiB metadata pages
+  immediately after the allocation header. Records may cross page boundaries.
+- All payloads follow this metadata prefix. Each payload is one uninterrupted, 4-KiB-aligned disk
+  byte range; no metadata is inserted between payloads or at payload chunk boundaries.
 - Small entries share a chunk only when each entry's complete payload and metadata fit inside it.
   Multi-chunk entries own all their chunks exclusively, including unused tails.
 - Written chunks are immutable. The entire allocation becomes reusable only after all entry owners and
@@ -27,7 +28,8 @@ Free capacity in another shard cannot satisfy an admission. No metadata lock is 
 
 `insert_batch` accepts explicit `(ObjectKey, Download)` pairs and returns the number published.
 Within each shard, entries are sorted smallest first and packed into complete chunk buffers.
-Payload, metadata, metadata-start bitmaps, and zero padding are finalized before each chunk's single write.
+Payload addresses, packed metadata, and zero padding are finalized before each chunk's single write.
+Growing the metadata prefix during packing shifts payload addresses without copying retained payload bytes.
 Partially filled chunks are written too. Later batches cannot append. The public tier supplies bounded
 batches from its background worker. Storage itself adds no batching delay.
 
@@ -69,17 +71,16 @@ for readers or writers. There is no relocation or cleaning.
 
 ## Metadata and recovery
 
-`src/range_cache/page_format.rs` defines the experimental v6 format. All on-disk checksums use
+`src/range_cache/page_format.rs` defines the experimental v7 format. All on-disk checksums use
 XXHash64 with seed zero, stored as 8-byte little-endian integers. Metadata page headers are 48 bytes;
-entry metadata uses 72 bytes plus the key. Opening an older cache resets its generation rather than
-recovering the old format. Consecutive entry metadata pages store the full key, object range, one payload
-address and aligned length, payload checksum, and batch ID. Each page has a checksum, and each chain
-carries a checksum of the complete entry metadata. The allocation's first chunk metadata page records
-the cache generation, batch ID, and consecutive chunk count.
+each entry record uses 72 bytes plus its inline key. Opening an older cache resets its generation rather
+than recovering the old format. Records store the full key, object range, one payload address and aligned
+length, payload checksum, and batch ID. Each page has a checksum and carries the checksum of the complete
+packed metadata prefix. Corruption in the prefix rejects its allocation during recovery.
 
-The allocation header contains a bitmap of entry metadata starts within its first chunk. These are
-recovery candidates, not live-entry or free-space bits. Removal does not update the bitmap.
-Whole-chunk reuse replaces it.
+The allocation header records the cache generation, batch ID, consecutive chunk count, and packed record
+byte length, excluding page headers and padding. Recovery reads the prefix and scans records sequentially;
+there is no entry-start bitmap. Removal does not modify metadata. Whole-chunk reuse replaces it.
 
 `recovery-ends` is a small checksummed file containing the layout, cache generation, and one scan end
 per shard. Growing ends are checkpointed by atomic replacement every ten seconds; stale ends may omit
@@ -92,7 +93,7 @@ synchronization or final checkpoint on close is promised.
 
 The allocator records chunks claimed during recovery, even if their owners later release them. New writes
 may claim unscanned chunks immediately. Recovery reserves only chunks being inspected, validates their
-metadata chains, generation, batch IDs, the payload range, and ownership, then publishes without displacing indexed
+packed metadata, generation, batch IDs, sequential payload ranges, and ownership, then publishes without displacing indexed
 ranges. Shared-chunk entries retain shared ownership; multi-chunk entries reserve their complete contiguous run.
 Inspection alone does not permanently claim a chunk. These temporary claim bitmaps disappear after the scan.
 
