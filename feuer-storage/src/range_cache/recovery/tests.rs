@@ -197,6 +197,22 @@ async fn incrementally_recovers_shared_chunks_and_multi_chunk_entries() {
 }
 
 #[tokio::test]
+async fn recovers_metadata_larger_than_16_mib() {
+    let capacity = 32 * CHUNK_BYTES;
+    let (directory, cache) = open_test_cache(capacity).await;
+    let key = "k".repeat(16 * 1024 * 1024 + 1);
+    let source = download(0, 100);
+    assert!(cache.insert(key.clone(), source.clone()).await.unwrap());
+    cache.disk.save_recovery_ends().unwrap();
+    drop(cache);
+
+    let cache = open_paused(directory.path(), capacity).await;
+    let end = cache.disk.shards[0].written_end.load(Ordering::Relaxed);
+    cache.disk.recover_chunk(0, 0, end).await;
+    assert_eq!(cache.get(&key, source.downloaded_range()).await.unwrap(), source.bytes());
+}
+
+#[tokio::test]
 async fn writes_can_win_before_scanning_and_recovery_does_not_resurrect_freed_entries() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
     cache.insert("old".to_owned(), download(0, 100)).await.unwrap();

@@ -14,9 +14,6 @@ use super::*;
 const BOUNDS_TAG: &[u8; 8] = b"FEUEND04";
 const BOUNDS_FILE: &str = "recovery-ends";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
-// Malformed metadata must not turn recovery into an unbounded allocation or chain walk.
-// Larger metadata is legal to write but may be skipped by best-effort recovery.
-const MAX_RECOVERY_METADATA_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) struct RecoveryState {
     path: PathBuf,
@@ -418,7 +415,7 @@ impl DiskRangeCacheState {
             )?;
             if metadata.is_empty() {
                 content_length = usize::try_from(integer(bytes, 0)?).ok()?;
-                if !(88..=MAX_RECOVERY_METADATA_BYTES).contains(&content_length) {
+                if content_length < 88 {
                     return None;
                 }
             }

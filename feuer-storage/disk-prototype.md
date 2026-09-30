@@ -90,7 +90,6 @@ may claim unscanned chunks immediately. Recovery reserves only chunks being insp
 metadata chains, generation, batch IDs, mappings, and ownership, then publishes without displacing indexed
 ranges. Shared-chunk entries retain shared ownership; multi-chunk entries reserve every chunk exclusively.
 Inspection alone does not permanently claim a chunk. These temporary claim bitmaps disappear after the scan.
-Metadata chains larger than 16 MiB are skipped to bound decoder memory and work.
 
 The scan issues one 4-KiB read at a time. It retries admission rather than queueing ahead of foreground
 waiters, and pending foreground requests precede pending scan requests. Index locks never span scan I/O.
