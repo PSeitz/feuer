@@ -69,10 +69,10 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
 ### Raw direct I/O
 
 - Reads and writes have separate request channels, pending queues, active slots, rings, and worker threads.
-  Each queue overlaps up to 64 operations in arrival order and wakes for new requests while I/O is outstanding,
+  The queues overlap up to 64 reads and 8 writes and wake for new requests while I/O is outstanding,
   without busy polling or registered buffers.
-- Read and write admission each reserve up to 64 requests and 64 MiB of aligned I/O buffers. Chunks are at most
-  1 MiB. Caller inputs and read-result allocations are outside the combined 128-MiB I/O buffer memory budget.
+- Request slots cover preparing, queued, and active I/O. Each request transfers at most 1 MiB.
+  These limits do not bound caller inputs or full read-result allocations; there is no buffer-memory semaphore.
 - Reads accept arbitrary byte ranges. Write offsets and lengths must be multiples of 4 KiB, enforced by
   assertions. The driver performs no read-modify-write or overlap checks: the upper layer must supply
   complete aligned blocks and prevent conflicting access across physical byte ranges rounded outward

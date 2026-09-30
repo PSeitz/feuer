@@ -7,12 +7,6 @@ type IoResultReceiver = oneshot::Receiver<io::Result<IoBuffers>>;
 fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) -> (IoRequest, IoResultReceiver) {
     let (reply, receive) = oneshot::channel();
     let request_permit = queue.resources.request_slots.clone().try_acquire_owned().unwrap();
-    let buffer_memory_permit = queue
-        .resources
-        .buffer_memory
-        .clone()
-        .try_acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
-        .unwrap();
     let buffers = if operation == IoOperation::Write {
         let mut buffer = AlignedIoBuffer::allocate_zeroed(length).unwrap();
         buffer.as_mut_slice().fill(0x99);
@@ -25,13 +19,7 @@ fn request(queue: &IoQueue, operation: IoOperation, offset: u64, length: usize) 
         IoBuffers::Read(AlignedIoBuffer::new(length, Vec::new(), queue.resources.buffer_pool(length)).unwrap())
     };
     (
-        IoRequest::new(
-            offset,
-            buffers,
-            0..length,
-            reply,
-            (request_permit, buffer_memory_permit),
-        ),
+        IoRequest::new(offset, buffers, 0..length, reply, request_permit),
         receive,
     )
 }
@@ -418,16 +406,12 @@ fn full_ring_does_not_block_the_other_direction() {
         for queue in [&full_queue, &other_queue] {
             assert!(queue.active.iter().all(Option::is_none));
             assert_eq!(queue.resources.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
-            assert_eq!(
-                queue.resources.buffer_memory.available_permits(),
-                MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
-            );
         }
     }
 }
 
 #[test]
-fn exhausted_write_request_slots_and_buffer_permits_leave_read_capacity() {
+fn exhausted_write_request_slots_leave_read_capacity() {
     let write_queue = queue();
     let read_queue = queue();
     let mut writes = Vec::new();
@@ -436,24 +420,18 @@ fn exhausted_write_request_slots_and_buffer_permits_leave_read_capacity() {
         writes.push(request(&write_queue, IoOperation::Write, 0, MAX_IO_CHUNK_BYTES));
     }
     assert_eq!(write_queue.resources.request_slots.available_permits(), 0);
-    assert_eq!(write_queue.resources.buffer_memory.available_permits(), 0);
     for _ in 0..MAX_IN_FLIGHT_READS {
         reads.push(request(&read_queue, IoOperation::Read, 0, MAX_IO_CHUNK_BYTES));
     }
     assert_eq!(read_queue.resources.request_slots.available_permits(), 0);
-    assert_eq!(read_queue.resources.buffer_memory.available_permits(), 0);
     drop((reads, writes));
     for queue in [&read_queue, &write_queue] {
         assert_eq!(queue.resources.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
-        assert_eq!(
-            queue.resources.buffer_memory.available_permits(),
-            MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
-        );
     }
 }
 
 #[tokio::test]
-async fn reads_progress_with_write_resources_exhausted_and_after_write_shutdown() {
+async fn reads_progress_with_write_request_slots_exhausted_and_after_write_shutdown() {
     let queue = queue();
     let file = queue.file.as_ref().unwrap();
     let lock = queue.directory_lock.as_ref().unwrap();
@@ -475,13 +453,6 @@ async fn reads_progress_with_write_resources_exhausted_and_after_write_shutdown(
         .request_slots
         .clone()
         .acquire_many_owned(MAX_IN_FLIGHT_WRITES as u32)
-        .await
-        .unwrap();
-    let _buffer_memory = write_queue
-        .resources
-        .buffer_memory
-        .clone()
-        .acquire_many_owned((MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES) as u32)
         .await
         .unwrap();
     let bytes = tokio::time::timeout(
@@ -524,17 +495,9 @@ fn canceled_submitted_write_retains_resources() {
         queue.resources.request_slots.available_permits(),
         MAX_IN_FLIGHT_READS - 1
     );
-    assert_eq!(
-        queue.resources.buffer_memory.available_permits(),
-        MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES - 1
-    );
     queue.process_requests_until_disconnected().unwrap();
     assert!(queue.active.iter().all(Option::is_none));
     assert_eq!(queue.resources.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
-    assert_eq!(
-        queue.resources.buffer_memory.available_permits(),
-        MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
-    );
 
     assert_eq!(allocator.available_bytes(), MAX_IO_CHUNK_BYTES as u64);
 
@@ -573,7 +536,7 @@ fn foreground_reads_are_submitted_before_queued_recovery_reads() {
 }
 
 #[tokio::test]
-async fn recovery_skips_read_without_request_slot_or_buffer_permit() {
+async fn recovery_skips_read_without_request_slot() {
     let queue = queue();
     let handle = IoQueueHandle::new(
         queue.file.as_ref().unwrap().clone(),
@@ -585,29 +548,29 @@ async fn recovery_skips_read_without_request_slot_or_buffer_permit() {
     let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
     let page = chunk.slice(0..DIRECT_IO_ALIGNMENT_BYTES as u64);
-    for budget in [&handle.resources.request_slots, &handle.resources.buffer_memory] {
-        let permits = budget
-            .clone()
-            .acquire_many_owned(budget.available_permits() as u32)
-            .await
-            .unwrap();
-        let read = handle.try_read_recovery_page(page.read_guard());
-        let result = tokio::time::timeout(std::time::Duration::from_secs(1), read)
-            .await
+    let request_slots = handle
+        .resources
+        .request_slots
+        .clone()
+        .acquire_many_owned(MAX_IN_FLIGHT_READS as u32)
+        .await
+        .unwrap();
+    let read = handle.try_read_recovery_page(page.read_guard());
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), read)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_none());
+    assert!(
+        handle
+            .resources
+            .buffer_pool(DIRECT_IO_ALIGNMENT_BYTES)
+            .lock()
             .unwrap()
-            .unwrap();
-        assert!(result.is_none());
-        assert!(
-            handle
-                .resources
-                .buffer_pool(DIRECT_IO_ALIGNMENT_BYTES)
-                .lock()
-                .unwrap()
-                .by_length
-                .is_empty()
-        );
-        drop(permits);
-    }
+            .by_length
+            .is_empty()
+    );
+    drop(request_slots);
     assert!(
         handle
             .try_read_recovery_page(page.read_guard())
@@ -646,10 +609,6 @@ fn finished_read_transfers_buffer_ownership() {
     assert_eq!(bytes.as_ptr(), ptr);
     assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
     assert_eq!(queue.resources.request_slots.available_permits(), MAX_IN_FLIGHT_READS);
-    assert_eq!(
-        queue.resources.buffer_memory.available_permits(),
-        MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES
-    );
 
     let slice = bytes.slice(1..);
     drop(bytes);

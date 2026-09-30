@@ -38,7 +38,7 @@ struct DataFileState {
 /// up to 64 reads and 8 writes. Foreground reads precede pending recovery reads;
 /// otherwise queues schedule in arrival order without checking for conflicts.
 /// Submission order does not guarantee completion order.
-/// Each queue budgets 64 MiB of active I/O slices.
+/// Each I/O request transfers at most 1 MiB. Request limits do not bound full read-result allocations.
 ///
 /// # Caller-owned concurrency and cancellation
 ///

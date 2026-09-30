@@ -35,10 +35,6 @@ const MAX_IN_FLIGHT_READS: usize = 64;
 // throughput, but raised write p99 from 4.6 to 47 ms and worsened small-read latency.
 // See benchmarks/ssd/uring-20260928/REPORT.md.
 const MAX_IN_FLIGHT_WRITES: usize = 8;
-// Per-queue I/O buffer memory budget: 64 full-size aligned buffers.
-// Caller inputs, caller-provided read destinations, and completed results are
-// outside this budget. A read into an existing buffer charges only its I/O slice.
-const MAX_IO_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 // Read-queue idle allocations, separate from active I/O and caller-owned results.
 // Read once on first use; zero disables retention for that size class.
 static IDLE_IO_BUFFER_CAPACITIES: LazyLock<[usize; 3]> = LazyLock::new(|| {
@@ -65,17 +61,14 @@ pub(crate) struct IoQueueHandle {
     wake_fd: Arc<OwnedFd>,
     // Queue thread; taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
-    // Request slots, buffer-memory permits, and reusable buffers for this queue.
+    // Request slots and reusable buffers for this queue.
     resources: Arc<IoQueueResources>,
 }
 
-/// Request slots, buffer-memory permits, and reusable buffers for an I/O queue.
+/// Request slots and reusable buffers for an I/O queue.
 struct IoQueueResources {
     // Limit covering preparing, queued, and active requests.
     request_slots: Arc<Semaphore>,
-    // Aligned I/O buffer memory budget: each permit covers 4 KiB.
-    // Acquired before allocating the buffer.
-    buffer_memory: Arc<Semaphore>,
     // Writes retain input slices or use unpooled scratch buffers.
     idle_buffers: Option<[Arc<Mutex<IdleIoBuffers>>; 3]>,
 }
@@ -84,7 +77,6 @@ impl IoQueueResources {
     fn new(max_in_flight: usize, operation: IoOperation, metrics: &IoMetrics) -> Self {
         Self {
             request_slots: Arc::new(Semaphore::new(max_in_flight)),
-            buffer_memory: Arc::new(Semaphore::new(MAX_IO_BUFFER_BYTES / DIRECT_IO_ALIGNMENT_BYTES)),
             idle_buffers: (operation == IoOperation::Read).then(|| {
                 std::array::from_fn(|pool_index| {
                     Arc::new(Mutex::new(IdleIoBuffers::new(
@@ -154,26 +146,14 @@ impl IoQueueHandle {
         })
     }
 
-    /// Acquires a request slot and buffer-memory permits before preparing or queueing I/O.
-    async fn acquire_request_and_buffer_permits(
-        &self,
-        length: usize,
-    ) -> io::Result<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
-        let request_permit = self
-            .resources
+    /// Acquires a request slot before preparing or queueing I/O.
+    async fn acquire_request_slot(&self) -> io::Result<OwnedSemaphorePermit> {
+        self.resources
             .request_slots
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| queue_stopped_error())?;
-        let buffer_memory_permit = self
-            .resources
-            .buffer_memory
-            .clone()
-            .acquire_many_owned((length / DIRECT_IO_ALIGNMENT_BYTES) as u32)
-            .await
-            .map_err(|_| queue_stopped_error())?;
-        Ok((request_permit, buffer_memory_permit))
+            .map_err(|_| queue_stopped_error())
     }
 
     pub(crate) fn allocate_buffer(
@@ -186,17 +166,17 @@ impl IoQueueHandle {
 
     pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
         assert_eq!(self.operation, IoOperation::Read);
-        let permits = self.acquire_request_and_buffer_permits(length).await?;
+        let request_permit = self.acquire_request_slot().await?;
         let buffer = self.allocate_buffer(length, Vec::new())?;
         Ok(self
-            .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permits)
+            .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, request_permit)
             .await?
             .into_read()
             .into_bytes())
     }
 
     /// One low-priority metadata read. Never joins the foreground admission waiters or allocates
-    /// a buffer without permits. The scanner retries later when foreground traffic owns the budget.
+    /// a buffer without a request slot. The scanner retries later when foreground traffic owns all slots.
     pub(crate) async fn try_read_recovery_page(&self, region: DiskRegionReadGuard) -> io::Result<Option<Bytes>> {
         let length = DIRECT_IO_ALIGNMENT_BYTES;
         let offset = region.range().start;
@@ -207,18 +187,9 @@ impl IoQueueHandle {
         let Ok(request_permit) = self.resources.request_slots.clone().try_acquire_owned() else {
             return Ok(None);
         };
-        let Ok(buffer_permit) = self.resources.buffer_memory.clone().try_acquire_owned() else {
-            return Ok(None);
-        };
         let buffer = self.allocate_buffer(length, vec![region])?;
         let (reply, receive) = oneshot::channel();
-        let mut request = IoRequest::new(
-            offset,
-            IoBuffers::Read(buffer),
-            0..length,
-            reply,
-            (request_permit, buffer_permit),
-        );
+        let mut request = IoRequest::new(offset, IoBuffers::Read(buffer), 0..length, reply, request_permit);
         request.recovery = true;
         self.sender
             .as_ref()
@@ -247,9 +218,9 @@ impl IoQueueHandle {
         assert_eq!(self.operation, IoOperation::Write);
         assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
-        let permits = self.acquire_request_and_buffer_permits(length).await?;
+        let request_permit = self.acquire_request_slot().await?;
         let buffers = IoBuffers::from_write_parts(length, parts, region)?;
-        self.submit_and_wait(offset, buffers, 0..length, permits).await?;
+        self.submit_and_wait(offset, buffers, 0..length, request_permit).await?;
         Ok(())
     }
 
@@ -261,9 +232,9 @@ impl IoQueueHandle {
         destination: Range<usize>,
     ) -> io::Result<AlignedIoBuffer> {
         assert_eq!(self.operation, IoOperation::Read);
-        let permits = self.acquire_request_and_buffer_permits(destination.len()).await?;
+        let request_permit = self.acquire_request_slot().await?;
         Ok(self
-            .submit_and_wait(offset, IoBuffers::Read(buffer), destination, permits)
+            .submit_and_wait(offset, IoBuffers::Read(buffer), destination, request_permit)
             .await?
             .into_read())
     }
@@ -274,10 +245,10 @@ impl IoQueueHandle {
         offset: u64,
         buffers: IoBuffers,
         destination: Range<usize>,
-        permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
+        request_permit: OwnedSemaphorePermit,
     ) -> io::Result<IoBuffers> {
         let (result_sender, result_receiver) = oneshot::channel();
-        let request = IoRequest::new(offset, buffers, destination, result_sender, permits);
+        let request = IoRequest::new(offset, buffers, destination, result_sender, request_permit);
         // All queued + active requests hold a permit, so this cannot wait for space.
         self.sender
             .as_ref()
@@ -529,7 +500,7 @@ impl IoBuffers {
 // immutable Bytes. Moving either does not move payload memory. Only the queue submits them.
 unsafe impl Send for IoBuffers {}
 
-/// One admitted I/O request, owning its buffers and permits through completion.
+/// One admitted I/O request, owning its buffers and request slot through completion.
 struct IoRequest {
     // Aligned physical start, used for kernel offsets.
     offset: u64,
@@ -545,8 +516,6 @@ struct IoRequest {
     recovery: bool,
     // Holds request admission until this request is dropped.
     _request_permit: OwnedSemaphorePermit,
-    // Holds the I/O buffer memory charge until this request is dropped.
-    _buffer_memory_permit: OwnedSemaphorePermit,
 }
 
 impl IoRequest {
@@ -555,7 +524,7 @@ impl IoRequest {
         buffers: IoBuffers,
         destination: Range<usize>,
         reply: oneshot::Sender<io::Result<IoBuffers>>,
-        permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
+        request_permit: OwnedSemaphorePermit,
     ) -> Self {
         assert!(offset.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES as u64));
         assert!(destination.start.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
@@ -573,8 +542,7 @@ impl IoRequest {
             completed_bytes: 0,
             reply: Some(reply),
             recovery: false,
-            _request_permit: permits.0,
-            _buffer_memory_permit: permits.1,
+            _request_permit: request_permit,
         }
     }
 
@@ -623,7 +591,7 @@ impl IoRequest {
         )
     }
 
-    /// Sends the buffers or error as the request result, releasing its admission permits.
+    /// Sends the buffers or error as the request result, releasing its request slot.
     fn send_result(mut self, result: io::Result<()>) {
         let result = result.map(|()| self.buffers);
         let _ = self.reply.take().unwrap().send(result);
@@ -631,7 +599,7 @@ impl IoRequest {
 }
 
 struct IoQueue {
-    // Closes budgets on exit to release admission waiters.
+    // Closes request slots on exit to release waiters.
     resources: Arc<IoQueueResources>,
     // Thread-owned kernel submission/completion queues; no cross-thread ring access.
     ring: IoUring,
@@ -773,7 +741,6 @@ impl IoQueue {
 impl Drop for IoQueue {
     fn drop(&mut self) {
         self.resources.request_slots.close();
-        self.resources.buffer_memory.close();
         if self.active.iter().any(Option::is_some) {
             // An abnormal queue exit cannot prove the kernel has stopped using pointers.
             // Closing a ring may tear it down asynchronously. Leak only the bounded active
