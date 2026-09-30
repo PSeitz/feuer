@@ -46,7 +46,7 @@ queue's memory budget and are copied again into aligned direct-I/O buffers.
 ## Reads and eviction
 
 `get` returns exactly the requested bytes from a covering entry. Every hit reads and hashes that
-entry's entire payload against its BLAKE3 checksum, excluding alignment padding. It reads neither
+entry's entire payload against its XXHash64 checksum, excluding alignment padding. It reads neither
 metadata nor neighboring entries. Small subrange requests can therefore cause large reads, though
 only requested bytes are retained in the result.
 
@@ -67,7 +67,10 @@ for readers or writers. There is no relocation or cleaning.
 
 ## Metadata and recovery
 
-`src/range_cache/page_format.rs` defines the experimental v4 format. Linked entry metadata pages
+`src/range_cache/page_format.rs` defines the experimental v5 format. All on-disk checksums use
+XXHash64 with seed zero, stored as 8-byte little-endian integers. Metadata page headers are 48 bytes;
+entry metadata uses 64 bytes plus the key and 16 bytes per payload region. Opening a v4 cache resets
+its generation instead of recovering the old format. Linked entry metadata pages
 store the full key, object range, ordered payload regions, payload checksum, and batch ID. Each page has
 a checksum, and each chain carries a checksum of the complete entry metadata. Chunk metadata records
 the cache generation and batch ID, binding an entry to the batch that wrote all its chunks.

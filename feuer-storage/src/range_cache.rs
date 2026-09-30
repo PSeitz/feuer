@@ -25,6 +25,7 @@ use feuer_types::{
     retention::{ObjectAccessHistories, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates},
 };
 use tokio::sync::OnceCell;
+use twox_hash::XxHash64;
 
 use crate::{
     DataFile, DataFileError, DataFileResult, DiskMetrics, IoMetrics,
@@ -121,7 +122,7 @@ struct ObjectRangeDiskStorage {
     eviction_position: usize,
     publication_id: u64,
     object_range: ByteRange,
-    payload_checksum: blake3::Hash,
+    payload_checksum: u64,
     payload_regions: Vec<DiskRegion>,
     // Keep metadata-only chunks reserved for as long as the entry exists.
     entry_metadata_regions: Vec<DiskRegion>,
@@ -130,7 +131,7 @@ struct ObjectRangeDiskStorage {
 /// A guarded object-range read, with the expected checksum and all payload regions.
 struct GuardedObjectRangeRead {
     object_range: ByteRange,
-    payload_checksum: blake3::Hash,
+    payload_checksum: u64,
     payload_regions: Vec<DiskRegionReadGuard>,
 }
 
@@ -640,7 +641,7 @@ impl UnwrittenShardBatch {
         let chunk_data_bytes = CHUNK_BYTES - METADATA_PAGE_BYTES as u64;
         let payload_region_count = aligned_payload_bytes.div_ceil(chunk_data_bytes);
         let metadata_bytes =
-            metadata_storage_bytes(88 + 16 * payload_region_count as usize + key.len()).ok_or(u64::MAX)?;
+            metadata_storage_bytes(64 + 16 * payload_region_count as usize + key.len()).ok_or(u64::MAX)?;
         let entry_bytes = aligned_payload_bytes + metadata_bytes;
         let free_tail_bytes = self.chunks.last().map_or(0, |chunk| CHUNK_BYTES - chunk.used_bytes);
         // Never split an entry across a shared chunk boundary, even if only metadata would spill.
@@ -677,15 +678,15 @@ impl UnwrittenShardBatch {
                 .push((offset_in_chunk, bytes.slice(payload_offset..payload_end)));
             payload_offset = payload_end;
         }
-        let payload_checksum = blake3::hash(bytes);
+        let payload_checksum = XxHash64::oneshot(0, bytes);
         let contents =
-            page_format::encode_entry_metadata(key, object_range, &payload_regions, &payload_checksum, &self.batch_id);
+            page_format::encode_entry_metadata(key, object_range, &payload_regions, payload_checksum, &self.batch_id);
         let (entry_metadata_regions, first_metadata_chunk) =
             self.reserve_entry_regions(&mut chunk_index, metadata_bytes);
         self.chunks[first_metadata_chunk]
             .metadata_starts
             .insert(entry_metadata_regions[0].range().start % CHUNK_BYTES);
-        let content_checksum = blake3::hash(&contents);
+        let content_checksum = XxHash64::oneshot(0, &contents);
         let mut page_ordinal = 0;
         let mut metadata_offset = 0;
         for (region_index, (chunk, region)) in self.chunks[first_metadata_chunk..]
@@ -708,7 +709,7 @@ impl UnwrittenShardBatch {
                 page_format::encode_page(
                     &mut page,
                     page_format::ENTRY_METADATA_PAGE_TAG,
-                    content_checksum.as_bytes(),
+                    content_checksum,
                     page_address,
                     page_ordinal,
                     next_page_address,
@@ -777,7 +778,7 @@ impl UnwrittenShardBatch {
             page_format::encode_page(
                 &mut page,
                 page_format::CHUNK_METADATA_PAGE_TAG,
-                blake3::hash(&contents).as_bytes(),
+                XxHash64::oneshot(0, &contents),
                 address,
                 address / CHUNK_BYTES,
                 0,
@@ -812,7 +813,7 @@ impl GuardedObjectRangeRead {
         let bytes = file
             .read_regions(self.payload_regions.clone(), self.object_range.len() as usize)
             .await?;
-        if blake3::hash(&bytes) != self.payload_checksum {
+        if XxHash64::oneshot(0, &bytes) != self.payload_checksum {
             return Ok(None);
         }
         Ok(Some(bytes.slice(start as usize..end as usize)))

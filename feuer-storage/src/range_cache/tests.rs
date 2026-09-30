@@ -158,7 +158,7 @@ async fn mixed_batch_groups_small_entries_and_records_every_metadata_start() {
         let (_, contents) = page_format::validate_page(
             &page,
             page_format::CHUNK_METADATA_PAGE_TAG,
-            page[32..64].try_into().unwrap(),
+            u64::from_le_bytes(page[8..16].try_into().unwrap()),
             address,
             address / CHUNK_BYTES,
         )
@@ -717,11 +717,11 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
         .read_at(chunk_address, METADATA_PAGE_BYTES)
         .await
         .unwrap();
-    let bitmap_checksum: [u8; 32] = chunk_metadata_page[32..64].try_into().unwrap();
+    let bitmap_checksum = u64::from_le_bytes(chunk_metadata_page[8..16].try_into().unwrap());
     let (next_entry_metadata_page_address, entry_metadata_starts) = page_format::validate_page(
         &chunk_metadata_page,
         page_format::CHUNK_METADATA_PAGE_TAG,
-        &bitmap_checksum,
+        bitmap_checksum,
         chunk_address,
         chunk_address / CHUNK_BYTES,
     )
@@ -729,8 +729,8 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
     assert_eq!(next_entry_metadata_page_address, 0);
     let bit_index = ((entry_metadata_start_address - chunk_address) / METADATA_PAGE_BYTES as u64) as usize;
     assert_eq!(
-        blake3::hash(&entry_metadata_starts[..page_format::CHUNK_METADATA_CONTENT_BYTES]).as_bytes(),
-        &bitmap_checksum
+        XxHash64::oneshot(0, &entry_metadata_starts[..page_format::CHUNK_METADATA_CONTENT_BYTES]),
+        bitmap_checksum
     );
     assert_ne!(entry_metadata_starts[bit_index / 8] & (1 << (bit_index % 8)), 0);
     assert_eq!(entry_metadata_starts[0] & 1, 0);
@@ -740,7 +740,7 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
         .read_at(entry_metadata_start_address, METADATA_PAGE_BYTES)
         .await
         .unwrap();
-    let entry_metadata_checksum: [u8; 32] = head[32..64].try_into().unwrap();
+    let entry_metadata_checksum = u64::from_le_bytes(head[8..16].try_into().unwrap());
     let expected_addresses: Vec<_> = entry_metadata
         .iter()
         .flat_map(|range| range.clone().step_by(METADATA_PAGE_BYTES))
@@ -754,7 +754,7 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
         let (next_entry_metadata_page_address, contents) = page_format::validate_page(
             &page,
             page_format::ENTRY_METADATA_PAGE_TAG,
-            &entry_metadata_checksum,
+            entry_metadata_checksum,
             address,
             ordinal as u64,
         )
@@ -763,23 +763,23 @@ async fn writes_full_key_range_and_payload_mappings_in_linked_entry_metadata() {
         address = next_entry_metadata_page_address;
     }
     assert_eq!(address, 0);
-    let integer = |offset| u64::from_le_bytes(entry_metadata_bytes[offset..offset + 8].try_into().unwrap());
-    assert_eq!(integer(0) as usize, 88 + payload.len() * 16 + key.len());
+    let read_u64 = |offset| u64::from_le_bytes(entry_metadata_bytes[offset..offset + 8].try_into().unwrap());
+    assert_eq!(read_u64(0) as usize, 64 + payload.len() * 16 + key.len());
     assert_eq!(
-        blake3::hash(&entry_metadata_bytes[..integer(0) as usize]).as_bytes(),
-        &entry_metadata_checksum
+        XxHash64::oneshot(0, &entry_metadata_bytes[..read_u64(0) as usize]),
+        entry_metadata_checksum
     );
-    assert_eq!(integer(8) as usize, key.len());
-    assert_eq!(integer(16), 17);
-    assert_eq!(integer(24), source.downloaded_range().end());
-    assert_eq!(integer(32) as usize, payload.len());
-    assert_eq!(&entry_metadata_bytes[40..72], blake3::hash(source.bytes()).as_bytes());
+    assert_eq!(read_u64(8) as usize, key.len());
+    assert_eq!(read_u64(16), 17);
+    assert_eq!(read_u64(24), source.downloaded_range().end());
+    assert_eq!(read_u64(32) as usize, payload.len());
+    assert_eq!(read_u64(40), XxHash64::oneshot(0, source.bytes()));
     for (index, region) in payload.iter().enumerate() {
-        assert_eq!(integer(72 + index * 16), region.start);
-        assert_eq!(integer(80 + index * 16), region.end);
+        assert_eq!(read_u64(48 + index * 16), region.start);
+        assert_eq!(read_u64(56 + index * 16), region.end);
     }
     assert_eq!(
-        &entry_metadata_bytes[72 + payload.len() * 16..integer(0) as usize - 16],
+        &entry_metadata_bytes[48 + payload.len() * 16..read_u64(0) as usize - 16],
         key.as_bytes()
     );
 }
@@ -1002,7 +1002,7 @@ async fn readers_keep_replaced_payload_reserved_but_results_do_not() {
         .read_at(guard.range().start, PAYLOAD_ALIGNMENT_BYTES as usize)
         .await
         .unwrap();
-    assert_eq!(blake3::hash(&bytes[..100]), payload_checksum);
+    assert_eq!(XxHash64::oneshot(0, &bytes[..100]), payload_checksum);
     assert!(cache.disk.shards[0].allocator.reserve_chunks(1).is_none());
     drop(guard);
     let reused = cache.disk.shards[0].allocator.reserve_chunks(1).unwrap();
@@ -1090,7 +1090,7 @@ async fn failed_chunk_write_releases_the_batch_without_publication() {
     assert!(cache.get(&"large".to_owned(), range(0, 1)).await.is_none());
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 3 * CHUNK_BYTES);
     let chunk_metadata_page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
-    assert_eq!(&chunk_metadata_page[88..96], page_format::CHUNK_METADATA_PAGE_TAG);
+    assert_eq!(&chunk_metadata_page[40..48], page_format::CHUNK_METADATA_PAGE_TAG);
 }
 
 #[test]
@@ -1208,7 +1208,7 @@ async fn shards_are_disjoint_and_recover_independently() {
 fn invalidation_preserves_different_contents_but_may_discard_an_identical_replacement() {
     let read = GuardedObjectRangeRead {
         object_range: range(0, 3),
-        payload_checksum: blake3::hash(b"old"),
+        payload_checksum: XxHash64::oneshot(0, b"old"),
         payload_regions: Vec::new(),
     };
     for replacement in [b"old", b"new"] {
@@ -1220,7 +1220,7 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
                 eviction_position: 0,
                 publication_id: 0,
                 object_range: range(0, 3),
-                payload_checksum: blake3::hash(replacement),
+                payload_checksum: XxHash64::oneshot(0, replacement),
                 payload_regions: Vec::new(),
                 entry_metadata_regions: Vec::new(),
             },
@@ -1239,7 +1239,7 @@ fn metadata_page_checks_bind_content_checksum_address_ordinal_tag_and_entire_con
     page_format::encode_page(
         &mut page,
         page_format::ENTRY_METADATA_PAGE_TAG,
-        &[7; 32],
+        7,
         METADATA_PAGE_BYTES as u64,
         2,
         8192,
@@ -1249,14 +1249,14 @@ fn metadata_page_checks_bind_content_checksum_address_ordinal_tag_and_entire_con
         page_format::validate_page(
             bytes,
             page_format::ENTRY_METADATA_PAGE_TAG,
-            &[7; 32],
+            7,
             METADATA_PAGE_BYTES as u64,
             2,
         )
         .is_some()
     };
     assert!(validate(&page));
-    for offset in [0, 32, 64, 72, 80, 88, 96, METADATA_PAGE_BYTES - 1] {
+    for offset in [0, 8, 16, 24, 32, 40, 48, METADATA_PAGE_BYTES - 1] {
         let mut torn = page.clone();
         torn[offset] ^= 1;
         assert!(!validate(&torn));
@@ -1266,7 +1266,7 @@ fn metadata_page_checks_bind_content_checksum_address_ordinal_tag_and_entire_con
         page_format::validate_page(
             &page,
             page_format::CHUNK_METADATA_PAGE_TAG,
-            &[7; 32],
+            7,
             METADATA_PAGE_BYTES as u64,
             2
         )
@@ -1276,18 +1276,18 @@ fn metadata_page_checks_bind_content_checksum_address_ordinal_tag_and_entire_con
         page_format::validate_page(
             &page,
             page_format::ENTRY_METADATA_PAGE_TAG,
-            &[8; 32],
+            8,
             METADATA_PAGE_BYTES as u64,
             2
         )
         .is_none()
     );
-    assert!(page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG, &[7; 32], 8192, 2).is_none());
+    assert!(page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG, 7, 8192, 2).is_none());
     assert!(
         page_format::validate_page(
             &page,
             page_format::ENTRY_METADATA_PAGE_TAG,
-            &[7; 32],
+            7,
             METADATA_PAGE_BYTES as u64,
             3
         )
@@ -1298,7 +1298,7 @@ fn metadata_page_checks_bind_content_checksum_address_ordinal_tag_and_entire_con
     page_format::encode_page(
         &mut page,
         page_format::ENTRY_METADATA_PAGE_TAG,
-        &[8; 32],
+        8,
         METADATA_PAGE_BYTES as u64,
         2,
         8192,

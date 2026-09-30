@@ -414,6 +414,7 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+ "twox-hash",
 ]
 
 [[package]]

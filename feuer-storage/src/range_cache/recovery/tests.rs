@@ -107,6 +107,25 @@ fn resets_are_persistent_and_interrupted_updates_leave_the_previous_file() {
 }
 
 #[test]
+fn v4_inventory_resets_generation() {
+    let directory = tempfile::tempdir().unwrap();
+    let generation = [1; 16];
+    let mut bytes = b"FEUEND04".to_vec();
+    bytes.extend_from_slice(&generation);
+    bytes.extend_from_slice(&CHUNK_BYTES.to_le_bytes());
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    bytes.extend_from_slice(&CHUNK_BYTES.to_le_bytes());
+    bytes.extend_from_slice(blake3::hash(&bytes).as_bytes());
+    fs::write(directory.path().join(BOUNDS_FILE), bytes).unwrap();
+
+    let (reset, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
+    assert_ne!(reset.generation, generation);
+    assert_eq!(ends, vec![0]);
+    let (reopened, _) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
+    assert_eq!(reopened.generation, reset.generation);
+}
+
+#[test]
 fn layout_change_warnings_describe_previous_and_current_layouts() {
     let directory = tempfile::tempdir().unwrap();
     let log_path = directory.path().join("recovery.log");
@@ -209,7 +228,10 @@ async fn recovers_metadata_larger_than_16_mib() {
     let cache = open_paused(directory.path(), capacity).await;
     let end = cache.disk.shards[0].written_end.load(Ordering::Relaxed);
     cache.disk.recover_chunk(0, 0, end).await;
-    assert_eq!(cache.get(&key, source.downloaded_range()).await.unwrap(), source.bytes());
+    assert_eq!(
+        cache.get(&key, source.downloaded_range()).await.unwrap(),
+        source.bytes()
+    );
 }
 
 #[tokio::test]
@@ -339,14 +361,14 @@ async fn a_payload_chunk_from_another_batch_cannot_join_old_entry_metadata() {
         .await
         .unwrap();
     let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
-    let mut contents = page[96..96 + page_format::CHUNK_METADATA_CONTENT_BYTES].to_vec();
+    let mut contents = page[48..48 + page_format::CHUNK_METADATA_CONTENT_BYTES].to_vec();
     assert_eq!(&contents[..32], &[0; 32]); // Payload-only chunk, no entry to recover independently.
     contents[48] ^= 1; // Valid page for a different batch, not just a checksum failure.
     let mut replaced = vec![0; METADATA_PAGE_BYTES];
     page_format::encode_page(
         &mut replaced,
         page_format::CHUNK_METADATA_PAGE_TAG,
-        blake3::hash(&contents).as_bytes(),
+        XxHash64::oneshot(0, &contents),
         0,
         0,
         0,
@@ -394,8 +416,13 @@ fn decoder_rejects_malformed_lengths_ranges_mappings_keys_and_batch_ids() {
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap().pop().unwrap();
     let payload = vec![chunk.slice(4096..8192)];
-    let bytes =
-        page_format::encode_entry_metadata("key", range(7, 17), &payload, &blake3::hash(b"0123456789"), &[1; 16]);
+    let bytes = page_format::encode_entry_metadata(
+        "key",
+        range(7, 17),
+        &payload,
+        XxHash64::oneshot(0, b"0123456789"),
+        &[1; 16],
+    );
     assert!(decode_entry(&bytes, &[1; 16], 0..CHUNK_BYTES).is_some());
     assert!(decode_entry(&bytes, &[2; 16], 0..CHUNK_BYTES).is_none());
     for (offset, value) in [
@@ -404,17 +431,17 @@ fn decoder_rejects_malformed_lengths_ranges_mappings_keys_and_batch_ids() {
         (16, 17),
         (24, 7),
         (32, u64::MAX),
-        (72, 0),
-        (72, 4097),
-        (80, 2 * CHUNK_BYTES),
-        (80, 4096),
+        (48, 0),
+        (48, 4097),
+        (56, 2 * CHUNK_BYTES),
+        (56, 4096),
     ] {
         let mut invalid = bytes.to_vec();
         invalid[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
         assert!(decode_entry(&invalid, &[1; 16], 0..CHUNK_BYTES).is_none());
     }
     let mut invalid = bytes.to_vec();
-    invalid[88] = 0xff;
+    invalid[64] = 0xff;
     assert!(decode_entry(&invalid, &[1; 16], 0..CHUNK_BYTES).is_none());
     for length in 0..bytes.len() {
         assert!(decode_entry(&bytes[..length], &[1; 16], 0..CHUNK_BYTES).is_none());

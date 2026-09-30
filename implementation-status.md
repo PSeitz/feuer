@@ -121,7 +121,7 @@ background recovery and remaining crash testing. `DiskRangeCache::insert_batch` 
 shard, assembles whole chunks including entry metadata and chunk metadata, writes each chunk once, and then
 publishes after containment revalidation. Partial final chunks are finalized too. Later batches cannot fill them. Full keys and exact
 object ranges map to ordered physical regions. Payload bytes have no interleaved headers. Entry metadata stores
-one BLAKE3 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
+one XXHash64 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
 entry while copying only requested bytes into the result. It does not read neighboring entries or metadata.
 
 Independent shards have their own allocator and range-index lock. The allocator tracks coalesced free
@@ -134,7 +134,7 @@ Entries within a batch share 1-MiB chunks with 4-KiB-aligned storage only when e
 and metadata fit inside that chunk. Multi-chunk entries own their chunks exclusively, including unused tails. Small entries use at least 4 KiB of payload
 plus 4 KiB of metadata inside their batch's chunks. Metadata pages are not shared between entries. A single-entry
 batch costs at least one chunk. Removed entries leave holes that cannot be reused individually.
-The v4 format checksums complete entry metadata and records a bitmap of entry metadata starts.
+The v5 format uses XXHash64 for all on-disk checksums, checksums complete entry metadata and records a bitmap of entry metadata starts.
 Cache generations isolate resets; batch IDs reject metadata referencing chunks reused by another batch.
 Read invalidation compares expected payload checksums. Discarding a newer identical copy is an allowed miss.
 Pressure eviction samples up to 64 live entries and selects the lowest recent retrieval value per payload
@@ -218,7 +218,7 @@ permanently excluded by the design.
 ### Integrity and recovery
 
 - Extend current memory-identity publication checks when tier-aware retention policy is implemented.
-- Validate the versioned metadata format and whole-entry BLAKE3 checksums against injected crash and reuse cases.
+- Validate the versioned metadata format and whole-entry XXHash64 checksums against injected crash and reuse cases.
 - Exercise incremental recovery and generation resets on real Linux direct I/O and io_uring.
 - Validate recovery after process and machine crashes, beyond metadata corruption and reuse tests.
 

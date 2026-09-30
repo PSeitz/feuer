@@ -11,7 +11,7 @@ use std::{
 
 use super::*;
 
-const BOUNDS_TAG: &[u8; 8] = b"FEUEND04";
+const BOUNDS_TAG: &[u8; 8] = b"FEUEND05";
 const BOUNDS_FILE: &str = "recovery-ends";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -50,12 +50,12 @@ impl RecoveryBounds {
         for end in &self.ends {
             bytes.extend_from_slice(&end.to_le_bytes());
         }
-        bytes.extend_from_slice(blake3::hash(&bytes).as_bytes());
+        bytes.extend_from_slice(&XxHash64::oneshot(0, &bytes).to_le_bytes());
         bytes
     }
 
     fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 80 || &bytes[..8] != BOUNDS_TAG {
+        if bytes.len() < 56 || &bytes[..8] != BOUNDS_TAG {
             return None;
         }
         let capacity = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
@@ -68,7 +68,7 @@ impl RecoveryBounds {
             return None;
         }
         let length = 40 + 8 * shards;
-        if bytes.len() != length + 32 || bytes[length..] != *blake3::hash(&bytes[..length]).as_bytes() {
+        if bytes.len() != length + 8 || bytes[length..] != XxHash64::oneshot(0, &bytes[..length]).to_le_bytes() {
             return None;
         }
         let ends: Vec<_> = bytes[40..length]
@@ -343,18 +343,18 @@ impl DiskRangeCacheState {
     async fn read_chunk_header(&self, chunk: &DiskRegion) -> Option<ChunkHeader> {
         let address = chunk.range().start;
         let bytes = self.file.read_recovery_page(chunk, address).await.ok()?;
-        let checksum = bytes[32..64].try_into().ok()?;
+        let checksum = read_u64(&bytes, 8)?;
         let (next, contents) = page_format::validate_page(
             &bytes,
             page_format::CHUNK_METADATA_PAGE_TAG,
-            &checksum,
+            checksum,
             address,
             address / CHUNK_BYTES,
         )?;
         if next != 0
             || contents[0] & 1 != 0
             || contents[32..48] != self.recovery.generation
-            || *blake3::hash(&contents[..page_format::CHUNK_METADATA_CONTENT_BYTES]).as_bytes() != checksum
+            || XxHash64::oneshot(0, &contents[..page_format::CHUNK_METADATA_CONTENT_BYTES]) != checksum
             || contents[page_format::CHUNK_METADATA_CONTENT_BYTES..]
                 .iter()
                 .any(|&byte| byte != 0)
@@ -405,7 +405,7 @@ impl DiskRangeCacheState {
                 &chunks[&chunk_address]
             };
             let page = self.file.read_recovery_page(chunk, address).await.ok()?;
-            let checksum = checksum.get_or_insert(page[32..64].try_into().ok()?);
+            let checksum = *checksum.get_or_insert(read_u64(&page, 8)?);
             let (next, bytes) = page_format::validate_page(
                 &page,
                 page_format::ENTRY_METADATA_PAGE_TAG,
@@ -414,8 +414,8 @@ impl DiskRangeCacheState {
                 metadata.len() as u64,
             )?;
             if metadata.is_empty() {
-                content_length = usize::try_from(integer(bytes, 0)?).ok()?;
-                if content_length < 88 {
+                content_length = usize::try_from(read_u64(bytes, 0)?).ok()?;
+                if content_length < 64 {
                     return None;
                 }
             }
@@ -425,7 +425,7 @@ impl DiskRangeCacheState {
             if contents.len() == content_length {
                 if next != 0
                     || bytes[take..].iter().any(|&byte| byte != 0)
-                    || blake3::hash(&contents).as_bytes() != checksum
+                    || XxHash64::oneshot(0, &contents) != checksum
                 {
                     return None;
                 }
@@ -478,13 +478,13 @@ struct ChunkHeader {
 struct RecoveredEntry {
     key: ObjectKey,
     object_range: ByteRange,
-    checksum: blake3::Hash,
+    checksum: u64,
     payload: Vec<Range<u64>>,
     metadata: Vec<Range<u64>>,
     chunks: BTreeMap<u64, DiskRegion>,
 }
 
-fn integer(bytes: &[u8], offset: usize) -> Option<u64> {
+fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?))
 }
 
@@ -502,26 +502,26 @@ fn valid_allocation(range: &Range<u64>, bounds: Range<u64>) -> bool {
         && range.start / CHUNK_BYTES == (range.end - 1) / CHUNK_BYTES
 }
 
-type DecodedEntry = (ObjectKey, ByteRange, blake3::Hash, Vec<Range<u64>>);
+type DecodedEntry = (ObjectKey, ByteRange, u64, Vec<Range<u64>>);
 
 fn decode_entry(bytes: &[u8], batch_id: &[u8; 16], bounds: Range<u64>) -> Option<DecodedEntry> {
-    let length = usize::try_from(integer(bytes, 0)?).ok()?;
-    let key_length = usize::try_from(integer(bytes, 8)?).ok()?;
-    let range = ByteRange::new(integer(bytes, 16)?, integer(bytes, 24)?).ok()?;
-    let count = usize::try_from(integer(bytes, 32)?).ok()?;
+    let length = usize::try_from(read_u64(bytes, 0)?).ok()?;
+    let key_length = usize::try_from(read_u64(bytes, 8)?).ok()?;
+    let range = ByteRange::new(read_u64(bytes, 16)?, read_u64(bytes, 24)?).ok()?;
+    let count = usize::try_from(read_u64(bytes, 32)?).ok()?;
     if length != bytes.len()
         || count == 0
-        || 88usize.checked_add(count.checked_mul(16)?)?.checked_add(key_length)? != length
+        || 64usize.checked_add(count.checked_mul(16)?)?.checked_add(key_length)? != length
         || bytes.get(length.checked_sub(16)?..)? != batch_id
     {
         return None;
     }
-    let checksum = blake3::Hash::from_bytes(bytes.get(40..72)?.try_into().ok()?);
+    let checksum = read_u64(bytes, 40)?;
     let mut payload = Vec::new();
     let mut remaining =
         range.len().checked_add(PAYLOAD_ALIGNMENT_BYTES - 1)? / PAYLOAD_ALIGNMENT_BYTES * PAYLOAD_ALIGNMENT_BYTES;
     for index in 0..count {
-        let allocation = integer(bytes, 72 + index * 16)?..integer(bytes, 80 + index * 16)?;
+        let allocation = read_u64(bytes, 48 + index * 16)?..read_u64(bytes, 56 + index * 16)?;
         if !valid_allocation(&allocation, bounds.clone()) {
             return None;
         }
@@ -531,7 +531,7 @@ fn decode_entry(bytes: &[u8], batch_id: &[u8; 16], bounds: Range<u64>) -> Option
     if remaining != 0 {
         return None;
     }
-    let key = std::str::from_utf8(&bytes[72 + count * 16..length - 16])
+    let key = std::str::from_utf8(&bytes[48 + count * 16..length - 16])
         .ok()?
         .to_owned();
     Some((key, range, checksum, payload))
