@@ -87,31 +87,29 @@ struct RemovedCacheUsage {
     entry_count: u64,
 }
 
-/// Object key, range start, and entry ID of a cached entry.
+/// Object key and range start of a cached entry.
 #[derive(Clone)]
-struct ObjectKeyRangeStartAndEntryId {
+struct ObjectKeyAndRangeStart {
     object_key: ObjectKey,
     start: u64,
-    id: u64,
 }
 
 /// Rotating ring of cached-range candidates for reclaiming memory by trimming or eviction.
 #[derive(Default)]
 struct ReclaimCandidateRing {
-    entries: Vec<ObjectKeyRangeStartAndEntryId>,
+    entries: Vec<ObjectKeyAndRangeStart>,
     cursor: usize,
 }
 
 impl ReclaimCandidateRing {
-    fn register(&mut self, candidate: ObjectKeyRangeStartAndEntryId) -> usize {
+    fn register(&mut self, candidate: ObjectKeyAndRangeStart) -> usize {
         let slot = self.entries.len();
         self.entries.push(candidate);
         slot
     }
 
     /// Removes `slot` and returns the candidate moved into it, if any.
-    fn remove(&mut self, slot: usize, expected_id: u64) -> Option<ObjectKeyRangeStartAndEntryId> {
-        debug_assert_eq!(self.entries.get(slot).map(|candidate| candidate.id), Some(expected_id));
+    fn remove(&mut self, slot: usize) -> Option<ObjectKeyAndRangeStart> {
         let last_slot = self.entries.len() - 1;
         self.entries.swap_remove(slot);
         let moved_candidate = (slot != last_slot).then(|| self.entries[slot].clone());
@@ -197,7 +195,7 @@ pub(super) struct MemoryCacheShard {
     used_bytes: u64,
     ranges: FxHashMap<ObjectKey, ObjectCachedRanges>,
     next_entry_id: u64,
-    /// Object keys, range starts, and entry IDs, sampled in rotation to choose a range to trim or evict.
+    /// Object keys and range starts, sampled in rotation to choose a range to trim or evict.
     candidates: ReclaimCandidateRing,
     metrics: Arc<MemoryMetrics>,
     buffer_pool: Arc<BufferPool>,
@@ -303,10 +301,9 @@ impl MemoryCacheShard {
         self.used_bytes += capacity;
         self.buffer_pool.add_cached(capacity);
         let id = self.allocate_entry_id();
-        let candidate_slot = self.candidates.register(ObjectKeyRangeStartAndEntryId {
+        let candidate_slot = self.candidates.register(ObjectKeyAndRangeStart {
             object_key: object_key.clone(),
             start: range.start(),
-            id,
         });
         let entries = self.ranges.entry(object_key).or_default();
         let entry = CachedRange {
@@ -336,10 +333,9 @@ impl MemoryCacheShard {
         let capacity = bytes.len() as u64;
         self.buffer_pool.add_cached(capacity);
         let id = self.allocate_entry_id();
-        let candidate_slot = self.candidates.register(ObjectKeyRangeStartAndEntryId {
+        let candidate_slot = self.candidates.register(ObjectKeyAndRangeStart {
             object_key: object_key.clone(),
             start: range.start(),
-            id,
         });
         let entries = self.ranges.entry(object_key.clone()).or_default();
         let entry = CachedRange {
@@ -408,7 +404,7 @@ impl MemoryCacheShard {
             (removed_range, object_has_no_cached_ranges)
         };
 
-        self.remove_eviction_candidate(removed_range.candidate_slot, removed_range.id);
+        self.remove_eviction_candidate(removed_range.candidate_slot);
         if object_has_no_cached_ranges {
             self.ranges.remove(object_key);
         }
@@ -418,8 +414,8 @@ impl MemoryCacheShard {
         Some(removed_bytes)
     }
 
-    fn remove_eviction_candidate(&mut self, slot: usize, expected_id: u64) {
-        let moved_candidate = self.candidates.remove(slot, expected_id);
+    fn remove_eviction_candidate(&mut self, slot: usize) {
+        let moved_candidate = self.candidates.remove(slot);
         let Some(moved_candidate) = moved_candidate else {
             return;
         };
@@ -427,7 +423,6 @@ impl MemoryCacheShard {
             .ranges
             .get_mut(&moved_candidate.object_key)
             .and_then(|entries| entries.by_start.get_mut(&moved_candidate.start))
-            .filter(|entry| entry.id == moved_candidate.id)
             .expect("a moved policy candidate must still refer to a live entry");
         entry.candidate_slot = slot;
     }
@@ -452,7 +447,6 @@ impl MemoryCacheShard {
             let entry = entries
                 .by_start
                 .get(&candidate.start)
-                .filter(|entry| entry.id == candidate.id)
                 .expect("every policy candidate must identify a live entry");
             if candidate.object_key == *admitting_key && admitting_range.contains(entry.range) {
                 continue;
