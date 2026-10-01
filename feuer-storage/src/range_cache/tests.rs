@@ -438,22 +438,22 @@ async fn disk_value_uses_payload_size_not_aligned_allocations_or_chunk_size() {
 }
 
 #[tokio::test]
-async fn payload_value_ignores_original_key_length_and_breaks_ties_by_publication() {
+async fn payload_value_ignores_original_key_length_and_keeps_first_sampled_on_ties() {
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
     let older = ObjectKeyHash::from("small metadata");
     let newer = ObjectKeyHash::from("long key/".repeat(1000));
     cache.insert(older, download(0, 100)).await.unwrap();
     cache.insert(newer, download(0, 100)).await.unwrap();
-    cache.access_histories().record_access(&older, range(0, 1));
-    cache.access_histories().record_access(&newer, range(0, 1));
+    // Without access history both scores are zero; sample the newer entry first.
+    cache.disk.shards[0].entry_index.lock().unwrap().next_candidate = 1;
     assert!(
         cache
             .insert(ObjectKeyHash::from("incoming"), download(0, 1))
             .await
             .unwrap()
     );
-    assert!(cache.get(&older, range(0, 1)).await.is_none());
-    assert!(cache.get(&newer, range(0, 1)).await.is_some());
+    assert!(cache.get(&older, range(0, 1)).await.is_some());
+    assert!(cache.get(&newer, range(0, 1)).await.is_none());
 }
 
 #[tokio::test]
@@ -1232,6 +1232,33 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
 }
 
 #[test]
+fn index_insertion_keeps_covered_ranges_and_replaces_matching_starts() {
+    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
+    let region = allocator.reserve_chunks(1).unwrap();
+    let key = ObjectKeyHash::from("object");
+    let mut index = DiskEntryIndex::new(DiskMetrics::noop());
+    for object_range in [range(10, 20), range(0, 30), range(15, 16), range(0, 40)] {
+        index.insert(
+            key,
+            ObjectRangeDiskStorage {
+                read_result: Weak::new(),
+                eviction_position: 0,
+                object_range,
+                payload_checksum: 0,
+                payload_region: region.slice(0..4096),
+                metadata_slot: None,
+            },
+        );
+    }
+    assert_eq!(index.ranges_by_key[&key].len(), 3);
+    assert_eq!(index.ranges_by_key[&key][&0].object_range, range(0, 40));
+    assert_eq!(index.eviction_candidates.len(), 3);
+    for (position, (key, start)) in index.eviction_candidates.iter().enumerate() {
+        assert_eq!(index.ranges_by_key[key][start].eviction_position, position);
+    }
+}
+
+#[test]
 fn invalidation_preserves_different_contents_but_may_discard_an_identical_replacement() {
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
     let region = allocator.reserve_chunks(1).unwrap();
@@ -1247,7 +1274,6 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
             ObjectRangeDiskStorage {
                 read_result: Weak::new(),
                 eviction_position: 0,
-                publication_id: 0,
                 object_range: range(0, 3),
                 payload_checksum: XxHash64::oneshot(0, replacement),
                 payload_region: region.slice(8192..12288),

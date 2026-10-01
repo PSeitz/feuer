@@ -82,7 +82,6 @@ struct DiskEntryIndex {
     ranges_by_key: HashMap<ObjectKeyHash, BTreeMap<u64, ObjectRangeDiskStorage>>,
     eviction_candidates: Vec<(ObjectKeyHash, u64)>,
     next_candidate: usize,
-    next_publication_id: u64,
     metrics: Arc<DiskMetrics>,
 }
 
@@ -109,7 +108,6 @@ struct ObjectRangeDiskStorage {
     // Only concurrent callers retain the result; the index must not cache payload bytes.
     read_result: Weak<EntryReadResult>,
     eviction_position: usize,
-    publication_id: u64,
     object_range: ByteRange,
     payload_checksum: u64,
     payload_region: DiskRegion,
@@ -411,6 +409,7 @@ impl DiskRangeCache {
                             let mut entry = Some((key, storage));
                             with_current(&token, &mut || {
                                 if let Some((key, storage)) = entry.take() {
+                                    index.remove_covered_ranges(&key, storage.object_range);
                                     index.insert(key, storage);
                                     published_entries += 1;
                                     attempt.set_outcome(DiskWriteOutcome::Published);
@@ -533,7 +532,7 @@ impl DiskCacheShard {
         *attempts_left -= 1;
         let (sample_start, sample_count) =
             sample_candidates(&mut index.next_candidate, candidate_count, self.reclaim_sample_size);
-        let mut selected_candidate: Option<(usize, f64, u64, u64)> = None;
+        let mut selected_candidate: Option<(usize, f64, u64)> = None;
         for sample_offset in 0..sample_count {
             let position = (sample_start + sample_offset) % candidate_count;
             let (key, range_start) = &index.eviction_candidates[position];
@@ -543,12 +542,10 @@ impl DiskCacheShard {
             }
             let retrieval_cost = access_histories.retention_score(key, entry.object_range);
             let payload_bytes = entry.object_range.len();
-            if selected_candidate.is_none_or(|(_, selected_cost, selected_bytes, selected_id)| {
-                compare_cost_per_byte(retrieval_cost, payload_bytes, selected_cost, selected_bytes)
-                    .then_with(|| entry.publication_id.cmp(&selected_id))
-                    .is_lt()
+            if selected_candidate.is_none_or(|(_, selected_cost, selected_bytes)| {
+                compare_cost_per_byte(retrieval_cost, payload_bytes, selected_cost, selected_bytes).is_lt()
             }) {
-                selected_candidate = Some((position, retrieval_cost, payload_bytes, entry.publication_id));
+                selected_candidate = Some((position, retrieval_cost, payload_bytes));
             }
         }
         if let Some((position, ..)) = selected_candidate {
@@ -566,27 +563,27 @@ impl DiskEntryIndex {
             ranges_by_key: HashMap::new(),
             eviction_candidates: Vec::new(),
             next_candidate: 0,
-            next_publication_id: 0,
             metrics,
         }
     }
 
-    fn insert(&mut self, key: ObjectKeyHash, mut storage: ObjectRangeDiskStorage) {
-        let object_range = storage.object_range;
-        if let Some(entries) = self.ranges_by_key.get(&key) {
+    // Remove entries fully covered by a write; recovery skips this cleanup.
+    fn remove_covered_ranges(&mut self, key: &ObjectKeyHash, object_range: ByteRange) {
+        if let Some(entries) = self.ranges_by_key.get(key) {
             let replaced_range_starts: Vec<_> = entries
                 .range(object_range.start()..object_range.end())
                 .filter_map(|(&start, entry)| object_range.contains(entry.object_range).then_some(start))
                 .collect();
             for start in replaced_range_starts {
-                self.remove(&key, start);
+                self.remove(key, start);
             }
         }
-        self.next_publication_id = self
-            .next_publication_id
-            .checked_add(1)
-            .expect("disk entry identities exhausted");
-        storage.publication_id = self.next_publication_id;
+    }
+
+    fn insert(&mut self, key: ObjectKeyHash, mut storage: ObjectRangeDiskStorage) {
+        let object_range = storage.object_range;
+        // Recovery may encounter another record with the same key and start.
+        self.remove(&key, object_range.start());
         storage.eviction_position = self.eviction_candidates.len();
         self.metrics.entries.increase(1);
         self.metrics.payload_bytes.increase(object_range.len());
@@ -696,7 +693,6 @@ impl UnwrittenShardBatch {
             ObjectRangeDiskStorage {
                 read_result: Weak::new(),
                 eviction_position: 0,
-                publication_id: 0,
                 object_range,
                 payload_checksum,
                 payload_region,

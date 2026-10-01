@@ -199,16 +199,13 @@ impl DiskRangeCacheState {
                     let storage = ObjectRangeDiskStorage {
                         read_result: Weak::new(),
                         eviction_position: 0,
-                        publication_id: 0,
                         object_range,
                         payload_checksum: checksum,
                         metadata_slot: Some(shard.metadata_slot(chunk, slot)),
                         payload_region,
                     };
                     payload_ranges.insert(payload.start, payload.end);
-                    if index.covering_range(&key, object_range).is_none() {
-                        index.insert(key, storage);
-                    }
+                    index.insert(key, storage);
                 }
             }
             tokio::task::yield_now().await;
