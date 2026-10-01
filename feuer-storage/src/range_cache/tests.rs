@@ -1190,7 +1190,7 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
     assert!(cache.get(&key, range(3, 13)).await.is_none());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shards_are_disjoint_and_recovered_before_open_returns() {
     let (directory, cache) = open_test_cache(256 * CHUNK_BYTES).await;
     assert_eq!(cache.disk.shards.len(), 2);

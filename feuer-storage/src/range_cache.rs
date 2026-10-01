@@ -259,8 +259,13 @@ impl DiskRangeCache {
         });
         let started = Instant::now();
         tracing::info!(target: "feuer::storage", "starting disk cache recovery");
+        let mut recovery_tasks = tokio::task::JoinSet::new();
         for index in 0..disk.shards.len() {
-            disk.recover_shard(index).await;
+            let disk = disk.clone();
+            recovery_tasks.spawn(async move { disk.recover_shard(index).await });
+        }
+        while let Some(result) = recovery_tasks.join_next().await {
+            result.expect("shard recovery task failed");
         }
         tracing::info!(target: "feuer::storage", elapsed_seconds = started.elapsed().as_secs_f64(), "disk cache recovery finished");
         disk.start_checkpoint_task();
