@@ -85,8 +85,6 @@ fn resets_are_persistent_and_interrupted_updates_leave_the_previous_file() {
     let (first, _) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 2).unwrap();
     let (same, _) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 2).unwrap();
     assert_eq!(first.generation, same.generation);
-    assert_ne!(first.next_batch_id(), same.next_batch_id());
-    assert_ne!(same.next_batch_id(), same.next_batch_id());
     fs::write(first.path.with_extension("tmp"), b"interrupted update").unwrap();
     let (same, _) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 2).unwrap();
     assert_eq!(first.generation, same.generation);
@@ -126,8 +124,8 @@ fn v4_inventory_resets_generation() {
 }
 
 #[test]
-fn v6_and_v7_inventories_reset_generation() {
-    for tag in [b"FEUEND06", b"FEUEND07"] {
+fn older_inventories_reset_generation() {
+    for tag in [b"FEUEND06", b"FEUEND07", b"FEUEND08"] {
         let directory = tempfile::tempdir().unwrap();
         let bounds = RecoveryBounds {
             generation: [1; 16],
@@ -493,35 +491,6 @@ async fn torn_metadata_and_reused_multi_chunk_addresses_are_rejected() {
 }
 
 #[tokio::test]
-async fn allocation_header_and_entry_metadata_must_have_the_same_batch() {
-    let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-    let key = ObjectKeyHash::from("large");
-    cache.insert(key, download(0, 2 * CHUNK_BYTES as usize)).await.unwrap();
-    let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
-    let mut contents = page[48..48 + page_format::CHUNK_METADATA_CONTENT_BYTES].to_vec();
-    contents[16] ^= 1; // Valid page for a different batch, not just a checksum failure.
-    let mut replaced = vec![0; METADATA_PAGE_BYTES];
-    page_format::encode_page(
-        &mut replaced,
-        page_format::CHUNK_METADATA_PAGE_TAG,
-        XxHash64::oneshot(0, &contents),
-        0,
-        0,
-        0,
-        &contents,
-    );
-    cache.disk.file.write_at(0, &Bytes::from(replaced)).await.unwrap();
-    cache.disk.save_recovery_ends().unwrap();
-    drop(cache);
-    let cache = DiskRangeCache::open(directory.path(), 4 * CHUNK_BYTES, IoMetrics::noop())
-        .await
-        .unwrap();
-    wait_for_recovery(&cache).await;
-    assert!(!cache.contains(&key, range(0, 1)));
-    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 4 * CHUNK_BYTES);
-}
-
-#[tokio::test]
 async fn recovery_bounds_the_whole_run_before_claiming_it() {
     let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     cache
@@ -534,13 +503,13 @@ async fn recovery_bounds_the_whole_run_before_claiming_it() {
     assert!(cache.disk.recover_chunk(0, 0, CHUNK_BYTES).await.is_none());
     let original = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
     for (offset, value) in [
-        (32, 0u64),
-        (32, 1),
-        (32, u64::MAX),
-        (40, 0),
-        (40, 71),
-        (40, 3 * CHUNK_BYTES),
-        (40, u64::MAX),
+        (16, 0u64),
+        (16, 1),
+        (16, u64::MAX),
+        (24, 0),
+        (24, 71),
+        (24, 3 * CHUNK_BYTES),
+        (24, u64::MAX),
     ] {
         let mut contents = original[48..48 + page_format::CHUNK_METADATA_CONTENT_BYTES].to_vec();
         contents[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
@@ -624,7 +593,7 @@ async fn generation_reset_rejects_old_chunks_even_when_new_scan_bounds_cover_the
 }
 
 #[test]
-fn decoder_rejects_malformed_lengths_ranges_addresses_and_batch_ids() {
+fn decoder_rejects_malformed_lengths_ranges_and_addresses() {
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap();
     let payload = chunk.slice(8192..12288);
@@ -633,10 +602,17 @@ fn decoder_rejects_malformed_lengths_ranges_addresses_and_batch_ids() {
         range(7, 17),
         &payload,
         XxHash64::oneshot(0, b"0123456789"),
-        &[1; 16],
     );
-    assert!(decode_entry(&bytes, &[1; 16], 0..CHUNK_BYTES).is_some());
-    assert!(decode_entry(&bytes, &[2; 16], 0..CHUNK_BYTES).is_none());
+    assert_eq!(bytes.len(), 48);
+    assert_eq!(
+        decode_entry(&bytes, 0..CHUNK_BYTES),
+        Some((
+            ObjectKeyHash::from("key"),
+            range(7, 17),
+            XxHash64::oneshot(0, b"0123456789"),
+            payload.range(),
+        ))
+    );
     for (offset, value) in [
         (16, u64::MAX),
         (24, 0),
@@ -649,12 +625,12 @@ fn decoder_rejects_malformed_lengths_ranges_addresses_and_batch_ids() {
     ] {
         let mut invalid = bytes.to_vec();
         invalid[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-        assert!(decode_entry(&invalid, &[1; 16], 0..CHUNK_BYTES).is_none());
+        assert!(decode_entry(&invalid, 0..CHUNK_BYTES).is_none());
     }
     let mut invalid = bytes.to_vec();
-    invalid[56] = 0xff;
-    assert!(decode_entry(&invalid, &[1; 16], 0..CHUNK_BYTES).is_none());
+    invalid.push(0);
+    assert!(decode_entry(&invalid, 0..CHUNK_BYTES).is_none());
     for length in 0..bytes.len() {
-        assert!(decode_entry(&bytes[..length], &[1; 16], 0..CHUNK_BYTES).is_none());
+        assert!(decode_entry(&bytes[..length], 0..CHUNK_BYTES).is_none());
     }
 }

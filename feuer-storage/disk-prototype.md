@@ -10,8 +10,8 @@ incrementally while ordinary reads and writes continue.
 
 - The file contains 1-MiB chunks. Each allocation reserves one consecutive run of whole chunks
   and starts with one 4-KiB metadata page. Continuation chunks have no headers.
-- Variable-length entry records, with inline keys, are packed into shared 4-KiB metadata pages
-  immediately after the allocation header. Records may cross page boundaries.
+- Fixed 48-byte entry records, with 128-bit key hashes, are packed into shared 4-KiB metadata pages
+  immediately after the allocation header. Records never cross page boundaries.
 - All payloads follow this metadata prefix. Each payload is one uninterrupted, 4-KiB-aligned disk
   byte range; no metadata is inserted between payloads or at payload chunk boundaries.
 - Small entries share a chunk only when each entry's complete payload and metadata fit inside it.
@@ -71,14 +71,14 @@ for readers or writers. There is no relocation or cleaning.
 
 ## Metadata and recovery
 
-`src/range_cache/page_format.rs` defines the experimental v7 format. All on-disk checksums use
+`src/range_cache/page_format.rs` defines the experimental v9 format. All on-disk checksums use
 XXHash64 with seed zero, stored as 8-byte little-endian integers. Metadata page headers are 48 bytes;
-each entry record uses 72 bytes plus its inline key. Opening an older cache resets its generation rather
-than recovering the old format. Records store the full key, object range, one payload address and aligned
-length, payload checksum, and batch ID. Each page has a checksum and carries the checksum of the complete
-packed metadata prefix. Corruption in the prefix rejects its allocation during recovery.
+each entry record uses 48 bytes. Opening an older cache resets its generation rather than recovering the
+old format. Records store the 128-bit key hash, object offset and length, one payload address, and payload
+checksum. Aligned payload length is derived from object length. Each page has a checksum and carries the
+checksum of the complete packed metadata prefix. Corruption in the prefix rejects its allocation during recovery.
 
-The allocation header records the cache generation, batch ID, consecutive chunk count, and packed record
+The allocation header records the cache generation, consecutive chunk count, and packed record
 byte length, excluding page headers and padding. Recovery reads the prefix and scans records sequentially;
 there is no entry-start bitmap. Removal does not modify metadata. Whole-chunk reuse replaces it.
 
@@ -93,7 +93,7 @@ synchronization or final checkpoint on close is promised.
 
 The allocator records chunks claimed during recovery, even if their owners later release them. New writes
 may claim unscanned chunks immediately. Recovery reserves only chunks being inspected, validates their
-packed metadata, generation, batch IDs, sequential payload ranges, and ownership, then publishes without displacing indexed
+packed metadata, generation, sequential payload ranges, and ownership, then publishes without displacing indexed
 ranges. Shared-chunk entries retain shared ownership; multi-chunk entries reserve their complete contiguous run.
 Inspection alone does not permanently claim a chunk. These temporary claim bitmaps disappear after the scan.
 

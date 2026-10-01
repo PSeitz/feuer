@@ -68,7 +68,7 @@ pub(super) async fn entry_disk_ranges(
         chunk_start / CHUNK_BYTES,
     )
     .unwrap();
-    let metadata_bytes = u64::from_le_bytes(contents[40..48].try_into().unwrap()) as usize;
+    let metadata_bytes = u64::from_le_bytes(contents[24..32].try_into().unwrap()) as usize;
     let start = chunk_start + METADATA_PAGE_BYTES as u64;
     let metadata = start..start + metadata_storage_bytes(metadata_bytes).unwrap();
     (vec![payload], vec![metadata])
@@ -804,9 +804,9 @@ async fn writes_key_hash_range_and_payload_address_in_fixed_size_metadata() {
         XxHash64::oneshot(0, &contents[..page_format::CHUNK_METADATA_CONTENT_BYTES]),
         header_checksum
     );
-    assert_eq!(u64::from_le_bytes(contents[32..40].try_into().unwrap()), 2);
+    assert_eq!(u64::from_le_bytes(contents[16..24].try_into().unwrap()), 2);
     assert_eq!(
-        u64::from_le_bytes(contents[40..48].try_into().unwrap()) as usize,
+        u64::from_le_bytes(contents[24..32].try_into().unwrap()) as usize,
         page_format::ENTRY_METADATA_BYTES
     );
     let head = cache

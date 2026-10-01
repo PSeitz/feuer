@@ -1,9 +1,9 @@
-//! Experimental v8 metadata pages. Fixed-size records with XXH3-128 object keys are packed
+//! Experimental v9 metadata pages. Fixed-size records with XXH3-128 object keys are packed
 //! into consecutive pages before all payloads in an allocation. Records never cross page boundaries.
 //! All checksums are XXHash64 with seed zero, stored as little-endian u64s.
 //! Each record page carries the checksum of the complete packed metadata prefix.
 //! Page checksums additionally bind tag, address, ordinal, links and contents.
-//! Chunk metadata binds a cache generation and batch ID; completion is not persistence.
+//! Chunk metadata identifies the cache generation; completion is not persistence.
 
 use bytes::Bytes;
 use feuer_types::{ByteRange, ObjectKeyHash};
@@ -12,17 +12,17 @@ use twox_hash::XxHash64;
 use crate::allocation::DiskRegion;
 
 /// Size in bytes of a metadata page, including its header and padding.
-/// Each entry metadata page holds 63 complete 64-byte records and 16 padding bytes.
+/// Each entry metadata page holds 84 complete 48-byte records and 16 padding bytes.
 pub(super) const METADATA_PAGE_BYTES: usize = 4096;
 const PAGE_HEADER_BYTES: usize = 48;
-pub(super) const ENTRY_METADATA_BYTES: usize = 64;
+pub(super) const ENTRY_METADATA_BYTES: usize = 48;
 pub(super) const PAGE_CONTENT_BYTES: usize =
     (METADATA_PAGE_BYTES - PAGE_HEADER_BYTES) / ENTRY_METADATA_BYTES * ENTRY_METADATA_BYTES;
-pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES08";
-pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX08";
-pub(super) const CHUNK_METADATA_CONTENT_BYTES: usize = 48;
+pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES09";
+pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX09";
+pub(super) const CHUNK_METADATA_CONTENT_BYTES: usize = 32;
 
-/// Content checksum covers the packed records, or the allocation's identities and lengths.
+/// Content checksum covers the packed records, or the allocation's generation and lengths.
 pub(super) fn encode_page(
     page: &mut [u8],
     page_tag: &[u8; 8],
@@ -67,15 +67,14 @@ pub(super) fn validate_page<'a>(
     ))
 }
 
-/// Key hash (u128), object start and length, payload address, payload checksum (u64s), batch ID.
+/// Key hash (u128), object start and length, payload address, payload checksum (u64s).
 /// All integers are little-endian. Aligned payload length is derived from object length.
-/// The batch ID binds every record to its allocation; payload checksums exclude alignment padding.
+/// Payload checksums exclude alignment padding.
 pub(super) fn encode_entry_metadata(
     key: &ObjectKeyHash,
     object_range: ByteRange,
     payload_region: &DiskRegion,
     payload_checksum: u64,
-    batch_id: &[u8; 16],
 ) -> Bytes {
     let mut bytes = Vec::with_capacity(ENTRY_METADATA_BYTES);
     bytes.extend_from_slice(&key.0.to_le_bytes());
@@ -87,6 +86,5 @@ pub(super) fn encode_entry_metadata(
     ] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
-    bytes.extend_from_slice(batch_id);
     Bytes::from(bytes)
 }

@@ -5,21 +5,19 @@ use std::{
     io::{self, Read, Write},
     ops::Range,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
 use super::*;
 
-const RECOVERY_FILE_FORMAT_ID: &[u8; 8] = b"FEUEND08";
+const RECOVERY_FILE_FORMAT_ID: &[u8; 8] = b"FEUEND09";
 const RECOVERY_FILE_NAME: &str = "recovery-ends";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(super) struct RecoveryState {
     path: PathBuf,
     pub(super) generation: [u8; 16],
-    session_id: [u8; 16],
-    next_batch_number: AtomicU64,
     pub(super) running: AtomicBool,
 }
 
@@ -153,20 +151,10 @@ impl RecoveryState {
             Self {
                 path,
                 generation: bounds.generation,
-                session_id: random_identity()?,
-                next_batch_number: AtomicU64::new(0),
                 running: AtomicBool::new(running),
             },
             bounds.ends,
         ))
-    }
-
-    pub(super) fn next_batch_id(&self) -> [u8; 16] {
-        let ordinal = self.next_batch_number.fetch_add(1, Ordering::Relaxed);
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&self.session_id);
-        hasher.update(&ordinal.to_le_bytes());
-        hasher.finalize().as_bytes()[..16].try_into().unwrap()
     }
 }
 
@@ -289,8 +277,7 @@ impl DiskRangeCacheState {
         let mut payload_start = address + METADATA_PAGE_BYTES as u64 + metadata_storage_bytes(metadata.len())?;
         while !records.is_empty() {
             let length = page_format::ENTRY_METADATA_BYTES;
-            let (key, object_range, checksum, payload) =
-                decode_entry(records.get(..length)?, &header.batch_id, region.range())?;
+            let (key, object_range, checksum, payload) = decode_entry(records.get(..length)?, region.range())?;
             // Payloads follow the shared metadata prefix and each other, without overlap or gaps.
             if self.shard_index_for_key(&key) != shard_index
                 || payload.start != payload_start
@@ -350,8 +337,8 @@ impl DiskRangeCacheState {
         {
             return None;
         }
-        let chunk_count = read_u64(contents, 32)?;
-        let metadata_bytes = usize::try_from(read_u64(contents, 40)?).ok()?;
+        let chunk_count = read_u64(contents, 16)?;
+        let metadata_bytes = usize::try_from(read_u64(contents, 24)?).ok()?;
         let prefix_bytes = (METADATA_PAGE_BYTES as u64).checked_add(metadata_storage_bytes(metadata_bytes)?)?;
         if chunk_count == 0
             || metadata_bytes == 0
@@ -361,7 +348,6 @@ impl DiskRangeCacheState {
             return None;
         }
         Some(ChunkHeader {
-            batch_id: contents[16..32].try_into().ok()?,
             chunk_count,
             metadata_bytes,
         })
@@ -382,7 +368,7 @@ impl DiskRangeCacheState {
                 address,
                 ordinal as u64,
             )?;
-            let take = (header.metadata_bytes - contents.len()).min(bytes.len());
+            let take = (header.metadata_bytes - contents.len()).min(PAGE_CONTENT_BYTES);
             contents.extend_from_slice(&bytes[..take]);
             let expected_next = if contents.len() == header.metadata_bytes {
                 0
@@ -398,7 +384,6 @@ impl DiskRangeCacheState {
 }
 
 struct ChunkHeader {
-    batch_id: [u8; 16],
     chunk_count: u64,
     metadata_bytes: usize,
 }
@@ -417,8 +402,8 @@ fn valid_allocation(range: &Range<u64>, bounds: Range<u64>) -> bool {
 
 type DecodedEntry = (ObjectKeyHash, ByteRange, u64, Range<u64>);
 
-fn decode_entry(bytes: &[u8], batch_id: &[u8; 16], bounds: Range<u64>) -> Option<DecodedEntry> {
-    if bytes.len() != page_format::ENTRY_METADATA_BYTES || bytes.get(48..)? != batch_id {
+fn decode_entry(bytes: &[u8], bounds: Range<u64>) -> Option<DecodedEntry> {
+    if bytes.len() != page_format::ENTRY_METADATA_BYTES {
         return None;
     }
     let key = ObjectKeyHash(u128::from_le_bytes(bytes[..16].try_into().ok()?));

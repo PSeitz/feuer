@@ -95,7 +95,6 @@ struct UnwrittenRegion {
 /// Entries and their chunk contents prepared for one shard's batch write.
 #[derive(Default)]
 struct UnwrittenShardBatch {
-    batch_id: [u8; 16],
     regions: Vec<UnwrittenRegion>,
     entries: Vec<(ObjectKeyHash, ObjectRangeDiskStorage)>,
 }
@@ -305,10 +304,7 @@ impl DiskRangeCache {
                 let mut published_entries = 0;
                 for (shard, mut downloads) in disk.shards.iter().zip(downloads_by_shard) {
                     downloads.sort_by_key(|(_, download, _, _)| download.bytes().len());
-                    let mut batch = UnwrittenShardBatch {
-                        batch_id: disk.recovery.next_batch_id(),
-                        ..Default::default()
-                    };
+                    let mut batch = UnwrittenShardBatch::default();
                     let mut publication_tokens = Vec::new();
                     let mut attempts_left = MAX_EVICTION_ATTEMPTS;
                     let mut chunks_left = MAX_EVICTION_CHUNKS;
@@ -715,7 +711,6 @@ impl UnwrittenShardBatch {
                     entry.object_range,
                     &entry.payload_region,
                     entry.payload_checksum,
-                    &self.batch_id,
                 ));
             }
             let content_checksum = XxHash64::oneshot(0, &metadata);
@@ -740,9 +735,8 @@ impl UnwrittenShardBatch {
             let mut page = vec![0; METADATA_PAGE_BYTES];
             let mut contents = [0; page_format::CHUNK_METADATA_CONTENT_BYTES];
             contents[..16].copy_from_slice(generation);
-            contents[16..32].copy_from_slice(&self.batch_id);
-            contents[32..40].copy_from_slice(&prepared.region.chunk_count().to_le_bytes());
-            contents[40..48].copy_from_slice(&(metadata.len() as u64).to_le_bytes());
+            contents[16..24].copy_from_slice(&prepared.region.chunk_count().to_le_bytes());
+            contents[24..32].copy_from_slice(&(metadata.len() as u64).to_le_bytes());
             page_format::encode_page(
                 &mut page,
                 page_format::CHUNK_METADATA_PAGE_TAG,

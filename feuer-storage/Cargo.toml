@@ -17,7 +17,6 @@ default = ["tokio/runtime-tokio"]
 io-bench = []
 
 [dependencies]
-blake3 = "1"
 bytes = { workspace = true }
 feuer-memory = { workspace = true }
 feuer-types = { workspace = true }
@@ -33,6 +32,7 @@ io-uring = "0.7"
 libc = "0.2"
 
 [dev-dependencies]
+blake3 = "1"
 mixtrics = { workspace = true, features = ["prometheus"] }
 prometheus = { workspace = true }
 tempfile = { workspace = true }

@@ -138,12 +138,12 @@ Publication is not transactional across shards. Callers bound batch memory and c
 
 Entries within a batch share 1-MiB chunks with 4-KiB-aligned storage only when each entry's complete payload
 and metadata fit inside that chunk. Multi-chunk entries own their chunks exclusively, including unused tails. Small entries use at least 4 KiB of payload
-and share metadata pages. Variable-length records with inline keys are packed before all payloads in an allocation.
+and share metadata pages. Fixed 48-byte records with 128-bit key hashes are packed before all payloads in an allocation.
 A single-entry batch costs at least one chunk. Removed entries leave holes that cannot be reused individually.
-The v7 format uses XXHash64 for all on-disk checksums. Each contiguous allocation starts with one metadata page
+The v9 format uses XXHash64 for all on-disk checksums. Each contiguous allocation starts with one metadata page
 recording its chunk count and packed record byte length. Recovery scans the records sequentially, without a bitmap.
 Each record stores one payload address and length; continuation chunks have no headers. Allocation refuses scattered free chunks.
-Cache generations isolate resets; batch IDs bind allocation headers to entry metadata. Older formats cold-reset.
+Cache generations isolate resets. Metadata and payload checksums validate stored contents. Older formats cold-reset.
 Read invalidation compares expected payload checksums. Discarding a newer identical copy is an allowed miss.
 Pressure eviction samples up to 64 live entries and selects the lowest recent retrieval value per payload
 byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.
