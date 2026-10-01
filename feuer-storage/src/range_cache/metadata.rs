@@ -183,7 +183,7 @@ impl DiskCacheShard {
                 pages.chunks[last].set_next(address);
                 pages.dirty_pages.insert((last, RECORD_PAGES));
             } else {
-                self.metadata_head.store(address, Ordering::Relaxed);
+                self.first_metadata_chunk_address.store(address, Ordering::Relaxed);
             }
             pages.add_chunk(chunk);
         }

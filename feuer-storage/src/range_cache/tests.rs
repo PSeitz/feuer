@@ -1214,7 +1214,7 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
     assert!(first.last().unwrap().end <= 128 * CHUNK_BYTES);
     assert!(second[0].start >= 128 * CHUNK_BYTES);
     let returned = cache.get(&keys[0], range(0, 100)).await.unwrap();
-    cache.disk.save_metadata_heads().unwrap();
+    cache.disk.save_metadata_chain_starts().unwrap();
     let capacity = cache.disk.file.capacity();
     drop(cache);
     let reopened = DiskRangeCache::open(directory.path(), capacity, IoMetrics::noop())

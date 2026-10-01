@@ -39,7 +39,7 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
         let source = download(payload_bytes);
         let inputs: Vec<_> = (0..entries).map(|key| (ObjectKeyHash(key), source.clone())).collect();
         assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), entries as usize);
-        cache.disk.save_metadata_heads().unwrap();
+        cache.disk.save_metadata_chain_starts().unwrap();
         let capacity = cache.disk.file.capacity();
         drop(cache);
 
@@ -78,7 +78,7 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), 0.0);
     let written_chunks = value(&registry, "feuer_disk_chunks", &[("state", "allocated")]);
     assert_eq!(written_chunks, 5.0); // Metadata, one shared payload chunk, and three large-entry chunks.
-    cache.disk.save_metadata_heads().unwrap();
+    cache.disk.save_metadata_chain_starts().unwrap();
     let metrics = cache.disk.metrics.clone();
     drop(cache);
 
