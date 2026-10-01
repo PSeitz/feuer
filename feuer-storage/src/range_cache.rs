@@ -216,7 +216,7 @@ impl DiskRangeCache {
         let file = DataFile::open_with_buffer_pool(&directory, capacity, io_metrics, buffer_pool).await?;
         let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
         let lock_owner = file.clone();
-        let (recovery, ends) = tokio::task::spawn_blocking(move || {
+        let (recovery, shard_scan_ends) = tokio::task::spawn_blocking(move || {
             let _lock_owner = lock_owner;
             recovery::RecoveryState::open(&directory, capacity, num_shards)
         })
@@ -227,14 +227,14 @@ impl DiskRangeCache {
             .map(|shard_index| {
                 let range = recovery::shard_range(capacity, num_shards, shard_index);
                 let allocator = DiskChunkAllocator::with_metrics(range.clone(), metrics.clone()).unwrap();
-                if ends[shard_index] > range.start {
-                    allocator.start_recovery(range.start, ends[shard_index]);
+                if shard_scan_ends[shard_index] > range.start {
+                    allocator.start_recovery(range.start, shard_scan_ends[shard_index]);
                 }
                 DiskCacheShard {
                     reclaim_sample_size,
                     allocator,
                     entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
-                    written_end: AtomicU64::new(ends[shard_index]),
+                    written_end: AtomicU64::new(shard_scan_ends[shard_index]),
                 }
             })
             .collect();
@@ -245,7 +245,7 @@ impl DiskRangeCache {
             metrics,
             recovery,
         });
-        disk.start_background_tasks(ends);
+        disk.start_background_tasks(shard_scan_ends);
         Ok(Self { disk })
     }
 

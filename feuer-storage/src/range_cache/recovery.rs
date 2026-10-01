@@ -159,8 +159,8 @@ impl DiskRangeCacheState {
         self.recovery_bounds().save(&self.recovery.path)
     }
 
-    pub(super) fn start_background_tasks(self: &Arc<Self>, ends: Vec<u64>) {
-        let mut saved_ends = ends.clone();
+    pub(super) fn start_background_tasks(self: &Arc<Self>, shard_scan_ends: Vec<u64>) {
+        let mut saved_shard_scan_ends = shard_scan_ends.clone();
         if self.recovery.running.load(Ordering::Relaxed) {
             let weak = Arc::downgrade(self);
             let capacity = self.file.capacity();
@@ -168,37 +168,37 @@ impl DiskRangeCacheState {
             tracing::info!(
                 target: "feuer::storage",
                 recovery_file = %self.recovery.path.display(),
-                shard_count = ends.len(),
+                shard_count = shard_scan_ends.len(),
                 capacity_bytes = capacity,
                 "starting disk cache recovery"
             );
             tokio::spawn(async move {
-                for (index, &end) in ends.iter().enumerate() {
-                    let range = shard_range(capacity, ends.len(), index);
-                    let start = range.start;
+                for (shard_index, &scan_end) in shard_scan_ends.iter().enumerate() {
+                    let shard_byte_range = shard_range(capacity, shard_scan_ends.len(), shard_index);
+                    let scan_start = shard_byte_range.start;
                     tracing::debug!(
                         target: "feuer::storage",
-                        shard_index = index,
-                        shard_capacity_bytes = range.end - start,
-                        scan_start = start,
-                        scan_end = end,
-                        scan_chunks = (end - start) / CHUNK_BYTES,
+                        shard_index,
+                        shard_capacity_bytes = shard_byte_range.end - scan_start,
+                        scan_start,
+                        scan_end,
+                        scan_chunks = (scan_end - scan_start) / CHUNK_BYTES,
                         "starting disk shard recovery scan"
                     );
-                    let mut address = start;
-                    while address < end {
+                    let mut chunk_address = scan_start;
+                    while chunk_address < scan_end {
                         {
                             let Some(disk) = weak.upgrade() else { return };
-                            address = disk
-                                .recover_chunk(index, address, end)
+                            chunk_address = disk
+                                .recover_chunk(shard_index, chunk_address, scan_end)
                                 .await
-                                .unwrap_or(address + CHUNK_BYTES);
+                                .unwrap_or(chunk_address + CHUNK_BYTES);
                         }
                         // Do not retain the cache between attempts, or monopolize an executor on skipped chunks.
                         tokio::task::yield_now().await;
                     }
                     let Some(disk) = weak.upgrade() else { return };
-                    disk.shards[index].allocator.finish_recovery();
+                    disk.shards[shard_index].allocator.finish_recovery();
                 }
                 if let Some(disk) = weak.upgrade() {
                     disk.recovery.running.store(false, Ordering::Release);
@@ -223,7 +223,7 @@ impl DiskRangeCacheState {
                 tokio::time::sleep(CHECKPOINT_INTERVAL).await;
                 let Some(disk) = weak.upgrade() else { return };
                 let bounds = disk.recovery_bounds();
-                if bounds.ends == saved_ends {
+                if bounds.ends == saved_shard_scan_ends {
                     continue;
                 }
                 // Retain the directory lock until the atomic replacement completes, even on cancellation.
@@ -233,7 +233,7 @@ impl DiskRangeCacheState {
                 })
                 .await
                 {
-                    Ok(Ok(ends)) => saved_ends = ends,
+                    Ok(Ok(shard_scan_ends)) => saved_shard_scan_ends = shard_scan_ends,
                     result => tracing::warn!(target: "feuer::storage", ?result, "could not save disk recovery ends"),
                 }
             }
