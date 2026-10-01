@@ -240,7 +240,7 @@ impl DiskRangeCacheState {
         });
     }
 
-    /// Returns the allocation's end so the scan skips its continuation chunks.
+    /// Returns the reserved chunks' end so the scan skips their continuation chunks.
     async fn recover_chunk(&self, shard_index: usize, address: u64, scan_end: u64) -> Option<u64> {
         let shard = &self.shards[shard_index];
         let mut region = shard.allocator.reserve_for_recovery(address / CHUNK_BYTES, 1)?;
@@ -342,7 +342,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?))
 }
 
-fn valid_allocation(range: &Range<u64>, bounds: Range<u64>) -> bool {
+fn valid_payload_range(range: &Range<u64>, bounds: Range<u64>) -> bool {
     range.start < range.end
         && range.start >= bounds.start + METADATA_PAGE_BYTES as u64
         && range.end <= bounds.end
@@ -364,7 +364,7 @@ fn decode_entry(bytes: &[u8], bounds: Range<u64>) -> Option<DecodedEntry> {
     let aligned_length =
         range.len().checked_add(PAYLOAD_ALIGNMENT_BYTES - 1)? / PAYLOAD_ALIGNMENT_BYTES * PAYLOAD_ALIGNMENT_BYTES;
     let payload = start..start.checked_add(aligned_length)?;
-    if !valid_allocation(&payload, bounds) {
+    if !valid_payload_range(&payload, bounds) {
         return None;
     }
     Some((key, range, checksum, payload))

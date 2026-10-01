@@ -189,7 +189,7 @@ impl DiskChunkAllocator {
     }
 }
 
-/// A reserved byte range in the backing file. Subranges retain the whole contiguous allocation.
+/// A reserved byte range in the backing file. Subranges retain all reserved chunks.
 #[derive(Debug)]
 pub(super) struct DiskRegion {
     range: Range<u64>,
@@ -213,7 +213,7 @@ impl DiskRegion {
         self.reservation.chunks.end - self.reservation.chunks.start
     }
 
-    /// Reserves a subrange without permitting independent reuse of any part of the allocation.
+    /// Creates a subrange sharing ownership of all reserved chunks.
     pub(super) fn slice(&self, range: Range<u64>) -> Self {
         assert!(self.range.start <= range.start && range.start < range.end && range.end <= self.range.end);
         Self {
@@ -222,7 +222,7 @@ impl DiskRegion {
         }
     }
 
-    /// Counts all recovered chunks until their last owner/read guard releases the allocation.
+    /// Counts all recovered chunks until their last owner/read guard releases them.
     pub(super) fn mark_recovered(&self) {
         let mut free = self.reservation.free.lock().unwrap();
         free.mark_claimed(self.reservation.chunks.clone());
@@ -238,7 +238,7 @@ impl DiskRegion {
     }
 }
 
-/// Prevents the whole allocation from being overwritten or reused while a read depends on this region.
+/// Prevents all reserved chunks from being overwritten or reused while a read depends on this region.
 #[derive(Debug)]
 pub(super) struct DiskRegionReadGuard {
     region: DiskRegion,
