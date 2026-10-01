@@ -1,5 +1,6 @@
 use std::{fmt, sync::Arc};
 
+use bytesize::ByteSize;
 use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedRegistry};
 
 use crate::buffer::BUFFER_SIZES;
@@ -68,6 +69,12 @@ impl MemoryMetrics {
             &[],
         );
         let operation_counter = |label: &'static str| operations.counter(&[label.into()]);
+        let buffer_gauges = |status: &'static str| {
+            BUFFER_SIZES.map(|size| {
+                let bucket = format!("{:.0}", ByteSize(size as u64));
+                buffer_bytes.gauge(&[bucket.into(), status.into()])
+            })
+        };
 
         Arc::new(Self {
             insert: operation_counter("insert"),
@@ -79,8 +86,8 @@ impl MemoryMetrics {
             trimmed_payload_bytes: trimmed_payload_bytes.counter(&[]),
             used_bytes: used_bytes.gauge(&[]),
             capacity_bytes: capacity_bytes.gauge(&[]),
-            idle_buffer_bytes: BUFFER_SIZES.map(|size| buffer_bytes.gauge(&[size.to_string().into(), "idle".into()])),
-            used_buffer_bytes: BUFFER_SIZES.map(|size| buffer_bytes.gauge(&[size.to_string().into(), "used".into()])),
+            idle_buffer_bytes: buffer_gauges("idle"),
+            used_buffer_bytes: buffer_gauges("used"),
             entries: entries.gauge(&[]),
         })
     }

@@ -17,6 +17,7 @@ benchmark = []
 
 [dependencies]
 bytes = { workspace = true }
+bytesize = "2.7"
 feuer-types = { workspace = true }
 fnv = "1"
 mixtrics = { workspace = true }

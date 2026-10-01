@@ -152,8 +152,9 @@ capacity by default. All six buckets share this ceiling, without per-bucket caps
 Larger allocations are not pooled. Writes use aligned input slices or unpooled scratch.
 These metrics are registered by `MemoryMetrics`, not `IoMetrics`, and have no `pool`
 or `operation` label. The former `pool=small|medium|large` labels have been removed.
-The buffer gauge has a `bucket` label containing allocation capacity in bytes:
-`32768`, `262144`, `4194304`, `16777216`, `33554432`, or `67108864`.
+The buffer gauge has a `bucket` label containing human-readable allocation capacity:
+`32 KiB`, `256 KiB`, `4 MiB`, `16 MiB`, `32 MiB`, or `64 MiB`.
+Gauge values remain in bytes. Update filters using the former numeric bucket labels.
 
 | Metric | Type | Meaning |
 |---|---|---|

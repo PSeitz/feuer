@@ -135,7 +135,7 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         let capacity = (100 * size as u64).div_ceil(7);
         let pool = BufferPool::new(capacity, metrics.clone());
         let gauge = |name| value(&registry, name, &[]);
-        let bucket = size.to_string();
+        let bucket = format!("{:.0}", bytesize::ByteSize(size as u64));
         let buffer_bytes = |status| {
             value(
                 &registry,
@@ -188,10 +188,11 @@ fn bucket_gauges_follow_pressure_reclamation_and_shutdown_independently() {
     let capacity = 100 * BUFFER_SIZES[2] as u64;
     let pool = BufferPool::new(capacity, MemoryMetrics::new(&backend));
     let idle = |size: usize| {
+        let bucket = format!("{:.0}", bytesize::ByteSize(size as u64));
         value(
             &registry,
             "feuer_io_buffer_pool_bytes",
-            &[("bucket", &size.to_string()), ("status", "idle")],
+            &[("bucket", &bucket), ("status", "idle")],
         )
     };
     for &size in &BUFFER_SIZES[..3] {
