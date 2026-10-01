@@ -4,6 +4,14 @@ Added code is a liability. Less code is usually better. Every addition must just
 
 Implement only what the stated requirements need. Do not add features, abstractions, guarantees, or configuration "for completeness" or hypothetical future use. Every addition must solve a concrete, current requirement. If its necessity is unclear, ask before implementing. Prefer the smallest correct solution.
 
+# Linux SSD testing
+
+Machine: `ssh m8g-32cpu-local-ssd`. From the project checkout on that host:
+
+```sh
+PATH="$HOME/.cargo/bin:$PATH" TMPDIR=/mnt/local-ssd cargo test --locked -p feuer-storage --lib
+```
+
 # Disk chunks
 
 A written chunk is immutable until all entry owners and read guards release it. Explicit batches group small entries into chunks and finalize payload, entry metadata, and chunk metadata before writing. Do not append to written chunks or reuse individual entry holes.
