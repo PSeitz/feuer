@@ -116,7 +116,7 @@ fn v4_inventory_resets_generation() {
     bytes.extend_from_slice(&1u64.to_le_bytes());
     bytes.extend_from_slice(&CHUNK_BYTES.to_le_bytes());
     bytes.extend_from_slice(blake3::hash(&bytes).as_bytes());
-    fs::write(directory.path().join(BOUNDS_FILE), bytes).unwrap();
+    fs::write(directory.path().join(RECOVERY_FILE_NAME), bytes).unwrap();
 
     let (reset, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
     assert_ne!(reset.generation, generation);
@@ -139,7 +139,7 @@ fn v6_and_v7_inventories_reset_generation() {
         let length = bytes.len() - 8;
         let checksum = XxHash64::oneshot(0, &bytes[..length]);
         bytes[length..].copy_from_slice(&checksum.to_le_bytes());
-        fs::write(directory.path().join(BOUNDS_FILE), bytes).unwrap();
+        fs::write(directory.path().join(RECOVERY_FILE_NAME), bytes).unwrap();
         let (reset, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
         assert_ne!(reset.generation, bounds.generation);
         assert_eq!(ends, vec![0]);
@@ -162,7 +162,7 @@ fn layout_change_warnings_describe_previous_and_current_layouts() {
     RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 2).unwrap();
     RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 1).unwrap();
     RecoveryState::open(directory.path(), 128 * CHUNK_BYTES, 1).unwrap();
-    fs::write(directory.path().join(BOUNDS_FILE), b"torn inventory").unwrap();
+    fs::write(directory.path().join(RECOVERY_FILE_NAME), b"torn inventory").unwrap();
     RecoveryState::open(directory.path(), 128 * CHUNK_BYTES, 1).unwrap();
 
     let log = fs::read_to_string(log_path).unwrap();
@@ -605,7 +605,7 @@ async fn generation_reset_rejects_old_chunks_even_when_new_scan_bounds_cover_the
     cache.disk.save_recovery_ends().unwrap();
     let old_generation = cache.disk.recovery.generation;
     drop(cache);
-    fs::remove_file(directory.path().join(BOUNDS_FILE)).unwrap();
+    fs::remove_file(directory.path().join(RECOVERY_FILE_NAME)).unwrap();
     let cache = open_paused(directory.path(), 4 * CHUNK_BYTES).await;
     assert_ne!(cache.disk.recovery.generation, old_generation);
     cache.disk.shards[0]

@@ -11,8 +11,8 @@ use std::{
 
 use super::*;
 
-const BOUNDS_TAG: &[u8; 8] = b"FEUEND08";
-const BOUNDS_FILE: &str = "recovery-ends";
+const RECOVERY_FILE_FORMAT_ID: &[u8; 8] = b"FEUEND08";
+const RECOVERY_FILE_NAME: &str = "recovery-ends";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(super) struct RecoveryState {
@@ -43,7 +43,7 @@ pub(super) fn shard_range(capacity: u64, count: usize, index: usize) -> Range<u6
 impl RecoveryBounds {
     fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(BOUNDS_TAG);
+        bytes.extend_from_slice(RECOVERY_FILE_FORMAT_ID);
         bytes.extend_from_slice(&self.generation);
         bytes.extend_from_slice(&self.capacity.to_le_bytes());
         bytes.extend_from_slice(&(self.ends.len() as u64).to_le_bytes());
@@ -55,7 +55,7 @@ impl RecoveryBounds {
     }
 
     fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 56 || &bytes[..8] != BOUNDS_TAG {
+        if bytes.len() < 56 || &bytes[..8] != RECOVERY_FILE_FORMAT_ID {
             return None;
         }
         let capacity = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
@@ -103,7 +103,7 @@ impl RecoveryBounds {
 
 impl RecoveryState {
     pub(super) fn open(directory: &Path, capacity: u64, shards: usize) -> io::Result<(Self, Vec<u64>)> {
-        let path = directory.join(BOUNDS_FILE);
+        let path = directory.join(RECOVERY_FILE_NAME);
         // The inventory is tiny even at the maximum shard count. Never read an unbounded file.
         let mut bytes = Vec::new();
         let saved = File::open(&path).and_then(|file| file.take(1024).read_to_end(&mut bytes));
