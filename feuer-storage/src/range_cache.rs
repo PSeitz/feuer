@@ -580,18 +580,32 @@ impl DiskEntryIndex {
         }
     }
 
-    fn insert(&mut self, key: ObjectKeyHash, mut storage: ObjectRangeDiskStorage) {
-        let object_range = storage.object_range;
-        // Recovery may encounter another record with the same key and start.
-        self.remove(&key, object_range.start());
-        storage.eviction_position = self.eviction_candidates.len();
-        self.metrics.entries.increase(1);
-        self.metrics.payload_bytes.increase(object_range.len());
-        self.eviction_candidates.push((key, object_range.start()));
-        self.ranges_by_key
-            .entry(key)
-            .or_default()
-            .insert(object_range.start(), storage);
+    fn insert(&mut self, key: ObjectKeyHash, storage: ObjectRangeDiskStorage) {
+        self.insert_entries(std::iter::once((key, storage)));
+    }
+
+    fn insert_batch(&mut self, entries: &mut Vec<(ObjectKeyHash, ObjectRangeDiskStorage)>) {
+        self.ranges_by_key.reserve(entries.len());
+        self.eviction_candidates.reserve(entries.len());
+        self.insert_entries(entries.drain(..));
+    }
+
+    fn insert_entries(&mut self, entries: impl IntoIterator<Item = (ObjectKeyHash, ObjectRangeDiskStorage)>) {
+        let mut entry_count = 0;
+        let mut payload_bytes = 0;
+        for (key, mut storage) in entries {
+            let object_range = storage.object_range;
+            storage.eviction_position = self.eviction_candidates.len();
+            entry_count += 1;
+            payload_bytes += object_range.len();
+            self.eviction_candidates.push((key, object_range.start()));
+            self.ranges_by_key
+                .entry(key)
+                .or_default()
+                .insert(object_range.start(), storage);
+        }
+        self.metrics.entries.increase(entry_count);
+        self.metrics.payload_bytes.increase(payload_bytes);
     }
 
     fn remove(&mut self, key: &ObjectKeyHash, start: u64) -> Option<ObjectRangeDiskStorage> {

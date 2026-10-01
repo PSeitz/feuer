@@ -155,11 +155,11 @@ impl DiskRangeCacheState {
         let mut payload_chunks = BTreeMap::<u64, DiskRegion>::new();
         let mut payload_ranges = BTreeMap::<u64, u64>::new();
         let count = shard.metadata.lock().unwrap().chunks.len();
+        let mut entries = Vec::new();
         for chunk in 0..count {
             {
-                let mut index = shard.entry_index.lock().unwrap();
+                let mut pages = shard.metadata.lock().unwrap();
                 for slot in 0..RECORDS_PER_CHUNK {
-                    let mut pages = shard.metadata.lock().unwrap();
                     let record = pages.chunks[chunk].record(slot);
                     if record.iter().all(|&byte| byte == 0) {
                         continue;
@@ -193,8 +193,6 @@ impl DiskRangeCacheState {
                         pages.discard_record(chunk, slot);
                         continue;
                     }
-                    // Dropping a replaced entry locks metadata to invalidate its record.
-                    drop(pages);
                     let payload_region = region.slice(payload.clone());
                     let storage = ObjectRangeDiskStorage {
                         read_result: Weak::new(),
@@ -205,9 +203,10 @@ impl DiskRangeCacheState {
                         payload_region,
                     };
                     payload_ranges.insert(payload.start, payload.end);
-                    index.insert(key, storage);
+                    entries.push((key, storage));
                 }
             }
+            shard.entry_index.lock().unwrap().insert_batch(&mut entries);
             tokio::task::yield_now().await;
         }
         shard.allocator.finish_recovery();

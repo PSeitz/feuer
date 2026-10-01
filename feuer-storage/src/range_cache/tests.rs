@@ -1232,13 +1232,14 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
 }
 
 #[test]
-fn index_insertion_keeps_covered_ranges_and_replaces_matching_starts() {
+fn index_batch_insertion_keeps_covered_ranges() {
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
     let region = allocator.reserve_chunks(1).unwrap();
     let key = ObjectKeyHash::from("object");
-    let mut index = DiskEntryIndex::new(DiskMetrics::noop());
-    for object_range in [range(10, 20), range(0, 30), range(15, 16), range(0, 40)] {
-        index.insert(
+    let (registry, backend) = crate::test_metrics::registry();
+    let mut index = DiskEntryIndex::new(DiskMetrics::new(&backend));
+    let mut entries = Vec::from([range(10, 20), range(0, 30), range(15, 16)].map(|object_range| {
+        (
             key,
             ObjectRangeDiskStorage {
                 read_result: Weak::new(),
@@ -1248,10 +1249,19 @@ fn index_insertion_keeps_covered_ranges_and_replaces_matching_starts() {
                 payload_region: region.slice(0..4096),
                 metadata_slot: None,
             },
-        );
-    }
+        )
+    }));
+    let capacity = entries.capacity();
+    index.insert_batch(&mut entries);
+    assert!(entries.is_empty());
+    assert_eq!(entries.capacity(), capacity);
+    assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 3.0);
+    assert_eq!(
+        crate::test_metrics::value(&registry, "feuer_disk_payload_bytes", &[]),
+        41.0
+    );
     assert_eq!(index.ranges_by_key[&key].len(), 3);
-    assert_eq!(index.ranges_by_key[&key][&0].object_range, range(0, 40));
+    assert_eq!(index.ranges_by_key[&key][&0].object_range, range(0, 30));
     assert_eq!(index.eviction_candidates.len(), 3);
     for (position, (key, start)) in index.eviction_candidates.iter().enumerate() {
         assert_eq!(index.ranges_by_key[key][start].eviction_position, position);
