@@ -32,8 +32,9 @@ struct DiskChunkAvailability {
 }
 
 impl DiskChunkAvailability {
-    /// Removes one contiguous range of free chunks. Failure consumes no space.
-    fn reserve(&mut self, chunks: Range<u64>) -> Option<()> {
+    /// Removes the specified chunks from the free-chunk map and decreases the available chunk count.
+    /// If any are unavailable, leaves both unchanged.
+    fn remove_free_chunks(&mut self, chunks: Range<u64>) -> Option<()> {
         let (&start, &count) = self.free_chunk_count_by_start.range(..=chunks.start).next_back()?;
         if chunks.start >= chunks.end || chunks.end > start + count {
             return None;
@@ -48,8 +49,6 @@ impl DiskChunkAvailability {
         }
         let count = chunks.end - chunks.start;
         self.available_chunks -= count;
-        self.metrics.free_chunks.decrease(count);
-        self.metrics.allocated_chunks.increase(count);
         Some(())
     }
 
@@ -157,8 +156,18 @@ impl DiskChunkAllocator {
                 return None;
             }
         }
-        free.reserve(chunks.clone())?;
-        Some(self.region(chunks))
+        free.remove_free_chunks(chunks.clone())?;
+        free.metrics.free_chunks.decrease(count);
+        free.metrics.allocated_chunks.increase(count);
+        Some(self.region(chunks, false))
+    }
+
+    /// Startup payload recovery retains every region and reports batch metrics before yielding.
+    /// Metadata is already reserved; retained regions prevent payload chunks from being claimed twice.
+    pub(super) fn recover_payload_chunks(&self, first: u64, count: u64) -> Option<DiskRegion> {
+        let chunks = first..first.checked_add(count)?;
+        self.free.lock().unwrap().remove_free_chunks(chunks.clone())?;
+        Some(self.region(chunks, true))
     }
 
     /// Reserves one contiguous run of whole chunks. Failure consumes no space.
@@ -172,18 +181,20 @@ impl DiskChunkAllocator {
             .iter()
             .find(|(_, length)| **length >= count)?;
         let chunks = start..start + count;
-        free.reserve(chunks.clone())?;
+        free.remove_free_chunks(chunks.clone())?;
         free.mark_claimed(chunks.clone());
-        Some(self.region(chunks))
+        free.metrics.free_chunks.decrease(count);
+        free.metrics.allocated_chunks.increase(count);
+        Some(self.region(chunks, false))
     }
 
-    fn region(&self, chunks: Range<u64>) -> DiskRegion {
+    fn region(&self, chunks: Range<u64>, recovered: bool) -> DiskRegion {
         DiskRegion {
             range: chunks.start * CHUNK_BYTES..chunks.end * CHUNK_BYTES,
             reservation: Arc::new(ChunkReservation {
                 free: self.free.clone(),
                 chunks,
-                recovered: AtomicBool::new(false),
+                recovered: AtomicBool::new(recovered),
             }),
         }
     }

@@ -167,6 +167,7 @@ impl DiskRangeCacheState {
         let count = shard.metadata.lock().unwrap().chunks.len();
         let mut entries = Vec::new();
         for chunk in 0..count {
+            let mut recovered_chunks = 0;
             {
                 let mut pages = shard.metadata.lock().unwrap();
                 for slot in 0..RECORDS_PER_CHUNK {
@@ -190,12 +191,12 @@ impl DiskRangeCacheState {
                     if let std::collections::btree_map::Entry::Vacant(entry) = payload_chunks.entry(start) {
                         let Some(region) = shard
                             .allocator
-                            .reserve_for_recovery(start / CHUNK_BYTES, (end - start) / CHUNK_BYTES)
+                            .recover_payload_chunks(start / CHUNK_BYTES, (end - start) / CHUNK_BYTES)
                         else {
                             pages.discard_record(chunk, slot);
                             continue;
                         };
-                        region.mark_recovered();
+                        recovered_chunks += region.chunk_count();
                         entry.insert(region);
                     }
                     let region = &payload_chunks[&start];
@@ -216,6 +217,10 @@ impl DiskRangeCacheState {
                     entries.push((key, storage));
                 }
             }
+            // Report before yielding; cancellation can then release regions with balanced metrics.
+            self.metrics.free_chunks.decrease(recovered_chunks);
+            self.metrics.allocated_chunks.increase(recovered_chunks);
+            self.metrics.recovered_chunks.increase(recovered_chunks);
             shard.entry_index.lock().unwrap().insert_batch(&mut entries);
             tokio::task::yield_now().await;
         }
