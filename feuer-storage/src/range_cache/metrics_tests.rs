@@ -26,9 +26,9 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     let capacity = 8 * CHUNK_BYTES;
     let (directory, cache, registry) = measured_cache(capacity).await;
     let inputs = vec![
-        ("small-a".to_owned(), download(4)),
-        ("small-b".to_owned(), download(8)),
-        ("large".to_owned(), download(2 * CHUNK_BYTES as usize + 17)),
+        (ObjectKeyHash::from("small-a"), download(4)),
+        (ObjectKeyHash::from("small-b"), download(8)),
+        (ObjectKeyHash::from("large"), download(2 * CHUNK_BYTES as usize + 17)),
     ];
     cache.insert_batch(inputs.clone()).await.unwrap();
     assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), 0.0);
@@ -66,9 +66,9 @@ async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation()
     use std::{future::Future, task::Poll};
 
     let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
-    let key = "object".to_owned();
+    let key = ObjectKeyHash::from("object");
     let source = Download::new(10, Bytes::from_static(b"abcdefgh")).unwrap();
-    cache.insert_batch(vec![(key.clone(), source)]).await.unwrap();
+    cache.insert_batch(vec![(key, source)]).await.unwrap();
 
     // Hold initialization pending so both lookups deterministically join the same read.
     let result = Arc::new(OnceCell::new());
@@ -130,12 +130,12 @@ async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation()
 #[tokio::test]
 async fn records_write_outcomes_packing_and_index_usage() {
     let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
-    let key = "object".to_owned();
+    let key = ObjectKeyHash::from("object");
     let request = ByteRange::new(0, 1).unwrap();
     let outcome = |label| value(&registry, "feuer_disk_write_entries_total", &[("outcome", label)]);
     assert_eq!(
         cache
-            .insert_batch(vec![(key.clone(), download(4)), ("neighbor".into(), download(8))])
+            .insert_batch(vec![(key, download(4)), ("neighbor".into(), download(8))])
             .await
             .unwrap(),
         2
@@ -151,7 +151,7 @@ async fn records_write_outcomes_packing_and_index_usage() {
         value(&registry, "feuer_disk_batch_bytes_total", &[("kind", "chunk")]),
         CHUNK_BYTES as f64
     );
-    assert_eq!(cache.insert_batch(vec![(key.clone(), download(4))]).await.unwrap(), 0);
+    assert_eq!(cache.insert_batch(vec![(key, download(4))]).await.unwrap(), 0);
     assert_eq!(outcome("already_covered"), 1.0);
     assert_eq!(
         cache
@@ -214,7 +214,7 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
     assert_eq!(triggering(), 1.0);
 
     // Evictions still count when a read guard prevents reuse and insertion fails.
-    let guard = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key["third"][&0]
+    let guard = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&ObjectKeyHash::from("third")][&0]
         .payload_region
         .read_guard();
     assert_eq!(
@@ -244,8 +244,8 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
 async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage() {
     let (directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
     let request = ByteRange::new(0, 1).unwrap();
-    let key = "corrupt".to_owned();
-    cache.insert_batch(vec![(key.clone(), download(4))]).await.unwrap();
+    let key = ObjectKeyHash::from("corrupt");
+    cache.insert_batch(vec![(key, download(4))]).await.unwrap();
     let address = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key][&0]
         .payload_region
         .range()
@@ -262,7 +262,7 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
         1.0
     );
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
-    cache.insert_batch(vec![(key.clone(), download(4))]).await.unwrap();
+    cache.insert_batch(vec![(key, download(4))]).await.unwrap();
     std::fs::OpenOptions::new()
         .write(true)
         .open(directory.path().join("data"))
@@ -290,7 +290,11 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
     // As in the existing write-failure test, let allocation exceed the actual file.
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
-    disk.shards[0].entry_index.lock().unwrap().remove("second", 0);
+    disk.shards[0]
+        .entry_index
+        .lock()
+        .unwrap()
+        .remove(&ObjectKeyHash::from("second"), 0);
     disk.shards[0].allocator = DiskChunkAllocator::with_metrics(0..3 * CHUNK_BYTES, disk.metrics.clone()).unwrap();
     let cache = DiskRangeCache { disk: Arc::new(disk) };
     assert!(

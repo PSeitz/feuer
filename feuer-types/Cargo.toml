@@ -17,6 +17,7 @@ bytes = { workspace = true }
 bytesize = "2.7"
 fnv = "1"
 thiserror = { workspace = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [lints]
 workspace = true

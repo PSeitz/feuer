@@ -8,9 +8,8 @@ mod recovery;
 mod tests;
 
 use std::{
-    collections::{BTreeMap, HashMap, hash_map::DefaultHasher},
+    collections::{BTreeMap, HashMap},
     fmt,
-    hash::{Hash, Hasher},
     path::Path,
     sync::{
         Arc, Mutex, Weak,
@@ -22,7 +21,7 @@ use std::{
 use bytes::Bytes;
 use feuer_memory::BufferPool;
 use feuer_types::{
-    ByteRange, Download, ObjectKey,
+    ByteRange, Download, ObjectKeyHash,
     retention::{ObjectAccessHistories, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates},
 };
 use tokio::sync::OnceCell;
@@ -46,7 +45,7 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 /// Explicit batches pack smaller entries together and write complete immutable 1-MiB chunks.
 /// Entries have plain payload bytes, 4-KiB-aligned storage, and a checksum in their entry metadata.
 /// Reads verify the whole covering entry, returning only requested bytes. Reuse requires a wholly free chunk.
-/// Full-key hashing selects an independently allocated shard; admission may fail despite space elsewhere.
+/// The key hash selects an independently allocated shard; admission may fail despite space elsewhere.
 ///
 /// Pressure eviction uses sampled retrieval value per payload byte.
 /// Recovery publishes old entries incrementally alongside foreground reads and writes.
@@ -75,8 +74,8 @@ struct DiskCacheShard {
 
 /// Disk entries indexed by object key and range start, with dense rotating eviction candidates.
 struct DiskEntryIndex {
-    ranges_by_key: HashMap<ObjectKey, BTreeMap<u64, ObjectRangeDiskStorage>>,
-    eviction_candidates: Vec<(ObjectKey, u64)>,
+    ranges_by_key: HashMap<ObjectKeyHash, BTreeMap<u64, ObjectRangeDiskStorage>>,
+    eviction_candidates: Vec<(ObjectKeyHash, u64)>,
     next_candidate: usize,
     next_publication_id: u64,
     metrics: Arc<DiskMetrics>,
@@ -98,7 +97,7 @@ struct UnwrittenRegion {
 struct UnwrittenShardBatch {
     batch_id: [u8; 16],
     regions: Vec<UnwrittenRegion>,
-    entries: Vec<(ObjectKey, ObjectRangeDiskStorage)>,
+    entries: Vec<(ObjectKeyHash, ObjectRangeDiskStorage)>,
 }
 
 /// Verified bytes or failure shared by concurrent reads of one stored entry.
@@ -266,7 +265,7 @@ impl DiskRangeCache {
     /// Pressure eviction is bounded; unavailable capacity causes admission to be skipped, not waited for.
     /// Callers bound batch size and concurrency: payload slices are retained until writing completes.
     /// Dropping this future does not abort its detached writer or release storage needed by submitted I/O.
-    pub async fn insert_batch(&self, downloads: Vec<(ObjectKey, Download)>) -> Result<usize, DiskRangeCacheError> {
+    pub async fn insert_batch(&self, downloads: Vec<(ObjectKeyHash, Download)>) -> Result<usize, DiskRangeCacheError> {
         self.insert_batch_checked(
             downloads
                 .into_iter()
@@ -284,7 +283,7 @@ impl DiskRangeCache {
     /// The detached writer retains tokens and reservations even if this future is canceled.
     pub async fn insert_batch_checked<T, F>(
         &self,
-        downloads: Vec<(ObjectKey, Download, T)>,
+        downloads: Vec<(ObjectKeyHash, Download, T)>,
         with_current: F,
     ) -> Result<usize, DiskRangeCacheError>
     where
@@ -385,7 +384,7 @@ impl DiskRangeCache {
     }
 
     /// Checks indexed coverage without reading payload or recording an access.
-    pub fn contains(&self, key: &ObjectKey, range: ByteRange) -> bool {
+    pub fn contains(&self, key: &ObjectKeyHash, range: ByteRange) -> bool {
         self.disk.shards[self.disk.shard_index_for_key(key)]
             .entry_index
             .lock()
@@ -397,12 +396,12 @@ impl DiskRangeCache {
     /// Returns exactly requested bytes from one covering entry, or a miss on any I/O/integrity uncertainty.
     /// Concurrent reads of one stored entry share whole-entry I/O and checksum verification.
     /// Reads no neighboring entries or metadata. Results retain no disk ownership.
-    pub async fn get(&self, key: &ObjectKey, requested: ByteRange) -> Option<Bytes> {
+    pub async fn get(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<Bytes> {
         self.get_with_capacity(key, requested).await.map(|(bytes, _)| bytes)
     }
 
     /// Returns the requested slice and its whole backing allocation capacity for memory admission.
-    pub async fn get_with_capacity(&self, key: &ObjectKey, requested: ByteRange) -> Option<(Bytes, usize)> {
+    pub async fn get_with_capacity(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<(Bytes, usize)> {
         let started = Instant::now();
         let metrics = &self.disk.metrics;
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
@@ -510,7 +509,7 @@ impl DiskCacheShard {
             }
         }
         if let Some((position, ..)) = selected_candidate {
-            let (key, start) = index.eviction_candidates[position].clone();
+            let (key, start) = index.eviction_candidates[position];
             *chunks_left -= index.ranges_by_key[&key][&start].payload_region.chunk_count() as usize;
             index.remove(&key, start);
         }
@@ -529,7 +528,7 @@ impl DiskEntryIndex {
         }
     }
 
-    fn insert(&mut self, key: ObjectKey, mut storage: ObjectRangeDiskStorage) {
+    fn insert(&mut self, key: ObjectKeyHash, mut storage: ObjectRangeDiskStorage) {
         let object_range = storage.object_range;
         if let Some(entries) = self.ranges_by_key.get(&key) {
             let replaced_range_starts: Vec<_> = entries
@@ -548,14 +547,14 @@ impl DiskEntryIndex {
         storage.eviction_position = self.eviction_candidates.len();
         self.metrics.entries.increase(1);
         self.metrics.payload_bytes.increase(object_range.len());
-        self.eviction_candidates.push((key.clone(), object_range.start()));
+        self.eviction_candidates.push((key, object_range.start()));
         self.ranges_by_key
             .entry(key)
             .or_default()
             .insert(object_range.start(), storage);
     }
 
-    fn remove(&mut self, key: &str, start: u64) -> Option<ObjectRangeDiskStorage> {
+    fn remove(&mut self, key: &ObjectKeyHash, start: u64) -> Option<ObjectRangeDiskStorage> {
         let entries = self.ranges_by_key.get_mut(key)?;
         let storage = entries.remove(&start)?;
         self.metrics.entries.decrease(1);
@@ -576,7 +575,7 @@ impl DiskEntryIndex {
     }
 
     /// Removes the indexed entry matching the failed read's expected start and checksum.
-    fn remove_entry_matching_read(&mut self, key: &str, read: &GuardedObjectRangeRead) {
+    fn remove_entry_matching_read(&mut self, key: &ObjectKeyHash, read: &GuardedObjectRangeRead) {
         let start = read.object_range.start();
         // Preserve different contents. Discarding a newer identical copy is an acceptable miss.
         if self
@@ -589,7 +588,7 @@ impl DiskEntryIndex {
         }
     }
 
-    fn covering_range(&self, key: &str, requested: ByteRange) -> Option<&ObjectRangeDiskStorage> {
+    fn covering_range(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&ObjectRangeDiskStorage> {
         // Retained ranges never contain one another, so their ends increase with their starts.
         let (_, storage) = self.ranges_by_key.get(key)?.range(..=requested.start()).next_back()?;
         storage.object_range.contains(requested).then_some(storage)
@@ -610,10 +609,8 @@ impl Drop for DiskEntryIndex {
 }
 
 impl DiskRangeCacheState {
-    fn shard_index_for_key(&self, key: &str) -> usize {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        (hasher.finish() % self.shards.len() as u64) as usize
+    fn shard_index_for_key(&self, key: &ObjectKeyHash) -> usize {
+        (key.0 % self.shards.len() as u128) as usize
     }
 }
 
@@ -630,13 +627,13 @@ impl UnwrittenShardBatch {
     fn pack_download(
         &mut self,
         allocator: &DiskChunkAllocator,
-        key: &ObjectKey,
+        key: &ObjectKeyHash,
         download: &Download,
     ) -> Result<(), u64> {
         let object_range = download.downloaded_range();
         let bytes = download.bytes();
         let aligned_payload_bytes = (bytes.len() as u64).next_multiple_of(PAYLOAD_ALIGNMENT_BYTES);
-        let metadata_bytes = 72 + key.len();
+        let metadata_bytes = page_format::ENTRY_METADATA_BYTES;
         let shares_chunk = self.regions.last().is_some_and(|region| {
             region.region.chunk_count() == 1
                 && region.used_bytes
@@ -683,7 +680,7 @@ impl UnwrittenShardBatch {
         prepared.parts.push(((payload_start - base) as usize, bytes.clone()));
         prepared.used_bytes += aligned_payload_bytes;
         self.entries.push((
-            key.clone(),
+            *key,
             ObjectRangeDiskStorage {
                 read_result: Weak::new(),
                 eviction_position: 0,
@@ -707,7 +704,7 @@ impl UnwrittenShardBatch {
         metrics: &DiskMetrics,
         generation: &[u8; 16],
         written_end: &AtomicU64,
-    ) -> Result<Vec<(ObjectKey, ObjectRangeDiskStorage)>, DiskRangeCacheError> {
+    ) -> Result<Vec<(ObjectKeyHash, ObjectRangeDiskStorage)>, DiskRangeCacheError> {
         for prepared in &mut self.regions {
             let address = prepared.region.range().start;
             let entry_end = prepared.entry_start + prepared.parts.len() - 1;

@@ -44,9 +44,9 @@ fn queue_metrics_cover_enqueue_pressure_dequeue_and_cancellation() {
 }
 
 fn enqueue(disk_write_queue: &DiskWriteQueue, memory: &MemoryCache, key: &str) {
-    let key = key.to_owned();
+    let key = ObjectKeyHash::from(key);
     let download = Download::new(3, Bytes::from_static(b"abcd")).unwrap();
-    let id = memory.insert(key.clone(), download.clone()).unwrap();
+    let id = memory.insert(key, download.clone()).unwrap();
     disk_write_queue.enqueue_if_capacity(key, download, id);
 }
 
@@ -58,7 +58,7 @@ fn queue_saturation_is_nonblocking_and_bounded_by_entries() {
     enqueue(&disk_write_queue, &memory, "skipped");
     assert_eq!(receiver.len(), 1);
     // Queue pressure did not reject memory admission.
-    let key = "skipped".to_owned();
+    let key = ObjectKeyHash::from("skipped");
     assert!(memory.get(&key, ByteRange::new(3, 7).unwrap()).is_some());
     let active = receiver.try_recv().unwrap();
     enqueue(&disk_write_queue, &memory, "next");
@@ -81,20 +81,20 @@ async fn eviction_and_reinsertion_cancel_old_queued_writes_while_current_entries
     for key in ["live-a", "evicted", "readmitted", "live-b"] {
         enqueue(&disk_write_queue, &memory, key);
     }
-    assert!(memory.remove(&"evicted".to_owned(), range));
-    assert!(memory.remove(&"readmitted".to_owned(), range));
+    assert!(memory.remove(&ObjectKeyHash::from("evicted"), range));
+    assert!(memory.remove(&ObjectKeyHash::from("readmitted"), range));
     memory.insert(
-        "readmitted".to_owned(),
+        ObjectKeyHash::from("readmitted"),
         Download::new(3, Bytes::from_static(b"abcd")).unwrap(),
     );
     drop(disk_write_queue);
     DiskWriteQueue::write_queued_batches(receiver, memory.clone(), disk.clone()).await;
-    assert!(!disk.contains(&"evicted".to_owned(), range));
-    assert!(!disk.contains(&"readmitted".to_owned(), range));
+    assert!(!disk.contains(&ObjectKeyHash::from("evicted"), range));
+    assert!(!disk.contains(&ObjectKeyHash::from("readmitted"), range));
     // Both fit on disk only if the drained batch packs them into the same chunk.
     for key in ["live-a", "live-b"] {
         assert_eq!(
-            disk.get(&key.to_owned(), range).await.unwrap(),
+            disk.get(&ObjectKeyHash::from(key), range).await.unwrap(),
             Bytes::from_static(b"abcd")
         );
         assert_eq!(

@@ -126,22 +126,26 @@ fn v4_inventory_resets_generation() {
 }
 
 #[test]
-fn v6_inventory_resets_generation() {
-    let directory = tempfile::tempdir().unwrap();
-    let bounds = RecoveryBounds {
-        generation: [1; 16],
-        capacity: CHUNK_BYTES,
-        ends: vec![CHUNK_BYTES],
-    };
-    let mut bytes = bounds.encode();
-    bytes[..8].copy_from_slice(b"FEUEND06");
-    let length = bytes.len() - 8;
-    let checksum = XxHash64::oneshot(0, &bytes[..length]);
-    bytes[length..].copy_from_slice(&checksum.to_le_bytes());
-    fs::write(directory.path().join(BOUNDS_FILE), bytes).unwrap();
-    let (reset, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
-    assert_ne!(reset.generation, bounds.generation);
-    assert_eq!(ends, vec![0]);
+fn v6_and_v7_inventories_reset_generation() {
+    for tag in [b"FEUEND06", b"FEUEND07"] {
+        let directory = tempfile::tempdir().unwrap();
+        let bounds = RecoveryBounds {
+            generation: [1; 16],
+            capacity: CHUNK_BYTES,
+            ends: vec![CHUNK_BYTES],
+        };
+        let mut bytes = bounds.encode();
+        bytes[..8].copy_from_slice(tag);
+        let length = bytes.len() - 8;
+        let checksum = XxHash64::oneshot(0, &bytes[..length]);
+        bytes[length..].copy_from_slice(&checksum.to_le_bytes());
+        fs::write(directory.path().join(BOUNDS_FILE), bytes).unwrap();
+        let (reset, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
+        assert_ne!(reset.generation, bounds.generation);
+        assert_eq!(ends, vec![0]);
+        let (reopened, _) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
+        assert_eq!(reopened.generation, reset.generation);
+    }
 }
 
 #[test]
@@ -178,7 +182,10 @@ fn layout_change_warnings_describe_previous_and_current_layouts() {
 #[tokio::test]
 async fn recovery_logs_start_and_completion_at_info() {
     let (directory, cache) = open_test_cache(8 * CHUNK_BYTES).await;
-    cache.insert("object".to_owned(), download(0, 100)).await.unwrap();
+    cache
+        .insert(ObjectKeyHash::from("object"), download(0, 100))
+        .await
+        .unwrap();
     cache.disk.save_recovery_ends().unwrap();
     drop(cache);
 
@@ -208,10 +215,10 @@ async fn recovery_logs_start_and_completion_at_info() {
 async fn incrementally_recovers_shared_chunks_and_multi_chunk_entries() {
     let (directory, cache) = open_test_cache(8 * CHUNK_BYTES).await;
     let inputs = vec![
-        ("small-a".to_owned(), download(17, 123)),
-        ("small-b".to_owned(), download(9, 444)),
-        ("large".to_owned(), download(3, 2 * CHUNK_BYTES as usize + 17)),
-        ("metadata-only/".repeat(90_000), download(0, 512)),
+        (ObjectKeyHash::from("small-a"), download(17, 123)),
+        (ObjectKeyHash::from("small-b"), download(9, 444)),
+        (ObjectKeyHash::from("large"), download(3, 2 * CHUNK_BYTES as usize + 17)),
+        (ObjectKeyHash::from("metadata-only/".repeat(90_000)), download(0, 512)),
     ];
     assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
     cache.disk.save_recovery_ends().unwrap();
@@ -230,7 +237,7 @@ async fn incrementally_recovers_shared_chunks_and_multi_chunk_entries() {
         assert_eq!(cache.get(key, source.downloaded_range()).await.unwrap(), source.bytes());
         assert_eq!(cache.access_histories().clock(), 0);
     }
-    // Metadata-only chunks and partially occupied chunks must remain fully reserved.
+    // All chunks, including partially occupied ones, must remain fully reserved.
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 8 * CHUNK_BYTES - end);
 }
 
@@ -239,8 +246,8 @@ async fn recovery_advances_past_multi_chunk_payload_to_the_next_allocation() {
     let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     let large = download(0, 2 * CHUNK_BYTES as usize + 17);
     let small = download(0, 123);
-    cache.insert("large".to_owned(), large.clone()).await.unwrap();
-    cache.insert("small".to_owned(), small.clone()).await.unwrap();
+    cache.insert(ObjectKeyHash::from("large"), large.clone()).await.unwrap();
+    cache.insert(ObjectKeyHash::from("small"), small.clone()).await.unwrap();
     cache.disk.save_recovery_ends().unwrap();
     drop(cache);
 
@@ -251,19 +258,24 @@ async fn recovery_advances_past_multi_chunk_payload_to_the_next_allocation() {
     assert_eq!(cache.disk.recover_chunk(0, next, end).await, Some(end));
     for (key, source) in [("large", large), ("small", small)] {
         assert_eq!(
-            cache.get(&key.to_owned(), source.downloaded_range()).await.unwrap(),
+            cache
+                .get(&ObjectKeyHash::from(key), source.downloaded_range())
+                .await
+                .unwrap(),
             source.bytes()
         );
     }
 }
 
 #[tokio::test]
-async fn packed_records_cross_pages_and_corruption_rejects_the_shared_prefix() {
+async fn fixed_records_fill_multiple_pages_and_corruption_rejects_the_shared_prefix() {
     for corrupt in [false, true] {
         let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
-        let inputs: Vec<_> = (0..130).map(|i| (format!("small-{i}"), download(i, 1024))).collect();
+        let inputs: Vec<_> = (0..130)
+            .map(|i| (ObjectKeyHash::from(format!("small-{i}")), download(i, 1024)))
+            .collect();
         assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
-        let (_, metadata) = entry_disk_ranges(&cache, "small-0").await;
+        let (_, metadata) = entry_disk_ranges(&cache, &ObjectKeyHash::from("small-0")).await;
         assert!(metadata[0].end - metadata[0].start > METADATA_PAGE_BYTES as u64);
         if corrupt {
             cache
@@ -276,7 +288,10 @@ async fn packed_records_cross_pages_and_corruption_rejects_the_shared_prefix() {
                 .await
                 .unwrap();
         }
-        cache.insert("independent".to_owned(), download(0, 17)).await.unwrap();
+        cache
+            .insert(ObjectKeyHash::from("independent"), download(0, 17))
+            .await
+            .unwrap();
         cache.disk.save_recovery_ends().unwrap();
         drop(cache);
         let cache = DiskRangeCache::open(directory.path(), 2 * CHUNK_BYTES, IoMetrics::noop())
@@ -290,7 +305,7 @@ async fn packed_records_cross_pages_and_corruption_rejects_the_shared_prefix() {
                 assert_eq!(cache.get(key, source.downloaded_range()).await.unwrap(), source.bytes());
             }
         }
-        assert!(cache.contains(&"independent".to_owned(), range(0, 17)));
+        assert!(cache.contains(&ObjectKeyHash::from("independent"), range(0, 17)));
         assert_eq!(
             cache.disk.shards[0].allocator.available_bytes(),
             if corrupt { CHUNK_BYTES } else { 0 }
@@ -299,12 +314,12 @@ async fn packed_records_cross_pages_and_corruption_rejects_the_shared_prefix() {
 }
 
 #[tokio::test]
-async fn recovers_metadata_larger_than_16_mib() {
+async fn recovers_hash_of_key_larger_than_16_mib() {
     let capacity = 32 * CHUNK_BYTES;
     let (directory, cache) = open_test_cache(capacity).await;
-    let key = "k".repeat(16 * 1024 * 1024 + 1);
+    let key = ObjectKeyHash::from("k".repeat(16 * 1024 * 1024 + 1));
     let source = download(0, 100);
-    assert!(cache.insert(key.clone(), source.clone()).await.unwrap());
+    assert!(cache.insert(key, source.clone()).await.unwrap());
     cache.disk.save_recovery_ends().unwrap();
     drop(cache);
 
@@ -320,25 +335,39 @@ async fn recovers_metadata_larger_than_16_mib() {
 #[tokio::test]
 async fn writes_can_win_before_scanning_and_recovery_does_not_resurrect_freed_entries() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
-    cache.insert("old".to_owned(), download(0, 100)).await.unwrap();
-    cache.insert("untouched".to_owned(), download(0, 100)).await.unwrap();
+    cache
+        .insert(ObjectKeyHash::from("old"), download(0, 100))
+        .await
+        .unwrap();
+    cache
+        .insert(ObjectKeyHash::from("untouched"), download(0, 100))
+        .await
+        .unwrap();
     cache.disk.save_recovery_ends().unwrap();
     drop(cache);
     let cache = open_paused(directory.path(), 3 * CHUNK_BYTES).await;
     // Both lookups and writes work while the scan has not advanced at all.
-    assert!(cache.get(&"old".to_owned(), range(0, 1)).await.is_none());
-    assert!(cache.insert("new".to_owned(), download(0, 17)).await.unwrap());
+    assert!(cache.get(&ObjectKeyHash::from("old"), range(0, 1)).await.is_none());
+    assert!(cache.insert(ObjectKeyHash::from("new"), download(0, 17)).await.unwrap());
     assert_eq!(
-        cache.get(&"new".to_owned(), range(0, 17)).await.unwrap(),
+        cache.get(&ObjectKeyHash::from("new"), range(0, 17)).await.unwrap(),
         download(0, 17).bytes()
     );
-    cache.disk.shards[0].entry_index.lock().unwrap().remove("new", 0);
+    cache.disk.shards[0]
+        .entry_index
+        .lock()
+        .unwrap()
+        .remove(&ObjectKeyHash::from("new"), 0);
     assert!(cache.disk.recover_chunk(0, 0, 2 * CHUNK_BYTES).await.is_none());
-    assert!(!cache.contains(&"old".to_owned(), range(0, 1)));
-    assert!(!cache.contains(&"new".to_owned(), range(0, 1)));
+    assert!(!cache.contains(&ObjectKeyHash::from("old"), range(0, 1)));
+    assert!(!cache.contains(&ObjectKeyHash::from("new"), range(0, 1)));
     cache.disk.recover_chunk(0, CHUNK_BYTES, 2 * CHUNK_BYTES).await.unwrap();
-    assert!(cache.contains(&"untouched".to_owned(), range(0, 1)));
-    cache.disk.shards[0].entry_index.lock().unwrap().remove("untouched", 0);
+    assert!(cache.contains(&ObjectKeyHash::from("untouched"), range(0, 1)));
+    cache.disk.shards[0]
+        .entry_index
+        .lock()
+        .unwrap()
+        .remove(&ObjectKeyHash::from("untouched"), 0);
     assert!(
         cache
             .disk
@@ -351,40 +380,63 @@ async fn writes_can_win_before_scanning_and_recovery_does_not_resurrect_freed_en
 #[tokio::test]
 async fn recovery_does_not_replace_a_range_published_by_a_write() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
-    cache.insert("discarded".to_owned(), download(0, 100)).await.unwrap();
-    cache.insert("object".to_owned(), download(0, 100)).await.unwrap();
+    cache
+        .insert(ObjectKeyHash::from("discarded"), download(0, 100))
+        .await
+        .unwrap();
+    cache
+        .insert(ObjectKeyHash::from("object"), download(0, 100))
+        .await
+        .unwrap();
     cache.disk.save_recovery_ends().unwrap();
     drop(cache);
     let cache = open_paused(directory.path(), 3 * CHUNK_BYTES).await;
-    cache.insert("object".to_owned(), download(0, 20)).await.unwrap();
+    cache
+        .insert(ObjectKeyHash::from("object"), download(0, 20))
+        .await
+        .unwrap();
     cache.disk.recover_chunk(0, CHUNK_BYTES, 2 * CHUNK_BYTES).await.unwrap();
-    assert!(cache.contains(&"object".to_owned(), range(0, 20)));
-    assert!(!cache.contains(&"object".to_owned(), range(0, 100)));
+    assert!(cache.contains(&ObjectKeyHash::from("object"), range(0, 20)));
+    assert!(!cache.contains(&ObjectKeyHash::from("object"), range(0, 100)));
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
 }
 
 #[tokio::test]
 async fn stale_ends_bound_recovery_and_new_writes_do_not_extend_the_scan() {
     let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-    cache.insert("saved".to_owned(), download(0, 100)).await.unwrap();
+    cache
+        .insert(ObjectKeyHash::from("saved"), download(0, 100))
+        .await
+        .unwrap();
     cache.disk.save_recovery_ends().unwrap();
-    cache.insert("beyond-end".to_owned(), download(0, 100)).await.unwrap();
+    cache
+        .insert(ObjectKeyHash::from("beyond-end"), download(0, 100))
+        .await
+        .unwrap();
     drop(cache);
     let cache = DiskRangeCache::open(directory.path(), 4 * CHUNK_BYTES, IoMetrics::noop())
         .await
         .unwrap();
     wait_for_recovery(&cache).await;
-    assert!(cache.contains(&"saved".to_owned(), range(0, 1)));
-    assert!(!cache.contains(&"beyond-end".to_owned(), range(0, 1)));
-    assert!(cache.insert("new".to_owned(), download(0, 100)).await.unwrap());
+    assert!(cache.contains(&ObjectKeyHash::from("saved"), range(0, 1)));
+    assert!(!cache.contains(&ObjectKeyHash::from("beyond-end"), range(0, 1)));
+    assert!(
+        cache
+            .insert(ObjectKeyHash::from("new"), download(0, 100))
+            .await
+            .unwrap()
+    );
     assert!(!cache.disk.recovery.running.load(Ordering::Acquire));
 }
 
 #[tokio::test]
 async fn corrupt_payload_is_recovered_only_as_a_candidate_and_misses_on_read() {
     let (directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    cache.insert("object".to_owned(), download(0, 100)).await.unwrap();
-    let payload = entry_disk_ranges(&cache, "object").await.0[0].clone();
+    cache
+        .insert(ObjectKeyHash::from("object"), download(0, 100))
+        .await
+        .unwrap();
+    let payload = entry_disk_ranges(&cache, &ObjectKeyHash::from("object")).await.0[0].clone();
     cache
         .disk
         .file
@@ -397,20 +449,17 @@ async fn corrupt_payload_is_recovered_only_as_a_candidate_and_misses_on_read() {
         .await
         .unwrap();
     wait_for_recovery(&cache).await;
-    assert!(cache.contains(&"object".to_owned(), range(0, 1)));
-    assert!(cache.get(&"object".to_owned(), range(0, 1)).await.is_none());
-    assert!(!cache.contains(&"object".to_owned(), range(0, 1)));
+    assert!(cache.contains(&ObjectKeyHash::from("object"), range(0, 1)));
+    assert!(cache.get(&ObjectKeyHash::from("object"), range(0, 1)).await.is_none());
+    assert!(!cache.contains(&ObjectKeyHash::from("object"), range(0, 1)));
 }
 
 #[tokio::test]
 async fn torn_metadata_and_reused_multi_chunk_addresses_are_rejected() {
     for corrupt_metadata in [false, true] {
         let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-        let key = "large".to_owned();
-        cache
-            .insert(key.clone(), download(0, 2 * CHUNK_BYTES as usize))
-            .await
-            .unwrap();
+        let key = ObjectKeyHash::from("large");
+        cache.insert(key, download(0, 2 * CHUNK_BYTES as usize)).await.unwrap();
         let (payload, metadata) = entry_disk_ranges(&cache, &key).await;
         if corrupt_metadata {
             cache
@@ -422,9 +471,14 @@ async fn torn_metadata_and_reused_multi_chunk_addresses_are_rejected() {
         } else {
             // Reuse the beginning of an old multi-chunk allocation.
             cache.disk.shards[0].entry_index.lock().unwrap().remove(&key, 0);
-            assert!(cache.insert("replacement".to_owned(), download(0, 100)).await.unwrap());
+            assert!(
+                cache
+                    .insert(ObjectKeyHash::from("replacement"), download(0, 100))
+                    .await
+                    .unwrap()
+            );
             assert_eq!(
-                entry_disk_ranges(&cache, "replacement").await.0[0].start,
+                entry_disk_ranges(&cache, &ObjectKeyHash::from("replacement")).await.0[0].start,
                 payload[0].start
             );
         }
@@ -441,11 +495,8 @@ async fn torn_metadata_and_reused_multi_chunk_addresses_are_rejected() {
 #[tokio::test]
 async fn allocation_header_and_entry_metadata_must_have_the_same_batch() {
     let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-    let key = "large".to_owned();
-    cache
-        .insert(key.clone(), download(0, 2 * CHUNK_BYTES as usize))
-        .await
-        .unwrap();
+    let key = ObjectKeyHash::from("large");
+    cache.insert(key, download(0, 2 * CHUNK_BYTES as usize)).await.unwrap();
     let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
     let mut contents = page[48..48 + page_format::CHUNK_METADATA_CONTENT_BYTES].to_vec();
     contents[16] ^= 1; // Valid page for a different batch, not just a checksum failure.
@@ -474,7 +525,7 @@ async fn allocation_header_and_entry_metadata_must_have_the_same_batch() {
 async fn recovery_bounds_the_whole_run_before_claiming_it() {
     let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     cache
-        .insert("large".to_owned(), download(0, 2 * CHUNK_BYTES as usize))
+        .insert(ObjectKeyHash::from("large"), download(0, 2 * CHUNK_BYTES as usize))
         .await
         .unwrap();
     cache.disk.save_recovery_ends().unwrap();
@@ -505,12 +556,12 @@ async fn recovery_bounds_the_whole_run_before_claiming_it() {
         );
         cache.disk.file.write_at(0, &Bytes::from(page)).await.unwrap();
         cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await;
-        assert!(!cache.contains(&"large".to_owned(), range(0, 1)));
+        assert!(!cache.contains(&ObjectKeyHash::from("large"), range(0, 1)));
         assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 4 * CHUNK_BYTES);
     }
     cache.disk.file.write_at(0, &original).await.unwrap();
     cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await.unwrap();
-    assert!(cache.contains(&"large".to_owned(), range(0, 1)));
+    assert!(cache.contains(&ObjectKeyHash::from("large"), range(0, 1)));
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), CHUNK_BYTES);
 }
 
@@ -518,26 +569,39 @@ async fn recovery_bounds_the_whole_run_before_claiming_it() {
 async fn recovery_cannot_claim_a_run_with_a_reused_continuation_chunk() {
     let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     cache
-        .insert("old".to_owned(), download(0, 2 * CHUNK_BYTES as usize))
+        .insert(ObjectKeyHash::from("old"), download(0, 2 * CHUNK_BYTES as usize))
         .await
         .unwrap();
     cache.disk.save_recovery_ends().unwrap();
     drop(cache);
     let cache = open_paused(directory.path(), 4 * CHUNK_BYTES).await;
     let head = cache.disk.shards[0].allocator.reserve_for_recovery(0, 1).unwrap();
-    cache.insert("new".to_owned(), download(0, 100)).await.unwrap();
-    cache.disk.shards[0].entry_index.lock().unwrap().remove("new", 0);
+    cache
+        .insert(ObjectKeyHash::from("new"), download(0, 100))
+        .await
+        .unwrap();
+    cache.disk.shards[0]
+        .entry_index
+        .lock()
+        .unwrap()
+        .remove(&ObjectKeyHash::from("new"), 0);
     drop(head);
     assert!(cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await.is_none());
-    assert!(!cache.contains(&"old".to_owned(), range(0, 1)));
+    assert!(!cache.contains(&ObjectKeyHash::from("old"), range(0, 1)));
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 4 * CHUNK_BYTES);
 }
 
 #[tokio::test]
 async fn generation_reset_rejects_old_chunks_even_when_new_scan_bounds_cover_them() {
     let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-    cache.insert("old-a".to_owned(), download(0, 100)).await.unwrap();
-    cache.insert("old-b".to_owned(), download(0, 100)).await.unwrap();
+    cache
+        .insert(ObjectKeyHash::from("old-a"), download(0, 100))
+        .await
+        .unwrap();
+    cache
+        .insert(ObjectKeyHash::from("old-b"), download(0, 100))
+        .await
+        .unwrap();
     cache.disk.save_recovery_ends().unwrap();
     let old_generation = cache.disk.recovery.generation;
     drop(cache);
@@ -555,17 +619,17 @@ async fn generation_reset_rejects_old_chunks_even_when_new_scan_bounds_cover_the
         .unwrap();
     wait_for_recovery(&cache).await;
     assert_eq!(cache.disk.recovery.generation, new_generation);
-    assert!(!cache.contains(&"old-a".to_owned(), range(0, 1)));
-    assert!(!cache.contains(&"old-b".to_owned(), range(0, 1)));
+    assert!(!cache.contains(&ObjectKeyHash::from("old-a"), range(0, 1)));
+    assert!(!cache.contains(&ObjectKeyHash::from("old-b"), range(0, 1)));
 }
 
 #[test]
-fn decoder_rejects_malformed_lengths_ranges_addresses_keys_and_batch_ids() {
+fn decoder_rejects_malformed_lengths_ranges_addresses_and_batch_ids() {
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap();
     let payload = chunk.slice(8192..12288);
     let bytes = page_format::encode_entry_metadata(
-        "key",
+        &ObjectKeyHash::from("key"),
         range(7, 17),
         &payload,
         XxHash64::oneshot(0, b"0123456789"),
@@ -574,18 +638,14 @@ fn decoder_rejects_malformed_lengths_ranges_addresses_keys_and_batch_ids() {
     assert!(decode_entry(&bytes, &[1; 16], 0..CHUNK_BYTES).is_some());
     assert!(decode_entry(&bytes, &[2; 16], 0..CHUNK_BYTES).is_none());
     for (offset, value) in [
-        (0, u64::MAX),
-        (8, u64::MAX),
-        (16, 17),
-        (24, 7),
+        (16, u64::MAX),
+        (24, 0),
+        (24, u64::MAX),
         (32, u64::MAX),
         (32, 0),
         (32, 4097),
         (32, CHUNK_BYTES),
-        (40, 0),
-        (40, 4097),
-        (40, 8192),
-        (40, u64::MAX),
+        (24, CHUNK_BYTES),
     ] {
         let mut invalid = bytes.to_vec();
         invalid[offset..offset + 8].copy_from_slice(&value.to_le_bytes());

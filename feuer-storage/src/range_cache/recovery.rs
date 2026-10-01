@@ -11,7 +11,7 @@ use std::{
 
 use super::*;
 
-const BOUNDS_TAG: &[u8; 8] = b"FEUEND07";
+const BOUNDS_TAG: &[u8; 8] = b"FEUEND08";
 const BOUNDS_FILE: &str = "recovery-ends";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -288,7 +288,7 @@ impl DiskRangeCacheState {
         let mut records = metadata.as_slice();
         let mut payload_start = address + METADATA_PAGE_BYTES as u64 + metadata_storage_bytes(metadata.len())?;
         while !records.is_empty() {
-            let length = usize::try_from(read_u64(records, 0)?).ok()?;
+            let length = page_format::ENTRY_METADATA_BYTES;
             let (key, object_range, checksum, payload) =
                 decode_entry(records.get(..length)?, &header.batch_id, region.range())?;
             // Payloads follow the shared metadata prefix and each other, without overlap or gaps.
@@ -353,7 +353,11 @@ impl DiskRangeCacheState {
         let chunk_count = read_u64(contents, 32)?;
         let metadata_bytes = usize::try_from(read_u64(contents, 40)?).ok()?;
         let prefix_bytes = (METADATA_PAGE_BYTES as u64).checked_add(metadata_storage_bytes(metadata_bytes)?)?;
-        if chunk_count == 0 || metadata_bytes < 72 || prefix_bytes >= chunk_count.checked_mul(CHUNK_BYTES)? {
+        if chunk_count == 0
+            || metadata_bytes == 0
+            || !metadata_bytes.is_multiple_of(page_format::ENTRY_METADATA_BYTES)
+            || prefix_bytes >= chunk_count.checked_mul(CHUNK_BYTES)?
+        {
             return None;
         }
         Some(ChunkHeader {
@@ -411,28 +415,23 @@ fn valid_allocation(range: &Range<u64>, bounds: Range<u64>) -> bool {
         && range.end.is_multiple_of(PAYLOAD_ALIGNMENT_BYTES)
 }
 
-type DecodedEntry = (ObjectKey, ByteRange, u64, Range<u64>);
+type DecodedEntry = (ObjectKeyHash, ByteRange, u64, Range<u64>);
 
 fn decode_entry(bytes: &[u8], batch_id: &[u8; 16], bounds: Range<u64>) -> Option<DecodedEntry> {
-    let length = usize::try_from(read_u64(bytes, 0)?).ok()?;
-    let key_length = usize::try_from(read_u64(bytes, 8)?).ok()?;
-    let range = ByteRange::new(read_u64(bytes, 16)?, read_u64(bytes, 24)?).ok()?;
-    if length != bytes.len()
-        || 72usize.checked_add(key_length)? != length
-        || bytes.get(length.checked_sub(16)?..)? != batch_id
-    {
+    if bytes.len() != page_format::ENTRY_METADATA_BYTES || bytes.get(48..)? != batch_id {
         return None;
     }
-    let checksum = read_u64(bytes, 48)?;
+    let key = ObjectKeyHash(u128::from_le_bytes(bytes[..16].try_into().ok()?));
+    let object_start = read_u64(bytes, 16)?;
+    let range = ByteRange::new(object_start, object_start.checked_add(read_u64(bytes, 24)?)?).ok()?;
+    let checksum = read_u64(bytes, 40)?;
     let start = read_u64(bytes, 32)?;
-    let payload_length = read_u64(bytes, 40)?;
-    let payload = start..start.checked_add(payload_length)?;
     let aligned_length =
         range.len().checked_add(PAYLOAD_ALIGNMENT_BYTES - 1)? / PAYLOAD_ALIGNMENT_BYTES * PAYLOAD_ALIGNMENT_BYTES;
-    if payload_length != aligned_length || !valid_allocation(&payload, bounds) {
+    let payload = start..start.checked_add(aligned_length)?;
+    if !valid_allocation(&payload, bounds) {
         return None;
     }
-    let key = std::str::from_utf8(&bytes[56..length - 16]).ok()?.to_owned();
     Some((key, range, checksum, payload))
 }
 

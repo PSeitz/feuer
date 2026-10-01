@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use bytes::Bytes;
 use feuer_types::{
-    ByteRange, ObjectKey,
+    ByteRange, ObjectKeyHash,
     retention::{ObjectAccessHistories, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates},
 };
 use rustc_hash::FxHashMap;
@@ -90,7 +90,7 @@ struct RemovedCacheUsage {
 /// Object key and range start of a cached entry.
 #[derive(Clone)]
 struct ObjectKeyAndRangeStart {
-    object_key: ObjectKey,
+    object_key: ObjectKeyHash,
     start: u64,
 }
 
@@ -128,14 +128,14 @@ impl ReclaimCandidateRing {
 
 /// The cached range selected for reclaiming memory.
 struct ReclaimCandidate {
-    object_key: ObjectKey,
+    object_key: ObjectKeyHash,
     range: ByteRange,
     id: u64,
 }
 
 /// Source payload, plan, and identity for trimming a cached range outside the shard lock.
 pub(super) struct RangeTrimSource {
-    object_key: ObjectKey,
+    object_key: ObjectKeyHash,
     start: u64,
     id: u64,
     object_generation: u64,
@@ -171,7 +171,7 @@ impl RangeTrimSource {
 
 /// Replacement payloads from trimming a cached range, awaiting identity/generation checks.
 pub(super) struct RangeTrimReplacement {
-    object_key: ObjectKey,
+    object_key: ObjectKeyHash,
     start: u64,
     id: u64,
     object_generation: u64,
@@ -193,7 +193,7 @@ pub(super) struct MemoryCacheShard {
     capacity: u64,
     pub(super) reclaim_sample_size: usize,
     used_bytes: u64,
-    ranges: FxHashMap<ObjectKey, ObjectCachedRanges>,
+    ranges: FxHashMap<ObjectKeyHash, ObjectCachedRanges>,
     next_entry_id: u64,
     /// Object keys and range starts, sampled in rotation to choose a range to trim or evict.
     candidates: ReclaimCandidateRing,
@@ -220,7 +220,7 @@ impl MemoryCacheShard {
         self.used_bytes
     }
 
-    pub(super) fn get(&self, object_key: &ObjectKey, requested_range: ByteRange) -> Option<Bytes> {
+    pub(super) fn get(&self, object_key: &ObjectKeyHash, requested_range: ByteRange) -> Option<Bytes> {
         self.ranges
             .get(object_key)?
             .covering_range(requested_range)
@@ -234,7 +234,7 @@ impl MemoryCacheShard {
     /// to bound sampling work per lock hold.
     pub(super) fn try_admit_or_reclaim(
         &mut self,
-        object_key: &ObjectKey,
+        object_key: &ObjectKeyHash,
         range: ByteRange,
         bytes: &Bytes,
         capacity: u64,
@@ -256,13 +256,8 @@ impl MemoryCacheShard {
         if used_bytes_without_contained_ranges <= max_existing_bytes {
             let removal = self.remove_contained_ranges(object_key, &contained_ranges.ranges);
             debug_assert_eq!(removal.allocation_bytes, contained_ranges.allocation_bytes);
-            let id = self.insert_downloaded_range(
-                object_key.clone(),
-                range,
-                bytes.clone(),
-                capacity,
-                access_histories.clock(),
-            );
+            let id =
+                self.insert_downloaded_range(*object_key, range, bytes.clone(), capacity, access_histories.clock());
 
             if removal.entry_count != 0 {
                 self.metrics
@@ -292,7 +287,7 @@ impl MemoryCacheShard {
     /// Inserts a downloaded range, charging its backing allocation capacity.
     fn insert_downloaded_range(
         &mut self,
-        object_key: ObjectKey,
+        object_key: ObjectKeyHash,
         range: ByteRange,
         bytes: Bytes,
         capacity: u64,
@@ -302,7 +297,7 @@ impl MemoryCacheShard {
         self.buffer_pool.add_cached(capacity);
         let id = self.allocate_entry_id();
         let candidate_slot = self.candidates.register(ObjectKeyAndRangeStart {
-            object_key: object_key.clone(),
+            object_key,
             start: range.start(),
         });
         let entries = self.ranges.entry(object_key).or_default();
@@ -321,7 +316,7 @@ impl MemoryCacheShard {
         id
     }
 
-    pub(super) fn contains_entry(&self, key: &ObjectKey, range: ByteRange, id: u64) -> bool {
+    pub(super) fn contains_entry(&self, key: &ObjectKeyHash, range: ByteRange, id: u64) -> bool {
         self.ranges
             .get(key)
             .and_then(|entries| entries.by_start.get(&range.start()))
@@ -329,15 +324,15 @@ impl MemoryCacheShard {
     }
 
     /// Inserts a trimmed range into the index and candidate ring; the caller accounts for its bytes.
-    fn insert_trimmed_range(&mut self, object_key: &ObjectKey, range: ByteRange, bytes: Bytes, access_clock: u64) {
+    fn insert_trimmed_range(&mut self, object_key: &ObjectKeyHash, range: ByteRange, bytes: Bytes, access_clock: u64) {
         let capacity = bytes.len() as u64;
         self.buffer_pool.add_cached(capacity);
         let id = self.allocate_entry_id();
         let candidate_slot = self.candidates.register(ObjectKeyAndRangeStart {
-            object_key: object_key.clone(),
+            object_key: *object_key,
             start: range.start(),
         });
-        let entries = self.ranges.entry(object_key.clone()).or_default();
+        let entries = self.ranges.entry(*object_key).or_default();
         let entry = CachedRange {
             id,
             range,
@@ -360,7 +355,7 @@ impl MemoryCacheShard {
     }
 
     /// Removes cached ranges already found fully contained in the incoming download.
-    fn remove_contained_ranges(&mut self, object_key: &ObjectKey, ranges: &[ByteRange]) -> RemovedCacheUsage {
+    fn remove_contained_ranges(&mut self, object_key: &ObjectKeyHash, ranges: &[ByteRange]) -> RemovedCacheUsage {
         let mut removal = RemovedCacheUsage::default();
         for &range in ranges {
             let removed_bytes = self
@@ -372,7 +367,7 @@ impl MemoryCacheShard {
         removal
     }
 
-    pub(super) fn remove(&mut self, object_key: &ObjectKey, range: ByteRange) -> bool {
+    pub(super) fn remove(&mut self, object_key: &ObjectKeyHash, range: ByteRange) -> bool {
         let Some(removed_bytes) = self.remove_entry(object_key, range, None) else {
             return false;
         };
@@ -385,7 +380,7 @@ impl MemoryCacheShard {
     /// Subtracts those bytes from shard usage; the caller updates metrics.
     fn remove_entry(
         &mut self,
-        object_key: &ObjectKey,
+        object_key: &ObjectKeyHash,
         range: ByteRange,
         expected_entry_id: Option<u64>,
     ) -> Option<u64> {
@@ -430,13 +425,13 @@ impl MemoryCacheShard {
     /// Selects the lowest retrieval-cost density from a rotating, bounded sample.
     fn select_reclaim_candidate(
         &mut self,
-        admitting_key: &ObjectKey,
+        admitting_key: &ObjectKeyHash,
         admitting_range: ByteRange,
         access_histories: &ObjectAccessHistories,
     ) -> Option<ReclaimCandidate> {
         let (sample_start, sample_count) = self.candidates.sample(self.reclaim_sample_size);
         let candidate_count = self.candidates.entries.len();
-        let mut selected_candidate: Option<(&ObjectKey, &CachedRange, f64)> = None;
+        let mut selected_candidate: Option<(&ObjectKeyHash, &CachedRange, f64)> = None;
 
         for offset in 0..sample_count {
             let candidate = &self.candidates.entries[(sample_start + offset) % candidate_count];
@@ -464,7 +459,7 @@ impl MemoryCacheShard {
             }
         }
         selected_candidate.map(|(object_key, entry, _)| ReclaimCandidate {
-            object_key: object_key.clone(),
+            object_key: *object_key,
             range: entry.range,
             id: entry.id,
         })
@@ -491,7 +486,7 @@ impl MemoryCacheShard {
         }
         let plan = plan_range_trim(entry.range, access_histories.active_ranges(&candidate.object_key))?;
         Some(RangeTrimSource {
-            object_key: candidate.object_key.clone(),
+            object_key: candidate.object_key,
             start: candidate.range.start(),
             id: candidate.id,
             object_generation: entries.object_generation,

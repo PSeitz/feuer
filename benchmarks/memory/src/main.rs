@@ -12,7 +12,7 @@ use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use feuer_memory::MemoryCache;
 use feuer_types::{
-    ByteRange, Download, ObjectKey,
+    ByteRange, Download, ObjectKeyHash,
     config::{parse_config_number, read_env_number},
     retention::{
         ACCESS_COUNT_HALF_LIFE, FIXED_RETRIEVAL_EQUIVALENT_BYTES, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY,
@@ -107,7 +107,7 @@ impl DownloadExpansionConfig {
 
 #[derive(Clone)]
 struct TraceRequest {
-    object_key: ObjectKey,
+    object_key: ObjectKeyHash,
     object_size: u64,
     requested_range: ByteRange,
     timestamp_millis: u64,
@@ -195,7 +195,7 @@ impl ReplayCache for FeuerReplayCache {
     fn insert(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes) -> Result<(), String> {
         let download = Download::new(downloaded_range.start(), payload).map_err(|error| error.to_string())?;
         debug_assert_eq!(download.downloaded_range(), downloaded_range);
-        self.cache.insert(request.object_key.clone(), download);
+        self.cache.insert(request.object_key, download);
         Ok(())
     }
 
@@ -204,7 +204,7 @@ impl ReplayCache for FeuerReplayCache {
     }
 }
 
-type FoyerRangeKey = (ObjectKey, ByteRange);
+type FoyerRangeKey = (ObjectKeyHash, ByteRange);
 
 #[derive(Clone)]
 struct FoyerCachedDownload {
@@ -263,10 +263,7 @@ impl FoyerReplayCache {
     }
 
     fn key(&self, request: &TraceRequest, downloaded_range: ByteRange) -> FoyerRangeKey {
-        (
-            request.object_key.clone(),
-            self.key_range.range(request, downloaded_range),
-        )
+        (request.object_key, self.key_range.range(request, downloaded_range))
     }
 }
 
@@ -527,7 +524,7 @@ struct CoalescedDownload<'a> {
 }
 
 fn expanded_download_ranges(workload: &[TraceRequest], config: DownloadExpansionConfig) -> Vec<ByteRange> {
-    let mut request_indices_by_object: HashMap<(&str, u64), Vec<usize>> = HashMap::new();
+    let mut request_indices_by_object: HashMap<(&ObjectKeyHash, u64), Vec<usize>> = HashMap::new();
     for (request_index, request) in workload.iter().enumerate() {
         request_indices_by_object
             .entry((&request.object_key, request.object_size))
@@ -837,7 +834,7 @@ fn parse_trace_line(line: &str) -> Result<TraceRequest, String> {
     let timestamp = find_json_string(line, "timestamp")?;
     let timestamp_millis = parse_timestamp_millis(&timestamp)?;
     Ok(TraceRequest {
-        object_key: ObjectKey::from(object_key),
+        object_key: ObjectKeyHash::from(object_key),
         object_size,
         requested_range,
         timestamp_millis,
@@ -995,7 +992,7 @@ mod tests {
 
     #[derive(Default)]
     struct CoveringRangeTestCache {
-        entries: Vec<(ObjectKey, ByteRange)>,
+        entries: Vec<(ObjectKeyHash, ByteRange)>,
     }
 
     impl ReplayCache for CoveringRangeTestCache {
@@ -1017,7 +1014,7 @@ mod tests {
             _payload: Bytes,
         ) -> Result<(), String> {
             assert!(downloaded_range.contains(request.requested_range));
-            self.entries.push((request.object_key.clone(), downloaded_range));
+            self.entries.push((request.object_key, downloaded_range));
             Ok(())
         }
 
@@ -1193,7 +1190,7 @@ mod tests {
             r#"{"object_num_bytes":100,"object_id":"object-a","requested_range_end":11,"requested_range_start":7,"timestamp":"2026-08-08T01:12:49.481Z"}"#,
         )
         .unwrap();
-        assert_eq!(request.object_key, ObjectKey::from("object-a"));
+        assert_eq!(request.object_key, ObjectKeyHash::from("object-a"));
         assert_eq!(request.object_size, 100);
         assert_eq!(request.requested_range, ByteRange::new(7, 11).unwrap());
         assert_eq!(

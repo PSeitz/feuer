@@ -10,7 +10,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use feuer_types::{ByteRange, Download, ObjectKey, retention::ObjectAccessHistories};
+use feuer_types::{ByteRange, Download, ObjectKeyHash, retention::ObjectAccessHistories};
 use fnv::FnvHasher;
 use parking_lot::Mutex;
 
@@ -22,7 +22,7 @@ const MAX_SHARDS: usize = 64;
 
 /// A sharded cache of downloaded object ranges with Foyer-style soft capacity.
 ///
-/// All ranges for one fully compared [`ObjectKey`] share a shard and are kept
+/// All ranges for one [`ObjectKeyHash`] share a shard and are kept
 /// in an ordered index. Partial overlaps coexist and are treated no differently
 /// from disjoint ranges. A lookup succeeds only when one retained range covers
 /// the exact request and returns a [`Bytes`] slice containing only those
@@ -143,7 +143,7 @@ impl MemoryCache {
     }
 
     /// Looks up one covering range without recording an access.
-    pub fn get(&self, object_key: &ObjectKey, requested_range: ByteRange) -> Option<Bytes> {
+    pub fn get(&self, object_key: &ObjectKeyHash, requested_range: ByteRange) -> Option<Bytes> {
         let shard_index = self.shard_index(object_key);
         self.shards[shard_index].lock().get(object_key, requested_range)
     }
@@ -155,14 +155,14 @@ impl MemoryCache {
     /// discarded. A larger download replaces entries it fully contains, while
     /// partial overlaps coexist.
     /// Returns the new shard-local entry identity, or `None` for a redundant download.
-    pub fn insert(&self, object_key: ObjectKey, download: Download) -> Option<u64> {
+    pub fn insert(&self, object_key: ObjectKeyHash, download: Download) -> Option<u64> {
         let capacity = download.bytes().len();
         self.insert_with_capacity(object_key, download, capacity)
     }
 
     /// Caches bytes while charging their backing allocation, even if they are a smaller slice.
     /// Shared allocations are conservatively charged once per cached entry.
-    pub fn insert_with_capacity(&self, object_key: ObjectKey, download: Download, capacity: usize) -> Option<u64> {
+    pub fn insert_with_capacity(&self, object_key: ObjectKeyHash, download: Download, capacity: usize) -> Option<u64> {
         let (downloaded_range, bytes) = download.into_parts();
         assert!(capacity >= bytes.len());
         self.admit_download(object_key, downloaded_range, bytes, capacity as u64)
@@ -173,7 +173,7 @@ impl MemoryCache {
     /// The action must not reenter this memory cache or perform I/O.
     pub fn with_current_entry<R>(
         &self,
-        object_key: &ObjectKey,
+        object_key: &ObjectKeyHash,
         range: ByteRange,
         entry_id: u64,
         action: impl FnOnce() -> R,
@@ -184,7 +184,7 @@ impl MemoryCache {
 
     fn admit_download(
         &self,
-        object_key: ObjectKey,
+        object_key: ObjectKeyHash,
         downloaded_range: ByteRange,
         bytes: Bytes,
         capacity: u64,
@@ -229,7 +229,7 @@ impl MemoryCache {
     }
 
     /// Removes one entry with exactly the supplied key and range.
-    pub fn remove(&self, object_key: &ObjectKey, range: ByteRange) -> bool {
+    pub fn remove(&self, object_key: &ObjectKeyHash, range: ByteRange) -> bool {
         let shard_index = self.shard_index(object_key);
         self.shards[shard_index].lock().remove(object_key, range)
     }
@@ -237,7 +237,7 @@ impl MemoryCache {
     /// Selects this process's in-memory shard for an object.
     ///
     /// The shard assignment is process-local and must never be persisted.
-    fn shard_index(&self, object_key: &ObjectKey) -> usize {
+    fn shard_index(&self, object_key: &ObjectKeyHash) -> usize {
         let mut hasher = FnvHasher::default();
         object_key.hash(&mut hasher);
         (hasher.finish() % self.shards.len() as u64) as usize

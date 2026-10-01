@@ -65,5 +65,5 @@ async fn records_each_started_request_before_any_result() {
         .await
         .unwrap();
     assert_eq!(history.clock(), 5, "success paths do not double-count");
-    assert_eq!(history.active_ranges(&key), vec![requested; 5]);
+    assert_eq!(history.active_ranges(&ObjectKeyHash::from(key)), vec![requested; 5]);
 }

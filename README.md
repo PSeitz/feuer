@@ -43,6 +43,12 @@ Keys must identify immutable content. Distinct requested ranges for a key must n
 overlap, though exact repeats are allowed. Downloads may cover multiple requests.
 Feuer leaves request coalescing, scheduling, and retries to your downloader.
 
+At the public lookup boundary, Feuer hashes the key's UTF-8 bytes once with XXH3-128
+(seed zero). Both tiers, access history, and disk recovery use only this 128-bit identity;
+full keys are not retained or checked for collisions. Keys must not be adversarial.
+Disk format v8 stores the hash in little-endian form in fixed 64-byte entry records.
+Older disk formats are discarded on open, not migrated.
+
 ## Capacity and disk writes
 
 Memory capacity covers cached allocation charges and idle read buffers in one cache instance.

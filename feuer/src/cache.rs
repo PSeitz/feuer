@@ -8,7 +8,7 @@ use feuer_memory::MemoryCache;
 use feuer_memory::MemoryMetrics;
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskRangeCache, DiskRangeCacheError, IoMetrics};
-use feuer_types::{ByteRange, Download, ObjectKey, retention::ObjectAccessHistories};
+use feuer_types::{ByteRange, Download, ObjectKeyHash, retention::ObjectAccessHistories};
 #[cfg(target_os = "linux")]
 use mixtrics::metrics::BoxedRegistry;
 use thiserror::Error;
@@ -118,7 +118,7 @@ impl TieredMemoryDiskCache {
     /// download's allocation.
     pub async fn get_or_fetch<F, Fut, E>(
         &self,
-        object_key: ObjectKey,
+        object_key: crate::ObjectKey,
         requested_range: ByteRange,
         callback: F,
     ) -> Result<Bytes, GetOrFetchError<E>>
@@ -127,6 +127,7 @@ impl TieredMemoryDiskCache {
         Fut: Future<Output = Result<Download, E>>,
     {
         let started = Instant::now();
+        let object_key = ObjectKeyHash::from(object_key);
         self.state.access_histories.record_access(&object_key, requested_range);
         let metrics = &self.state.metrics;
         if let Some(bytes) = self.state.memory.get(&object_key, requested_range) {
@@ -137,7 +138,7 @@ impl TieredMemoryDiskCache {
         #[cfg(target_os = "linux")]
         if let Some((bytes, capacity)) = self.state.disk.get_with_capacity(&object_key, requested_range).await {
             self.state.memory.insert_with_capacity(
-                object_key.clone(),
+                object_key,
                 Download::new(requested_range.start(), bytes.clone()).expect("disk result covers the request"),
                 capacity,
             );
@@ -168,7 +169,7 @@ impl TieredMemoryDiskCache {
             metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
             return Ok(requested_bytes);
         }
-        let entry_id = self.state.memory.insert(object_key.clone(), download.clone());
+        let entry_id = self.state.memory.insert(object_key, download.clone());
         #[cfg(target_os = "linux")]
         if let Some(entry_id) = entry_id {
             self.state
@@ -266,10 +267,10 @@ mod tests {
             })
             .await
             .unwrap();
-        cache
-            .state
-            .memory
-            .insert(key.clone(), Download::new(100, Bytes::from(vec![0; 64])).unwrap());
+        cache.state.memory.insert(
+            ObjectKeyHash::from(key.as_str()),
+            Download::new(100, Bytes::from(vec![0; 64])).unwrap(),
+        );
         cache
             .get_or_fetch(key.clone(), range(1, 3), || async {
                 Err::<Download, _>("disk hit must not fetch")
@@ -339,9 +340,9 @@ mod tests {
         (directory, cache)
     }
 
-    async fn wait_for_disk(cache: &TieredMemoryDiskCache, key: &ObjectKey, range: ByteRange) {
+    async fn wait_for_disk(cache: &TieredMemoryDiskCache, key: &str, range: ByteRange) {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !cache.state.disk.contains(key, range) {
+            while !cache.state.disk.contains(&ObjectKeyHash::from(key), range) {
                 tokio::task::yield_now().await;
             }
         })
@@ -352,7 +353,7 @@ mod tests {
     #[tokio::test]
     async fn disk_hit_after_memory_pressure_promotes_only_request_and_records_once() {
         let (_directory, cache) = cache(32).await;
-        let key = ObjectKey::from("object");
+        let key = String::from("object");
         let history = &cache.state.access_histories;
         let source = Download::new(10, Bytes::from_static(b"abcdefghij")).unwrap();
         let result = cache
@@ -367,11 +368,17 @@ mod tests {
 
         // The same key selects the same memory shard; an oversized disjoint range
         // forces the original download out without contributing an access.
-        cache
-            .state
-            .memory
-            .insert(key.clone(), Download::new(100, Bytes::from(vec![0; 64])).unwrap());
-        assert!(cache.state.memory.get(&key, range(13, 17)).is_none());
+        cache.state.memory.insert(
+            ObjectKeyHash::from(key.as_str()),
+            Download::new(100, Bytes::from(vec![0; 64])).unwrap(),
+        );
+        assert!(
+            cache
+                .state
+                .memory
+                .get(&ObjectKeyHash::from(key.as_str()), range(13, 17))
+                .is_none()
+        );
         for accesses in [2, 3] {
             let hit = cache
                 .get_or_fetch(key.clone(), range(13, 17), || async {
@@ -393,7 +400,7 @@ mod tests {
             .state
             .disk
             .insert_batch(vec![(
-                key.clone(),
+                ObjectKeyHash::from(key.as_str()),
                 Download::new(0, Bytes::from(vec![0x77; 40 * 1024])).unwrap(),
             )])
             .await
@@ -407,11 +414,19 @@ mod tests {
         assert_eq!(&bytes[..], &[0x77; 4]);
         assert_eq!(cache.state.memory.used_bytes(), 256 * 1024);
         assert_eq!(
-            cache.state.memory.get(&key, range(5, 9)).unwrap().as_ptr(),
+            cache
+                .state
+                .memory
+                .get(&ObjectKeyHash::from(key.as_str()), range(5, 9))
+                .unwrap()
+                .as_ptr(),
             bytes.as_ptr()
         );
         assert_eq!(cache.state.memory.buffer_pool().idle_bytes(), 0);
-        cache.state.memory.remove(&key, range(5, 9));
+        cache
+            .state
+            .memory
+            .remove(&ObjectKeyHash::from(key.as_str()), range(5, 9));
         assert_eq!(cache.state.memory.used_bytes(), 0);
         assert_eq!(&bytes[..], &[0x77; 4]);
     }
@@ -419,7 +434,7 @@ mod tests {
     #[tokio::test]
     async fn callback_covered_by_a_racing_disk_write_is_not_inserted_again() {
         let (_directory, cache) = cache(32).await;
-        let key = ObjectKey::from("object");
+        let key = String::from("object");
         let history = &cache.state.access_histories;
         let bytes = cache
             .get_or_fetch(key.clone(), range(2, 4), || async {
@@ -428,7 +443,7 @@ mod tests {
                     .state
                     .disk
                     .insert_batch(vec![(
-                        key.clone(),
+                        ObjectKeyHash::from(key.as_str()),
                         Download::new(0, Bytes::from_static(b"abcdefgh")).unwrap(),
                     )])
                     .await
@@ -445,7 +460,7 @@ mod tests {
     #[tokio::test]
     async fn callback_cancellation_keeps_the_recorded_request_without_inserting() {
         let (_directory, cache) = cache(32).await;
-        let key = ObjectKey::from("canceled");
+        let key = String::from("canceled");
         let history = &cache.state.access_histories;
         let entered = Arc::new(Notify::new());
         let task = {
@@ -465,8 +480,19 @@ mod tests {
         assert_eq!(history.clock(), 1, "recorded before the callback completes");
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        assert!(cache.state.memory.get(&key, range(0, 1)).is_none());
-        assert!(!cache.state.disk.contains(&key, range(0, 1)));
+        assert!(
+            cache
+                .state
+                .memory
+                .get(&ObjectKeyHash::from(key.as_str()), range(0, 1))
+                .is_none()
+        );
+        assert!(
+            !cache
+                .state
+                .disk
+                .contains(&ObjectKeyHash::from(key.as_str()), range(0, 1))
+        );
         assert_eq!(history.clock(), 1);
     }
 
@@ -490,7 +516,7 @@ mod tests {
     #[tokio::test]
     async fn callback_result_and_covering_memory_hit_return_the_exact_request() {
         let (_directory, cache) = cache(32).await;
-        let key = ObjectKey::from("object");
+        let key = String::from("object");
         let payload = Bytes::from_static(b"abcdefghij");
         let callback_count = Arc::new(AtomicU64::new(0));
 
@@ -521,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn every_concurrent_miss_invokes_its_own_callback() {
         let (_directory, cache) = cache(32).await;
-        let key = ObjectKey::from("object");
+        let key = String::from("object");
         let barrier = Arc::new(Barrier::new(3));
         let callback_count = Arc::new(AtomicU64::new(0));
         let mut tasks = Vec::new();
@@ -553,7 +579,7 @@ mod tests {
     #[tokio::test]
     async fn callback_errors_are_returned_without_retry_or_insertion() {
         let (_directory, cache) = cache(8).await;
-        let key = ObjectKey::from("object");
+        let key = String::from("object");
         let callback_count = Arc::new(AtomicU64::new(0));
 
         for expected_count in 1..=2 {
@@ -574,7 +600,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_noncovering_but_retains_oversized_callback_results() {
         let (_directory, cache) = cache(4).await;
-        let key = ObjectKey::from("object");
+        let key = String::from("object");
 
         let error = cache
             .get_or_fetch(key.clone(), range(2, 4), || async {
@@ -614,7 +640,7 @@ mod tests {
     #[tokio::test]
     async fn a_racing_contained_download_is_discarded_but_returns_its_own_bytes() {
         let (_directory, cache) = cache(32).await;
-        let key = ObjectKey::from("object");
+        let key = String::from("object");
         let callback_entered = Arc::new(Notify::new());
         let release_callback = Arc::new(Notify::new());
 

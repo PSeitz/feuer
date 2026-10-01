@@ -12,7 +12,7 @@ use std::{
 
 use fnv::{FnvHashMap, FnvHasher};
 
-use crate::{ByteRange, ObjectKey, config::read_env_number};
+use crate::{ByteRange, ObjectKeyHash, config::read_env_number};
 
 /// Default maximum entries inspected in one retention-policy sample.
 pub const RECLAIM_SAMPLE_SIZE: usize = 64;
@@ -41,7 +41,7 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 /// Every distinct key and requested-range counter is retained for this object's lifetime, even after
 /// cache eviction. Recent trimming events remain bounded. History is not persisted across restarts.
 pub struct ObjectAccessHistories {
-    shards: [Mutex<HashMap<ObjectKey, RangeAccessHistory>>; ACCESS_HISTORY_SHARDS],
+    shards: [Mutex<HashMap<ObjectKeyHash, RangeAccessHistory>>; ACCESS_HISTORY_SHARDS],
     clock: AtomicU64,
 }
 
@@ -64,12 +64,12 @@ impl ObjectAccessHistories {
     /// Failed and canceled requests contribute to demand just like successful requests.
     /// Distinct requested ranges for an object must not overlap; exact repeats update the same counter.
     /// Cache insertion and eviction do not record or remove history.
-    pub fn record_access(&self, key: &ObjectKey, requested: ByteRange) {
+    pub fn record_access(&self, key: &ObjectKeyHash, requested: ByteRange) {
         let mut objects = self.shard(key).lock().unwrap();
         // Assign the clock under the shard lock so this key's updates cannot arrive out of order.
         // The atomic only measures request age; the shard mutex protects the history itself.
         let clock = self.clock.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-        objects.entry(key.clone()).or_default().record(requested, clock);
+        objects.entry(*key).or_default().record(requested, clock);
     }
 
     /// Number of requests recorded across all keys and cache tiers.
@@ -80,7 +80,7 @@ impl ObjectAccessHistories {
 
     /// Sums decay-weighted retrieval costs for requests fully contained in `cached_range`.
     /// Eviction compares this score per payload byte. Unknown keys have zero score.
-    pub fn retention_score(&self, key: &ObjectKey, cached_range: ByteRange) -> f64 {
+    pub fn retention_score(&self, key: &ObjectKeyHash, cached_range: ByteRange) -> f64 {
         let objects = self.shard(key).lock().unwrap();
         objects
             .get(key)
@@ -89,14 +89,14 @@ impl ObjectAccessHistories {
 
     /// Snapshots recent requested ranges for trimming. Later accesses do not invalidate the snapshot:
     /// it guides a retention policy, not the correctness of the cached bytes.
-    pub fn active_ranges(&self, key: &ObjectKey) -> Vec<ByteRange> {
+    pub fn active_ranges(&self, key: &ObjectKeyHash) -> Vec<ByteRange> {
         let objects = self.shard(key).lock().unwrap();
         objects
             .get(key)
             .map_or_else(Vec::new, |history| history.active_ranges(self.clock()).collect())
     }
 
-    fn shard(&self, key: &ObjectKey) -> &Mutex<HashMap<ObjectKey, RangeAccessHistory>> {
+    fn shard(&self, key: &ObjectKeyHash) -> &Mutex<HashMap<ObjectKeyHash, RangeAccessHistory>> {
         let mut hasher = FnvHasher::default();
         key.hash(&mut hasher);
         &self.shards[hasher.finish() as usize % self.shards.len()]
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn history_needs_no_cached_entry_and_keeps_distinct_counters() {
         let histories = ObjectAccessHistories::new();
-        let key = "object".to_owned();
+        let key = ObjectKeyHash::from("object");
         assert_eq!(histories.retention_score(&key, range(0, 1)), 0.0);
         assert!(histories.active_ranges(&key).is_empty());
         assert!(histories.shards.iter().all(|shard| shard.lock().unwrap().is_empty()));
@@ -389,7 +389,7 @@ mod tests {
             let histories = histories.clone();
             threads.push(std::thread::spawn(move || {
                 for _ in 0..1000 {
-                    histories.record_access(&"object".to_owned(), range(0, 1));
+                    histories.record_access(&ObjectKeyHash::from("object"), range(0, 1));
                 }
             }));
         }
@@ -397,9 +397,9 @@ mod tests {
             thread.join().unwrap();
         }
         assert_eq!(histories.clock(), 8000);
-        let objects = histories.shard(&"object".to_owned()).lock().unwrap();
+        let objects = histories.shard(&ObjectKeyHash::from("object")).lock().unwrap();
         assert_eq!(objects.len(), 1);
-        let actual = &objects["object"];
+        let actual = &objects[&ObjectKeyHash::from("object")];
         assert_eq!(actual.access_counts.len(), 1);
         let mut expected = RangeAccessHistory::default();
         for clock in 1..=8000 {
@@ -414,9 +414,9 @@ mod tests {
     #[test]
     fn another_history_shard_can_record_and_read_while_one_is_locked() {
         let histories = ObjectAccessHistories::new();
-        let locked_key = "locked".to_owned();
+        let locked_key = ObjectKeyHash::from("locked");
         let other = (0..1000)
-            .map(|index| format!("other-{index}"))
+            .map(|index| ObjectKeyHash::from(format!("other-{index}")))
             .find(|key| !std::ptr::eq(histories.shard(&locked_key), histories.shard(key)))
             .unwrap();
         let (done, received) = std::sync::mpsc::channel();
@@ -436,7 +436,9 @@ mod tests {
     #[test]
     fn concurrent_keys_share_one_clock_and_keep_ordered_events() {
         let histories = ObjectAccessHistories::new();
-        let keys: Vec<_> = (0..32).map(|index| format!("object-{index}")).collect();
+        let keys: Vec<_> = (0..32)
+            .map(|index| ObjectKeyHash::from(format!("object-{index}")))
+            .collect();
         std::thread::scope(|scope| {
             for key in &keys {
                 let histories = &histories;
@@ -459,10 +461,10 @@ mod tests {
     #[test]
     fn all_keys_advance_the_same_clock_without_expiring_counters() {
         let histories = ObjectAccessHistories::new();
-        let old = "old".to_owned();
+        let old = ObjectKeyHash::from("old");
         histories.record_access(&old, range(0, 1));
         for _ in 0..*MAX_ACCESS_AGE_ACCESSES + 1 {
-            histories.record_access(&"other".to_owned(), range(0, 1));
+            histories.record_access(&ObjectKeyHash::from("other"), range(0, 1));
         }
         assert!(histories.active_ranges(&old).is_empty());
         assert_eq!(histories.shard(&old).lock().unwrap()[&old].access_counts.len(), 1);

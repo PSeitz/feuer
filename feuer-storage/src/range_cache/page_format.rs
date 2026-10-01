@@ -1,23 +1,25 @@
-//! Experimental v7 metadata pages. Variable-length entry records, with inline keys, are packed
-//! into consecutive pages before all payloads in an allocation. Records may cross page boundaries.
+//! Experimental v8 metadata pages. Fixed-size records with XXH3-128 object keys are packed
+//! into consecutive pages before all payloads in an allocation. Records never cross page boundaries.
 //! All checksums are XXHash64 with seed zero, stored as little-endian u64s.
 //! Each record page carries the checksum of the complete packed metadata prefix.
 //! Page checksums additionally bind tag, address, ordinal, links and contents.
 //! Chunk metadata binds a cache generation and batch ID; completion is not persistence.
 
 use bytes::Bytes;
-use feuer_types::ByteRange;
+use feuer_types::{ByteRange, ObjectKeyHash};
 use twox_hash::XxHash64;
 
 use crate::allocation::DiskRegion;
 
 /// Size in bytes of a metadata page, including its header and padding.
-/// Pages hold multiple records; large records continue into subsequent pages.
+/// Each entry metadata page holds 63 complete 64-byte records and 16 padding bytes.
 pub(super) const METADATA_PAGE_BYTES: usize = 4096;
 const PAGE_HEADER_BYTES: usize = 48;
-pub(super) const PAGE_CONTENT_BYTES: usize = METADATA_PAGE_BYTES - PAGE_HEADER_BYTES;
-pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES07";
-pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX07";
+pub(super) const ENTRY_METADATA_BYTES: usize = 64;
+pub(super) const PAGE_CONTENT_BYTES: usize =
+    (METADATA_PAGE_BYTES - PAGE_HEADER_BYTES) / ENTRY_METADATA_BYTES * ENTRY_METADATA_BYTES;
+pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES08";
+pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX08";
 pub(super) const CHUNK_METADATA_CONTENT_BYTES: usize = 48;
 
 /// Content checksum covers the packed records, or the allocation's identities and lengths.
@@ -65,31 +67,26 @@ pub(super) fn validate_page<'a>(
     ))
 }
 
-/// Content length, key length, object range, payload address and aligned length, checksum, full key, batch ID.
-/// All integers are little-endian u64s. Records are packed together before the allocation's payloads.
-/// The payload checksum covers exactly the entry bytes, excluding final alignment padding.
+/// Key hash (u128), object start and length, payload address, payload checksum (u64s), batch ID.
+/// All integers are little-endian. Aligned payload length is derived from object length.
+/// The batch ID binds every record to its allocation; payload checksums exclude alignment padding.
 pub(super) fn encode_entry_metadata(
-    key: &str,
+    key: &ObjectKeyHash,
     object_range: ByteRange,
     payload_region: &DiskRegion,
     payload_checksum: u64,
     batch_id: &[u8; 16],
 ) -> Bytes {
-    let length = 72 + key.len();
-    let payload = payload_region.range();
-    let mut bytes = Vec::with_capacity(length);
+    let mut bytes = Vec::with_capacity(ENTRY_METADATA_BYTES);
+    bytes.extend_from_slice(&key.0.to_le_bytes());
     for value in [
-        length as u64,
-        key.len() as u64,
         object_range.start(),
-        object_range.end(),
-        payload.start,
-        payload.end - payload.start,
+        object_range.len(),
+        payload_region.range().start,
         payload_checksum,
     ] {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
-    bytes.extend_from_slice(key.as_bytes());
     bytes.extend_from_slice(batch_id);
     Bytes::from(bytes)
 }
