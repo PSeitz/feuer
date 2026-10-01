@@ -5,7 +5,6 @@ use std::{
     io::{self, Read, Write},
     ops::Range,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -17,7 +16,6 @@ const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(super) struct RecoveryState {
     path: PathBuf,
-    pub(super) running: AtomicBool,
 }
 
 /// Metadata-chain heads and the file capacity needed to interpret them during recovery.
@@ -103,14 +101,7 @@ impl RecoveryState {
                 heads
             }
         };
-        let running = heads.heads.iter().any(|&head| head != NO_CHUNK);
-        Ok((
-            Self {
-                path,
-                running: AtomicBool::new(running),
-            },
-            heads.heads,
-        ))
+        Ok((Self { path }, heads.heads))
     }
 }
 
@@ -131,23 +122,7 @@ impl DiskRangeCacheState {
         self.recovery_heads().save(&self.recovery.path)
     }
 
-    pub(super) fn start_background_tasks(self: &Arc<Self>) {
-        if self.recovery.running.load(Ordering::Relaxed) {
-            let weak = Arc::downgrade(self);
-            let count = self.shards.len();
-            tokio::spawn(async move {
-                let started = Instant::now();
-                tracing::info!(target: "feuer::storage", "starting disk cache recovery");
-                for index in 0..count {
-                    let Some(disk) = weak.upgrade() else { return };
-                    disk.recover_shard(index).await;
-                }
-                if let Some(disk) = weak.upgrade() {
-                    disk.recovery.running.store(false, Ordering::Release);
-                    tracing::info!(target: "feuer::storage", elapsed_seconds = started.elapsed().as_secs_f64(), "disk cache recovery finished");
-                }
-            });
-        }
+    pub(super) fn start_checkpoint_task(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         let mut saved_heads = self.recovery_heads().heads;
         tokio::spawn(async move {
@@ -171,130 +146,128 @@ impl DiskRangeCacheState {
         });
     }
 
-    /// Load a shard once before allowing metadata updates in that shard. Other shards remain independent.
+    /// Scan a shard's metadata before the cache becomes available.
     pub(super) async fn recover_shard(&self, shard_index: usize) {
         let shard = &self.shards[shard_index];
-        shard
-            .metadata_loaded
-            .get_or_init(|| async {
-                let _io = shard.metadata_io.lock().await;
-                let bounds = shard_range(self.file.capacity(), self.shards.len(), shard_index);
-                let mut address = shard.metadata_head.load(Ordering::Relaxed);
-                while address != NO_CHUNK {
-                    if !address.is_multiple_of(CHUNK_BYTES) || !bounds.contains(&address) {
-                        break;
-                    }
-                    let Some(region) = shard.allocator.reserve_for_recovery(address / CHUNK_BYTES, 1) else {
-                        break;
-                    };
-                    let Ok(bytes) = self.file.read_recovery_chunk(&region).await else {
-                        break;
-                    };
-                    region.mark_recovered();
-                    let chunk = metadata::MetadataChunk {
-                        region,
-                        bytes: bytes.to_vec(),
-                    };
-                    let next = chunk.next();
+        let bounds = shard_range(self.file.capacity(), self.shards.len(), shard_index);
+        // Reserve every metadata chunk before accepting any payload addresses from the records.
+        shard.load_metadata_chain(&self.file, bounds.clone()).await;
+        let mut payload_chunks = BTreeMap::<u64, DiskRegion>::new();
+        let mut payload_ranges = BTreeMap::<u64, u64>::new();
+        let count = shard.metadata.lock().unwrap().chunks.len();
+        for chunk in 0..count {
+            {
+                let mut index = shard.entry_index.lock().unwrap();
+                for slot in 0..RECORDS_PER_CHUNK {
                     let mut pages = shard.metadata.lock().unwrap();
-                    let chunk_index = pages.add_chunk(chunk);
-                    for page in 0..RECORD_PAGES {
-                        let bytes = &pages.chunks[chunk_index].bytes
-                            [page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES];
-                        let valid = validate_page(
-                            bytes,
-                            ENTRY_METADATA_PAGE_TAG,
-                            0,
-                            address + (page * METADATA_PAGE_BYTES) as u64,
-                            page as u64,
-                        )
-                        .is_some_and(|(count, contents)| {
-                            count == RECORDS_PER_PAGE as u64
-                                && contents[PAGE_CONTENT_BYTES..].iter().all(|&byte| byte == 0)
-                        });
-                        if !valid {
-                            pages.repair_page(chunk_index, page);
-                        }
+                    let record = pages.chunks[chunk].record(slot);
+                    if record.iter().all(|&byte| byte == 0) {
+                        continue;
                     }
+                    let entry = decode_entry(record, bounds.clone()).filter(|(key, _, _, payload)| {
+                        self.shard_index_for_key(key) == shard_index
+                            && payload_ranges
+                                .range(..payload.end)
+                                .next_back()
+                                .is_none_or(|(_, end)| *end <= payload.start)
+                    });
+                    let Some((key, object_range, checksum, payload)) = entry else {
+                        pages.discard_record(chunk, slot);
+                        continue;
+                    };
+                    let start = payload.start / CHUNK_BYTES * CHUNK_BYTES;
+                    let end = payload.end.next_multiple_of(CHUNK_BYTES);
+                    if let std::collections::btree_map::Entry::Vacant(entry) = payload_chunks.entry(start) {
+                        let Some(region) = shard
+                            .allocator
+                            .reserve_for_recovery(start / CHUNK_BYTES, (end - start) / CHUNK_BYTES)
+                        else {
+                            pages.discard_record(chunk, slot);
+                            continue;
+                        };
+                        region.mark_recovered();
+                        entry.insert(region);
+                    }
+                    let region = &payload_chunks[&start];
+                    if payload.end > region.range().end {
+                        pages.discard_record(chunk, slot);
+                        continue;
+                    }
+                    // Dropping a replaced entry locks metadata to invalidate its record.
                     drop(pages);
-                    match next {
-                        Some(next) => address = next,
-                        None => break,
+                    let payload_region = region.slice(payload.clone());
+                    let storage = ObjectRangeDiskStorage {
+                        read_result: Weak::new(),
+                        eviction_position: 0,
+                        publication_id: 0,
+                        object_range,
+                        payload_checksum: checksum,
+                        metadata_slot: Some(shard.metadata_slot(chunk, slot)),
+                        payload_region,
+                    };
+                    payload_ranges.insert(payload.start, payload.end);
+                    if index.covering_range(&key, object_range).is_none() {
+                        index.insert(key, storage);
                     }
                 }
-                {
-                    let mut pages = shard.metadata.lock().unwrap();
-                    if address != NO_CHUNK {
-                        pages.end_chain();
-                    }
-                    if pages.chunks.is_empty() {
-                        shard.metadata_head.store(NO_CHUNK, Ordering::Relaxed);
-                    }
+            }
+            tokio::task::yield_now().await;
+        }
+        shard.allocator.finish_recovery();
+    }
+}
+
+impl DiskCacheShard {
+    /// Read and repair the metadata chain before any entry can claim payload chunks.
+    async fn load_metadata_chain(&self, file: &DataFile, bounds: Range<u64>) {
+        let mut pages = metadata::MetadataPages::default();
+        let mut address = self.metadata_head.load(Ordering::Relaxed);
+        while address != NO_CHUNK {
+            if !address.is_multiple_of(CHUNK_BYTES) || !bounds.contains(&address) {
+                break;
+            }
+            let Some(region) = self.allocator.reserve_for_recovery(address / CHUNK_BYTES, 1) else {
+                break;
+            };
+            let Ok(bytes) = file.read_recovery_chunk(&region).await else {
+                break;
+            };
+            region.mark_recovered();
+            let chunk = metadata::MetadataChunk {
+                region,
+                bytes: bytes.to_vec(),
+            };
+            let next = chunk.next();
+            let chunk_index = pages.add_chunk(chunk);
+            for page in 0..RECORD_PAGES {
+                let bytes =
+                    &pages.chunks[chunk_index].bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES];
+                let valid = validate_page(
+                    bytes,
+                    ENTRY_METADATA_PAGE_TAG,
+                    0,
+                    address + (page * METADATA_PAGE_BYTES) as u64,
+                    page as u64,
+                )
+                .is_some_and(|(count, contents)| {
+                    count == RECORDS_PER_PAGE as u64 && contents[PAGE_CONTENT_BYTES..].iter().all(|&byte| byte == 0)
+                });
+                if !valid {
+                    pages.repair_page(chunk_index, page);
                 }
-                // Reserve every metadata chunk before accepting any payload addresses from the records.
-                let mut payload_chunks = BTreeMap::<u64, DiskRegion>::new();
-                let mut payload_ranges = BTreeMap::<u64, u64>::new();
-                let count = shard.metadata.lock().unwrap().chunks.len();
-                for chunk in 0..count {
-                    for slot in 0..RECORDS_PER_CHUNK {
-                        let record = {
-                            let pages = shard.metadata.lock().unwrap();
-                            let record = pages.chunks[chunk].record(slot);
-                            if record.iter().all(|&byte| byte == 0) {
-                                continue;
-                            }
-                            <[u8; ENTRY_METADATA_BYTES]>::try_from(record).unwrap()
-                        };
-                        let entry = decode_entry(&record, bounds.clone()).filter(|(key, _, _, payload)| {
-                            self.shard_index_for_key(key) == shard_index
-                                && payload_ranges
-                                    .range(..payload.end)
-                                    .next_back()
-                                    .is_none_or(|(_, end)| *end <= payload.start)
-                        });
-                        let Some((key, object_range, checksum, payload)) = entry else {
-                            shard.metadata.lock().unwrap().discard_record(chunk, slot);
-                            continue;
-                        };
-                        let start = payload.start / CHUNK_BYTES * CHUNK_BYTES;
-                        let end = payload.end.next_multiple_of(CHUNK_BYTES);
-                        if let std::collections::btree_map::Entry::Vacant(entry) = payload_chunks.entry(start) {
-                            let Some(region) = shard
-                                .allocator
-                                .reserve_for_recovery(start / CHUNK_BYTES, (end - start) / CHUNK_BYTES)
-                            else {
-                                shard.metadata.lock().unwrap().discard_record(chunk, slot);
-                                continue;
-                            };
-                            region.mark_recovered();
-                            entry.insert(region);
-                        }
-                        let region = &payload_chunks[&start];
-                        if payload.end > region.range().end {
-                            shard.metadata.lock().unwrap().discard_record(chunk, slot);
-                            continue;
-                        }
-                        let payload_region = region.slice(payload.clone());
-                        let storage = ObjectRangeDiskStorage {
-                            read_result: Weak::new(),
-                            eviction_position: 0,
-                            publication_id: 0,
-                            object_range,
-                            payload_checksum: checksum,
-                            metadata_slot: Some(shard.metadata_slot(chunk, slot)),
-                            payload_region,
-                        };
-                        payload_ranges.insert(payload.start, payload.end);
-                        let mut index = shard.entry_index.lock().unwrap();
-                        if index.covering_range(&key, object_range).is_none() {
-                            index.insert(key, storage);
-                        }
-                    }
-                    tokio::task::yield_now().await;
-                }
-                shard.allocator.finish_recovery();
-            })
-            .await;
+            }
+            match next {
+                Some(next) => address = next,
+                None => break,
+            }
+        }
+        if address != NO_CHUNK {
+            pages.end_chain();
+        }
+        if pages.chunks.is_empty() {
+            self.metadata_head.store(NO_CHUNK, Ordering::Relaxed);
+        }
+        *self.metadata.lock().unwrap() = pages;
     }
 }
 

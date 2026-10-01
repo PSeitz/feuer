@@ -51,7 +51,7 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 /// The key hash selects an independently allocated shard; admission may fail despite space elsewhere.
 ///
 /// Pressure eviction uses sampled retrieval value per payload byte.
-/// Recovery publishes old entries incrementally alongside foreground reads and writes.
+/// Opening waits for all shards to recover before making the cache available.
 /// The experimental format is neither a persistence guarantee nor a stable on-disk interface.
 #[derive(Clone)]
 pub struct DiskRangeCache {
@@ -74,7 +74,6 @@ struct DiskCacheShard {
     entry_index: Mutex<DiskEntryIndex>,
     metadata: Arc<Mutex<metadata::MetadataPages>>,
     metadata_io: tokio::sync::Mutex<()>,
-    metadata_loaded: OnceCell<()>,
     metadata_head: AtomicU64,
 }
 
@@ -160,9 +159,7 @@ impl fmt::Debug for DiskRangeCache {
 }
 
 impl DiskRangeCache {
-    /// Opens an exclusively locked, fixed-capacity file and starts background recovery.
-    /// Reads are immediately available; recovered entries appear incrementally.
-    /// Writes wait for their shard's metadata recovery before modifying its pages.
+    /// Opens an exclusively locked, fixed-capacity file after scanning every shard's metadata.
     pub async fn open(
         directory: impl AsRef<Path>,
         capacity: u64,
@@ -250,7 +247,6 @@ impl DiskRangeCache {
                     entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
                     metadata: Arc::new(Mutex::new(metadata::MetadataPages::default())),
                     metadata_io: tokio::sync::Mutex::new(()),
-                    metadata_loaded: OnceCell::new(),
                     metadata_head: AtomicU64::new(metadata_heads[shard_index]),
                 }
             })
@@ -262,7 +258,13 @@ impl DiskRangeCache {
             metrics,
             recovery,
         });
-        disk.start_background_tasks();
+        let started = Instant::now();
+        tracing::info!(target: "feuer::storage", "starting disk cache recovery");
+        for index in 0..disk.shards.len() {
+            disk.recover_shard(index).await;
+        }
+        tracing::info!(target: "feuer::storage", elapsed_seconds = started.elapsed().as_secs_f64(), "disk cache recovery finished");
+        disk.start_checkpoint_task();
         Ok(Self { disk })
     }
 
@@ -319,11 +321,10 @@ impl DiskRangeCache {
                     downloads_by_shard[disk.shard_index_for_key(&key)].push((key, download, token, attempt));
                 }
                 let mut published_entries = 0;
-                for (shard_index, (shard, mut downloads)) in disk.shards.iter().zip(downloads_by_shard).enumerate() {
+                for (shard, mut downloads) in disk.shards.iter().zip(downloads_by_shard) {
                     if downloads.is_empty() {
                         continue;
                     }
-                    disk.recover_shard(shard_index).await;
                     let _metadata_io = shard.metadata_io.lock().await;
                     shard.flush_metadata(&disk.file).await?;
                     downloads.sort_by_key(|(_, download, _, _)| download.bytes().len());

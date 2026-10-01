@@ -47,7 +47,6 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
         let cache = DiskRangeCache::open(directory.path(), capacity, IoMetrics::new(&backend))
             .await
             .unwrap();
-        recovery::tests::wait_for_recovery(&cache).await;
         assert_eq!(
             value(
                 &registry,
@@ -93,7 +92,6 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     )
     .await
     .unwrap();
-    recovery::tests::wait_for_recovery(&cache).await;
     assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), written_chunks);
     for (key, source) in inputs {
         assert_eq!(

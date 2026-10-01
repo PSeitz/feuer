@@ -1191,7 +1191,7 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
 }
 
 #[tokio::test]
-async fn shards_are_disjoint_and_recover_independently() {
+async fn shards_are_disjoint_and_recovered_before_open_returns() {
     let (directory, cache) = open_test_cache(256 * CHUNK_BYTES).await;
     assert_eq!(cache.disk.shards.len(), 2);
     let keys: Vec<_> = (0..2)
@@ -1220,7 +1220,7 @@ async fn shards_are_disjoint_and_recover_independently() {
     let reopened = DiskRangeCache::open(directory.path(), capacity, IoMetrics::noop())
         .await
         .unwrap();
-    recovery::tests::wait_for_recovery(&reopened).await;
+    assert!(keys.iter().all(|key| reopened.contains(key, range(0, 100))));
     for key in &keys {
         assert_eq!(
             reopened.get(key, range(0, 100)).await.unwrap(),

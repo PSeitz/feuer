@@ -3,9 +3,8 @@
 Experimental `DiskRangeCache`, connected to public tiered lookup and bounded background disk writes.
 [tiered-plan.md](../tiered-plan.md) remains authoritative.
 
-**Open starts background recovery without waiting.** Reads remain available and recovered entries
-appear incrementally. A write waits for its shard's metadata recovery before modifying metadata;
-other shards remain independent.
+**Open waits for recovery to finish.** Every shard's metadata is scanned before the cache becomes
+available for reads and writes.
 
 ## Layout and ownership
 
@@ -101,8 +100,8 @@ find metadata. Bounded read-channel admission remains FIFO. All metadata chunks 
 reserved before records can claim payload addresses; duplicate, cyclic, out-of-shard, and conflicting
 claims cannot reserve the same chunks twice. Record decoding checks range arithmetic, alignment,
 shard identity, and payload overlap. Payload reservations are shared where entries share a chunk.
-Entries are then published incrementally. Foreground writes to that shard wait for this process;
-reads can use already published entries. Temporary allocator claim bits are released afterward.
+Entries are indexed during opening, and temporary allocator claim bits are released afterward.
+Opening returns only after every shard has been scanned.
 
 Corrupt pages/links are repaired in the in-memory metadata image and flushed before subsequent
 writes can reuse space. Recovery does not read payloads: their checksums are verified on every hit.
@@ -120,6 +119,6 @@ TMPDIR=/mnt/local-ssd cargo test --locked -p feuer-storage --lib
 Tests cover links between full metadata chunks, one full-chunk recovery read independent of payload
 size, mutable record-slot reuse, independently reclaimable payloads, durable invalidation plus read
 guards before reuse, failed-invalidation retry, malformed/cyclic links, corrupt record pages,
-metadata/payload ownership conflicts, replacement during startup, format resets, and payload checksum
+metadata/payload ownership conflicts, replacement after reopening, format resets, and payload checksum
 failures. Existing tests cover packing, fragmentation, cancellation, eviction, and contiguous payloads
 up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v11.

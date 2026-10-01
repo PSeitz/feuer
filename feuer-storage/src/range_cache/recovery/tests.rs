@@ -1,25 +1,13 @@
 use super::*;
 use crate::range_cache::tests::{download, open_test_cache, range};
 
-pub(in crate::range_cache) async fn wait_for_recovery(cache: &DiskRangeCache) {
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while cache.disk.recovery.running.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .unwrap();
-}
-
 async fn reopen(directory: &Path, cache: DiskRangeCache) -> DiskRangeCache {
     cache.disk.save_metadata_heads().unwrap();
     let capacity = cache.disk.file.capacity();
     drop(cache);
-    let cache = DiskRangeCache::open(directory, capacity, IoMetrics::noop())
+    DiskRangeCache::open(directory, capacity, IoMetrics::noop())
         .await
-        .unwrap();
-    wait_for_recovery(&cache).await;
-    cache
+        .unwrap()
 }
 
 #[test]
@@ -314,7 +302,7 @@ async fn failed_invalidation_keeps_payload_reserved_until_a_successful_retry() {
 }
 
 #[tokio::test]
-async fn a_write_waits_for_its_shards_metadata_then_replaces_recovered_entries() {
+async fn a_write_after_open_replaces_recovered_entries() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(10, 10)).await.unwrap());
@@ -325,7 +313,6 @@ async fn a_write_waits_for_its_shards_metadata_then_replaces_recovered_entries()
         .await
         .unwrap();
     assert!(cache.insert(key, download(0, 100)).await.unwrap());
-    wait_for_recovery(&cache).await;
     let cache = reopen(directory.path(), cache).await;
     assert_eq!(cache.get(&key, range(0, 100)).await.unwrap(), download(0, 100).bytes());
     assert_eq!(
