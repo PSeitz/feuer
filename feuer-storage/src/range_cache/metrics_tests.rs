@@ -22,6 +22,49 @@ async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache, pr
 }
 
 #[tokio::test]
+async fn recovery_reads_only_entry_metadata_pages() {
+    for (entries, payload_bytes, pages) in [
+        (1, 1024, 1),
+        (84, 1024, 1),
+        (85, 1024, 2),
+        (168, 1024, 2),
+        (169, 1024, 3),
+        (252, 1024, 3),
+        (1, CHUNK_BYTES as usize - METADATA_PAGE_BYTES, 1),
+        (1, 2 * CHUNK_BYTES as usize, 1),
+    ] {
+        let capacity = 4 * CHUNK_BYTES;
+        let (directory, cache) = tests::open_test_cache(capacity).await;
+        let source = download(payload_bytes);
+        let inputs: Vec<_> = (0..entries).map(|key| (ObjectKeyHash(key), source.clone())).collect();
+        assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), entries as usize);
+        cache.disk.save_recovery_ends().unwrap();
+        drop(cache);
+
+        let (registry, backend) = registry();
+        let cache = DiskRangeCache::open(directory.path(), capacity, IoMetrics::new(&backend))
+            .await
+            .unwrap();
+        recovery::tests::wait_for_recovery(&cache).await;
+        assert_eq!(
+            value(
+                &registry,
+                "feuer_disk_io_total",
+                &[("operation", "read"), ("outcome", "success")]
+            ),
+            pages as f64
+        );
+        assert_eq!(
+            value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]),
+            (pages * METADATA_PAGE_BYTES) as f64
+        );
+        for (key, source) in inputs {
+            assert!(cache.contains(&key, source.downloaded_range()));
+        }
+    }
+}
+
+#[tokio::test]
 async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     let capacity = 8 * CHUNK_BYTES;
     let (directory, cache, registry) = measured_cache(capacity).await;

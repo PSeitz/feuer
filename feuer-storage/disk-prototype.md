@@ -8,10 +8,10 @@ incrementally while ordinary reads and writes continue.
 
 ## Layout and ownership
 
-- The file contains 1-MiB chunks. Each allocation reserves one consecutive run of whole chunks
-  and starts with one 4-KiB metadata page. Continuation chunks have no headers.
+- The file contains 1-MiB chunks. Each allocation reserves one consecutive run of whole chunks.
+  Continuation chunks have no headers.
 - Fixed 48-byte entry records, with 128-bit key hashes, are packed into shared 4-KiB metadata pages
-  immediately after the allocation header. Records never cross page boundaries.
+  at the allocation's start. There is no separate allocation header. Records never cross page boundaries.
 - All payloads follow this metadata prefix. Each payload is one uninterrupted, 4-KiB-aligned disk
   byte range; no metadata is inserted between payloads or at payload chunk boundaries.
 - Small entries share a chunk only when each entry's complete payload and metadata fit inside it.
@@ -71,29 +71,30 @@ for readers or writers. There is no relocation or cleaning.
 
 ## Metadata and recovery
 
-`src/range_cache/page_format.rs` defines the experimental v9 format. All on-disk checksums use
+`src/range_cache/page_format.rs` defines the experimental v10 format. All on-disk checksums use
 XXHash64 with seed zero, stored as 8-byte little-endian integers. Metadata page headers are 48 bytes;
-each entry record uses 48 bytes. Opening an older cache resets its generation rather than recovering the
-old format. Records store the 128-bit key hash, object offset and length, one payload address, and payload
-checksum. Aligned payload length is derived from object length. Each page has a checksum and carries the
-checksum of the complete packed metadata prefix. Corruption in the prefix rejects its allocation during recovery.
+each entry record uses 48 bytes. Older formats are not recovered. Records store the 128-bit key hash,
+object offset and length, one payload address, and payload checksum. Aligned payload length is derived
+from object length. Each page has a checksum and carries the total entry count and checksum of the
+complete packed metadata prefix. Corruption in the prefix rejects its allocation during recovery.
 
-The allocation header records the cache generation, consecutive chunk count, and packed record
-byte length, excluding page headers and padding. Recovery reads the prefix and scans records sequentially;
-there is no entry-start bitmap. Removal does not modify metadata. Whole-chunk reuse replaces it.
+There is no cache generation or stored chunk count. Recovery derives the metadata length from the
+entry count and the reserved chunk range from payload addresses and lengths. Up to 84 records fit in
+one page, so these allocations need only one metadata read. Larger prefixes use consecutive pages.
+Removal does not modify metadata. Whole-chunk reuse replaces it.
 
-`recovery-ends` is a small checksummed file containing the layout, cache generation, and one scan end
-per shard. Growing ends are checkpointed by atomic replacement every ten seconds; stale ends may omit
-recent writes. Recovery snapshots those ends at open and stops there, regardless of new writes.
-Missing, invalid, or incompatible inventory resets the cache generation and logs a cold start. A changed
-shard count or capacity logs a warning with the previous and current layout: the entire old cache is discarded.
-Recovery logs startup and completion time at info level; per-shard capacity and scan bounds are debug details. The reset
-is synchronized before serving; old-generation chunks cannot reappear on later restarts. No payload
-synchronization or final checkpoint on close is promised.
+`recovery-ends` is a small checksummed file containing the layout and one scan end per shard.
+Growing ends are checkpointed by atomic replacement every ten seconds; stale ends may omit recent writes.
+Recovery snapshots those ends at open and stops there, regardless of new writes.
+Missing, invalid, or incompatible inventory resets only the scan ends and logs a cold start. A changed
+shard count or capacity logs a warning with the previous and current layout. Resetting scan ends does
+not clear disk contents: older valid entries may be recovered on a later scan that reaches them.
+Recovery logs startup and completion time at info level; per-shard capacity and scan bounds are debug details.
+No payload synchronization or final checkpoint on close is promised.
 
 The allocator records chunks claimed during recovery, even if their owners later release them. New writes
 may claim unscanned chunks immediately. Recovery reserves only chunks being inspected, validates their
-packed metadata, generation, sequential payload ranges, and ownership, then publishes without displacing indexed
+packed metadata, sequential payload ranges, and ownership, then publishes without displacing indexed
 ranges. Shared-chunk entries retain shared ownership; multi-chunk entries reserve their complete contiguous run.
 Inspection alone does not permanently claim a chunk. These temporary claim bitmaps disappear after the scan.
 
@@ -114,10 +115,11 @@ mkdir -p /mnt/local-ssd/<isolated-test-directory>
 TMPDIR=/mnt/local-ssd/<isolated-test-directory> cargo test --locked -p feuer-storage
 ```
 
-Tests cover incremental recovery, concurrent allocation claims, stale scan ends, generation resets,
+Tests cover incremental recovery, concurrent allocation claims, stale scan ends, scan-end resets,
 metadata corruption, reused multi-chunk addresses, contiguous payloads, rejection of fragmented free space,
-and bounded FIFO I/O admission. Real Linux execution of
-the new recovery tests and device power-loss testing remain outstanding, along with buffered mode and
-tier-aware retention tuning.
+and bounded FIFO I/O admission. The v10 suite ran on `m8g-32cpu-local-ssd` with real direct I/O and
+io_uring: 113 tests passed; `eviction_preserves_a_newer_replacement` failed and also failed on the
+unchanged baseline. Tests verify one recovery read for up to 84 entries and for multi-chunk entries.
+Device power-loss testing remains outstanding, along with buffered mode and tier-aware retention tuning.
 Measure chunk utilization, metadata overhead, read/write amplification, and retention quality before
 selecting this layout over alternatives.

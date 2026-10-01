@@ -1,9 +1,9 @@
-//! Experimental v9 metadata pages. Fixed-size records with XXH3-128 object keys are packed
-//! into consecutive pages before all payloads in an allocation. Records never cross page boundaries.
+//! Experimental v10 metadata pages. Fixed-size records with XXH3-128 object keys are packed
+//! at the start of consecutive chunks, before all payloads. Records never cross page boundaries.
 //! All checksums are XXHash64 with seed zero, stored as little-endian u64s.
-//! Each record page carries the checksum of the complete packed metadata prefix.
-//! Page checksums additionally bind tag, address, ordinal, links and contents.
-//! Chunk metadata identifies the cache generation; completion is not persistence.
+//! Each page carries the entry count and checksum of the complete packed metadata prefix.
+//! Page checksums additionally bind tag, address, ordinal, entry count and contents.
+//! Chunk count is derived from payload addresses and lengths; completion is not persistence.
 
 use bytes::Bytes;
 use feuer_types::{ByteRange, ObjectKeyHash};
@@ -18,18 +18,16 @@ const PAGE_HEADER_BYTES: usize = 48;
 pub(super) const ENTRY_METADATA_BYTES: usize = 48;
 pub(super) const PAGE_CONTENT_BYTES: usize =
     (METADATA_PAGE_BYTES - PAGE_HEADER_BYTES) / ENTRY_METADATA_BYTES * ENTRY_METADATA_BYTES;
-pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES09";
-pub(super) const CHUNK_METADATA_PAGE_TAG: &[u8; 8] = b"FEUIDX09";
-pub(super) const CHUNK_METADATA_CONTENT_BYTES: usize = 32;
+pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES10";
 
-/// Content checksum covers the packed records, or the allocation's generation and lengths.
+/// Content checksum covers all packed entry records.
 pub(super) fn encode_page(
     page: &mut [u8],
     page_tag: &[u8; 8],
     content_checksum: u64,
     page_address: u64,
     page_ordinal: u64,
-    next_entry_metadata_page_address: u64,
+    entry_count: u64,
     contents: &[u8],
 ) {
     assert_eq!(page.len(), METADATA_PAGE_BYTES);
@@ -38,7 +36,7 @@ pub(super) fn encode_page(
     page[8..16].copy_from_slice(&content_checksum.to_le_bytes());
     page[16..24].copy_from_slice(&page_address.to_le_bytes());
     page[24..32].copy_from_slice(&page_ordinal.to_le_bytes());
-    page[32..40].copy_from_slice(&next_entry_metadata_page_address.to_le_bytes());
+    page[32..40].copy_from_slice(&entry_count.to_le_bytes());
     page[40..48].copy_from_slice(page_tag);
     page[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + contents.len()].copy_from_slice(contents);
     let checksum = XxHash64::oneshot(0, &page[8..]);

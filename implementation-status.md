@@ -124,7 +124,7 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
 
 [`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) specifies the experimental layout and
 background recovery and remaining crash testing. `DiskRangeCache::insert_batch` groups smaller entries together within each
-shard, assembles whole chunks including entry metadata and chunk metadata, writes each chunk once, and then
+shard, assembles whole chunks including entry metadata, writes each chunk once, and then
 publishes after containment revalidation. Partial final chunks are finalized too. Later batches cannot fill them. Full keys and exact
 object ranges map to one contiguous physical range each. Payload bytes have no metadata gaps, including at chunk boundaries. Entry metadata stores
 one XXHash64 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
@@ -140,10 +140,11 @@ Entries within a batch share 1-MiB chunks with 4-KiB-aligned storage only when e
 and metadata fit inside that chunk. Multi-chunk entries own their chunks exclusively, including unused tails. Small entries use at least 4 KiB of payload
 and share metadata pages. Fixed 48-byte records with 128-bit key hashes are packed before all payloads in an allocation.
 A single-entry batch costs at least one chunk. Removed entries leave holes that cannot be reused individually.
-The v9 format uses XXHash64 for all on-disk checksums. Each contiguous allocation starts with one metadata page
-recording its chunk count and packed record byte length. Recovery scans the records sequentially, without a bitmap.
-Each record stores one payload address and length; continuation chunks have no headers. Allocation refuses scattered free chunks.
-Cache generations isolate resets. Metadata and payload checksums validate stored contents. Older formats cold-reset.
+The v10 format uses XXHash64 for all on-disk checksums. Each contiguous allocation starts directly with entry metadata
+pages carrying the total entry count. There is no separate allocation header or cache generation. Recovery derives the
+chunk count from payload addresses and lengths. Each record stores one payload address and length; continuation chunks
+have no headers. Allocation refuses scattered free chunks. Metadata and payload checksums validate stored contents.
+Older formats are skipped.
 Read invalidation compares expected payload checksums. Discarding a newer identical copy is an allowed miss.
 Pressure eviction samples up to 64 live entries and selects the lowest recent retrieval value per payload
 byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.
@@ -153,13 +154,14 @@ Each shard batch is limited to 64 sampled decisions and 4,096 chunks charged to 
 storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
 disk cache to a memory cache's evidence. Public tier orchestration now uses it.
 Recovery scans up to saved per-shard ends and publishes validated entries incrementally. New writes can
-claim unscanned chunks; recovery retries when the read channel is full and admitted reads run in FIFO order. Layout changes start a new cache
-generation and log a cold reset. See the prototype document for checkpoint and validation details.
+claim unscanned chunks; recovery retries when the read channel is full and admitted reads run in FIFO order. Layout changes
+reset scan ends without clearing disk contents. Older valid entries may reappear when later scans reach them.
+See the prototype document for checkpoint and validation details.
 No comparative layout/performance claim is established.
 
 The range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
 cancellation, corruption/reused payload, partial batch failure, metadata-only chunks, disjoint shards,
-mixed-size packing, exclusive multi-chunk ownership, finalized chunk metadata, whole-chunk ownership/reuse,
+mixed-size packing, exclusive multi-chunk ownership, finalized entry metadata, whole-chunk ownership/reuse,
 bounded value-aware entry eviction, shared evidence across tiers, payload-only scoring, mixed-size churn,
 concurrent eviction/reads,
 rejection of scattered free chunks, contiguous payloads across chunk boundaries, and whole-entry
@@ -227,7 +229,7 @@ permanently excluded by the design.
 
 - Extend current memory-identity publication checks when tier-aware retention policy is implemented.
 - Validate the versioned metadata format and whole-entry XXHash64 checksums against injected crash and reuse cases.
-- Exercise incremental recovery and generation resets on real Linux direct I/O and io_uring.
+- Exercise incremental recovery and scan-end resets on real Linux direct I/O and io_uring.
 - Validate recovery after process and machine crashes, beyond metadata corruption and reuse tests.
 
 ### Tier-aware policy and hardening

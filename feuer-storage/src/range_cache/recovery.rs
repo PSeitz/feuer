@@ -11,26 +11,18 @@ use std::{
 
 use super::*;
 
-const RECOVERY_FILE_FORMAT_ID: &[u8; 8] = b"FEUEND09";
+const RECOVERY_FILE_FORMAT_ID: &[u8; 8] = b"FEUEND10";
 const RECOVERY_FILE_NAME: &str = "recovery-ends";
 const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(10);
 
 pub(super) struct RecoveryState {
     path: PathBuf,
-    pub(super) generation: [u8; 16],
     pub(super) running: AtomicBool,
 }
 
 struct RecoveryBounds {
-    generation: [u8; 16],
     capacity: u64,
     ends: Vec<u64>,
-}
-
-fn random_identity() -> io::Result<[u8; 16]> {
-    let mut bytes = [0; 16];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes)
 }
 
 pub(super) fn shard_range(capacity: u64, count: usize, index: usize) -> Range<u64> {
@@ -42,7 +34,6 @@ impl RecoveryBounds {
     fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(RECOVERY_FILE_FORMAT_ID);
-        bytes.extend_from_slice(&self.generation);
         bytes.extend_from_slice(&self.capacity.to_le_bytes());
         bytes.extend_from_slice(&(self.ends.len() as u64).to_le_bytes());
         for end in &self.ends {
@@ -53,11 +44,11 @@ impl RecoveryBounds {
     }
 
     fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 56 || &bytes[..8] != RECOVERY_FILE_FORMAT_ID {
+        if bytes.len() < 40 || &bytes[..8] != RECOVERY_FILE_FORMAT_ID {
             return None;
         }
-        let capacity = u64::from_le_bytes(bytes[24..32].try_into().unwrap());
-        let shards = usize::try_from(u64::from_le_bytes(bytes[32..40].try_into().unwrap())).ok()?;
+        let capacity = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let shards = usize::try_from(u64::from_le_bytes(bytes[16..24].try_into().unwrap())).ok()?;
         if !(1..=64).contains(&shards)
             || capacity == 0
             || capacity > i64::MAX as u64
@@ -65,11 +56,11 @@ impl RecoveryBounds {
         {
             return None;
         }
-        let length = 40 + 8 * shards;
+        let length = 24 + 8 * shards;
         if bytes.len() != length + 8 || bytes[length..] != XxHash64::oneshot(0, &bytes[..length]).to_le_bytes() {
             return None;
         }
-        let ends: Vec<_> = bytes[40..length]
+        let ends: Vec<_> = bytes[24..length]
             .as_chunks::<8>()
             .0
             .iter()
@@ -81,11 +72,7 @@ impl RecoveryBounds {
                 return None;
             }
         }
-        Some(Self {
-            generation: bytes[8..24].try_into().unwrap(),
-            capacity,
-            ends,
-        })
+        Some(Self { capacity, ends })
     }
 
     fn save(&self, path: &Path) -> io::Result<()> {
@@ -94,7 +81,6 @@ impl RecoveryBounds {
         file.write_all(&self.encode())?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
-        // Especially important for resets: old-generation chunks must not reappear after a crash.
         File::open(path.parent().unwrap())?.sync_all()
     }
 }
@@ -122,17 +108,16 @@ impl RecoveryState {
                         shard_count = shards,
                         previous_capacity_bytes = previous.capacity,
                         capacity_bytes = capacity,
-                        "discarding entire disk cache: incompatible recovery layout"
+                        "resetting disk recovery scan bounds: incompatible layout"
                     );
                 } else {
                     tracing::info!(
                         target: "feuer::storage",
                         recovery_file = %path.display(),
-                        "resetting disk cache: recovery ends missing, invalid, or incompatible"
+                        "resetting disk recovery scan bounds: recovery ends missing, invalid, or incompatible"
                     );
                 }
                 let bounds = RecoveryBounds {
-                    generation: random_identity()?,
                     capacity,
                     ends: (0..shards)
                         .map(|index| shard_range(capacity, shards, index).start)
@@ -150,7 +135,6 @@ impl RecoveryState {
         Ok((
             Self {
                 path,
-                generation: bounds.generation,
                 running: AtomicBool::new(running),
             },
             bounds.ends,
@@ -161,7 +145,6 @@ impl RecoveryState {
 impl DiskRangeCacheState {
     fn recovery_bounds(&self) -> RecoveryBounds {
         RecoveryBounds {
-            generation: self.recovery.generation,
             capacity: self.file.capacity(),
             ends: self
                 .shards
@@ -261,33 +244,37 @@ impl DiskRangeCacheState {
     async fn recover_chunk(&self, shard_index: usize, address: u64, scan_end: u64) -> Option<u64> {
         let shard = &self.shards[shard_index];
         let mut region = shard.allocator.reserve_for_recovery(address / CHUNK_BYTES, 1)?;
-        let header = self.read_chunk_header(&region).await?;
-        if address.checked_add(header.chunk_count.checked_mul(CHUNK_BYTES)?)? > scan_end {
+        let metadata = self.read_metadata(&region).await?;
+        let entries = metadata
+            .as_chunks::<{ page_format::ENTRY_METADATA_BYTES }>()
+            .0
+            .iter()
+            .map(|record| decode_entry(record, address..scan_end))
+            .collect::<Option<Vec<_>>>()?;
+        let mut payload_start = address + metadata_storage_bytes(metadata.len())?;
+        for (key, _, _, payload) in &entries {
+            // Payloads follow the shared metadata prefix and each other, without overlap or gaps.
+            if self.shard_index_for_key(key) != shard_index || payload.start != payload_start {
+                return None;
+            }
+            payload_start = payload.end;
+        }
+        let end = payload_start.checked_next_multiple_of(CHUNK_BYTES)?;
+        if end > scan_end {
             return None;
         }
-        if header.chunk_count > 1 {
+        let chunk_count = (end - address) / CHUNK_BYTES;
+        if chunk_count > 1 {
+            if entries.len() != 1 {
+                return None;
+            }
             drop(region);
             // Any intervening write marks its chunks claimed, even if it releases them again.
             region = shard
                 .allocator
-                .reserve_for_recovery(address / CHUNK_BYTES, header.chunk_count)?;
+                .reserve_for_recovery(address / CHUNK_BYTES, chunk_count)?;
         }
-        let metadata = self.read_metadata(&region, &header).await?;
-        let mut records = metadata.as_slice();
-        let mut payload_start = address + METADATA_PAGE_BYTES as u64 + metadata_storage_bytes(metadata.len())?;
-        while !records.is_empty() {
-            let length = page_format::ENTRY_METADATA_BYTES;
-            let (key, object_range, checksum, payload) = decode_entry(records.get(..length)?, region.range())?;
-            // Payloads follow the shared metadata prefix and each other, without overlap or gaps.
-            if self.shard_index_for_key(&key) != shard_index
-                || payload.start != payload_start
-                || (header.chunk_count > 1
-                    && (length != metadata.len() || payload.end.next_multiple_of(CHUNK_BYTES) != region.range().end))
-            {
-                return None;
-            }
-            records = &records[length..];
-            payload_start = payload.end;
+        for (key, object_range, checksum, payload) in entries {
             let storage = ObjectRangeDiskStorage {
                 read_result: Weak::new(),
                 eviction_position: 0,
@@ -317,75 +304,38 @@ impl DiskRangeCacheState {
         Some(region.range().end)
     }
 
-    async fn read_chunk_header(&self, chunk: &DiskRegion) -> Option<ChunkHeader> {
-        let address = chunk.range().start;
-        let bytes = self.file.read_recovery_page(chunk, address).await.ok()?;
-        let checksum = read_u64(&bytes, 8)?;
-        let (next, contents) = page_format::validate_page(
-            &bytes,
-            page_format::CHUNK_METADATA_PAGE_TAG,
-            checksum,
-            address,
-            address / CHUNK_BYTES,
-        )?;
-        if next != 0
-            || contents[..16] != self.recovery.generation
-            || XxHash64::oneshot(0, &contents[..page_format::CHUNK_METADATA_CONTENT_BYTES]) != checksum
-            || contents[page_format::CHUNK_METADATA_CONTENT_BYTES..]
-                .iter()
-                .any(|&byte| byte != 0)
-        {
+    /// Reads and validates packed entry records, all of which fit in the first chunk.
+    async fn read_metadata(&self, region: &DiskRegion) -> Option<Vec<u8>> {
+        let mut address = region.range().start;
+        let mut page = self.file.read_recovery_page(region, address).await.ok()?;
+        let checksum = read_u64(&page, 8)?;
+        let entry_count = read_u64(&page, 32)?;
+        // Shared entries each need at least one aligned payload; multi-chunk entries are exclusive.
+        if entry_count == 0 || entry_count > CHUNK_BYTES / PAYLOAD_ALIGNMENT_BYTES {
             return None;
         }
-        let chunk_count = read_u64(contents, 16)?;
-        let metadata_bytes = usize::try_from(read_u64(contents, 24)?).ok()?;
-        let prefix_bytes = (METADATA_PAGE_BYTES as u64).checked_add(metadata_storage_bytes(metadata_bytes)?)?;
-        if chunk_count == 0
-            || metadata_bytes == 0
-            || !metadata_bytes.is_multiple_of(page_format::ENTRY_METADATA_BYTES)
-            || prefix_bytes >= chunk_count.checked_mul(CHUNK_BYTES)?
-        {
-            return None;
-        }
-        Some(ChunkHeader {
-            chunk_count,
-            metadata_bytes,
-        })
-    }
-
-    /// Reads and validates the allocation's packed records before publishing any entries.
-    async fn read_metadata(&self, region: &DiskRegion, header: &ChunkHeader) -> Option<Vec<u8>> {
-        let mut contents = Vec::new();
-        let mut checksum = None;
-        for ordinal in 0..header.metadata_bytes.div_ceil(PAGE_CONTENT_BYTES) {
-            let address = region.range().start + ((ordinal + 1) * METADATA_PAGE_BYTES) as u64;
-            let page = self.file.read_recovery_page(region, address).await.ok()?;
-            let checksum = *checksum.get_or_insert(read_u64(&page, 8)?);
-            let (next, bytes) = page_format::validate_page(
+        let metadata_bytes = entry_count as usize * page_format::ENTRY_METADATA_BYTES;
+        let mut contents = Vec::with_capacity(metadata_bytes);
+        for ordinal in 0..metadata_bytes.div_ceil(PAGE_CONTENT_BYTES) {
+            if ordinal != 0 {
+                address += METADATA_PAGE_BYTES as u64;
+                page = self.file.read_recovery_page(region, address).await.ok()?;
+            }
+            let (count, bytes) = page_format::validate_page(
                 &page,
                 page_format::ENTRY_METADATA_PAGE_TAG,
                 checksum,
                 address,
                 ordinal as u64,
             )?;
-            let take = (header.metadata_bytes - contents.len()).min(PAGE_CONTENT_BYTES);
+            let take = (metadata_bytes - contents.len()).min(PAGE_CONTENT_BYTES);
             contents.extend_from_slice(&bytes[..take]);
-            let expected_next = if contents.len() == header.metadata_bytes {
-                0
-            } else {
-                address + METADATA_PAGE_BYTES as u64
-            };
-            if next != expected_next || bytes[take..].iter().any(|&byte| byte != 0) {
+            if count != entry_count || bytes[take..].iter().any(|&byte| byte != 0) {
                 return None;
             }
         }
-        (XxHash64::oneshot(0, &contents) == checksum?).then_some(contents)
+        (XxHash64::oneshot(0, &contents) == checksum).then_some(contents)
     }
-}
-
-struct ChunkHeader {
-    chunk_count: u64,
-    metadata_bytes: usize,
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {

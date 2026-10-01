@@ -45,7 +45,6 @@ async fn open_paused(directory: &Path, capacity: u64) -> DiskRangeCache {
 #[test]
 fn scan_ends_validate_checksum_layout_and_bounds() {
     let bounds = RecoveryBounds {
-        generation: [1; 16],
         capacity: 256 * CHUNK_BYTES,
         ends: vec![CHUNK_BYTES, 129 * CHUNK_BYTES],
     };
@@ -63,7 +62,6 @@ fn scan_ends_validate_checksum_layout_and_bounds() {
         let invalid = RecoveryBounds {
             capacity,
             ends: vec![0],
-            ..bounds
         };
         assert!(RecoveryBounds::decode(&invalid.encode()).is_none());
     }
@@ -83,66 +81,47 @@ fn scan_ends_validate_checksum_layout_and_bounds() {
 fn resets_are_persistent_and_interrupted_updates_leave_the_previous_file() {
     let directory = tempfile::tempdir().unwrap();
     let (first, _) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 2).unwrap();
-    let (same, _) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 2).unwrap();
-    assert_eq!(first.generation, same.generation);
+    let bounds = RecoveryBounds {
+        capacity: 256 * CHUNK_BYTES,
+        ends: vec![CHUNK_BYTES, 129 * CHUNK_BYTES],
+    };
+    bounds.save(&first.path).unwrap();
     fs::write(first.path.with_extension("tmp"), b"interrupted update").unwrap();
-    let (same, _) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 2).unwrap();
-    assert_eq!(first.generation, same.generation);
-    // Same capacity, different shard count: a new persistent generation, not reinterpreted ends.
-    let (reset, ends) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 1).unwrap();
-    assert_ne!(first.generation, reset.generation);
+    let (_, ends) = RecoveryState::open(directory.path(), bounds.capacity, 2).unwrap();
+    assert_eq!(ends, bounds.ends);
+    // Same capacity, different shard count: reset rather than reinterpret the ends.
+    let (reset, ends) = RecoveryState::open(directory.path(), bounds.capacity, 1).unwrap();
     assert_eq!(ends, vec![0]);
-    let (again, _) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 1).unwrap();
-    assert_eq!(reset.generation, again.generation);
+    let (_, ends) = RecoveryState::open(directory.path(), bounds.capacity, 1).unwrap();
+    assert_eq!(ends, vec![0]);
 
-    let (resized, ends) = RecoveryState::open(directory.path(), 128 * CHUNK_BYTES, 1).unwrap();
-    assert_ne!(reset.generation, resized.generation);
+    let (_, ends) = RecoveryState::open(directory.path(), 128 * CHUNK_BYTES, 1).unwrap();
     assert_eq!(ends, vec![0]);
 
     fs::write(&reset.path, b"torn inventory").unwrap();
-    let (corrupt_reset, _) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 1).unwrap();
-    assert_ne!(resized.generation, corrupt_reset.generation);
-}
-
-#[test]
-fn v4_inventory_resets_generation() {
-    let directory = tempfile::tempdir().unwrap();
-    let generation = [1; 16];
-    let mut bytes = b"FEUEND04".to_vec();
-    bytes.extend_from_slice(&generation);
-    bytes.extend_from_slice(&CHUNK_BYTES.to_le_bytes());
-    bytes.extend_from_slice(&1u64.to_le_bytes());
-    bytes.extend_from_slice(&CHUNK_BYTES.to_le_bytes());
-    bytes.extend_from_slice(blake3::hash(&bytes).as_bytes());
-    fs::write(directory.path().join(RECOVERY_FILE_NAME), bytes).unwrap();
-
-    let (reset, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
-    assert_ne!(reset.generation, generation);
+    let (_, ends) = RecoveryState::open(directory.path(), bounds.capacity, 1).unwrap();
     assert_eq!(ends, vec![0]);
-    let (reopened, _) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
-    assert_eq!(reopened.generation, reset.generation);
 }
 
 #[test]
-fn older_inventories_reset_generation() {
-    for tag in [b"FEUEND06", b"FEUEND07", b"FEUEND08"] {
+fn older_inventories_reset_scan_ends() {
+    for tag in [b"FEUEND04", b"FEUEND06", b"FEUEND07", b"FEUEND08", b"FEUEND09"] {
         let directory = tempfile::tempdir().unwrap();
-        let bounds = RecoveryBounds {
-            generation: [1; 16],
-            capacity: CHUNK_BYTES,
-            ends: vec![CHUNK_BYTES],
-        };
-        let mut bytes = bounds.encode();
-        bytes[..8].copy_from_slice(tag);
-        let length = bytes.len() - 8;
-        let checksum = XxHash64::oneshot(0, &bytes[..length]);
-        bytes[length..].copy_from_slice(&checksum.to_le_bytes());
+        let mut bytes = tag.to_vec();
+        bytes.extend_from_slice(&[1; 16]); // Legacy generation field.
+        bytes.extend_from_slice(&CHUNK_BYTES.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&CHUNK_BYTES.to_le_bytes());
+        if tag == b"FEUEND04" {
+            bytes.extend_from_slice(blake3::hash(&bytes).as_bytes());
+        } else {
+            bytes.extend_from_slice(&XxHash64::oneshot(0, &bytes).to_le_bytes());
+        }
         fs::write(directory.path().join(RECOVERY_FILE_NAME), bytes).unwrap();
-        let (reset, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
-        assert_ne!(reset.generation, bounds.generation);
+        let (_, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
         assert_eq!(ends, vec![0]);
-        let (reopened, _) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
-        assert_eq!(reopened.generation, reset.generation);
+        let (_, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
+        assert_eq!(ends, vec![0]);
     }
 }
 
@@ -166,7 +145,7 @@ fn layout_change_warnings_describe_previous_and_current_layouts() {
     let log = fs::read_to_string(log_path).unwrap();
     let warnings: Vec<_> = log
         .lines()
-        .filter(|line| line.contains("discarding entire disk cache"))
+        .filter(|line| line.contains("incompatible layout"))
         .collect();
     assert_eq!(warnings.len(), 2);
     assert!(warnings[0].contains("reason=\"shard count changed\""));
@@ -503,29 +482,45 @@ async fn recovery_bounds_the_whole_run_before_claiming_it() {
     assert!(cache.disk.recover_chunk(0, 0, CHUNK_BYTES).await.is_none());
     let original = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
     for (offset, value) in [
-        (16, 0u64),
-        (16, 1),
         (16, u64::MAX),
         (24, 0),
-        (24, 71),
-        (24, 3 * CHUNK_BYTES),
+        (24, 4 * CHUNK_BYTES),
         (24, u64::MAX),
+        (32, 0),
+        (32, 4097),
+        (32, u64::MAX),
     ] {
-        let mut contents = original[48..48 + page_format::CHUNK_METADATA_CONTENT_BYTES].to_vec();
+        let mut contents = original[48..48 + page_format::ENTRY_METADATA_BYTES].to_vec();
         contents[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
         let mut page = vec![0; METADATA_PAGE_BYTES];
         page_format::encode_page(
             &mut page,
-            page_format::CHUNK_METADATA_PAGE_TAG,
+            page_format::ENTRY_METADATA_PAGE_TAG,
             XxHash64::oneshot(0, &contents),
             0,
             0,
-            0,
+            1,
             &contents,
         );
         cache.disk.file.write_at(0, &Bytes::from(page)).await.unwrap();
         cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await;
         assert!(!cache.contains(&ObjectKeyHash::from("large"), range(0, 1)));
+        assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 4 * CHUNK_BYTES);
+    }
+    for count in [0, 2, CHUNK_BYTES / PAYLOAD_ALIGNMENT_BYTES + 1, u64::MAX] {
+        let contents = &original[48..48 + page_format::ENTRY_METADATA_BYTES];
+        let mut page = vec![0; METADATA_PAGE_BYTES];
+        page_format::encode_page(
+            &mut page,
+            page_format::ENTRY_METADATA_PAGE_TAG,
+            XxHash64::oneshot(0, contents),
+            0,
+            0,
+            count,
+            contents,
+        );
+        cache.disk.file.write_at(0, &Bytes::from(page)).await.unwrap();
+        assert!(cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await.is_none());
         assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 4 * CHUNK_BYTES);
     }
     cache.disk.file.write_at(0, &original).await.unwrap();
@@ -561,7 +556,7 @@ async fn recovery_cannot_claim_a_run_with_a_reused_continuation_chunk() {
 }
 
 #[tokio::test]
-async fn generation_reset_rejects_old_chunks_even_when_new_scan_bounds_cover_them() {
+async fn resetting_scan_ends_leaves_old_entries_available_to_later_scans() {
     let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     cache
         .insert(ObjectKeyHash::from("old-a"), download(0, 100))
@@ -572,24 +567,26 @@ async fn generation_reset_rejects_old_chunks_even_when_new_scan_bounds_cover_the
         .await
         .unwrap();
     cache.disk.save_recovery_ends().unwrap();
-    let old_generation = cache.disk.recovery.generation;
     drop(cache);
     fs::remove_file(directory.path().join(RECOVERY_FILE_NAME)).unwrap();
     let cache = open_paused(directory.path(), 4 * CHUNK_BYTES).await;
-    assert_ne!(cache.disk.recovery.generation, old_generation);
+    assert_eq!(cache.disk.shards[0].written_end.load(Ordering::Relaxed), 0);
+    assert!(!cache.contains(&ObjectKeyHash::from("old-a"), range(0, 1)));
     cache.disk.shards[0]
         .written_end
         .store(2 * CHUNK_BYTES, Ordering::Relaxed);
     cache.disk.save_recovery_ends().unwrap();
-    let new_generation = cache.disk.recovery.generation;
     drop(cache);
     let cache = DiskRangeCache::open(directory.path(), 4 * CHUNK_BYTES, IoMetrics::noop())
         .await
         .unwrap();
     wait_for_recovery(&cache).await;
-    assert_eq!(cache.disk.recovery.generation, new_generation);
-    assert!(!cache.contains(&ObjectKeyHash::from("old-a"), range(0, 1)));
-    assert!(!cache.contains(&ObjectKeyHash::from("old-b"), range(0, 1)));
+    for key in ["old-a", "old-b"] {
+        assert_eq!(
+            cache.get(&ObjectKeyHash::from(key), range(0, 100)).await.unwrap(),
+            download(0, 100).bytes()
+        );
+    }
 }
 
 #[test]

@@ -84,7 +84,7 @@ struct DiskEntryIndex {
 /// One contiguous disk region's metadata and retained payload slices, before writing.
 struct UnwrittenRegion {
     region: DiskRegion,
-    // Header placeholder, then payload slices at 4-KiB-aligned offsets. Finalization inserts metadata pages.
+    // Payload slices at 4-KiB-aligned offsets. Finalization prepends metadata pages.
     parts: Vec<(usize, Bytes)>,
     used_bytes: u64,
     // Encoded record bytes, excluding page headers and padding.
@@ -341,10 +341,7 @@ impl DiskRangeCache {
                             attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
                         }
                     }
-                    let entries = match batch
-                        .write_chunks(&disk.file, &disk.metrics, &disk.recovery.generation, &shard.written_end)
-                        .await
-                    {
+                    let entries = match batch.write_chunks(&disk.file, &disk.metrics, &shard.written_end).await {
                         Ok(entries) => entries,
                         Err(error) => {
                             for (_, attempt) in &mut publication_tokens {
@@ -640,12 +637,12 @@ impl UnwrittenShardBatch {
         });
         if !shares_chunk {
             let entry_bytes = metadata_storage_bytes(metadata_bytes).ok_or(u64::MAX)? + aligned_payload_bytes;
-            let count = (METADATA_PAGE_BYTES as u64 + entry_bytes).div_ceil(CHUNK_BYTES);
+            let count = entry_bytes.div_ceil(CHUNK_BYTES);
             let region = allocator.reserve_chunks(count).ok_or(count)?;
             self.regions.push(UnwrittenRegion {
                 region,
-                parts: vec![(0, Bytes::new())],
-                used_bytes: METADATA_PAGE_BYTES as u64,
+                parts: Vec::new(),
+                used_bytes: 0,
                 metadata_bytes: 0,
                 entry_start: self.entries.len(),
             });
@@ -656,7 +653,7 @@ impl UnwrittenShardBatch {
             - metadata_storage_bytes(prepared.metadata_bytes).unwrap();
         // The prefix can grow until writing starts. Move payload addresses, not payload bytes.
         if metadata_growth != 0 {
-            for (offset, _) in &mut prepared.parts[1..] {
+            for (offset, _) in &mut prepared.parts {
                 *offset += metadata_growth as usize;
             }
             for (_, entry) in &mut self.entries[prepared.entry_start..] {
@@ -693,17 +690,16 @@ impl UnwrittenShardBatch {
         self.regions.iter().map(|prepared| prepared.region.chunk_count()).sum()
     }
 
-    /// Finalizes chunk metadata and writes all chunks before returning entries for publication.
+    /// Finalizes entry metadata and writes all chunks before returning entries for publication.
     async fn write_chunks(
         mut self,
         file: &DataFile,
         metrics: &DiskMetrics,
-        generation: &[u8; 16],
         written_end: &AtomicU64,
     ) -> Result<Vec<(ObjectKeyHash, ObjectRangeDiskStorage)>, DiskRangeCacheError> {
         for prepared in &mut self.regions {
             let address = prepared.region.range().start;
-            let entry_end = prepared.entry_start + prepared.parts.len() - 1;
+            let entry_end = prepared.entry_start + prepared.parts.len();
             let mut metadata = Vec::with_capacity(prepared.metadata_bytes);
             for (key, entry) in &self.entries[prepared.entry_start..entry_end] {
                 metadata.extend_from_slice(&page_format::encode_entry_metadata(
@@ -714,11 +710,9 @@ impl UnwrittenShardBatch {
                 ));
             }
             let content_checksum = XxHash64::oneshot(0, &metadata);
-            let payload_start = address + METADATA_PAGE_BYTES as u64 + metadata_storage_bytes(metadata.len()).unwrap();
             let mut metadata_parts = Vec::new();
             for (ordinal, content) in metadata.chunks(PAGE_CONTENT_BYTES).enumerate() {
-                let offset = (ordinal + 1) * METADATA_PAGE_BYTES;
-                let next = address + offset as u64 + METADATA_PAGE_BYTES as u64;
+                let offset = ordinal * METADATA_PAGE_BYTES;
                 let mut page = vec![0; METADATA_PAGE_BYTES];
                 page_format::encode_page(
                     &mut page,
@@ -726,27 +720,12 @@ impl UnwrittenShardBatch {
                     content_checksum,
                     address + offset as u64,
                     ordinal as u64,
-                    if next < payload_start { next } else { 0 },
+                    (entry_end - prepared.entry_start) as u64,
                     content,
                 );
                 metadata_parts.push((offset, Bytes::from(page)));
             }
-            prepared.parts.splice(1..1, metadata_parts);
-            let mut page = vec![0; METADATA_PAGE_BYTES];
-            let mut contents = [0; page_format::CHUNK_METADATA_CONTENT_BYTES];
-            contents[..16].copy_from_slice(generation);
-            contents[16..24].copy_from_slice(&prepared.region.chunk_count().to_le_bytes());
-            contents[24..32].copy_from_slice(&(metadata.len() as u64).to_le_bytes());
-            page_format::encode_page(
-                &mut page,
-                page_format::CHUNK_METADATA_PAGE_TAG,
-                XxHash64::oneshot(0, &contents),
-                address,
-                address / CHUNK_BYTES,
-                0,
-                &contents,
-            );
-            prepared.parts[0].1 = Bytes::from(page);
+            prepared.parts.splice(0..0, metadata_parts);
             for offset in (0..prepared.region.chunk_count() * CHUNK_BYTES).step_by(CHUNK_BYTES as usize) {
                 let end = offset as usize + CHUNK_BYTES as usize;
                 let mut parts = Vec::new();
