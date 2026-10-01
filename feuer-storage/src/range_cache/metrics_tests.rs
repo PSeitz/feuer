@@ -123,7 +123,7 @@ async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation()
             .unwrap()
             .get_mut(&10)
             .unwrap()
-            .read_result = Arc::downgrade(&result);
+            .in_flight_read = Arc::downgrade(&result);
     }
     let mut initializer = Box::pin(result.get_or_init(std::future::pending));
     assert!(

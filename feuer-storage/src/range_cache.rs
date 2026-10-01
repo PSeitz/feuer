@@ -79,7 +79,7 @@ struct DiskCacheShard {
 
 /// Disk entries indexed by object key and range start, with dense rotating eviction candidates.
 struct DiskEntryIndex {
-    ranges_by_key: HashMap<ObjectKeyHash, BTreeMap<u64, ObjectRangeDiskStorage>>,
+    ranges_by_key: HashMap<ObjectKeyHash, BTreeMap<u64, DiskEntry>>,
     eviction_candidates: Vec<(ObjectKeyHash, u64)>,
     next_candidate: usize,
     metrics: Arc<DiskMetrics>,
@@ -97,16 +97,17 @@ struct UnwrittenRegion {
 #[derive(Default)]
 struct UnwrittenShardBatch {
     regions: Vec<UnwrittenRegion>,
-    entries: Vec<(ObjectKeyHash, ObjectRangeDiskStorage)>,
+    entries: Vec<(ObjectKeyHash, DiskEntry)>,
 }
 
 /// Verified bytes or failure shared by concurrent reads of one stored entry.
 type EntryReadResult = OnceCell<Result<(Bytes, usize), DiskLookupOutcome>>;
 
-/// Disk storage reserved for one object range, with its expected payload checksum.
-struct ObjectRangeDiskStorage {
+/// One indexed disk entry, including storage, eviction bookkeeping, and in-flight reads.
+struct DiskEntry {
+    // In-flight deduplication: concurrent readers share one disk read and checksum verification.
     // Only concurrent callers retain the result; the index must not cache payload bytes.
-    read_result: Weak<EntryReadResult>,
+    in_flight_read: Weak<EntryReadResult>,
     eviction_position: usize,
     object_range: ByteRange,
     payload_checksum: u64,
@@ -447,7 +448,7 @@ impl DiskRangeCache {
         let started = Instant::now();
         let metrics = &self.disk.metrics;
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
-        let (guarded_read, read_result) = {
+        let (guarded_read, in_flight_read) = {
             let mut index = shard.entry_index.lock().unwrap();
             let Some(storage) = index.covering_range(key, requested) else {
                 metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
@@ -455,9 +456,9 @@ impl DiskRangeCache {
             };
             let start = storage.object_range.start();
             let storage = index.ranges_by_key.get_mut(key).unwrap().get_mut(&start).unwrap();
-            let read_result = storage.read_result.upgrade().unwrap_or_else(|| {
+            let in_flight_read = storage.in_flight_read.upgrade().unwrap_or_else(|| {
                 let result = Arc::new(OnceCell::new());
-                storage.read_result = Arc::downgrade(&result);
+                storage.in_flight_read = Arc::downgrade(&result);
                 result
             });
             (
@@ -466,11 +467,11 @@ impl DiskRangeCache {
                     payload_checksum: storage.payload_checksum,
                     payload_region: storage.payload_region.read_guard(),
                 },
-                read_result,
+                in_flight_read,
             )
         };
         // If the initializing caller is canceled, OnceCell lets a waiter take over.
-        let result = read_result
+        let result = in_flight_read
             .get_or_init(|| async {
                 match guarded_read
                     .read_verified_range(&self.disk.file, guarded_read.object_range)
@@ -580,17 +581,17 @@ impl DiskEntryIndex {
         }
     }
 
-    fn insert(&mut self, key: ObjectKeyHash, storage: ObjectRangeDiskStorage) {
+    fn insert(&mut self, key: ObjectKeyHash, storage: DiskEntry) {
         self.insert_entries(std::iter::once((key, storage)));
     }
 
-    fn insert_batch(&mut self, entries: &mut Vec<(ObjectKeyHash, ObjectRangeDiskStorage)>) {
+    fn insert_batch(&mut self, entries: &mut Vec<(ObjectKeyHash, DiskEntry)>) {
         self.ranges_by_key.reserve(entries.len());
         self.eviction_candidates.reserve(entries.len());
         self.insert_entries(entries.drain(..));
     }
 
-    fn insert_entries(&mut self, entries: impl IntoIterator<Item = (ObjectKeyHash, ObjectRangeDiskStorage)>) {
+    fn insert_entries(&mut self, entries: impl IntoIterator<Item = (ObjectKeyHash, DiskEntry)>) {
         let mut entry_count = 0;
         let mut payload_bytes = 0;
         for (key, mut storage) in entries {
@@ -608,7 +609,7 @@ impl DiskEntryIndex {
         self.metrics.payload_bytes.increase(payload_bytes);
     }
 
-    fn remove(&mut self, key: &ObjectKeyHash, start: u64) -> Option<ObjectRangeDiskStorage> {
+    fn remove(&mut self, key: &ObjectKeyHash, start: u64) -> Option<DiskEntry> {
         let entries = self.ranges_by_key.get_mut(key)?;
         let storage = entries.remove(&start)?;
         self.metrics.entries.decrease(1);
@@ -642,7 +643,7 @@ impl DiskEntryIndex {
         }
     }
 
-    fn covering_range(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&ObjectRangeDiskStorage> {
+    fn covering_range(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&DiskEntry> {
         // Retained ranges never contain one another, so their ends increase with their starts.
         let (_, storage) = self.ranges_by_key.get(key)?.range(..=requested.start()).next_back()?;
         storage.object_range.contains(requested).then_some(storage)
@@ -704,8 +705,8 @@ impl UnwrittenShardBatch {
         prepared.used_bytes += aligned_payload_bytes;
         self.entries.push((
             *key,
-            ObjectRangeDiskStorage {
-                read_result: Weak::new(),
+            DiskEntry {
+                in_flight_read: Weak::new(),
                 eviction_position: 0,
                 object_range,
                 payload_checksum,
@@ -726,7 +727,7 @@ impl UnwrittenShardBatch {
         file: &DataFile,
         metrics: &DiskMetrics,
         shard: &DiskCacheShard,
-    ) -> Result<Vec<(ObjectKeyHash, ObjectRangeDiskStorage)>, DiskRangeCacheError> {
+    ) -> Result<Vec<(ObjectKeyHash, DiskEntry)>, DiskRangeCacheError> {
         for prepared in &mut self.regions {
             let address = prepared.region.range().start;
             for offset in (0..prepared.region.chunk_count() * CHUNK_BYTES).step_by(CHUNK_BYTES as usize) {

@@ -134,7 +134,7 @@ impl MetadataPages {
     }
 }
 
-impl Drop for ObjectRangeDiskStorage {
+impl Drop for DiskEntry {
     fn drop(&mut self) {
         if let Some(slot) = &self.metadata_slot
             && let Some(pages) = slot.pages.upgrade()
@@ -191,7 +191,7 @@ impl DiskCacheShard {
         Ok(true)
     }
 
-    pub(super) fn record_entry(&self, key: &ObjectKeyHash, entry: &mut ObjectRangeDiskStorage) {
+    pub(super) fn record_entry(&self, key: &ObjectKeyHash, entry: &mut DiskEntry) {
         let record = encode_entry_metadata(key, entry.object_range, &entry.payload_region, entry.payload_checksum);
         let mut pages = self.metadata.lock().unwrap();
         let (chunk, slot) = pages

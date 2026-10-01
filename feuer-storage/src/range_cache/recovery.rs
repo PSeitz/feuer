@@ -194,8 +194,8 @@ impl DiskRangeCacheState {
                         continue;
                     }
                     let payload_region = region.slice(payload.clone());
-                    let storage = ObjectRangeDiskStorage {
-                        read_result: Weak::new(),
+                    let storage = DiskEntry {
+                        in_flight_read: Weak::new(),
                         eviction_position: 0,
                         object_range,
                         payload_checksum: checksum,

@@ -34,7 +34,7 @@ pub(super) async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskRa
     (directory, cache)
 }
 
-impl ObjectRangeDiskStorage {
+impl DiskEntry {
     fn single_chunk_start(&self) -> Option<u64> {
         (self.payload_region.chunk_count() == 1)
             .then_some(self.payload_region.range().start / CHUNK_BYTES * CHUNK_BYTES)
@@ -1241,8 +1241,8 @@ fn index_batch_insertion_keeps_covered_ranges() {
     let mut entries = Vec::from([range(10, 20), range(0, 30), range(15, 16)].map(|object_range| {
         (
             key,
-            ObjectRangeDiskStorage {
-                read_result: Weak::new(),
+            DiskEntry {
+                in_flight_read: Weak::new(),
                 eviction_position: 0,
                 object_range,
                 payload_checksum: 0,
@@ -1281,8 +1281,8 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
         let mut index = DiskEntryIndex::new(DiskMetrics::noop());
         index.insert(
             ObjectKeyHash::from("object"),
-            ObjectRangeDiskStorage {
-                read_result: Weak::new(),
+            DiskEntry {
+                in_flight_read: Weak::new(),
                 eviction_position: 0,
                 object_range: range(0, 3),
                 payload_checksum: XxHash64::oneshot(0, replacement),
