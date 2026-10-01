@@ -211,9 +211,8 @@ fn bucket_gauges_follow_pressure_reclamation_and_shutdown_independently() {
         assert_eq!(idle(size), 0.0);
     }
     for family in registry.gather() {
-        match family.name() {
-            "feuer_io_buffer_pool_bytes" => assert_eq!(family.get_metric().len(), 12),
-            _ => {}
+        if family.name() == "feuer_io_buffer_pool_bytes" {
+            assert_eq!(family.get_metric().len(), 12);
         }
     }
 }

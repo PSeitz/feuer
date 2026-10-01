@@ -1,5 +1,6 @@
-//! Experimental immutable batch writes, live range lookup and whole-entry validation.
+//! Immutable payload chunks, mutable metadata chunks, and whole-entry validation.
 
+mod metadata;
 #[cfg(test)]
 mod metrics_tests;
 mod page_format;
@@ -32,6 +33,7 @@ use crate::{
     allocation::{CHUNK_BYTES, DiskChunkAllocator, DiskRegion, DiskRegionReadGuard},
     disk_metrics::{DiskLookupOutcome, DiskWriteAttempt, DiskWriteOutcome},
 };
+#[cfg(test)]
 use page_format::{METADATA_PAGE_BYTES, PAGE_CONTENT_BYTES};
 
 const PAYLOAD_ALIGNMENT_BYTES: u64 = crate::uring::DIRECT_IO_ALIGNMENT_BYTES as u64;
@@ -42,7 +44,8 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 
 /// An experimental disk range cache used by the public tiered cache.
 ///
-/// Explicit batches pack smaller entries together and write complete immutable 1-MiB chunks.
+/// Explicit batches pack payloads into immutable 1-MiB chunks. Separate mutable metadata chunks
+/// hold entry records and links between metadata chunks.
 /// Entries have plain payload bytes, 4-KiB-aligned storage, and a checksum in their entry metadata.
 /// Reads verify the whole covering entry, returning only requested bytes. Reuse requires a wholly free chunk.
 /// The key hash selects an independently allocated shard; admission may fail despite space elsewhere.
@@ -69,7 +72,10 @@ struct DiskCacheShard {
     reclaim_sample_size: usize,
     allocator: DiskChunkAllocator,
     entry_index: Mutex<DiskEntryIndex>,
-    written_end: AtomicU64,
+    metadata: Arc<Mutex<metadata::MetadataPages>>,
+    metadata_io: tokio::sync::Mutex<()>,
+    metadata_loaded: OnceCell<()>,
+    metadata_head: AtomicU64,
 }
 
 /// Disk entries indexed by object key and range start, with dense rotating eviction candidates.
@@ -81,15 +87,12 @@ struct DiskEntryIndex {
     metrics: Arc<DiskMetrics>,
 }
 
-/// One contiguous disk region's metadata and retained payload slices, before writing.
+/// One contiguous reserved disk region and retained payload slices, before writing.
 struct UnwrittenRegion {
     region: DiskRegion,
-    // Payload slices at 4-KiB-aligned offsets. Finalization prepends metadata pages.
+    // Payload slices at 4-KiB-aligned offsets; metadata lives in separate chunks.
     parts: Vec<(usize, Bytes)>,
     used_bytes: u64,
-    // Encoded record bytes, excluding page headers and padding.
-    metadata_bytes: usize,
-    entry_start: usize,
 }
 
 /// Entries and their chunk contents prepared for one shard's batch write.
@@ -111,6 +114,16 @@ struct ObjectRangeDiskStorage {
     object_range: ByteRange,
     payload_checksum: u64,
     payload_region: DiskRegion,
+    metadata_slot: Option<metadata::MetadataSlot>,
+}
+
+impl Drop for DiskRangeCacheState {
+    fn drop(&mut self) {
+        // Closing the in-memory index must not erase records needed by the next open.
+        for shard in &self.shards {
+            shard.metadata.lock().unwrap().closing = true;
+        }
+    }
 }
 
 /// A guarded object-range read, with the expected checksum and contiguous payload region.
@@ -148,7 +161,8 @@ impl fmt::Debug for DiskRangeCache {
 
 impl DiskRangeCache {
     /// Opens an exclusively locked, fixed-capacity file and starts background recovery.
-    /// Reads and writes are immediately available; recovered entries appear incrementally.
+    /// Reads are immediately available; recovered entries appear incrementally.
+    /// Writes wait for their shard's metadata recovery before modifying its pages.
     pub async fn open(
         directory: impl AsRef<Path>,
         capacity: u64,
@@ -216,7 +230,7 @@ impl DiskRangeCache {
         let file = DataFile::open_with_buffer_pool(&directory, capacity, io_metrics, buffer_pool).await?;
         let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
         let lock_owner = file.clone();
-        let (recovery, shard_scan_ends) = tokio::task::spawn_blocking(move || {
+        let (recovery, metadata_heads) = tokio::task::spawn_blocking(move || {
             let _lock_owner = lock_owner;
             recovery::RecoveryState::open(&directory, capacity, num_shards)
         })
@@ -227,14 +241,17 @@ impl DiskRangeCache {
             .map(|shard_index| {
                 let range = recovery::shard_range(capacity, num_shards, shard_index);
                 let allocator = DiskChunkAllocator::with_metrics(range.clone(), metrics.clone()).unwrap();
-                if shard_scan_ends[shard_index] > range.start {
-                    allocator.start_recovery(range.start, shard_scan_ends[shard_index]);
+                if metadata_heads[shard_index] != page_format::NO_CHUNK {
+                    allocator.start_recovery(range.start, range.end);
                 }
                 DiskCacheShard {
                     reclaim_sample_size,
                     allocator,
                     entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
-                    written_end: AtomicU64::new(shard_scan_ends[shard_index]),
+                    metadata: Arc::new(Mutex::new(metadata::MetadataPages::default())),
+                    metadata_io: tokio::sync::Mutex::new(()),
+                    metadata_loaded: OnceCell::new(),
+                    metadata_head: AtomicU64::new(metadata_heads[shard_index]),
                 }
             })
             .collect();
@@ -245,7 +262,7 @@ impl DiskRangeCache {
             metrics,
             recovery,
         });
-        disk.start_background_tasks(shard_scan_ends);
+        disk.start_background_tasks();
         Ok(Self { disk })
     }
 
@@ -259,7 +276,7 @@ impl DiskRangeCache {
     /// Each shard's chunks finish writing before its entries publish, with containment revalidation.
     /// Publication is not transactional across shards. Does not record accesses.
     ///
-    /// Entries share a chunk only when their complete payload and metadata fit inside it.
+    /// Entries share a payload chunk only when their complete aligned payloads fit inside it.
     /// Multi-chunk entries own their chunks exclusively. Partially filled chunks are finalized too.
     /// Pressure eviction is bounded; unavailable capacity causes admission to be skipped, not waited for.
     /// Callers bound batch size and concurrency: payload slices are retained until writing completes.
@@ -302,10 +319,16 @@ impl DiskRangeCache {
                     downloads_by_shard[disk.shard_index_for_key(&key)].push((key, download, token, attempt));
                 }
                 let mut published_entries = 0;
-                for (shard, mut downloads) in disk.shards.iter().zip(downloads_by_shard) {
+                for (shard_index, (shard, mut downloads)) in disk.shards.iter().zip(downloads_by_shard).enumerate() {
+                    if downloads.is_empty() {
+                        continue;
+                    }
+                    disk.recover_shard(shard_index).await;
+                    let _metadata_io = shard.metadata_io.lock().await;
+                    shard.flush_metadata(&disk.file).await?;
                     downloads.sort_by_key(|(_, download, _, _)| download.bytes().len());
                     let mut batch = UnwrittenShardBatch::default();
-                    let mut publication_tokens = Vec::new();
+                    let mut publication_tokens: Vec<(T, DiskWriteAttempt)> = Vec::new();
                     let mut attempts_left = MAX_EVICTION_ATTEMPTS;
                     let mut chunks_left = MAX_EVICTION_CHUNKS;
                     for (key, download, token, mut attempt) in downloads {
@@ -318,9 +341,30 @@ impl DiskRangeCache {
                         {
                             let previous_entry_count = batch.entries.len();
                             let previous_chunks_left = chunks_left;
-                            while let Err(chunks_needed) = batch.pack_download(&shard.allocator, &key, &download) {
+                            loop {
+                                let ready = match shard.ensure_metadata_slots(&disk.file, batch.entries.len() + 1).await
+                                {
+                                    Ok(ready) => ready,
+                                    Err(error) => {
+                                        attempt.set_outcome(DiskWriteOutcome::Failed);
+                                        for (_, pending) in &mut publication_tokens {
+                                            pending.set_outcome(DiskWriteOutcome::Failed);
+                                        }
+                                        return Err(error.into());
+                                    }
+                                };
+                                let chunks_needed = if ready {
+                                    match batch.pack_download(&shard.allocator, &key, &download) {
+                                        Ok(()) => break,
+                                        Err(count) => count,
+                                    }
+                                } else {
+                                    1
+                                };
+                                let metadata_chunks = shard.metadata.lock().unwrap().chunks.len() as u64;
                                 // Evicting cannot help an entry that exceeds the capacity left by this batch.
-                                if chunks_needed > shard.allocator.chunk_capacity - batch.chunk_count()
+                                if chunks_needed
+                                    > shard.allocator.chunk_capacity - batch.chunk_count() - metadata_chunks
                                     || !shard.evict_candidate(
                                         &disk.access_histories,
                                         &mut attempts_left,
@@ -329,6 +373,7 @@ impl DiskRangeCache {
                                 {
                                     break;
                                 }
+                                shard.flush_metadata(&disk.file).await?;
                             }
                             // Only actual removals consume the chunk budget; sampling alone does not.
                             attempt.evicted = chunks_left != previous_chunks_left;
@@ -341,7 +386,7 @@ impl DiskRangeCache {
                             attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
                         }
                     }
-                    let entries = match batch.write_chunks(&disk.file, &disk.metrics, &shard.written_end).await {
+                    let entries = match batch.write_chunks(&disk.file, &disk.metrics, shard).await {
                         Ok(entries) => entries,
                         Err(error) => {
                             for (_, attempt) in &mut publication_tokens {
@@ -350,25 +395,29 @@ impl DiskRangeCache {
                             return Err(error);
                         }
                     };
-                    let mut index = shard.entry_index.lock().unwrap();
-                    // Publish larger entries first so contained batch members need not publish at all.
-                    for ((key, storage), (token, mut attempt)) in entries.into_iter().zip(publication_tokens).rev() {
-                        let object_range = storage.object_range;
-                        // Another writer or an earlier entry in this batch may already cover this range.
-                        if index.covering_range(&key, object_range).is_some() {
-                            attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
-                            continue;
-                        }
-                        attempt.set_outcome(DiskWriteOutcome::Stale);
-                        let mut entry = Some((key, storage));
-                        with_current(&token, &mut || {
-                            if let Some((key, storage)) = entry.take() {
-                                index.insert(key, storage);
-                                published_entries += 1;
-                                attempt.set_outcome(DiskWriteOutcome::Published);
+                    {
+                        let mut index = shard.entry_index.lock().unwrap();
+                        // Publish larger entries first so contained batch members need not publish at all.
+                        for ((key, storage), (token, mut attempt)) in entries.into_iter().zip(publication_tokens).rev()
+                        {
+                            let object_range = storage.object_range;
+                            // Another writer or an earlier entry in this batch may already cover this range.
+                            if index.covering_range(&key, object_range).is_some() {
+                                attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
+                                continue;
                             }
-                        });
+                            attempt.set_outcome(DiskWriteOutcome::Stale);
+                            let mut entry = Some((key, storage));
+                            with_current(&token, &mut || {
+                                if let Some((key, storage)) = entry.take() {
+                                    index.insert(key, storage);
+                                    published_entries += 1;
+                                    attempt.set_outcome(DiskWriteOutcome::Published);
+                                }
+                            });
+                        }
                     }
+                    shard.flush_metadata(&disk.file).await?;
                 }
                 Ok(published_entries)
             })
@@ -608,14 +657,8 @@ impl DiskRangeCacheState {
 }
 
 /// Computes metadata storage bytes, including page headers and final padding.
-fn metadata_storage_bytes(content_bytes: usize) -> Option<u64> {
-    (content_bytes as u64)
-        .div_ceil(PAGE_CONTENT_BYTES as u64)
-        .checked_mul(METADATA_PAGE_BYTES as u64)
-}
-
 impl UnwrittenShardBatch {
-    /// Packs one download's payload and metadata into reserved chunks without writing them.
+    /// Packs one download's payload into reserved chunks without writing it.
     /// Allocation failure leaves the batch unchanged and reports the required number of new chunks.
     fn pack_download(
         &mut self,
@@ -626,45 +669,20 @@ impl UnwrittenShardBatch {
         let object_range = download.downloaded_range();
         let bytes = download.bytes();
         let aligned_payload_bytes = (bytes.len() as u64).next_multiple_of(PAYLOAD_ALIGNMENT_BYTES);
-        let metadata_bytes = page_format::ENTRY_METADATA_BYTES;
         let shares_chunk = self.regions.last().is_some_and(|region| {
-            region.region.chunk_count() == 1
-                && region.used_bytes
-                    + aligned_payload_bytes
-                    + metadata_storage_bytes(region.metadata_bytes + metadata_bytes).unwrap()
-                    - metadata_storage_bytes(region.metadata_bytes).unwrap()
-                    <= CHUNK_BYTES
+            region.region.chunk_count() == 1 && region.used_bytes + aligned_payload_bytes <= CHUNK_BYTES
         });
         if !shares_chunk {
-            let entry_bytes = metadata_storage_bytes(metadata_bytes).ok_or(u64::MAX)? + aligned_payload_bytes;
-            let count = entry_bytes.div_ceil(CHUNK_BYTES);
+            let count = aligned_payload_bytes.div_ceil(CHUNK_BYTES);
             let region = allocator.reserve_chunks(count).ok_or(count)?;
             self.regions.push(UnwrittenRegion {
                 region,
                 parts: Vec::new(),
                 used_bytes: 0,
-                metadata_bytes: 0,
-                entry_start: self.entries.len(),
             });
         }
         let prepared = self.regions.last_mut().unwrap();
         let base = prepared.region.range().start;
-        let metadata_growth = metadata_storage_bytes(prepared.metadata_bytes + metadata_bytes).unwrap()
-            - metadata_storage_bytes(prepared.metadata_bytes).unwrap();
-        // The prefix can grow until writing starts. Move payload addresses, not payload bytes.
-        if metadata_growth != 0 {
-            for (offset, _) in &mut prepared.parts {
-                *offset += metadata_growth as usize;
-            }
-            for (_, entry) in &mut self.entries[prepared.entry_start..] {
-                let payload = entry.payload_region.range();
-                entry.payload_region = prepared
-                    .region
-                    .slice(payload.start + metadata_growth..payload.end + metadata_growth);
-            }
-        }
-        prepared.metadata_bytes += metadata_bytes;
-        prepared.used_bytes += metadata_growth;
         let payload_start = base + prepared.used_bytes;
         let payload_region = prepared
             .region
@@ -681,6 +699,7 @@ impl UnwrittenShardBatch {
                 object_range,
                 payload_checksum,
                 payload_region,
+                metadata_slot: None,
             },
         ));
         Ok(())
@@ -690,42 +709,15 @@ impl UnwrittenShardBatch {
         self.regions.iter().map(|prepared| prepared.region.chunk_count()).sum()
     }
 
-    /// Finalizes entry metadata and writes all chunks before returning entries for publication.
+    /// Writes payload chunks, then updates metadata pages before returning entries for publication.
     async fn write_chunks(
         mut self,
         file: &DataFile,
         metrics: &DiskMetrics,
-        written_end: &AtomicU64,
+        shard: &DiskCacheShard,
     ) -> Result<Vec<(ObjectKeyHash, ObjectRangeDiskStorage)>, DiskRangeCacheError> {
         for prepared in &mut self.regions {
             let address = prepared.region.range().start;
-            let entry_end = prepared.entry_start + prepared.parts.len();
-            let mut metadata = Vec::with_capacity(prepared.metadata_bytes);
-            for (key, entry) in &self.entries[prepared.entry_start..entry_end] {
-                metadata.extend_from_slice(&page_format::encode_entry_metadata(
-                    key,
-                    entry.object_range,
-                    &entry.payload_region,
-                    entry.payload_checksum,
-                ));
-            }
-            let content_checksum = XxHash64::oneshot(0, &metadata);
-            let mut metadata_parts = Vec::new();
-            for (ordinal, content) in metadata.chunks(PAGE_CONTENT_BYTES).enumerate() {
-                let offset = ordinal * METADATA_PAGE_BYTES;
-                let mut page = vec![0; METADATA_PAGE_BYTES];
-                page_format::encode_page(
-                    &mut page,
-                    page_format::ENTRY_METADATA_PAGE_TAG,
-                    content_checksum,
-                    address + offset as u64,
-                    ordinal as u64,
-                    (entry_end - prepared.entry_start) as u64,
-                    content,
-                );
-                metadata_parts.push((offset, Bytes::from(page)));
-            }
-            prepared.parts.splice(0..0, metadata_parts);
             for offset in (0..prepared.region.chunk_count() * CHUNK_BYTES).step_by(CHUNK_BYTES as usize) {
                 let end = offset as usize + CHUNK_BYTES as usize;
                 let mut parts = Vec::new();
@@ -744,9 +736,12 @@ impl UnwrittenShardBatch {
                     tracing::warn!(target: "feuer::storage", %error, "batch write failed");
                     return Err(error.into());
                 }
-                written_end.fetch_max(address + offset + CHUNK_BYTES, Ordering::Relaxed);
             }
         }
+        for (key, entry) in &mut self.entries {
+            shard.record_entry(key, entry);
+        }
+        shard.flush_metadata(file).await?;
         metrics.written_entries.increase(self.entries.len() as u64);
         metrics
             .packed_payload_bytes

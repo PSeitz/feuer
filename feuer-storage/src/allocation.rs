@@ -1,4 +1,4 @@
-//! Contiguous whole-chunk allocations for immutable batch writes.
+//! Ownership and reuse of consecutive whole chunks.
 
 use std::{
     collections::BTreeMap,
@@ -11,7 +11,7 @@ use std::{
 
 use crate::DiskMetrics;
 
-/// Written chunks stay immutable until all entry owners and read guards release them.
+/// Payload chunks stay immutable while owned; metadata updates require caller-owned synchronization.
 pub(super) const CHUNK_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -238,7 +238,8 @@ impl DiskRegion {
     }
 }
 
-/// Prevents all reserved chunks from being overwritten or reused while a read depends on this region.
+/// Prevents all reserved chunks from being reused while a read depends on this region.
+/// In-place metadata updates require separate caller-owned read/write synchronization.
 #[derive(Debug)]
 pub(super) struct DiskRegionReadGuard {
     region: DiskRegion,

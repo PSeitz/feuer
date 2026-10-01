@@ -22,23 +22,25 @@ async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache, pr
 }
 
 #[tokio::test]
-async fn recovery_reads_only_entry_metadata_pages() {
-    for (entries, payload_bytes, pages) in [
+async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
+    for (entries, payload_bytes, chunks) in [
         (1, 1024, 1),
         (84, 1024, 1),
-        (85, 1024, 2),
-        (168, 1024, 2),
-        (169, 1024, 3),
-        (252, 1024, 3),
+        (85, 1024, 1),
+        (168, 1024, 1),
+        (169, 1024, 1),
+        (252, 1024, 1),
         (1, CHUNK_BYTES as usize - METADATA_PAGE_BYTES, 1),
         (1, 2 * CHUNK_BYTES as usize, 1),
+        (page_format::RECORDS_PER_CHUNK as u128 + 1, 1, 2),
     ] {
-        let capacity = 4 * CHUNK_BYTES;
+        let capacity = if chunks == 2 { 100 } else { 4 } * CHUNK_BYTES;
         let (directory, cache) = tests::open_test_cache(capacity).await;
         let source = download(payload_bytes);
         let inputs: Vec<_> = (0..entries).map(|key| (ObjectKeyHash(key), source.clone())).collect();
         assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), entries as usize);
-        cache.disk.save_recovery_ends().unwrap();
+        cache.disk.save_metadata_heads().unwrap();
+        let capacity = cache.disk.file.capacity();
         drop(cache);
 
         let (registry, backend) = registry();
@@ -52,11 +54,11 @@ async fn recovery_reads_only_entry_metadata_pages() {
                 "feuer_disk_io_total",
                 &[("operation", "read"), ("outcome", "success")]
             ),
-            pages as f64
+            chunks as f64
         );
         assert_eq!(
             value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]),
-            (pages * METADATA_PAGE_BYTES) as f64
+            (chunks * CHUNK_BYTES) as f64
         );
         for (key, source) in inputs {
             assert!(cache.contains(&key, source.downloaded_range()));
@@ -76,8 +78,8 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     cache.insert_batch(inputs.clone()).await.unwrap();
     assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), 0.0);
     let written_chunks = value(&registry, "feuer_disk_chunks", &[("state", "allocated")]);
-    assert_eq!(written_chunks, 4.0); // One shared chunk and three chunks for the large entry.
-    cache.disk.save_recovery_ends().unwrap();
+    assert_eq!(written_chunks, 5.0); // Metadata, one shared payload chunk, and three large-entry chunks.
+    cache.disk.save_metadata_heads().unwrap();
     let metrics = cache.disk.metrics.clone();
     drop(cache);
 
@@ -205,7 +207,7 @@ async fn records_write_outcomes_packing_and_index_usage() {
     );
     assert_eq!(outcome("stale"), 1.0);
     assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 3.0);
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 1.0);
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 2.0);
     assert_eq!(
         cache
             .insert_batch(vec![("oversized".into(), download(4 * CHUNK_BYTES as usize))])
@@ -234,7 +236,7 @@ async fn records_write_outcomes_packing_and_index_usage() {
 
 #[tokio::test]
 async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
-    let (_directory, cache, registry) = measured_cache(CHUNK_BYTES).await;
+    let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
     let triggering = || value(&registry, "feuer_disk_eviction_triggering_insertions_total", &[]);
     cache
         .insert_batch(vec![("first".into(), download(4)), ("second".into(), download(4))])
@@ -318,12 +320,13 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
         1.0
     );
     assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 2.0);
+    // Both metadata and the payload awaiting durable invalidation remain reserved.
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 0.0);
 }
 
 #[tokio::test]
 async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_published() {
-    let (_directory, cache, registry) = measured_cache(CHUNK_BYTES).await;
+    let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
     cache.insert_batch(vec![("first".into(), download(4))]).await.unwrap();
     cache.insert_batch(vec![("second".into(), download(4))]).await.unwrap();
     assert_eq!(
@@ -338,7 +341,8 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
         .lock()
         .unwrap()
         .remove(&ObjectKeyHash::from("second"), 0);
-    disk.shards[0].allocator = DiskChunkAllocator::with_metrics(0..3 * CHUNK_BYTES, disk.metrics.clone()).unwrap();
+    disk.shards[0].allocator =
+        DiskChunkAllocator::with_metrics(CHUNK_BYTES..4 * CHUNK_BYTES, disk.metrics.clone()).unwrap();
     let cache = DiskRangeCache { disk: Arc::new(disk) };
     assert!(
         cache
@@ -355,8 +359,9 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
     );
     assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 2.0);
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 3.0);
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 0.0);
+    // The original allocator still owns metadata; the injected allocator's payload range is free.
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 4.0);
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 1.0);
 }
 
 #[test]

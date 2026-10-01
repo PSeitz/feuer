@@ -1,633 +1,378 @@
-use super::super::tests::{download, entry_disk_ranges, open_test_cache, range};
 use super::*;
+use crate::range_cache::tests::{download, open_test_cache, range};
 
-pub(crate) async fn wait_for_recovery(cache: &DiskRangeCache) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+pub(in crate::range_cache) async fn wait_for_recovery(cache: &DiskRangeCache) {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while cache.disk.recovery.running.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await
     .unwrap();
 }
 
-// Open the same production state without starting the scan, to control write/scan ordering.
-async fn open_paused(directory: &Path, capacity: u64) -> DiskRangeCache {
-    let file = DataFile::open(directory, capacity, IoMetrics::noop()).await.unwrap();
-    let count = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
-    let (recovery, ends) = RecoveryState::open(directory, capacity, count).unwrap();
-    let shards = ends
+async fn reopen(directory: &Path, cache: DiskRangeCache) -> DiskRangeCache {
+    cache.disk.save_metadata_heads().unwrap();
+    let capacity = cache.disk.file.capacity();
+    drop(cache);
+    let cache = DiskRangeCache::open(directory, capacity, IoMetrics::noop())
+        .await
+        .unwrap();
+    wait_for_recovery(&cache).await;
+    cache
+}
+
+#[test]
+fn metadata_heads_validate_checksum_version_and_shard_bounds() {
+    let heads = RecoveryHeads {
+        capacity: 8 * CHUNK_BYTES,
+        heads: vec![0, 6 * CHUNK_BYTES],
+    };
+    let encoded = heads.encode();
+    assert_eq!(RecoveryHeads::decode(&encoded).unwrap().heads, heads.heads);
+    let mut old_format = encoded.clone();
+    old_format[..8].copy_from_slice(b"FEUEND10");
+    let checksum_offset = old_format.len() - 8;
+    let checksum = XxHash64::oneshot(0, &old_format[..checksum_offset]);
+    old_format[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
+    assert!(RecoveryHeads::decode(&old_format).is_none());
+    for offset in [0, 8, 16, 24, encoded.len() - 1] {
+        let mut bad = encoded.clone();
+        bad[offset] ^= 1;
+        assert!(RecoveryHeads::decode(&bad).is_none());
+    }
+    for head in [1, 4 * CHUNK_BYTES, u64::MAX - 1] {
+        let heads = RecoveryHeads {
+            capacity: 8 * CHUNK_BYTES,
+            heads: vec![head, NO_CHUNK],
+        };
+        assert!(RecoveryHeads::decode(&heads.encode()).is_none());
+    }
+}
+
+#[test]
+fn incompatible_inventory_resets_durably_and_ignores_interrupted_replacements() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(RECOVERY_FILE_NAME);
+    let heads = RecoveryHeads {
+        capacity: 8 * CHUNK_BYTES,
+        heads: vec![0],
+    };
+    heads.save(&path).unwrap();
+    fs::write(path.with_extension("tmp"), b"interrupted").unwrap();
+    assert_eq!(
+        RecoveryState::open(directory.path(), 8 * CHUNK_BYTES, 1).unwrap().1,
+        vec![0]
+    );
+    assert_eq!(
+        RecoveryState::open(directory.path(), 4 * CHUNK_BYTES, 1).unwrap().1,
+        vec![NO_CHUNK]
+    );
+    assert_eq!(
+        RecoveryHeads::decode(&fs::read(path).unwrap()).unwrap().heads,
+        vec![NO_CHUNK]
+    );
+}
+
+#[tokio::test]
+async fn recovers_separate_metadata_and_contiguous_multi_chunk_payloads() {
+    let (directory, cache) = open_test_cache(12 * CHUNK_BYTES).await;
+    let lengths = [1, 4097, CHUNK_BYTES as usize, 3 * CHUNK_BYTES as usize + 7];
+    let entries = lengths
         .iter()
         .enumerate()
-        .map(|(index, &end)| {
-            let range = shard_range(capacity, count, index);
-            let allocator = DiskChunkAllocator::for_disk_range(range.clone()).unwrap();
-            allocator.start_recovery(range.start, end);
-            DiskCacheShard {
-                allocator,
-                reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
-                entry_index: Mutex::new(DiskEntryIndex::new(DiskMetrics::noop())),
-                written_end: AtomicU64::new(end),
-            }
-        })
+        .map(|(i, &length)| (ObjectKeyHash(i as u128), download(17, length)))
         .collect();
-    DiskRangeCache {
-        disk: Arc::new(DiskRangeCacheState {
-            file,
-            shards,
-            recovery,
-            access_histories: Arc::new(ObjectAccessHistories::new()),
-            metrics: DiskMetrics::noop(),
-        }),
-    }
-}
-
-#[test]
-fn scan_ends_validate_checksum_layout_and_bounds() {
-    let bounds = RecoveryBounds {
-        capacity: 256 * CHUNK_BYTES,
-        ends: vec![CHUNK_BYTES, 129 * CHUNK_BYTES],
-    };
-    let bytes = bounds.encode();
-    let decoded = RecoveryBounds::decode(&bytes).unwrap();
-    assert_eq!(decoded.ends, bounds.ends);
-    assert_eq!(decoded.capacity, bounds.capacity);
-    for index in 0..bytes.len() {
-        let mut corrupt = bytes.clone();
-        corrupt[index] ^= 1;
-        assert!(RecoveryBounds::decode(&corrupt).is_none());
-    }
-    assert!(RecoveryBounds::decode(&bytes[..16]).is_none());
-    for capacity in [0, 1, u64::MAX] {
-        let invalid = RecoveryBounds {
-            capacity,
-            ends: vec![0],
-        };
-        assert!(RecoveryBounds::decode(&invalid.encode()).is_none());
-    }
-    for ends in [
-        vec![],
-        vec![0; 65],
-        vec![1, 129 * CHUNK_BYTES],
-        vec![129 * CHUNK_BYTES, 129 * CHUNK_BYTES],
-        vec![0, 0],
-    ] {
-        let invalid = RecoveryBounds { ends, ..bounds };
-        assert!(RecoveryBounds::decode(&invalid.encode()).is_none());
-    }
-}
-
-#[test]
-fn resets_are_persistent_and_interrupted_updates_leave_the_previous_file() {
-    let directory = tempfile::tempdir().unwrap();
-    let (first, _) = RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 2).unwrap();
-    let bounds = RecoveryBounds {
-        capacity: 256 * CHUNK_BYTES,
-        ends: vec![CHUNK_BYTES, 129 * CHUNK_BYTES],
-    };
-    bounds.save(&first.path).unwrap();
-    fs::write(first.path.with_extension("tmp"), b"interrupted update").unwrap();
-    let (_, ends) = RecoveryState::open(directory.path(), bounds.capacity, 2).unwrap();
-    assert_eq!(ends, bounds.ends);
-    // Same capacity, different shard count: reset rather than reinterpret the ends.
-    let (reset, ends) = RecoveryState::open(directory.path(), bounds.capacity, 1).unwrap();
-    assert_eq!(ends, vec![0]);
-    let (_, ends) = RecoveryState::open(directory.path(), bounds.capacity, 1).unwrap();
-    assert_eq!(ends, vec![0]);
-
-    let (_, ends) = RecoveryState::open(directory.path(), 128 * CHUNK_BYTES, 1).unwrap();
-    assert_eq!(ends, vec![0]);
-
-    fs::write(&reset.path, b"torn inventory").unwrap();
-    let (_, ends) = RecoveryState::open(directory.path(), bounds.capacity, 1).unwrap();
-    assert_eq!(ends, vec![0]);
-}
-
-#[test]
-fn older_inventories_reset_scan_ends() {
-    for tag in [b"FEUEND04", b"FEUEND06", b"FEUEND07", b"FEUEND08", b"FEUEND09"] {
-        let directory = tempfile::tempdir().unwrap();
-        let mut bytes = tag.to_vec();
-        bytes.extend_from_slice(&[1; 16]); // Legacy generation field.
-        bytes.extend_from_slice(&CHUNK_BYTES.to_le_bytes());
-        bytes.extend_from_slice(&1u64.to_le_bytes());
-        bytes.extend_from_slice(&CHUNK_BYTES.to_le_bytes());
-        if tag == b"FEUEND04" {
-            bytes.extend_from_slice(blake3::hash(&bytes).as_bytes());
-        } else {
-            bytes.extend_from_slice(&XxHash64::oneshot(0, &bytes).to_le_bytes());
-        }
-        fs::write(directory.path().join(RECOVERY_FILE_NAME), bytes).unwrap();
-        let (_, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
-        assert_eq!(ends, vec![0]);
-        let (_, ends) = RecoveryState::open(directory.path(), CHUNK_BYTES, 1).unwrap();
-        assert_eq!(ends, vec![0]);
-    }
-}
-
-#[test]
-fn layout_change_warnings_describe_previous_and_current_layouts() {
-    let directory = tempfile::tempdir().unwrap();
-    let log_path = directory.path().join("recovery.log");
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_writer(Mutex::new(File::create(&log_path).unwrap()))
-        .finish();
-    let _logs = tracing::subscriber::set_default(subscriber);
-
-    RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 2).unwrap();
-    RecoveryState::open(directory.path(), 256 * CHUNK_BYTES, 1).unwrap();
-    RecoveryState::open(directory.path(), 128 * CHUNK_BYTES, 1).unwrap();
-    fs::write(directory.path().join(RECOVERY_FILE_NAME), b"torn inventory").unwrap();
-    RecoveryState::open(directory.path(), 128 * CHUNK_BYTES, 1).unwrap();
-
-    let log = fs::read_to_string(log_path).unwrap();
-    let warnings: Vec<_> = log
-        .lines()
-        .filter(|line| line.contains("incompatible layout"))
-        .collect();
-    assert_eq!(warnings.len(), 2);
-    assert!(warnings[0].contains("reason=\"shard count changed\""));
-    assert!(warnings[0].contains("previous_shard_count=2"));
-    assert!(warnings[0].contains("shard_count=1"));
-    assert!(warnings[1].contains("reason=\"capacity changed\""));
-    assert!(warnings[1].contains("previous_capacity_bytes=268435456"));
-    assert!(warnings[1].contains("capacity_bytes=134217728"));
-}
-
-#[tokio::test]
-async fn recovery_logs_start_and_completion_at_info() {
-    let (directory, cache) = open_test_cache(8 * CHUNK_BYTES).await;
-    cache
-        .insert(ObjectKeyHash::from("object"), download(0, 100))
-        .await
-        .unwrap();
-    cache.disk.save_recovery_ends().unwrap();
-    drop(cache);
-
-    let log_path = directory.path().join("recovery.log");
-    let subscriber = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_max_level(tracing::Level::INFO)
-        .with_writer(Mutex::new(File::create(&log_path).unwrap()))
-        .finish();
-    let _logs = tracing::subscriber::set_default(subscriber);
-    let cache = DiskRangeCache::open(directory.path(), 8 * CHUNK_BYTES, IoMetrics::noop())
-        .await
-        .unwrap();
-    wait_for_recovery(&cache).await;
-
-    let log = fs::read_to_string(log_path).unwrap();
-    assert!(log.contains("starting disk cache recovery"));
-    assert!(log.contains("shard_count=1"));
-    assert!(log.contains("capacity_bytes=8388608"));
-    assert!(log.contains("disk cache recovery finished"));
-    assert!(log.contains("elapsed_seconds="));
-    assert!(!log.contains("starting disk shard recovery scan"));
-}
-
-#[tokio::test]
-async fn incrementally_recovers_shared_chunks_and_multi_chunk_entries() {
-    let (directory, cache) = open_test_cache(8 * CHUNK_BYTES).await;
-    let inputs = vec![
-        (ObjectKeyHash::from("small-a"), download(17, 123)),
-        (ObjectKeyHash::from("small-b"), download(9, 444)),
-        (ObjectKeyHash::from("large"), download(3, 2 * CHUNK_BYTES as usize + 17)),
-        (ObjectKeyHash::from("metadata-only/".repeat(90_000)), download(0, 512)),
-    ];
-    assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
-    cache.disk.save_recovery_ends().unwrap();
-    drop(cache);
-    let cache = open_paused(directory.path(), 8 * CHUNK_BYTES).await;
-    let end = cache.disk.shards[0].written_end.load(Ordering::Relaxed);
-    cache.disk.recover_chunk(0, 0, end).await;
-    for (key, source) in &inputs[..2] {
-        assert_eq!(cache.get(key, source.downloaded_range()).await.unwrap(), source.bytes());
-    }
-    assert!(!cache.contains(&inputs[2].0, inputs[2].1.downloaded_range()));
-    for address in (CHUNK_BYTES..end).step_by(CHUNK_BYTES as usize) {
-        cache.disk.recover_chunk(0, address, end).await;
-    }
-    for (key, source) in &inputs {
-        assert_eq!(cache.get(key, source.downloaded_range()).await.unwrap(), source.bytes());
-        assert_eq!(cache.access_histories().clock(), 0);
-    }
-    // All chunks, including partially occupied ones, must remain fully reserved.
-    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 8 * CHUNK_BYTES - end);
-}
-
-#[tokio::test]
-async fn recovery_advances_past_multi_chunk_payload_to_the_next_allocation() {
-    let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-    let large = download(0, 2 * CHUNK_BYTES as usize + 17);
-    let small = download(0, 123);
-    cache.insert(ObjectKeyHash::from("large"), large.clone()).await.unwrap();
-    cache.insert(ObjectKeyHash::from("small"), small.clone()).await.unwrap();
-    cache.disk.save_recovery_ends().unwrap();
-    drop(cache);
-
-    let cache = open_paused(directory.path(), 4 * CHUNK_BYTES).await;
-    let end = cache.disk.shards[0].written_end.load(Ordering::Relaxed);
-    let next = cache.disk.recover_chunk(0, 0, end).await.unwrap();
-    assert_eq!(next, 3 * CHUNK_BYTES);
-    assert_eq!(cache.disk.recover_chunk(0, next, end).await, Some(end));
-    for (key, source) in [("large", large), ("small", small)] {
+    assert_eq!(cache.insert_batch(entries).await.unwrap(), lengths.len());
+    let cache = reopen(directory.path(), cache).await;
+    for (i, length) in lengths.into_iter().enumerate() {
         assert_eq!(
             cache
-                .get(&ObjectKeyHash::from(key), source.downloaded_range())
+                .get(&ObjectKeyHash(i as u128), range(17, 17 + length as u64))
                 .await
                 .unwrap(),
-            source.bytes()
+            download(17, length).bytes()
         );
     }
+    assert_eq!(cache.disk.shards[0].metadata.lock().unwrap().chunks.len(), 1);
 }
 
 #[tokio::test]
-async fn fixed_records_fill_multiple_pages_and_corruption_rejects_the_shared_prefix() {
-    for corrupt in [false, true] {
-        let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
-        let inputs: Vec<_> = (0..130)
-            .map(|i| (ObjectKeyHash::from(format!("small-{i}")), download(i, 1024)))
-            .collect();
-        assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
-        let (_, metadata) = entry_disk_ranges(&cache, &ObjectKeyHash::from("small-0")).await;
-        assert!(metadata[0].end - metadata[0].start > METADATA_PAGE_BYTES as u64);
-        if corrupt {
-            cache
-                .disk
-                .file
-                .write_at(
-                    metadata[0].end - METADATA_PAGE_BYTES as u64,
-                    &Bytes::from(vec![0; METADATA_PAGE_BYTES]),
-                )
-                .await
-                .unwrap();
-        }
+async fn follows_last_page_link_and_recovers_every_record_across_chunks() {
+    let (directory, cache) = open_test_cache(100 * CHUNK_BYTES).await;
+    let entries = RECORDS_PER_CHUNK + 17;
+    assert_eq!(
         cache
-            .insert(ObjectKeyHash::from("independent"), download(0, 17))
+            .insert_batch(
+                (0..entries)
+                    .map(|i| (ObjectKeyHash(i as u128), download(0, 1)))
+                    .collect()
+            )
             .await
-            .unwrap();
-        cache.disk.save_recovery_ends().unwrap();
-        drop(cache);
-        let cache = DiskRangeCache::open(directory.path(), 2 * CHUNK_BYTES, IoMetrics::noop())
-            .await
-            .unwrap();
-        wait_for_recovery(&cache).await;
-        for (key, source) in &inputs {
-            if corrupt {
-                assert!(!cache.contains(key, source.downloaded_range()));
-            } else {
-                assert_eq!(cache.get(key, source.downloaded_range()).await.unwrap(), source.bytes());
-            }
-        }
-        assert!(cache.contains(&ObjectKeyHash::from("independent"), range(0, 17)));
+            .unwrap(),
+        entries
+    );
+    {
+        let pages = cache.disk.shards[0].metadata.lock().unwrap();
+        assert_eq!(pages.chunks.len(), 2);
+        assert_eq!(pages.chunks[0].next(), Some(pages.chunks[1].region.range().start));
+        assert_eq!(pages.chunks[1].next(), Some(NO_CHUNK));
+    }
+    let cache = reopen(directory.path(), cache).await;
+    for i in 0..entries {
         assert_eq!(
-            cache.disk.shards[0].allocator.available_bytes(),
-            if corrupt { CHUNK_BYTES } else { 0 }
+            cache.get(&ObjectKeyHash(i as u128), range(0, 1)).await.unwrap(),
+            download(0, 1).bytes()
         );
     }
 }
 
 #[tokio::test]
-async fn recovers_hash_of_key_larger_than_16_mib() {
-    let capacity = 32 * CHUNK_BYTES;
-    let (directory, cache) = open_test_cache(capacity).await;
-    let key = ObjectKeyHash::from("k".repeat(16 * 1024 * 1024 + 1));
-    let source = download(0, 100);
-    assert!(cache.insert(key, source.clone()).await.unwrap());
-    cache.disk.save_recovery_ends().unwrap();
-    drop(cache);
-
-    let cache = open_paused(directory.path(), capacity).await;
-    let end = cache.disk.shards[0].written_end.load(Ordering::Relaxed);
-    cache.disk.recover_chunk(0, 0, end).await;
-    assert_eq!(
-        cache.get(&key, source.downloaded_range()).await.unwrap(),
-        source.bytes()
-    );
-}
-
-#[tokio::test]
-async fn writes_can_win_before_scanning_and_recovery_does_not_resurrect_freed_entries() {
+async fn multiple_batches_update_one_metadata_chunk_and_reuse_record_slots() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
-    cache
-        .insert(ObjectKeyHash::from("old"), download(0, 100))
-        .await
-        .unwrap();
-    cache
-        .insert(ObjectKeyHash::from("untouched"), download(0, 100))
-        .await
-        .unwrap();
-    cache.disk.save_recovery_ends().unwrap();
-    drop(cache);
-    let cache = open_paused(directory.path(), 3 * CHUNK_BYTES).await;
-    // Both lookups and writes work while the scan has not advanced at all.
-    assert!(cache.get(&ObjectKeyHash::from("old"), range(0, 1)).await.is_none());
-    assert!(cache.insert(ObjectKeyHash::from("new"), download(0, 17)).await.unwrap());
-    assert_eq!(
-        cache.get(&ObjectKeyHash::from("new"), range(0, 17)).await.unwrap(),
-        download(0, 17).bytes()
-    );
-    cache.disk.shards[0]
+    let shard = &cache.disk.shards[0];
+    for i in 0..20 {
+        assert!(
+            cache
+                .insert(ObjectKeyHash(i), download(0, CHUNK_BYTES as usize))
+                .await
+                .unwrap()
+        );
+    }
+    assert_eq!(shard.metadata.lock().unwrap().chunks.len(), 1);
+    let live_keys: Vec<_> = shard
         .entry_index
         .lock()
         .unwrap()
-        .remove(&ObjectKeyHash::from("new"), 0);
-    assert!(cache.disk.recover_chunk(0, 0, 2 * CHUNK_BYTES).await.is_none());
-    assert!(!cache.contains(&ObjectKeyHash::from("old"), range(0, 1)));
-    assert!(!cache.contains(&ObjectKeyHash::from("new"), range(0, 1)));
-    cache.disk.recover_chunk(0, CHUNK_BYTES, 2 * CHUNK_BYTES).await.unwrap();
-    assert!(cache.contains(&ObjectKeyHash::from("untouched"), range(0, 1)));
-    cache.disk.shards[0]
-        .entry_index
-        .lock()
-        .unwrap()
-        .remove(&ObjectKeyHash::from("untouched"), 0);
+        .ranges_by_key
+        .keys()
+        .copied()
+        .collect();
+    let cache = reopen(directory.path(), cache).await;
+    for key in live_keys {
+        assert!(cache.get(&key, range(0, 1)).await.is_some());
+    }
+    assert_eq!(cache.disk.shards[0].metadata.lock().unwrap().chunks.len(), 1);
+}
+
+#[tokio::test]
+async fn invalidation_and_read_guard_both_precede_payload_reuse() {
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let key = ObjectKeyHash(1);
+    assert!(cache.insert(key, download(0, 1)).await.unwrap());
+    let shard = &cache.disk.shards[0];
+    let guard = shard.entry_index.lock().unwrap().ranges_by_key[&key][&0]
+        .payload_region
+        .read_guard();
+    drop(shard.entry_index.lock().unwrap().remove(&key, 0));
     assert!(
-        cache
-            .disk
-            .recover_chunk(0, CHUNK_BYTES, 2 * CHUNK_BYTES)
-            .await
-            .is_none()
+        shard.allocator.reserve_chunks(1).is_none(),
+        "pending invalidation retains payload"
     );
-}
-
-#[tokio::test]
-async fn recovery_does_not_replace_a_range_published_by_a_write() {
-    let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
-    cache
-        .insert(ObjectKeyHash::from("discarded"), download(0, 100))
-        .await
-        .unwrap();
-    cache
-        .insert(ObjectKeyHash::from("object"), download(0, 100))
-        .await
-        .unwrap();
-    cache.disk.save_recovery_ends().unwrap();
-    drop(cache);
-    let cache = open_paused(directory.path(), 3 * CHUNK_BYTES).await;
-    cache
-        .insert(ObjectKeyHash::from("object"), download(0, 20))
-        .await
-        .unwrap();
-    cache.disk.recover_chunk(0, CHUNK_BYTES, 2 * CHUNK_BYTES).await.unwrap();
-    assert!(cache.contains(&ObjectKeyHash::from("object"), range(0, 20)));
-    assert!(!cache.contains(&ObjectKeyHash::from("object"), range(0, 100)));
-    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
-}
-
-#[tokio::test]
-async fn stale_ends_bound_recovery_and_new_writes_do_not_extend_the_scan() {
-    let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-    cache
-        .insert(ObjectKeyHash::from("saved"), download(0, 100))
-        .await
-        .unwrap();
-    cache.disk.save_recovery_ends().unwrap();
-    cache
-        .insert(ObjectKeyHash::from("beyond-end"), download(0, 100))
-        .await
-        .unwrap();
-    drop(cache);
-    let cache = DiskRangeCache::open(directory.path(), 4 * CHUNK_BYTES, IoMetrics::noop())
-        .await
-        .unwrap();
-    wait_for_recovery(&cache).await;
-    assert!(cache.contains(&ObjectKeyHash::from("saved"), range(0, 1)));
-    assert!(!cache.contains(&ObjectKeyHash::from("beyond-end"), range(0, 1)));
+    {
+        let _io = shard.metadata_io.lock().await;
+        shard.flush_metadata(&cache.disk.file).await.unwrap();
+    }
     assert!(
-        cache
-            .insert(ObjectKeyHash::from("new"), download(0, 100))
-            .await
-            .unwrap()
+        shard.allocator.reserve_chunks(1).is_none(),
+        "read guard still retains payload"
     );
-    assert!(!cache.disk.recovery.running.load(Ordering::Acquire));
+    drop(guard);
+    assert!(shard.allocator.reserve_chunks(1).is_some());
 }
 
 #[tokio::test]
-async fn corrupt_payload_is_recovered_only_as_a_candidate_and_misses_on_read() {
+async fn eviction_does_not_recover_an_old_record_for_reused_payload_chunks() {
     let (directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    cache
-        .insert(ObjectKeyHash::from("object"), download(0, 100))
+    let old = ObjectKeyHash(1);
+    let new = ObjectKeyHash(2);
+    assert!(cache.insert(old, download(0, 4096)).await.unwrap());
+    assert!(cache.insert(new, download(100, 4096)).await.unwrap());
+    let cache = reopen(directory.path(), cache).await;
+    assert!(cache.get(&old, range(0, 1)).await.is_none());
+    assert_eq!(
+        cache.get(&new, range(100, 4196)).await.unwrap(),
+        download(100, 4096).bytes()
+    );
+}
+
+#[tokio::test]
+async fn torn_record_page_does_not_reject_other_pages() {
+    let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+    let entries = RECORDS_PER_PAGE + 1;
+    assert_eq!(
+        cache
+            .insert_batch(
+                (0..entries)
+                    .map(|i| (ObjectKeyHash(i as u128), download(0, 1)))
+                    .collect()
+            )
+            .await
+            .unwrap(),
+        entries
+    );
+    let address = cache.disk.shards[0].metadata_head.load(Ordering::Relaxed);
+    let mut bytes = cache
+        .disk
+        .file
+        .read_at(address, METADATA_PAGE_BYTES)
         .await
-        .unwrap();
-    let payload = entry_disk_ranges(&cache, &ObjectKeyHash::from("object")).await.0[0].clone();
+        .unwrap()
+        .to_vec();
+    bytes[PAGE_HEADER_BYTES] ^= 1;
+    cache.disk.file.write_at(address, &Bytes::from(bytes)).await.unwrap();
+    let cache = reopen(directory.path(), cache).await;
+    assert!(cache.get(&ObjectKeyHash(0), range(0, 1)).await.is_none());
+    assert!(
+        cache
+            .get(&ObjectKeyHash(RECORDS_PER_PAGE as u128), range(0, 1))
+            .await
+            .is_some()
+    );
+    assert!(cache.insert(ObjectKeyHash(999), download(0, 1)).await.unwrap());
+    let cache = reopen(directory.path(), cache).await;
+    assert!(cache.get(&ObjectKeyHash(999), range(0, 1)).await.is_some());
+}
+
+#[tokio::test]
+async fn corrupt_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
+    for cyclic in [false, true] {
+        let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+        assert!(cache.insert(ObjectKeyHash(1), download(0, 1)).await.unwrap());
+        let address = cache.disk.shards[0].metadata_head.load(Ordering::Relaxed);
+        let offset = address + (RECORD_PAGES * METADATA_PAGE_BYTES) as u64;
+        let mut page = vec![0; METADATA_PAGE_BYTES];
+        encode_page(
+            &mut page,
+            NEXT_CHUNK_PAGE_TAG,
+            0,
+            offset,
+            RECORD_PAGES as u64,
+            1,
+            &address.to_le_bytes(),
+        );
+        if !cyclic {
+            page[0] ^= 1;
+        }
+        cache.disk.file.write_at(offset, &Bytes::from(page)).await.unwrap();
+        let cache = reopen(directory.path(), cache).await;
+        assert!(cache.get(&ObjectKeyHash(1), range(0, 1)).await.is_some());
+        assert!(cache.insert(ObjectKeyHash(2), download(0, 1)).await.unwrap());
+        assert_eq!(
+            cache.disk.shards[0].metadata.lock().unwrap().chunks[0].next(),
+            Some(NO_CHUNK)
+        );
+    }
+}
+
+#[tokio::test]
+async fn payload_corruption_remains_a_checksum_miss() {
+    let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    let key = ObjectKeyHash(1);
+    assert!(cache.insert(key, download(0, 1)).await.unwrap());
+    let payload = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key][&0]
+        .payload_region
+        .range();
     cache
         .disk
         .file
-        .write_at(payload.start, &Bytes::from(vec![0xff; METADATA_PAGE_BYTES]))
+        .write_at(payload.start, &Bytes::from(vec![99; 4096]))
         .await
         .unwrap();
-    cache.disk.save_recovery_ends().unwrap();
-    drop(cache);
-    let cache = DiskRangeCache::open(directory.path(), CHUNK_BYTES, IoMetrics::noop())
-        .await
-        .unwrap();
-    wait_for_recovery(&cache).await;
-    assert!(cache.contains(&ObjectKeyHash::from("object"), range(0, 1)));
-    assert!(cache.get(&ObjectKeyHash::from("object"), range(0, 1)).await.is_none());
-    assert!(!cache.contains(&ObjectKeyHash::from("object"), range(0, 1)));
+    let cache = reopen(directory.path(), cache).await;
+    assert!(cache.get(&key, range(0, 1)).await.is_none());
 }
 
 #[tokio::test]
-async fn torn_metadata_and_reused_multi_chunk_addresses_are_rejected() {
-    for corrupt_metadata in [false, true] {
-        let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-        let key = ObjectKeyHash::from("large");
-        cache.insert(key, download(0, 2 * CHUNK_BYTES as usize)).await.unwrap();
-        let (payload, metadata) = entry_disk_ranges(&cache, &key).await;
-        if corrupt_metadata {
-            cache
-                .disk
-                .file
-                .write_at(metadata[0].start, &Bytes::from(vec![0; METADATA_PAGE_BYTES]))
-                .await
-                .unwrap();
-        } else {
-            // Reuse the beginning of an old multi-chunk allocation.
-            cache.disk.shards[0].entry_index.lock().unwrap().remove(&key, 0);
-            assert!(
-                cache
-                    .insert(ObjectKeyHash::from("replacement"), download(0, 100))
-                    .await
-                    .unwrap()
-            );
-            assert_eq!(
-                entry_disk_ranges(&cache, &ObjectKeyHash::from("replacement")).await.0[0].start,
-                payload[0].start
-            );
-        }
-        cache.disk.save_recovery_ends().unwrap();
-        drop(cache);
-        let cache = DiskRangeCache::open(directory.path(), 4 * CHUNK_BYTES, IoMetrics::noop())
+async fn failed_invalidation_keeps_payload_reserved_until_a_successful_retry() {
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let entries = RECORDS_PER_PAGE + 1;
+    assert_eq!(
+        cache
+            .insert_batch(
+                (0..entries)
+                    .map(|i| (ObjectKeyHash(i as u128), download(0, 1)))
+                    .collect()
+            )
             .await
-            .unwrap();
-        wait_for_recovery(&cache).await;
-        assert!(!cache.contains(&key, range(0, 1)));
+            .unwrap(),
+        entries
+    );
+    let shard = &cache.disk.shards[0];
+    for i in 0..entries {
+        drop(shard.entry_index.lock().unwrap().remove(&ObjectKeyHash(i as u128), 0));
     }
+    let directory = tempfile::tempdir().unwrap();
+    let short_file = DataFile::open(directory.path(), METADATA_PAGE_BYTES as u64, IoMetrics::noop())
+        .await
+        .unwrap();
+    let _io = shard.metadata_io.lock().await;
+    assert!(shard.flush_metadata(&short_file).await.is_err());
+    assert!(shard.allocator.reserve_chunks(1).is_none());
+    shard.flush_metadata(&cache.disk.file).await.unwrap();
+    assert!(shard.allocator.reserve_chunks(1).is_some());
 }
 
 #[tokio::test]
-async fn recovery_bounds_the_whole_run_before_claiming_it() {
-    let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-    cache
-        .insert(ObjectKeyHash::from("large"), download(0, 2 * CHUNK_BYTES as usize))
-        .await
-        .unwrap();
-    cache.disk.save_recovery_ends().unwrap();
+async fn a_write_waits_for_its_shards_metadata_then_replaces_recovered_entries() {
+    let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+    let key = ObjectKeyHash(1);
+    assert!(cache.insert(key, download(10, 10)).await.unwrap());
+    cache.disk.save_metadata_heads().unwrap();
+    let capacity = cache.disk.file.capacity();
     drop(cache);
-    let cache = open_paused(directory.path(), 4 * CHUNK_BYTES).await;
-    assert!(cache.disk.recover_chunk(0, 0, CHUNK_BYTES).await.is_none());
-    let original = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
-    for (offset, value) in [
-        (16, u64::MAX),
-        (24, 0),
-        (24, 4 * CHUNK_BYTES),
-        (24, u64::MAX),
-        (32, 0),
-        (32, 4097),
-        (32, u64::MAX),
-    ] {
-        let mut contents = original[48..48 + page_format::ENTRY_METADATA_BYTES].to_vec();
-        contents[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-        let mut page = vec![0; METADATA_PAGE_BYTES];
-        page_format::encode_page(
-            &mut page,
-            page_format::ENTRY_METADATA_PAGE_TAG,
-            XxHash64::oneshot(0, &contents),
-            0,
-            0,
-            1,
-            &contents,
-        );
-        cache.disk.file.write_at(0, &Bytes::from(page)).await.unwrap();
-        cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await;
-        assert!(!cache.contains(&ObjectKeyHash::from("large"), range(0, 1)));
-        assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 4 * CHUNK_BYTES);
-    }
-    for count in [0, 2, CHUNK_BYTES / PAYLOAD_ALIGNMENT_BYTES + 1, u64::MAX] {
-        let contents = &original[48..48 + page_format::ENTRY_METADATA_BYTES];
-        let mut page = vec![0; METADATA_PAGE_BYTES];
-        page_format::encode_page(
-            &mut page,
-            page_format::ENTRY_METADATA_PAGE_TAG,
-            XxHash64::oneshot(0, contents),
-            0,
-            0,
-            count,
-            contents,
-        );
-        cache.disk.file.write_at(0, &Bytes::from(page)).await.unwrap();
-        assert!(cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await.is_none());
-        assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 4 * CHUNK_BYTES);
-    }
-    cache.disk.file.write_at(0, &original).await.unwrap();
-    cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await.unwrap();
-    assert!(cache.contains(&ObjectKeyHash::from("large"), range(0, 1)));
-    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), CHUNK_BYTES);
-}
-
-#[tokio::test]
-async fn recovery_cannot_claim_a_run_with_a_reused_continuation_chunk() {
-    let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-    cache
-        .insert(ObjectKeyHash::from("old"), download(0, 2 * CHUNK_BYTES as usize))
+    let cache = DiskRangeCache::open(directory.path(), capacity, IoMetrics::noop())
         .await
         .unwrap();
-    cache.disk.save_recovery_ends().unwrap();
-    drop(cache);
-    let cache = open_paused(directory.path(), 4 * CHUNK_BYTES).await;
-    let head = cache.disk.shards[0].allocator.reserve_for_recovery(0, 1).unwrap();
-    cache
-        .insert(ObjectKeyHash::from("new"), download(0, 100))
-        .await
-        .unwrap();
-    cache.disk.shards[0]
-        .entry_index
-        .lock()
-        .unwrap()
-        .remove(&ObjectKeyHash::from("new"), 0);
-    drop(head);
-    assert!(cache.disk.recover_chunk(0, 0, 3 * CHUNK_BYTES).await.is_none());
-    assert!(!cache.contains(&ObjectKeyHash::from("old"), range(0, 1)));
-    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 4 * CHUNK_BYTES);
-}
-
-#[tokio::test]
-async fn resetting_scan_ends_leaves_old_entries_available_to_later_scans() {
-    let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-    cache
-        .insert(ObjectKeyHash::from("old-a"), download(0, 100))
-        .await
-        .unwrap();
-    cache
-        .insert(ObjectKeyHash::from("old-b"), download(0, 100))
-        .await
-        .unwrap();
-    cache.disk.save_recovery_ends().unwrap();
-    drop(cache);
-    fs::remove_file(directory.path().join(RECOVERY_FILE_NAME)).unwrap();
-    let cache = open_paused(directory.path(), 4 * CHUNK_BYTES).await;
-    assert_eq!(cache.disk.shards[0].written_end.load(Ordering::Relaxed), 0);
-    assert!(!cache.contains(&ObjectKeyHash::from("old-a"), range(0, 1)));
-    cache.disk.shards[0]
-        .written_end
-        .store(2 * CHUNK_BYTES, Ordering::Relaxed);
-    cache.disk.save_recovery_ends().unwrap();
-    drop(cache);
-    let cache = DiskRangeCache::open(directory.path(), 4 * CHUNK_BYTES, IoMetrics::noop())
-        .await
-        .unwrap();
+    assert!(cache.insert(key, download(0, 100)).await.unwrap());
     wait_for_recovery(&cache).await;
-    for key in ["old-a", "old-b"] {
-        assert_eq!(
-            cache.get(&ObjectKeyHash::from(key), range(0, 100)).await.unwrap(),
-            download(0, 100).bytes()
-        );
-    }
+    let cache = reopen(directory.path(), cache).await;
+    assert_eq!(cache.get(&key, range(0, 100)).await.unwrap(), download(0, 100).bytes());
+    assert_eq!(
+        cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key].len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
+    let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    assert_eq!(
+        cache
+            .insert_batch(vec![
+                (ObjectKeyHash(1), download(0, 1)),
+                (ObjectKeyHash(2), download(0, 1))
+            ])
+            .await
+            .unwrap(),
+        2
+    );
+    let head = cache.disk.shards[0].metadata_head.load(Ordering::Relaxed);
+    let mut bytes = cache
+        .disk
+        .file
+        .read_at(head, METADATA_PAGE_BYTES)
+        .await
+        .unwrap()
+        .to_vec();
+    bytes[PAGE_HEADER_BYTES + 32..PAGE_HEADER_BYTES + 40].copy_from_slice(&head.to_le_bytes());
+    let checksum = XxHash64::oneshot(0, &bytes[8..]);
+    bytes[..8].copy_from_slice(&checksum.to_le_bytes());
+    cache.disk.file.write_at(head, &Bytes::from(bytes)).await.unwrap();
+    let cache = reopen(directory.path(), cache).await;
+    assert!(cache.get(&ObjectKeyHash(1), range(0, 1)).await.is_none());
+    assert!(cache.get(&ObjectKeyHash(2), range(0, 1)).await.is_some());
 }
 
 #[test]
-fn decoder_rejects_malformed_lengths_ranges_and_addresses() {
-    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
-    let chunk = allocator.reserve_chunks(1).unwrap();
-    let payload = chunk.slice(8192..12288);
-    let bytes = page_format::encode_entry_metadata(
-        &ObjectKeyHash::from("key"),
-        range(7, 17),
-        &payload,
-        XxHash64::oneshot(0, b"0123456789"),
-    );
-    assert_eq!(bytes.len(), 48);
-    assert_eq!(
-        decode_entry(&bytes, 0..CHUNK_BYTES),
-        Some((
-            ObjectKeyHash::from("key"),
-            range(7, 17),
-            XxHash64::oneshot(0, b"0123456789"),
-            payload.range(),
-        ))
-    );
-    for (offset, value) in [
-        (16, u64::MAX),
-        (24, 0),
-        (24, u64::MAX),
-        (32, u64::MAX),
-        (32, 0),
-        (32, 4097),
-        (32, CHUNK_BYTES),
-        (24, CHUNK_BYTES),
-    ] {
-        let mut invalid = bytes.to_vec();
+fn decoder_rejects_malformed_lengths_and_payload_bounds() {
+    let allocator = DiskChunkAllocator::for_disk_range(0..4 * CHUNK_BYTES).unwrap();
+    let region = allocator.reserve_chunks(1).unwrap();
+    let record = encode_entry_metadata(&ObjectKeyHash(1), range(0, 100), &region.slice(0..4096), 9);
+    assert!(decode_entry(&record, 0..4 * CHUNK_BYTES).is_some());
+    for (offset, value) in [(16, u64::MAX), (24, 0), (24, u64::MAX), (32, 1), (32, 4 * CHUNK_BYTES)] {
+        let mut invalid = record.to_vec();
         invalid[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-        assert!(decode_entry(&invalid, 0..CHUNK_BYTES).is_none());
-    }
-    let mut invalid = bytes.to_vec();
-    invalid.push(0);
-    assert!(decode_entry(&invalid, 0..CHUNK_BYTES).is_none());
-    for length in 0..bytes.len() {
-        assert!(decode_entry(&bytes[..length], 0..CHUNK_BYTES).is_none());
+        assert!(decode_entry(&invalid, 0..4 * CHUNK_BYTES).is_none());
     }
 }

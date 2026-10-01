@@ -1,9 +1,6 @@
-//! Experimental v10 metadata pages. Fixed-size records with XXH3-128 object keys are packed
-//! at the start of consecutive chunks, before all payloads. Records never cross page boundaries.
-//! All checksums are XXHash64 with seed zero, stored as little-endian u64s.
-//! Each page carries the entry count and checksum of the complete packed metadata prefix.
-//! Page checksums additionally bind tag, address, ordinal, entry count and contents.
-//! Chunk count is derived from payload addresses and lengths; completion is not persistence.
+//! Experimental v11 metadata-only chunks. Each chunk contains 255 independently checksummed
+//! record pages and one checksummed next-chunk page. Zero records are unused slots.
+//! Payloads live in separate chunks. Records never cross page boundaries.
 
 use bytes::Bytes;
 use feuer_types::{ByteRange, ObjectKeyHash};
@@ -14,13 +11,18 @@ use crate::allocation::DiskRegion;
 /// Size in bytes of a metadata page, including its header and padding.
 /// Each entry metadata page holds 84 complete 48-byte records and 16 padding bytes.
 pub(super) const METADATA_PAGE_BYTES: usize = 4096;
-const PAGE_HEADER_BYTES: usize = 48;
+pub(super) const PAGE_HEADER_BYTES: usize = 48;
 pub(super) const ENTRY_METADATA_BYTES: usize = 48;
 pub(super) const PAGE_CONTENT_BYTES: usize =
     (METADATA_PAGE_BYTES - PAGE_HEADER_BYTES) / ENTRY_METADATA_BYTES * ENTRY_METADATA_BYTES;
-pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES10";
+pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES11";
+pub(super) const NEXT_CHUNK_PAGE_TAG: &[u8; 8] = b"FEUNXT11";
+pub(super) const RECORDS_PER_PAGE: usize = PAGE_CONTENT_BYTES / ENTRY_METADATA_BYTES;
+pub(super) const RECORD_PAGES: usize = crate::allocation::CHUNK_BYTES as usize / METADATA_PAGE_BYTES - 1;
+pub(super) const RECORDS_PER_CHUNK: usize = RECORD_PAGES * RECORDS_PER_PAGE;
+pub(super) const NO_CHUNK: u64 = u64::MAX;
 
-/// Content checksum covers all packed entry records.
+/// The reserved content-checksum field is zero in v11; each page is validated independently.
 pub(super) fn encode_page(
     page: &mut [u8],
     page_tag: &[u8; 8],

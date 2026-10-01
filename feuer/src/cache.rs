@@ -302,7 +302,7 @@ mod tests {
                 "feuer_disk_io_total",
                 &[("operation", "write"), ("outcome", "success")]
             ),
-            1.0
+            3.0 // Initialize metadata chunk, write payload chunk, update metadata page.
         );
         assert_eq!(
             value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),

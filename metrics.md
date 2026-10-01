@@ -34,7 +34,7 @@ operations. Use the public lookup counters to measure caller-visible behavior.
 | `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`. Each chunk is 1 MiB |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
-| `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`. Payload and whole-chunk bytes of successfully written shard batches, before publication |
+| `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`. Payload and payload-chunk bytes of successfully written shard batches, before publication. Metadata writes are included in the raw I/O counters, not this packing counter |
 
 Disk read errors and checksum failures still behave as cache misses. Metrics
 make those distinct from absent entries. `contains()` does not count as a lookup.

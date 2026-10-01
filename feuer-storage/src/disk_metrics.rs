@@ -20,7 +20,7 @@ pub(crate) enum DiskWriteOutcome {
     Canceled,
 }
 
-/// Disk range lookup, immutable writes and whole-chunk capacity metrics.
+/// Disk range lookup, payload writes and whole-chunk capacity metrics.
 /// All labels have fixed values; gauges aggregate caches sharing a registry.
 #[derive(Debug)]
 pub struct DiskMetrics {
@@ -86,7 +86,7 @@ impl DiskMetrics {
             registry.register_gauge_vec("feuer_disk_entries".into(), "Indexed disk range entries".into(), &[]);
         let packed = registry.register_counter_vec(
             "feuer_disk_batch_bytes_total".into(),
-            "Payload and whole-chunk bytes in successfully written shard batches before publication".into(),
+            "Payload and payload-chunk bytes in successfully written shard batches before publication".into(),
             &["kind"],
         );
         let outcomes = ["hit", "absent", "io_error", "checksum_failed"];

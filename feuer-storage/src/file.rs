@@ -29,6 +29,7 @@ const LOCK_FILE_NAME: &str = ".feuer.lock";
 struct DataFileState {
     read_queue: uring::ReadQueue,
     write_queue: uring::WriteQueue,
+    file: Arc<File>,
     data_path: PathBuf,
     capacity: u64,
 }
@@ -174,17 +175,17 @@ impl DataFile {
         .await
     }
 
-    /// Recovery issues only one metadata read at a time and retries when the read channel is full.
-    /// Its guard prevents concurrent writes from overwriting this page.
-    pub(crate) async fn read_recovery_page(&self, region: &DiskRegion, address: u64) -> DataFileResult<Bytes> {
-        let length = uring::DIRECT_IO_ALIGNMENT_BYTES;
-        let page = region.slice(address..address + length as u64);
+    /// Reads a complete metadata chunk, retrying when the read channel is full.
+    /// The caller serializes metadata updates; the guard prevents chunk reuse.
+    pub(crate) async fn read_recovery_chunk(&self, region: &DiskRegion) -> DataFileResult<Bytes> {
+        let length = uring::MAX_IO_CHUNK_BYTES;
+        let address = region.range().start;
         self.measure_io(IoOperation::Read, address, length, async {
             loop {
                 let result = self
                     .state
                     .read_queue
-                    .try_read_recovery_page(page.read_guard())
+                    .try_read_recovery_chunk(region.read_guard())
                     .await
                     .map_err(|source| DataFileError::Io {
                         operation: IoOperation::Read,
@@ -239,8 +240,8 @@ impl DataFile {
         .await
     }
 
-    /// Writes one complete chunk from parts at aligned offsets starting at zero, without
-    /// an intermediate chunk buffer. Gaps are zero-filled. The queue retains the region until completion.
+    /// Writes an aligned region of at most 1 MiB from parts starting at zero, without
+    /// an intermediate region buffer. Gaps are zero-filled. The queue retains ownership until completion.
     pub(crate) async fn write_parts(&self, region: DiskRegion, parts: &[(usize, Bytes)]) -> DataFileResult<()> {
         let range = region.range();
         let offset = range.start;
@@ -258,6 +259,23 @@ impl DataFile {
                 })
         })
         .await
+    }
+
+    /// Makes completed metadata invalidations durable before their payload chunks can be reused.
+    pub(crate) async fn sync_data(&self) -> DataFileResult<()> {
+        let file = self.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let _owner = &file;
+            file.state.file.sync_data()
+        })
+        .await
+        .map_err(io::Error::other)
+        .and_then(|result| result);
+        result.map_err(|source| DataFileError::Io {
+            operation: IoOperation::Write,
+            path: self.state.data_path.clone(),
+            source,
+        })
     }
 
     async fn measure_io<T>(
@@ -386,6 +404,7 @@ fn open_file_state(directory: PathBuf, capacity: u64, buffer_pool: Arc<BufferPoo
     Ok(DataFileState {
         read_queue,
         write_queue,
+        file,
         data_path,
         capacity,
     })

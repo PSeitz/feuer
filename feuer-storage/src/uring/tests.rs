@@ -303,7 +303,6 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
     .unwrap();
     let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap();
-    let page = chunk.slice(0..DIRECT_IO_ALIGNMENT_BYTES as u64);
     let reservations = handle
         .handle
         .sender
@@ -313,7 +312,7 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
         .await
         .unwrap();
     assert_eq!(pool.idle_bytes(), 0);
-    let read = handle.try_read_recovery_page(page.read_guard());
+    let read = handle.try_read_recovery_chunk(chunk.read_guard());
     let result = tokio::time::timeout(std::time::Duration::from_secs(1), read)
         .await
         .unwrap()
@@ -339,7 +338,7 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
     assert_eq!(handle.handle.sender.as_ref().unwrap().capacity(), MAX_IN_FLIGHT_READS);
     assert!(
         handle
-            .try_read_recovery_page(page.read_guard())
+            .try_read_recovery_chunk(chunk.read_guard())
             .await
             .unwrap()
             .is_some()
@@ -377,10 +376,9 @@ async fn queue_exit_releases_admission_waiters_and_queued_requests() {
     }
     let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap();
-    let page = chunk.slice(0..DIRECT_IO_ALIGNMENT_BYTES as u64);
     assert_eq!(
         handle
-            .try_read_recovery_page(page.read_guard())
+            .try_read_recovery_chunk(chunk.read_guard())
             .await
             .unwrap_err()
             .kind(),

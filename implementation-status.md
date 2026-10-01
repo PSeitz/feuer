@@ -131,20 +131,21 @@ one XXHash64 checksum per entry, also retained in the in-memory index. `get` rea
 entry while copying only requested bytes into the result. It does not read neighboring entries or metadata.
 
 Independent shards have their own allocator and range-index lock. The allocator tracks coalesced free
-whole-chunk runs and temporary recovery-claim bitmaps. There is no persistent bitmap map or async index-write lock. Written chunks remain immutable.
+whole-chunk runs and temporary recovery-claim bitmaps. There is no persistent bitmap map. Payload chunks remain immutable;
+a per-shard async I/O lock serializes mutable metadata updates.
 All entry owners, queued writes, and read guards must release a chunk before reuse. Queued writes retain
 chunk ownership through completion despite caller cancellation. Failed batches release chunks normally.
 Publication is not transactional across shards. Callers bound batch memory and concurrency.
 
-Entries within a batch share 1-MiB chunks with 4-KiB-aligned storage only when each entry's complete payload
-and metadata fit inside that chunk. Multi-chunk entries own their chunks exclusively, including unused tails. Small entries use at least 4 KiB of payload
-and share metadata pages. Fixed 48-byte records with 128-bit key hashes are packed before all payloads in an allocation.
-A single-entry batch costs at least one chunk. Removed entries leave holes that cannot be reused individually.
-The v10 format uses XXHash64 for all on-disk checksums. Each contiguous allocation starts directly with entry metadata
-pages carrying the total entry count. There is no separate allocation header or cache generation. Recovery derives the
-chunk count from payload addresses and lengths. Each record stores one payload address and length; continuation chunks
-have no headers. Allocation refuses scattered free chunks. Metadata and payload checksums validate stored contents.
-Older formats are skipped.
+Entries within a batch share 1-MiB payload chunks with 4-KiB-aligned storage. Multi-chunk entries own consecutive
+chunks exclusively, including unused tails. Payload chunks contain no metadata. Removed payload holes cannot be reused individually.
+The v11 format stores fixed 48-byte records with 128-bit key hashes in separate 1-MiB metadata chunks. The first 255
+pages hold up to 21,420 records; the final 4-KiB page stores the next metadata chunk address. Metadata chunks remain
+reserved, but cleared slots are reused across batches. An active shard needs at least one metadata chunk in addition
+to its payload chunks. Metadata pages are cached in memory and updated under a per-shard I/O lock. Invalidated records
+retain payload reservations until the page updates are synchronized; read guards may retain them longer. Payload
+chunks described by the same metadata chunk remain independently reclaimable. New metadata chunks are initialized
+and synchronized before linking. Each page and payload has its own XXHash64 checksum. Older formats are not migrated.
 Read invalidation compares expected payload checksums. Discarding a newer identical copy is an allowed miss.
 Pressure eviction samples up to 64 live entries and selects the lowest recent retrieval value per payload
 byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.
@@ -153,10 +154,11 @@ remain indexed and may keep a partially empty chunk unavailable. No eviction met
 Each shard batch is limited to 64 sampled decisions and 4,096 chunks charged to removed entries. Guarded or active
 storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
 disk cache to a memory cache's evidence. Public tier orchestration now uses it.
-Recovery scans up to saved per-shard ends and publishes validated entries incrementally. New writes can
-claim unscanned chunks; recovery retries when the read channel is full and admitted reads run in FIFO order. Layout changes
-reset scan ends without clearing disk contents. Older valid entries may reappear when later scans reach them.
-See the prototype document for checkpoint and validation details.
+Recovery follows per-shard metadata heads and last-page links, reading exactly 1 MiB per metadata chunk without
+scanning payload chunks. Heads are saved in a checksummed, atomically replaced `recovery-heads` file. Reads remain
+available during recovery; writes wait for their shard's metadata recovery before updating its pages. Corrupt record
+pages are discarded independently; invalid or cyclic links terminate the chain. Layout changes reset the heads.
+See the prototype document for checkpoint, synchronization, and validation details.
 No comparative layout/performance claim is established.
 
 The range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller

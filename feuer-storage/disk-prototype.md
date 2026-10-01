@@ -3,123 +3,123 @@
 Experimental `DiskRangeCache`, connected to public tiered lookup and bounded background disk writes.
 [tiered-plan.md](../tiered-plan.md) remains authoritative.
 
-**Open starts background recovery without waiting for the scan.** Recovered entries become readable
-incrementally while ordinary reads and writes continue.
+**Open starts background recovery without waiting.** Reads remain available and recovered entries
+appear incrementally. A write waits for its shard's metadata recovery before modifying metadata;
+other shards remain independent.
 
 ## Layout and ownership
 
-- The file contains 1-MiB chunks. Each allocation reserves one consecutive run of whole chunks.
-  Continuation chunks have no headers.
-- Fixed 48-byte entry records, with 128-bit key hashes, are packed into shared 4-KiB metadata pages
-  at the allocation's start. There is no separate allocation header. Records never cross page boundaries.
-- All payloads follow this metadata prefix. Each payload is one uninterrupted, 4-KiB-aligned disk
-  byte range; no metadata is inserted between payloads or at payload chunk boundaries.
-- Small entries share a chunk only when each entry's complete payload and metadata fit inside it.
-  Multi-chunk entries own all their chunks exclusively, including unused tails.
-- Written chunks are immutable. The entire allocation becomes reusable only after all entry owners and
-  `DiskRegionReadGuard`s release it. Individual holes and individual chunks of a live allocation are never reused.
+The fixed-capacity backing file contains two kinds of 1-MiB chunks:
 
-`src/allocation.rs` tracks free chunks as coalesced runs. `DiskRegion` subranges share ownership
-of the entire contiguous allocation. Scattered free chunks are never combined for an entry.
-Allocation and the range index are sharded by full-key hash.
-Free capacity in another shard cannot satisfy an admission. No metadata lock is held across I/O.
+```text
+metadata chunk: [255 checksummed 4-KiB record pages][4-KiB next-chunk page]
+payload chunks: [contiguous, aligned payload bytes, with no metadata gaps]
+```
+
+Each metadata page holds 84 fixed 48-byte records. A metadata chunk therefore holds up to **21,420
+records**, shared across payload chunks and write batches. Its last page contains the next metadata
+chunk address, or `u64::MAX` for the end of the chain. Metadata chunks stay reserved for the cache's
+lifetime; cleared record slots are reused in place. Each active shard needs at least one metadata
+chunk, charged against its capacity. A one-chunk cache consequently has no room for payloads.
+
+Small payloads share chunks within an explicit batch. Each complete aligned payload must fit inside
+its shared chunk. Larger entries reserve consecutive whole chunks exclusively, including unused
+tails. Payload chunks are immutable while entry owners, queued I/O, or read guards retain them.
+Individual payload holes are never reused. `src/allocation.rs` tracks coalesced free chunk runs;
+`DiskRegion` slices share ownership of the entire reserved run. Scattered chunks are never combined
+for one entry.
+
+Metadata pages are mutable. A shard's async metadata I/O lock serializes reads and updates, separately
+from allocator ownership. Its short synchronous metadata lock protects cached page bytes, free slots,
+and pending invalidations; that lock and the range-index lock never span I/O. Cached metadata pages
+consume approximately 1 MiB of memory per metadata chunk, plus free-slot bookkeeping.
 
 ## Writes
 
-`insert_batch` accepts explicit `(ObjectKey, Download)` pairs and returns the number published.
-Within each shard, entries are sorted smallest first and packed into complete chunk buffers.
-Payload addresses, packed metadata, and zero padding are finalized before each chunk's single write.
-Growing the metadata prefix during packing shifts payload addresses without copying retained payload bytes.
-Partially filled chunks are written too. Later batches cannot append. The public tier supplies bounded
-batches from its background worker. Storage itself adds no batching delay.
+`insert_batch` sorts each shard's entries smallest first, packs aligned payloads into chunks, and
+writes those chunks once. Partially filled payload chunks are finalized too; later batches cannot
+append. Metadata growth never moves payload addresses. Storage adds no batching delay.
 
-All writes for a shard finish before publication. Publication rechecks containment, larger entries
-first: broader entries replace contained entries, while partial overlaps coexist. Contained entries
-and entries that cannot fit are skipped. Publication is not transactional across shards.
-`insert_batch_checked` additionally retains caller tokens through detached I/O and invokes a synchronous
-publication check. The public tier uses this to hold the memory shard lock while validating the original
-admission identity and publishing, so stale writes cannot become visible.
+New metadata chunks are fully initialized and synchronized before linking them from the preceding
+chunk. The first chunk is initialized before publishing its head address. Thus a committed link
+never deliberately targets a reserved-but-unwritten chunk. Payload writes finish before their
+metadata records are written. Dirty metadata pages are written as 4-KiB updates, not full-chunk
+rewrites, and synchronized before publication. The last-page link has its own checksum.
 
-Each queued write retains its chunk ownership through completion despite caller cancellation.
-Failed or abandoned batches release their chunks once all owners and in-flight I/O release them.
-An abnormal queue failure retains active I/O resources when completion cannot be established.
+Publication rechecks containment, larger entries first: broader entries replace contained entries,
+while partial overlaps coexist. Contained entries and entries that cannot fit are skipped.
+Publication is not transactional across shards. `insert_batch_checked` retains caller tokens and
+invokes the synchronous publication check under the index lock. Rejected records and superseded
+entries are invalidated afterward, before the insertion finishes successfully.
 
-Callers must bound batch size and concurrency. Complete chunk buffers are outside the raw I/O
-queue's memory budget and are copied again into aligned direct-I/O buffers.
+Each queued write retains its reserved region through completion despite caller cancellation.
+The detached writer finishes submitted I/O. Failed metadata updates leave dirty pages and retired
+payload reservations available for retry; uncertain payloads are not released for reuse. An abnormal
+queue failure retains active I/O resources when completion cannot be established.
+
+Callers bound batch size and concurrency. Payload buffers and cached metadata pages are outside the
+raw I/O queue's memory budget. Metadata synchronization adds foreground write cost; this layout's
+write throughput has not yet been compared against v10.
 
 ## Reads and eviction
 
-`get` returns exactly the requested bytes from a covering entry. Every hit reads and hashes that
-entry's entire payload against its XXHash64 checksum, excluding alignment padding. It reads neither
-metadata nor neighboring entries. Small subrange requests can therefore cause large reads, though
-only requested bytes are retained in the result.
+`get` reads and hashes the complete covering entry against its XXHash64 checksum, excluding alignment
+padding, then returns exactly the requested bytes. It reads neither metadata nor neighboring entries.
+A read acquires one `DiskRegionReadGuard` under the range-index lock and retains it through verification.
+Returned bytes retain no disk ownership. A checksum mismatch removes the entry only if its expected
+checksum still matches the failed read; discarding a newer identical copy remains an allowed miss.
 
-Each read acquires one `DiskRegionReadGuard` under the range-index lock and retains it through verification.
-Returned bytes retain no disk ownership. A checksum mismatch invalidates the indexed entry if its
-expected checksum still matches the failed read's expected checksum. This can discard a newer identical copy.
+Disk and memory consult standalone access history through `feuer-types::retention`. Public requests
+record accesses before lookup; raw reads and writes do not. Eviction samples live entries and removes
+the lowest recent retrieval value per payload byte. Metadata, alignment, and unused chunk space
+count against capacity but not the score. Eviction work is bounded; admission may be skipped rather
+than waiting for read guards. Free capacity in another shard cannot satisfy admission.
 
-Disk and memory consult standalone access history through `feuer-types::retention`.
-Requests are recorded by tier orchestration before lookup, regardless of outcome, not by raw reads or writes. History owns its
-counters independently of both tiers: eviction never deletes them, and cache entries hold no history handles.
-Its clock counts requests across all keys. History is in-memory only and has no counter capacity limit.
-Eviction samples live entries and removes the lowest recent retrieval value per payload byte.
-Metadata, alignment, and unused chunk space count against capacity but not the score.
+Removing an entry clears its metadata record in memory and retains its payload reservation on a
+pending-invalidation list. The next write flushes these invalidations **before trying to reuse the
+payload space**. Completed invalidations are synchronized before their reservations are released;
+read guards can retain the payload longer. Payload chunks described by the same metadata chunk do
+not share lifetimes. Metadata updates require no metadata reads because pages are cached in memory.
+Closing the in-memory index does not invalidate live entries needed by the next open.
 
-Eviction removes individual entries, but space remains unavailable until whole chunks are released.
-Work per batch is bounded. Exhausted budgets or unavailable capacity skip admission rather than wait
-for readers or writers. There is no relocation or cleaning.
+## Format and recovery
 
-## Metadata and recovery
+`src/range_cache/page_format.rs` defines experimental **v11**. Records contain a 128-bit key hash,
+object offset and length, one payload address, and the payload checksum. Aligned payload length is
+derived from object length. Zero records are free slots. Each 4-KiB page is independently checksummed
+with seed-zero XXHash64, binding its tag, address, ordinal, count, and contents. Records never cross
+page boundaries. Corrupt record pages are discarded independently; corrupt links stop the chain.
+There is no aggregate checksum spanning mutable pages.
 
-`src/range_cache/page_format.rs` defines the experimental v10 format. All on-disk checksums use
-XXHash64 with seed zero, stored as 8-byte little-endian integers. Metadata page headers are 48 bytes;
-each entry record uses 48 bytes. Older formats are not recovered. Records store the 128-bit key hash,
-object offset and length, one payload address, and payload checksum. Aligned payload length is derived
-from object length. Each page has a checksum and carries the total entry count and checksum of the
-complete packed metadata prefix. Corruption in the prefix rejects its allocation during recovery.
+`recovery-heads` is a small checksummed file containing capacity and one metadata-chain head per
+shard. Heads are checkpointed by atomic replacement every ten seconds. Missing, invalid, or
+incompatible inventory resets to empty heads; v10 inventories are not migrated. A stale inventory
+may omit a newly created shard chain. There is no final checkpoint-on-close guarantee.
 
-There is no cache generation or stored chunk count. Recovery derives the metadata length from the
-entry count and the reserved chunk range from payload addresses and lengths. Up to 84 records fit in
-one page, so these allocations need only one metadata read. Larger prefixes use consecutive pages.
-Removal does not modify metadata. Whole-chunk reuse replaces it.
+Recovery follows links using **one 1-MiB read per metadata chunk**. It never scans payload chunks to
+find metadata. Bounded read-channel admission remains FIFO. All metadata chunks in a shard are
+reserved before records can claim payload addresses; duplicate, cyclic, out-of-shard, and conflicting
+claims cannot reserve the same chunks twice. Record decoding checks range arithmetic, alignment,
+shard identity, and payload overlap. Payload reservations are shared where entries share a chunk.
+Entries are then published incrementally. Foreground writes to that shard wait for this process;
+reads can use already published entries. Temporary allocator claim bits are released afterward.
 
-`recovery-ends` is a small checksummed file containing the layout and one scan end per shard.
-Growing ends are checkpointed by atomic replacement every ten seconds; stale ends may omit recent writes.
-Recovery snapshots those ends at open and stops there, regardless of new writes.
-Missing, invalid, or incompatible inventory resets only the scan ends and logs a cold start. A changed
-shard count or capacity logs a warning with the previous and current layout. Resetting scan ends does
-not clear disk contents: older valid entries may be recovered on a later scan that reaches them.
-Recovery logs startup and completion time at info level; per-shard capacity and scan bounds are debug details.
-No payload synchronization or final checkpoint on close is promised.
+Corrupt pages/links are repaired in the in-memory metadata image and flushed before subsequent
+writes can reuse space. Recovery does not read payloads: their checksums are verified on every hit.
+Missing or torn payloads become misses. This remains a best-effort cache, not a durable object store.
+Real device power-loss testing is required before claiming crash hardening.
 
-The allocator records chunks claimed during recovery, even if their owners later release them. New writes
-may claim unscanned chunks immediately. Recovery reserves only chunks being inspected, validates their
-packed metadata, sequential payload ranges, and ownership, then publishes without displacing indexed
-ranges. Shared-chunk entries retain shared ownership; multi-chunk entries reserve their complete contiguous run.
-Inspection alone does not permanently claim a chunk. These temporary claim bitmaps disappear after the scan.
+## Validation
 
-The scan issues one 4-KiB read at a time. It retries admission when the bounded read channel is full;
-admitted requests run in FIFO order. Index locks never span scan I/O.
-Already-submitted scan I/O can still contend for the device.
-
-**Chunk writes are neither atomic nor durability barriers.** Bad metadata is skipped. Payload integrity is
-checked on every disk hit, including recovered hits; missing or torn payload becomes a miss. Real device
-power-loss testing is still required before claiming crash hardening.
-
-## Validation and remaining work
-
-Run on Linux with real io_uring/direct I/O and a fresh test directory:
+Run on Linux with real io_uring and direct I/O:
 
 ```sh
-mkdir -p /mnt/local-ssd/<isolated-test-directory>
-TMPDIR=/mnt/local-ssd/<isolated-test-directory> cargo test --locked -p feuer-storage
+TMPDIR=/mnt/local-ssd cargo test --locked -p feuer-storage --lib
 ```
 
-Tests cover incremental recovery, concurrent allocation claims, stale scan ends, scan-end resets,
-metadata corruption, reused multi-chunk addresses, contiguous payloads, rejection of fragmented free space,
-and bounded FIFO I/O admission. The v10 suite ran on `m8g-32cpu-local-ssd` with real direct I/O and
-io_uring: 113 tests passed; `eviction_preserves_a_newer_replacement` failed and also failed on the
-unchanged baseline. Tests verify one recovery read for up to 84 entries and for multi-chunk entries.
-Device power-loss testing remains outstanding, along with buffered mode and tier-aware retention tuning.
-Measure chunk utilization, metadata overhead, read/write amplification, and retention quality before
-selecting this layout over alternatives.
+Tests cover links between full metadata chunks, one full-chunk recovery read independent of payload
+size, mutable record-slot reuse, independently reclaimable payloads, durable invalidation plus read
+guards before reuse, failed-invalidation retry, malformed/cyclic links, corrupt record pages,
+metadata/payload ownership conflicts, replacement during startup, format resets, and payload checksum
+failures. Existing tests cover packing, fragmentation, cancellation, eviction, and contiguous payloads
+up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v11.

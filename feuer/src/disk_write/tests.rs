@@ -72,7 +72,7 @@ fn queue_saturation_is_nonblocking_and_bounded_by_entries() {
 async fn eviction_and_reinsertion_cancel_old_queued_writes_while_current_entries_batch_together() {
     let directory = tempfile::tempdir().unwrap();
     let memory = Arc::new(MemoryCache::new(4096));
-    let disk = DiskRangeCache::open(directory.path(), 1 << 20, IoMetrics::noop())
+    let disk = DiskRangeCache::open(directory.path(), 2 << 20, IoMetrics::noop())
         .await
         .unwrap();
     let (registry, backend) = registry();
@@ -91,7 +91,7 @@ async fn eviction_and_reinsertion_cancel_old_queued_writes_while_current_entries
     DiskWriteQueue::write_queued_batches(receiver, memory.clone(), disk.clone()).await;
     assert!(!disk.contains(&ObjectKeyHash::from("evicted"), range));
     assert!(!disk.contains(&ObjectKeyHash::from("readmitted"), range));
-    // Both fit on disk only if the drained batch packs them into the same chunk.
+    // One metadata chunk leaves one payload chunk; the drained batch must share it.
     for key in ["live-a", "live-b"] {
         assert_eq!(
             disk.get(&ObjectKeyHash::from(key), range).await.unwrap(),

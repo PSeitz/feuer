@@ -153,8 +153,8 @@ impl ReadQueue {
 
     /// One metadata read. Never waits for channel capacity or allocates a buffer without it.
     /// The scanner retries later when the channel is full; admitted requests run in FIFO order.
-    pub(crate) async fn try_read_recovery_page(&self, region: DiskRegionReadGuard) -> io::Result<Option<Bytes>> {
-        let length = DIRECT_IO_ALIGNMENT_BYTES;
+    pub(crate) async fn try_read_recovery_chunk(&self, region: DiskRegionReadGuard) -> io::Result<Option<Bytes>> {
+        let length = MAX_IO_CHUNK_BYTES;
         let offset = region.range().start;
         assert_eq!(region.range().end - offset, length as u64);
         let permit = match self.handle.sender.as_ref().unwrap().try_reserve() {
