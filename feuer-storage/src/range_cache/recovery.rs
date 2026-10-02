@@ -75,13 +75,8 @@ impl DiskCacheShard {
             for page in 0..RECORD_PAGES {
                 let bytes =
                     &pages.chunks[chunk_index].bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES];
-                let valid = validate_page(
-                    bytes,
-                    ENTRY_METADATA_PAGE_TAG,
-                    address + (page * METADATA_PAGE_BYTES) as u64,
-                    RECORDS_PER_PAGE as u64,
-                )
-                .is_some_and(|contents| contents[PAGE_CONTENT_BYTES..].iter().all(|&byte| byte == 0));
+                let valid = validate_page(bytes, ENTRY_METADATA_PAGE_TAG, RECORDS_PER_PAGE as u64)
+                    .is_some_and(|contents| contents[PAGE_CONTENT_BYTES..].iter().all(|&byte| byte == 0));
                 if !valid {
                     pages.chunks[chunk_index].reset_record_page(page);
                     pages.dirty_pages.insert((chunk_index, page));

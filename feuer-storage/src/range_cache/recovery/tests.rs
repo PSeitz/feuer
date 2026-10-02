@@ -205,7 +205,7 @@ async fn corrupt_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
         let address: u64 = 0;
         let offset = address + (RECORD_PAGES * METADATA_PAGE_BYTES) as u64;
         let mut page = vec![0; METADATA_PAGE_BYTES];
-        encode_page(&mut page, NEXT_CHUNK_PAGE_TAG, offset, 1, &address.to_le_bytes());
+        encode_page(&mut page, NEXT_CHUNK_PAGE_TAG, 1, &address.to_le_bytes());
         if !cyclic {
             page[0] ^= 1;
         }

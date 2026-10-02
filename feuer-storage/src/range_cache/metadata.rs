@@ -40,7 +40,6 @@ impl MetadataChunk {
         encode_page(
             &mut self.bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES],
             ENTRY_METADATA_PAGE_TAG,
-            self.region.range().start + (page * METADATA_PAGE_BYTES) as u64,
             RECORDS_PER_PAGE as u64,
             &[],
         );
@@ -52,7 +51,6 @@ impl MetadataChunk {
         encode_page(
             &mut self.bytes[offset..],
             NEXT_CHUNK_PAGE_TAG,
-            self.region.range().start + offset as u64,
             1,
             &address.to_le_bytes(),
         );
@@ -62,12 +60,7 @@ impl MetadataChunk {
     /// Returns `None` if the link page is invalid.
     pub(super) fn next_chunk_address(&self) -> Option<u64> {
         let offset = RECORD_PAGES * METADATA_PAGE_BYTES;
-        let contents = validate_page(
-            &self.bytes[offset..],
-            NEXT_CHUNK_PAGE_TAG,
-            self.region.range().start + offset as u64,
-            1,
-        )?;
+        let contents = validate_page(&self.bytes[offset..], NEXT_CHUNK_PAGE_TAG, 1)?;
         if contents[8..].iter().any(|&byte| byte != 0) {
             return None;
         }

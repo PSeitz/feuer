@@ -141,7 +141,7 @@ Publication is not transactional across shards. Callers bound batch memory and c
 
 Entries within a batch share 1-MiB payload chunks with 4-KiB-aligned storage. Multi-chunk entries own consecutive
 chunks exclusively, including unused tails. Payload chunks contain no metadata. Removed payload holes cannot be reused individually.
-The v12 format stores fixed 48-byte records with 128-bit key hashes in separate 1-MiB metadata chunks. The first 255
+The v13 format stores fixed 48-byte records with 128-bit key hashes in separate 1-MiB metadata chunks. The first 255
 pages hold up to 21,420 records; the final 4-KiB page stores the next metadata chunk address. Metadata chunks remain
 reserved, but cleared slots are reused across batches. An active shard needs at least one metadata chunk in addition
 to its payload chunks. Metadata pages are cached in memory and updated under a per-shard I/O lock. Invalidated records

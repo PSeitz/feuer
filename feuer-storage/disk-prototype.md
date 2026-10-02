@@ -86,7 +86,7 @@ Closing the in-memory index does not invalidate live entries needed by the next 
 
 ## Format and recovery
 
-[format.md](format.md) documents experimental **v12**: shard boundaries, fixed chain starts,
+[format.md](format.md) documents experimental **v13**: shard boundaries, fixed chain starts,
 page headers, entry records, checksums, and write ordering. Each metadata chain starts at the first
 chunk of its shard. There is no `recovery-heads` file or periodic address checkpoint.
 
@@ -116,4 +116,4 @@ size, metadata updates, independently reclaimable payloads, reuse without waitin
 or metadata writes, duplicate-start recovery, stale-record checksum misses, malformed/cyclic links, corrupt record pages,
 metadata/payload ownership conflicts, fixed chain starts, replacement after reopening, and payload checksum
 failures. Existing tests cover packing, fragmentation, cancellation, eviction, and contiguous payloads
-up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v12.
+up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v13.

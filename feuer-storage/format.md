@@ -1,4 +1,4 @@
-# Disk cache format v12
+# Disk cache format v13
 
 Experimental, best-effort cache format; no durability or compatibility guarantee.
 
@@ -61,17 +61,16 @@ Metadata chunks remain reserved while open.
 
 ### Page layout
 
-Every page begins with this 40-byte header:
+Every page begins with this 32-byte header:
 
 | Offset | Bytes | Field |
 | --- | --- | --- |
 | 0 | 8 | Seed-zero XXHash64 of page bytes `[8, 4096)` |
 | 8 | 8 | Reserved; zero |
-| 16 | 8 | This page's address |
-| 24 | 8 | Slot count: 84 for records, 1 for next-chunk address |
-| 32 | 8 | ASCII tag: `FEUDES12` for records, `FEUNXT12` for next-chunk address |
+| 16 | 8 | Slot count: 84 for records, 1 for next-chunk address |
+| 24 | 8 | ASCII tag: `FEUDES13` for records, `FEUNXT13` for next-chunk address |
 
-A record page holds 84 consecutive 48-byte records after the header, then 24 zero
+A record page holds 84 consecutive 48-byte records after the header, then 32 zero
 bytes. An all-zero record is unused. The next-chunk page holds one `u64` address
 after its header, with the rest zero. The address must be chunk-aligned within the
 backing file, or `u64::MAX` to end the chain.
