@@ -19,8 +19,7 @@ payload chunks: [contiguous, aligned payload bytes, with no metadata gaps]
 Each metadata page holds 84 fixed 48-byte records. A metadata chunk therefore holds up to **21,420
 records**, shared across payload chunks and write batches. Its last page contains the next metadata
 chunk address, or `u64::MAX` for the end of the chain. Metadata chunks stay reserved for the cache's
-lifetime; released record slots are overwritten in place. Each active shard needs at least one metadata
-chunk, charged against its capacity. A one-chunk cache consequently has no room for payloads.
+lifetime. Each active shard needs at least one metadata chunk, charged against its capacity. A one-chunk cache consequently has no room for payloads.
 
 Small payloads share chunks within an explicit batch. Each complete aligned payload must fit inside
 its shared chunk. Larger entries reserve consecutive whole chunks exclusively, including unused
@@ -28,11 +27,12 @@ tails. The allocator retains payload reservations; index entries and readers hol
 Individual payload holes are never reused. `src/allocation.rs` tracks coalesced free chunk runs;
 each `DiskRegion` has one owner: a batch, the allocator, or a metadata chunk. I/O requests carry
 addresses and buffers, not reservations. Scattered chunks are never combined for one entry.
+The allocator also assigns metadata record positions; metadata pages only store and update bytes.
 
 Metadata pages are mutable. A shard's async metadata I/O lock serializes reads and updates, separately
-from allocator ownership. Its short synchronous metadata lock protects cached page bytes, free slots,
-and dirty pages; that lock and the range-index lock never span I/O. Cached metadata pages
-consume approximately 1 MiB of memory per metadata chunk, plus free-slot bookkeeping.
+from allocator ownership. Its short synchronous metadata lock protects cached page bytes and dirty-page
+tracking; that lock and the range-index lock never span I/O. Cached metadata pages consume
+approximately 1 MiB of memory per metadata chunk.
 
 ## Writes
 
@@ -51,7 +51,7 @@ Publication rechecks containment, larger entries first: broader entries replace 
 while partial overlaps coexist. Contained entries and entries that cannot fit are skipped.
 Publication is not transactional across shards. `insert_batch_checked` retains caller tokens and
 invokes the synchronous publication check under the index lock. Rejected and superseded entries
-release their payload occupancy and metadata slots without invalidation writes.
+release their payload occupancy without invalidation writes.
 
 The detached writer retains its batch reservations during normal writes. Queued I/O retains buffers,
 not disk space: an abandoned write can overwrite a reused payload, producing a checksum miss.
@@ -79,15 +79,14 @@ charges at most 4,096 chunks to removed entries; admission may be skipped when n
 Free capacity in another shard cannot satisfy admission.
 
 Index removal and entry destruction change neither metadata nor disk occupancy. Eviction explicitly
-releases the allocator's payload reservation and recycles its metadata slot without changing the
-old record. The allocator keeps one reservation and entry count per chunk run. Shared chunks become
+releases the allocator's payload reservation without changing the old metadata record. The allocator keeps one reservation and entry count per chunk run. Shared chunks become
 free after their last entry is removed, without waiting for readers or queued writes. Payload chunks
 described by the same metadata chunk do not share lifetimes. Metadata updates require no metadata reads because pages are cached in memory.
 Closing the in-memory index does not invalidate live entries needed by the next open.
 
 ## Format and recovery
 
-[format.md](format.md) documents experimental **v11**: shard boundaries, fixed chain starts,
+[format.md](format.md) documents experimental **v12**: shard boundaries, fixed chain starts,
 page headers, entry records, checksums, and write ordering. Each metadata chain starts at the first
 chunk of its shard. There is no `recovery-heads` file or periodic address checkpoint.
 
@@ -113,8 +112,8 @@ TMPDIR=/mnt/local-ssd cargo test --locked -p feuer-storage --lib
 ```
 
 Tests cover links between full metadata chunks, one full-chunk recovery read independent of payload
-size, mutable record-slot reuse, independently reclaimable payloads, reuse without waiting for readers
+size, metadata updates, independently reclaimable payloads, reuse without waiting for readers
 or metadata writes, duplicate-start recovery, stale-record checksum misses, malformed/cyclic links, corrupt record pages,
 metadata/payload ownership conflicts, fixed chain starts, replacement after reopening, and payload checksum
 failures. Existing tests cover packing, fragmentation, cancellation, eviction, and contiguous payloads
-up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v11.
+up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v12.

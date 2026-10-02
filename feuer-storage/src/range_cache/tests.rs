@@ -47,10 +47,10 @@ pub(super) async fn entry_disk_ranges(
     let shard = &cache.disk.shards[cache.disk.shard_index_for_key(key)];
     let index = shard.entry_index.lock().unwrap();
     let entry = index.entries_by_key[key].first_key_value().unwrap().1;
-    let slot = entry.metadata_slot.as_ref().unwrap();
+    let (chunk, slot) = entry.metadata_slot.unwrap();
     let pages = shard.metadata.lock().unwrap();
-    let address = pages.chunks[slot.chunk].region.range().start
-        + (slot.slot / page_format::RECORDS_PER_PAGE * METADATA_PAGE_BYTES) as u64;
+    let address =
+        pages.chunks[chunk].region.range().start + (slot / page_format::RECORDS_PER_PAGE * METADATA_PAGE_BYTES) as u64;
     let metadata = address..address + METADATA_PAGE_BYTES as u64;
     (vec![entry.payload_range.clone()], vec![metadata])
 }
@@ -765,18 +765,14 @@ async fn writes_key_hash_range_and_payload_address_in_fixed_size_metadata() {
     assert_eq!(entry_metadata[0], 0..METADATA_PAGE_BYTES as u64);
     assert_eq!(payload[0].start, CHUNK_BYTES);
     let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
-    let entry_metadata_checksum = u64::from_le_bytes(page[8..16].try_into().unwrap());
-    let (entry_count, entry_metadata_bytes) = page_format::validate_page(
+    let entry_metadata_bytes = page_format::validate_page(
         &page,
         page_format::ENTRY_METADATA_PAGE_TAG,
-        entry_metadata_checksum,
         0,
-        0,
+        page_format::RECORDS_PER_PAGE as u64,
     )
     .unwrap();
-    assert_eq!(entry_count, page_format::RECORDS_PER_PAGE as u64);
     let read_u64 = |offset| u64::from_le_bytes(entry_metadata_bytes[offset..offset + 8].try_into().unwrap());
-    assert_eq!(entry_metadata_checksum, 0);
     assert_eq!(&entry_metadata_bytes[..16], &key.0.to_le_bytes());
     assert_eq!(read_u64(16), 17);
     assert_eq!(read_u64(24), source.downloaded_range().len());
@@ -1119,7 +1115,7 @@ async fn failed_chunk_write_releases_the_batch_without_publication() {
     assert!(cache.get(&ObjectKeyHash::from("large"), range(0, 1)).await.is_none());
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
     let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
-    assert_eq!(&page[40..48], page_format::ENTRY_METADATA_PAGE_TAG);
+    assert_eq!(&page[32..40], page_format::ENTRY_METADATA_PAGE_TAG);
 }
 
 #[test]
@@ -1294,66 +1290,31 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
 }
 
 #[test]
-fn metadata_page_checks_bind_content_checksum_address_ordinal_tag_and_entire_contents() {
-    let mut page = vec![0; METADATA_PAGE_BYTES];
-    page_format::encode_page(
-        &mut page,
-        page_format::ENTRY_METADATA_PAGE_TAG,
-        7,
-        METADATA_PAGE_BYTES as u64,
-        2,
-        8192,
-        b"entry metadata contents",
-    );
-    let validate = |bytes: &[u8]| {
-        page_format::validate_page(
-            bytes,
-            page_format::ENTRY_METADATA_PAGE_TAG,
-            7,
-            METADATA_PAGE_BYTES as u64,
-            2,
-        )
-        .is_some()
-    };
+fn metadata_page_checks_bind_reserved_zero_address_count_tag_and_entire_contents() {
+    let mut page = vec![0xff; METADATA_PAGE_BYTES];
+    let address = CHUNK_BYTES + METADATA_PAGE_BYTES as u64;
+    let tag = page_format::ENTRY_METADATA_PAGE_TAG;
+    let count = page_format::RECORDS_PER_PAGE as u64;
+    page_format::encode_page(&mut page, tag, address, count, b"entry metadata contents");
+    let validate = |bytes: &[u8]| page_format::validate_page(bytes, tag, address, count).is_some();
     assert!(validate(&page));
+    assert_eq!(&page[24..32], &count.to_le_bytes());
+    assert!(page[40..].starts_with(b"entry metadata contents"));
     for offset in [0, 8, 16, 24, 32, 40, 48, METADATA_PAGE_BYTES - 1] {
         let mut torn = page.clone();
         torn[offset] ^= 1;
         assert!(!validate(&torn));
     }
     assert!(!validate(&page[..METADATA_PAGE_BYTES - 1]));
-    assert!(page_format::validate_page(&page, b"FEUDES09", 7, METADATA_PAGE_BYTES as u64, 2).is_none());
-    assert!(
-        page_format::validate_page(
-            &page,
-            page_format::ENTRY_METADATA_PAGE_TAG,
-            8,
-            METADATA_PAGE_BYTES as u64,
-            2
-        )
-        .is_none()
-    );
-    assert!(page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG, 7, 8192, 2).is_none());
-    assert!(
-        page_format::validate_page(
-            &page,
-            page_format::ENTRY_METADATA_PAGE_TAG,
-            7,
-            METADATA_PAGE_BYTES as u64,
-            3
-        )
-        .is_none()
-    );
+    assert!(page_format::validate_page(&page, b"FEUDES09", address, count).is_none());
+    assert!(page_format::validate_page(&page, tag, 8192, count).is_none());
 
-    // A valid page of different entry metadata at the same address must not join this prefix.
-    page_format::encode_page(
-        &mut page,
-        page_format::ENTRY_METADATA_PAGE_TAG,
-        8,
-        METADATA_PAGE_BYTES as u64,
-        2,
-        8192,
-        b"different entry metadata contents",
-    );
-    assert!(!validate(&page));
+    // Header fields must match even with a valid page checksum.
+    for offset in [8, 16, 24, 32] {
+        let mut invalid = page.clone();
+        invalid[offset] ^= 1;
+        let checksum = XxHash64::oneshot(0, &invalid[8..]);
+        invalid[..8].copy_from_slice(&checksum.to_le_bytes());
+        assert!(!validate(&invalid));
+    }
 }

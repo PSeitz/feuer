@@ -1,4 +1,4 @@
-# Disk cache format v11
+# Disk cache format v12
 
 Experimental, best-effort cache format; no durability or compatibility guarantee.
 
@@ -57,22 +57,21 @@ A metadata chunk contains 256 independently checksummed **4-KiB pages**:
 | 0–254 | 84 entry records per page: 21,420 records per chunk |
 | 255 | Next metadata chunk's address; `u64::MAX` means there is no next chunk |
 
-Metadata chunks remain reserved while open; released record slots are reusable without clearing them.
+Metadata chunks remain reserved while open.
 
 ### Page layout
 
-Every page begins with this 48-byte header:
+Every page begins with this 40-byte header:
 
 | Offset | Bytes | Field |
 | --- | --- | --- |
 | 0 | 8 | Seed-zero XXHash64 of page bytes `[8, 4096)` |
 | 8 | 8 | Reserved; zero |
 | 16 | 8 | This page's address |
-| 24 | 8 | Page ordinal within chunk: 0–255 |
-| 32 | 8 | Slot count: 84 for records, 1 for next-chunk address |
-| 40 | 8 | ASCII tag: `FEUDES11` for records, `FEUNXT11` for next-chunk address |
+| 24 | 8 | Slot count: 84 for records, 1 for next-chunk address |
+| 32 | 8 | ASCII tag: `FEUDES12` for records, `FEUNXT12` for next-chunk address |
 
-A record page holds 84 consecutive 48-byte records after the header, then 16 zero
+A record page holds 84 consecutive 48-byte records after the header, then 24 zero
 bytes. An all-zero record is unused. The next-chunk page holds one `u64` address
 after its header, with the rest zero. The address must be chunk-aligned within the
 backing file, or `u64::MAX` to end the chain.
@@ -105,9 +104,9 @@ chunks are not appended to; individual payload holes are not reused.
 2. Complete payload writes before writing entry records, and metadata writes before
    publishing entries in memory. Metadata updates require read/write synchronization.
 3. The allocator releases payload chunks when their last entry is removed. Neither reads
-   nor queued writes reserve disk space. Released record slots are overwritten by later entries,
-   not invalidated. Readers validate owned buffers against the expected checksum after I/O;
-   late writes to reused payloads can cause checksum misses.
+   nor queued writes reserve disk space. Removal does not invalidate the old metadata record.
+   Readers validate owned buffers against the expected checksum after I/O; late writes to reused
+   payloads can cause checksum misses.
 
 No `fsync` or `fdatasync` is issued. Write completion does not guarantee durability
 or persistence ordering after power loss; recovery is best-effort.

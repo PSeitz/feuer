@@ -316,6 +316,10 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
         .remove(&ObjectKeyHash::from("second"), 0);
     disk.shards[0].allocator =
         DiskChunkAllocator::with_metrics(CHUNK_BYTES..4 * CHUNK_BYTES, disk.metrics.clone()).unwrap();
+    // The replacement allocator must also know about the existing metadata chunk.
+    disk.shards[0]
+        .allocator
+        .add_metadata_chunk(0, page_format::RECORDS_PER_CHUNK);
     let cache = DiskRangeCache { disk: Arc::new(disk) };
     assert!(
         cache

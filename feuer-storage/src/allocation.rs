@@ -1,4 +1,4 @@
-//! Ownership and reuse of consecutive whole chunks.
+//! Ownership and reuse of consecutive whole chunks and metadata record positions.
 
 use std::{
     collections::BTreeMap,
@@ -12,22 +12,23 @@ pub(super) const CHUNK_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub(super) struct DiskChunkAllocator {
-    free: Arc<Mutex<DiskChunkAvailability>>,
+    free: Arc<Mutex<DiskAvailability>>,
     pub(super) chunk_capacity: u64,
     /// First chunk address -> reserved region and number of entries using it.
     payload_chunks: Arc<Mutex<BTreeMap<u64, (DiskRegion, usize)>>>,
 }
 
-/// Free disk-chunk ranges and availability accounting.
+/// Free disk chunks and metadata record positions, with chunk accounting.
 #[derive(Debug)]
-struct DiskChunkAvailability {
+struct DiskAvailability {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
     free_chunk_count_by_start: BTreeMap<u64, u64>,
     available_chunks: u64,
+    metadata_slots: Vec<(usize, usize)>,
     metrics: Arc<DiskMetrics>,
 }
 
-impl DiskChunkAvailability {
+impl DiskAvailability {
     /// Removes the specified chunks from the free-chunk map and decreases the available chunk count.
     /// If any are unavailable, leaves both unchanged.
     fn remove_free_chunks(&mut self, chunks: Range<u64>) -> Option<()> {
@@ -75,7 +76,7 @@ impl DiskChunkAvailability {
     }
 }
 
-impl Drop for DiskChunkAvailability {
+impl Drop for DiskAvailability {
     fn drop(&mut self) {
         self.metrics.free_chunks.decrease(self.available_chunks);
     }
@@ -110,12 +111,31 @@ impl DiskChunkAllocator {
         Some(Self {
             chunk_capacity,
             payload_chunks: Arc::new(Mutex::new(BTreeMap::new())),
-            free: Arc::new(Mutex::new(DiskChunkAvailability {
+            free: Arc::new(Mutex::new(DiskAvailability {
                 free_chunk_count_by_start: BTreeMap::from([(disk_range.start / CHUNK_BYTES, chunk_capacity)]),
                 available_chunks: chunk_capacity,
+                metadata_slots: Vec::new(),
                 metrics,
             })),
         })
+    }
+
+    /// Registers the record positions in a newly initialized metadata chunk.
+    pub(super) fn add_metadata_chunk(&self, chunk: usize, records: usize) {
+        let mut free = self.free.lock().unwrap();
+        free.metadata_slots.extend((0..records).rev().map(|slot| (chunk, slot)));
+    }
+
+    pub(super) fn available_metadata_slots(&self) -> usize {
+        self.free.lock().unwrap().metadata_slots.len()
+    }
+
+    pub(super) fn reserve_metadata_slot(&self) -> Option<(usize, usize)> {
+        self.free.lock().unwrap().metadata_slots.pop()
+    }
+
+    pub(super) fn release_metadata_slot(&self, slot: (usize, usize)) {
+        self.free.lock().unwrap().metadata_slots.push(slot);
     }
 
     /// Reserves chunks at a known address during startup, before writes are allowed.
@@ -193,7 +213,7 @@ impl DiskChunkAllocator {
 /// One owner's reservation of consecutive whole chunks in the backing file.
 #[derive(Debug)]
 pub(super) struct DiskRegion {
-    free: Arc<Mutex<DiskChunkAvailability>>,
+    free: Arc<Mutex<DiskAvailability>>,
     chunks: Range<u64>,
     recovered: bool,
 }

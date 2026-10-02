@@ -17,19 +17,16 @@ impl DiskRangeCacheState {
         let shard_disk_range = shard_disk_range(self.file.capacity(), self.shards.len(), shard_index);
         // Reserve every metadata chunk before accepting any payload addresses from the records.
         shard.load_metadata_chain(&self.file, shard_disk_range.clone()).await;
-        let mut pages = shard.metadata.lock().unwrap();
+        let pages = shard.metadata.lock().unwrap();
         let mut index = shard.entry_index.lock().unwrap();
         for chunk in 0..pages.chunks.len() {
             for slot in 0..RECORDS_PER_CHUNK {
                 let record = pages.chunks[chunk].record(slot);
-                if record.iter().all(|&byte| byte == 0) {
-                    continue;
-                }
                 let entry = decode_entry_metadata(record, shard_disk_range.clone()).filter(|(key, _, _, payload)| {
                     self.shard_index_for_key(key) == shard_index && shard.allocator.recover_payload(payload).is_some()
                 });
                 let Some((key, object_range, checksum, payload_range)) = entry else {
-                    pages.release_slot(chunk, slot);
+                    shard.allocator.release_metadata_slot((chunk, slot));
                     continue;
                 };
                 let entry = DiskEntry {
@@ -37,14 +34,11 @@ impl DiskRangeCacheState {
                     eviction_position: 0,
                     object_range,
                     payload_checksum: checksum,
-                    metadata_slot: Some(metadata::MetadataSlot { chunk, slot }),
+                    metadata_slot: Some((chunk, slot)),
                     payload_range,
                 };
                 for entry in index.insert(key, entry) {
-                    shard.allocator.remove_payload(entry.payload_range.start);
-                    if let Some(slot) = entry.metadata_slot {
-                        pages.release_slot(slot.chunk, slot.slot);
-                    }
+                    shard.remove_payload(entry);
                 }
             }
         }
@@ -76,22 +70,21 @@ impl DiskCacheShard {
                 bytes: bytes.to_vec(),
             };
             let next_chunk_address = chunk.next_chunk_address();
-            let chunk_index = pages.add_chunk(chunk);
+            let chunk_index = pages.chunks.len();
+            pages.chunks.push(chunk);
             for page in 0..RECORD_PAGES {
                 let bytes =
                     &pages.chunks[chunk_index].bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES];
                 let valid = validate_page(
                     bytes,
                     ENTRY_METADATA_PAGE_TAG,
-                    0,
                     address + (page * METADATA_PAGE_BYTES) as u64,
-                    page as u64,
+                    RECORDS_PER_PAGE as u64,
                 )
-                .is_some_and(|(count, contents)| {
-                    count == RECORDS_PER_PAGE as u64 && contents[PAGE_CONTENT_BYTES..].iter().all(|&byte| byte == 0)
-                });
+                .is_some_and(|contents| contents[PAGE_CONTENT_BYTES..].iter().all(|&byte| byte == 0));
                 if !valid {
-                    pages.reset_record_page(chunk_index, page);
+                    pages.chunks[chunk_index].reset_record_page(page);
+                    pages.dirty_pages.insert((chunk_index, page));
                 }
             }
             match next_chunk_address {
@@ -100,7 +93,7 @@ impl DiskCacheShard {
             }
         }
         if address != NO_CHUNK {
-            pages.end_chain();
+            pages.set_last_chunk_link(NO_CHUNK);
         }
         *self.metadata.lock().unwrap() = pages;
     }

@@ -109,7 +109,7 @@ struct DiskEntry {
     object_range: ByteRange,
     payload_checksum: u64,
     payload_range: Range<u64>,
-    metadata_slot: Option<metadata::MetadataSlot>,
+    metadata_slot: Option<(usize, usize)>,
 }
 
 /// The disk address, object range, and expected checksum for one payload read.
@@ -557,12 +557,12 @@ impl DiskEntry {
 }
 
 impl DiskCacheShard {
-    /// Release payload occupancy and recycle its metadata slot. Neither index removal nor
+    /// Return an entry's payload usage and record position to the allocator. Neither index removal nor
     /// entry destruction has side effects on disk ownership or metadata.
     fn remove_payload(&self, entry: DiskEntry) {
         self.allocator.remove_payload(entry.payload_range.start);
         if let Some(slot) = entry.metadata_slot {
-            self.metadata.lock().unwrap().release_slot(slot.chunk, slot.slot);
+            self.allocator.release_metadata_slot(slot);
         }
     }
 }

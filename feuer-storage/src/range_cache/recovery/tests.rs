@@ -127,10 +127,9 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     let shard = &cache.disk.shards[0];
     let entry = shard.entry_index.lock().unwrap().remove(&key, 0).unwrap();
     let address = entry.payload_range.start;
-    let slot = entry.metadata_slot.as_ref().unwrap();
+    let (chunk, slot) = entry.metadata_slot.unwrap();
     let pages = shard.metadata.lock().unwrap();
-    let record = pages.chunks[slot.chunk].record(slot.slot).to_vec();
-    let (chunk, slot) = (slot.chunk, slot.slot);
+    let record = pages.chunks[chunk].record(slot).to_vec();
     drop(entry); // Must not lock metadata or release the allocator's payload.
     assert_eq!(pages.chunks[chunk].record(slot), record);
     assert!(shard.allocator.reserve_chunks(1).is_none());
@@ -190,6 +189,12 @@ async fn torn_record_page_does_not_reject_other_pages() {
     assert!(cache.insert(ObjectKeyHash(999), download(0, 1)).await.unwrap());
     let cache = reopen(directory.path(), cache).await;
     assert!(cache.get(&ObjectKeyHash(999), range(0, 1)).await.is_some());
+    assert!(
+        cache
+            .get(&ObjectKeyHash(RECORDS_PER_PAGE as u128), range(0, 1))
+            .await
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -200,15 +205,7 @@ async fn corrupt_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
         let address: u64 = 0;
         let offset = address + (RECORD_PAGES * METADATA_PAGE_BYTES) as u64;
         let mut page = vec![0; METADATA_PAGE_BYTES];
-        encode_page(
-            &mut page,
-            NEXT_CHUNK_PAGE_TAG,
-            0,
-            offset,
-            RECORD_PAGES as u64,
-            1,
-            &address.to_le_bytes(),
-        );
+        encode_page(&mut page, NEXT_CHUNK_PAGE_TAG, offset, 1, &address.to_le_bytes());
         if !cyclic {
             page[0] ^= 1;
         }
@@ -273,7 +270,7 @@ async fn failed_metadata_flush_does_not_delay_payload_reuse() {
     let _io = shard.metadata_io.lock().await;
     // Recycling slots produces no metadata writes, even across multiple pages.
     shard.flush_metadata(&short_file).await.unwrap();
-    shard.metadata.lock().unwrap().reset_record_page(0, 1);
+    shard.metadata.lock().unwrap().set_last_chunk_link(NO_CHUNK);
     assert!(shard.flush_metadata(&short_file).await.is_err());
     assert!(shard.allocator.reserve_chunks(1).is_some());
     shard.flush_metadata(&cache.disk.file).await.unwrap();
@@ -330,7 +327,7 @@ async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
 }
 
 #[tokio::test]
-async fn recovery_deduplicates_starts_and_recycles_displaced_metadata_slots() {
+async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
     for second_length in [100, 200, CHUNK_BYTES as usize + 1] {
         let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
         let key = ObjectKeyHash(1);
@@ -368,6 +365,7 @@ async fn recovery_deduplicates_starts_and_recycles_displaced_metadata_slots() {
             assert_eq!(index.eviction_candidates, vec![(key, 0)]);
             assert_eq!(index.entries_by_key[&key][&0].eviction_position, 0);
         }
+        assert_eq!(shard.allocator.available_metadata_slots(), RECORDS_PER_CHUNK - 1);
         assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 1.0);
         assert_eq!(
             crate::test_metrics::value(&registry, "feuer_disk_payload_bytes", &[]),
@@ -391,12 +389,10 @@ async fn recovery_deduplicates_starts_and_recycles_displaced_metadata_slots() {
             recovered_chunks
         );
         assert!(cache.insert(ObjectKeyHash(3), download(0, 1)).await.unwrap());
-        let slot = shard.entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(3)][&0]
+        let (_, slot) = shard.entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(3)][&0]
             .metadata_slot
-            .as_ref()
-            .unwrap()
-            .slot;
-        assert_eq!(slot, if second_length == 100 { 1 } else { 0 });
+            .unwrap();
+        assert_ne!(slot, if second_length == 100 { 0 } else { 1 });
         assert_eq!(shard.metadata.lock().unwrap().chunks.len(), 1);
         drop(cache);
         assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 0.0);
