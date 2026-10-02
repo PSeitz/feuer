@@ -68,8 +68,8 @@ throughput, not end-to-end cache latency.
 - `feuer-value-density`: `MemoryCache` with independent exact-range access counts
   decaying with an 8,192-request half-life across all keys by default. Sampled eviction
   compares decayed retrieval value per retained byte, crediting requests fully
-  covered by each cached range. Bounded event history is used only for trimming. After a
-  64-request grace, pressure trims the selected victim to its observed
+  covered by each cached range. Trimming uses a separate history of at most 64 events per object by default.
+  After a 64-request grace, pressure trims the selected victim to its observed
   request ranges when useful. The replay driver records requests before lookup in standalone history;
   distinct counters survive all cache evictions for the duration of the run.
 - `foyer-native-exact-key`: requested ranges are native Foyer keys. The

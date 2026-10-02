@@ -36,7 +36,7 @@ struct DataFileState {
 /// One exclusively owned, fixed-capacity Linux direct-I/O payload file.
 ///
 /// Reads and writes have separate io_uring rings and worker threads, with up to
-/// 64 active reads and 8 active writes plus equally sized bounded waiting channels.
+/// 64 active reads and 8 active writes, plus waiting channels for another 64 reads and 8 writes.
 /// Queues schedule in arrival order without checking for conflicts.
 /// Submission order does not guarantee completion order.
 /// Each I/O request transfers at most 1 MiB. Request limits do not bound full read-result allocations.
@@ -202,8 +202,8 @@ impl DataFile {
 
     /// Writes complete 4096-byte-aligned blocks.
     ///
-    /// Retains aligned byte slices directly; copies unaligned inputs into bounded
-    /// aligned buffers. Callers must protect the full aligned byte range from
+    /// Retains aligned byte slices directly; copies unaligned inputs into aligned
+    /// buffers of at most 1 MiB each. Callers must protect the full aligned byte range from
     /// conflicting access through completion.
     /// Dropping this future may leave a partial write and does not stop submitted
     /// writes: retain the disk region until they complete, as described in

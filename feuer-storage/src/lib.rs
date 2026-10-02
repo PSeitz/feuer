@@ -1,7 +1,7 @@
 //! Private Linux range-storage foundations for Feuer.
 //!
-//! A fixed-capacity O_DIRECT file with a bounded io_uring driver, plus an experimental
-//! disk range cache with connected allocation, entry metadata writes and integrity-checked reads.
+//! A fixed-capacity O_DIRECT file with up to 64 active reads and 8 active writes through io_uring,
+//! plus an experimental disk range cache with connected allocation, entry metadata writes and integrity-checked reads.
 //! Used by public tiered lookup and disk writes, with incremental best-effort restart recovery.
 
 #[cfg(not(target_os = "linux"))]

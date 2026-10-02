@@ -92,7 +92,7 @@ Enable `feuer::storage=info` in the application's tracing filter:
 
 Enable `feuer::storage=debug` for per-shard scan details (shard index, capacity,
 scan start/end byte offsets, and chunk count) and skipped-recovery messages.
-Scan size is bounded by the saved write end, not the shard's full capacity.
+Recovery follows each shard's metadata-chunk links without scanning payload chunks.
 
 ## Insertions that trigger eviction
 

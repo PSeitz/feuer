@@ -7,16 +7,17 @@ contract. This document records what exists and what remains to build.
 
 The public cache now connects **memory → integrity-checked disk → callback**. The fallible asynchronous
 `TieredMemoryDiskCache::open` opens the configured directory using Linux direct I/O and io_uring, with no
-silent fallback. A bounded worker batches retained downloads into the experimental `DiskRangeCache`.
-Reopening starts bounded background recovery, publishing entries incrementally alongside reads and writes.
+silent fallback. One worker drains a 256-entry queue in batches of at most 64 retained downloads into the
+experimental `DiskRangeCache`. Reopening reads one 1-MiB metadata chunk at a time per shard and waits for
+all shards to recover before returning.
 The recovery additions cross-compile for Linux; real io_uring execution and device-crash testing remain outstanding.
 
 | Area | Implemented | Remaining |
 | --- | --- | --- |
-| `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, bounded batched disk writes, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
+| `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, disk writes through a 256-entry queue in batches of at most 64, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range, internal shared access evidence and value comparison | None for the current public type boundary |
-| `feuer-memory` | Sharded covering-range index, bounded exact access evidence shared with disk, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
-| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, bounded QD64 io_uring driver, experimental sharded `DiskRangeCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, guarded whole-chunk reuse and bounded value-aware entry eviction | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
+| `feuer-memory` | Sharded covering-range index, exact access counts shared with disk, per-object trimming-event limits, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
+| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskRangeCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, guarded whole-chunk reuse and per-batch eviction attempt/chunk limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
 
 ## Implemented behavior
@@ -100,7 +101,7 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
 
 ## Validation and benchmarks
 
-- The [memory suite](benchmarks/memory/README.md) compares exact-range and source-bounded expanded downloads
+- The [memory suite](benchmarks/memory/README.md) compares exact-range and expanded downloads
   against native Foyer S3FIFO and a local exact-key cost-aware Foyer policy. The expanded strategy looks 5 ms
   ahead, coalesces gaps below the 10,000,000-byte source-cost break-even distance, and defaults to whole splits
   below 8 MiB and exact ranges otherwise.
@@ -164,7 +165,7 @@ No comparative layout/performance claim is established.
 The range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
 cancellation, corruption/reused payload, partial batch failure, metadata-only chunks, disjoint shards,
 mixed-size packing, exclusive multi-chunk ownership, finalized entry metadata, whole-chunk ownership/reuse,
-bounded value-aware entry eviction, shared evidence across tiers, payload-only scoring, mixed-size churn,
+per-batch eviction attempt and chunk limits, shared evidence across tiers, payload-only scoring, mixed-size churn,
 concurrent eviction/reads,
 rejection of scattered free chunks, contiguous payloads across chunk boundaries, and whole-entry
 validation of 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable.

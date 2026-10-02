@@ -99,9 +99,9 @@ On a cold pass the local exact-key policy beats S3FIFO at every measured
 capacity and remains close to Feuer. After one warm-up pass it leads both at
 256 MiB and 512 MiB, trails both from 1 GiB through 4 GiB, and then beats
 S3FIFO while trailing Feuer from 8 GiB upward. Its continuously decaying rate
-estimate deliberately avoids a workload-scale lifetime constant. The bounded
-candidate scan is slower than S3FIFO but remains substantially faster than
-Feuer's range-aware cache in this single-threaded replay.
+estimate deliberately avoids a workload-scale lifetime constant. Scanning up to
+64 candidates per eviction decision is slower than S3FIFO but remains substantially
+faster than Feuer's range-aware cache in this single-threaded replay.
 
 ## One-iteration warm cache — 16 shards
 

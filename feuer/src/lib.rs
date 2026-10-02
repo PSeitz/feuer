@@ -2,7 +2,7 @@
 //!
 //! The current public boundary provides exact requested byte ranges, opaque
 //! object identities, a soft-capacity memory tier, integrity-checked disk hits,
-//! bounded best-effort disk writes, and per-call asynchronous download callbacks.
+//! best-effort disk writes through a 256-entry queue, and per-call asynchronous download callbacks.
 //! Opening requires Linux direct I/O and io_uring. Disk recovery runs incrementally in the background.
 
 mod cache;

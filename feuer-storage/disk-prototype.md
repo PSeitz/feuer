@@ -1,6 +1,7 @@
 # Disk range-cache prototype
 
-Experimental `DiskRangeCache`, connected to public tiered lookup and bounded background disk writes.
+Experimental `DiskRangeCache`, connected to public tiered lookup and background disk writes through a
+256-entry queue.
 [tiered-plan.md](../tiered-plan.md) remains authoritative.
 
 **Open waits for recovery to finish.** Every shard's metadata is scanned before the cache becomes
@@ -72,8 +73,9 @@ checksum still matches the failed read; discarding a newer identical copy remain
 Disk and memory consult standalone access history through `feuer-types::retention`. Public requests
 record accesses before lookup; raw reads and writes do not. Eviction samples live entries and removes
 the lowest recent retrieval value per payload byte. Metadata, alignment, and unused chunk space
-count against capacity but not the score. Eviction work is bounded; admission may be skipped rather
-than waiting for read guards. Free capacity in another shard cannot satisfy admission.
+count against capacity but not the score. Each shard batch allows at most 64 eviction attempts and
+charges at most 4,096 chunks to removed entries; admission may be skipped rather than waiting for read guards.
+Free capacity in another shard cannot satisfy admission.
 
 Removing an entry clears its metadata record in memory and retains its payload reservation on a
 pending-invalidation list. The next write flushes these invalidations **before trying to reuse the
@@ -89,8 +91,8 @@ page headers, entry records, checksums, and write ordering. Each metadata chain 
 chunk of its shard. There is no `recovery-heads` file or periodic address checkpoint.
 
 Recovery follows links using **one 1-MiB read per metadata chunk**. It never scans payload chunks to
-find metadata. Bounded read-channel admission remains FIFO. All metadata chunks in a shard are
-reserved before records can claim payload addresses; duplicate, cyclic, out-of-shard, and conflicting
+find metadata. The read channel holds at most 64 waiting requests and processes them in arrival order.
+All metadata chunks in a shard are reserved before records can claim payload addresses; duplicate, cyclic, out-of-shard, and conflicting
 claims cannot reserve the same chunks twice. Record decoding checks range arithmetic, alignment,
 shard identity, and payload overlap. Payload reservations are shared where entries share a chunk.
 Entries are indexed during opening, and temporary allocator claim bits are released afterward.

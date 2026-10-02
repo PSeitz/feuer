@@ -21,7 +21,7 @@ struct CachedRange {
     bytes: Bytes,
     /// Capacity of the backing allocation, possibly larger than the visible payload.
     capacity: u64,
-    /// Slot in the bounded-work policy candidate ring.
+    /// This entry's slot in the eviction candidate ring.
     candidate_slot: usize,
     /// Request clock at admission.
     admitted_at_access: u64,
@@ -384,7 +384,7 @@ impl MemoryCacheShard {
         entry.candidate_slot = slot;
     }
 
-    /// Selects the lowest retrieval-cost density from a rotating, bounded sample.
+    /// Samples up to `reclaim_sample_size` entries and selects the lowest retrieval cost per retained byte.
     fn select_reclaim_candidate(
         &mut self,
         admitting_key: &ObjectKeyHash,

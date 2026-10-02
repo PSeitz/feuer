@@ -1,6 +1,6 @@
 [package]
 name = "feuer-memory"
-description = "Internal payload-bounded range memory tier for Feuer"
+description = "Internal range memory tier with a soft allocation-byte target for Feuer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

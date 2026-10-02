@@ -31,7 +31,7 @@ impl fmt::Debug for MemoryMetrics {
 }
 
 impl MemoryMetrics {
-    /// Registers memory-tier metrics using only bounded labels.
+    /// Registers memory-tier metrics with predefined operation, buffer-size, and buffer-status labels.
     pub fn new(registry: &BoxedRegistry) -> Arc<Self> {
         let operations = registry.register_counter_vec(
             "feuer_memory_operations_total".into(),

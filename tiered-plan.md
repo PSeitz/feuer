@@ -122,7 +122,7 @@ The current 165,435-access sample in
 uncached exact-request application of the source model below, fixed request latency contributes about 83.0% of
 total source time.
 
-On a miss, the source-bounded expanded benchmark looks 5 ms ahead and coalesces same-object ranges separated by
+On a miss, the expanded-download benchmark looks 5 ms ahead and coalesces same-object ranges separated by
 less than the source model's 10,000,000-byte break-even distance. The initiating callback downloads the merged
 range before followers replay. Downloads default to whole splits below 8 MiB and exact ranges otherwise. The
 whole-split threshold and coalescing distance are environment-controlled.
@@ -163,10 +163,11 @@ Distinct counters survive all cache evictions for the history object's lifetime 
 It is not persisted: recovered entries start without pre-restart access evidence.
 
 Every admission gets a short, deterministic shard-local grace before compaction. Policy keeps no separate
-prefetch-promotion state: bounded exact request evidence drives both retention and compaction. Grace never protects
-a cached range from pressure eviction.
+prefetch-promotion state: exact-range access counts drive retention, while recent request events drive compaction.
+Grace never protects a cached range from pressure eviction.
 
-Prefetch remains bounded in both tiers, and compaction grace never blocks admission or pressure eviction.
+Prefetched bytes count toward the memory target and disk capacity, and compaction grace never blocks admission
+or pressure eviction.
 
 The internal policy must distinguish whether a range has no disk copy, has a queued or active disk write, or is
 available on disk so it can value a memory hit that avoids disk differently from one that avoids source I/O.
@@ -209,7 +210,7 @@ Compaction is pressure-driven. Policy samples at most 64 cached ranges and selec
 retrieval value per retained byte, using independent exact-range access counts with a half-life of
 8,192 requests across all keys. Standalone history owns every distinct counter for its full
 in-process lifetime, independently of cache shards and eviction. Counter metadata has no capacity limit.
-For range trimming only, exact events are bounded to 64 per object by default
+For range trimming only, at most 64 exact events are retained per object by default
 (`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this) and expire after 262,144 later
 requests across all keys by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this).
 Once its grace of 64 requests across all keys expires, that same
@@ -218,8 +219,9 @@ evicted.
 Compacted replacements use only observed requests, merge only overlapping or adjacent intervals, preserve gaps,
 create no access, and cannot affect lookup results or caller-held slices.
 
-Lookup and access recording must not scan every live shard entry. Victim selection samples a bounded number
-of entries. Scoring work depends on the distinct requested ranges each candidate covers.
+Lookup and access recording must not scan every live shard entry. Victim selection samples at most the
+configured number of entries (64 by default). Scoring work depends on the distinct requested ranges each
+candidate covers.
 Copies made outside the metadata lock require the exact source range to still be cached at publication.
 Reinsertion of the same immutable range and changes to neighboring ranges do not invalidate a copy.
 Retained ranges already covered by another entry are skipped.
@@ -227,10 +229,10 @@ Access history is only policy input: newer accesses do not invalidate a trimming
 
 ## 7. Best-effort disk writes
 
-Disk writes are bounded and best-effort, not mandatory.
+Disk writes are best-effort and may be skipped when the pending-write queue is full.
 
 - A retained download may be scheduled for a disk write.
-- The pending-write queue is bounded by both bytes and entry count.
+- The pending-write queue must have limits on both payload bytes and entry count.
 - Under queue pressure, the internal policy may skip or replace a disk-write candidate. This never fails
   an otherwise successful lookup.
 - If the exact key and range are no longer cached in memory when a queued write starts, that write is
@@ -272,12 +274,11 @@ address and length plus its checksum. One read guard retains the entire contiguo
 Multiple entries may share a chunk only when each entry's complete payload and metadata fit inside that chunk.
 An entry spanning multiple chunks owns those chunks exclusively. Its unused tail cannot hold another entry.
 Disk pressure selects individual entries by sampled retrieval value per payload byte, not all owners of a
-shared chunk together. Removing an entry may free no whole chunk. If bounded eviction cannot reclaim enough
-contiguous capacity, the write is skipped rather than scattered across free chunks. Still-retained neighbors
-are not removed merely to empty the chunk.
-The allocator must handle the full size distribution, reclaim
-fragmented capacity with bounded work and rewrite traffic, remain practical at 1-TiB-plus capacities, and
-avoid a cache-wide hot lock. Free-space structures, relocation, and cleaning remain private mechanisms.
+shared chunk together. Removing an entry may free no whole chunk. If eviction exhausts its attempt or chunk
+budget before reclaiming enough contiguous capacity, the write is skipped rather than scattered across free chunks.
+Still-retained neighbors are not removed merely to empty the chunk.
+The allocator must handle the full size distribution, reclaim fragmented capacity with limits on chunks inspected
+and payload bytes rewritten, remain practical at 1-TiB-plus capacities, and avoid a cache-wide hot lock. Free-space structures, relocation, and cleaning remain private mechanisms.
 
 ## 8. Payload I/O modes
 
@@ -343,8 +344,8 @@ It must make it possible to observe:
 
 Actual source GETs and transferred bytes remain application-owned and are instrumented by the comparative
 benchmark harness. Callback counts are not assumed to equal source GETs when application coordination shares
-work. Normal labels and spans must not include object-key contents or other unbounded-cardinality values. Exact
-metric and span inventories are implementation checklists, not product API commitments. An
+work. Normal labels and spans must not include object-key contents or other values whose distinct count grows
+with the workload. Exact metric and span inventories are implementation checklists, not product API commitments. An
 incompatible-format reset must be logged. It does not require a dedicated metric in the MVP.
 
 ## 13. MVP acceptance criteria
@@ -369,7 +370,8 @@ The MVP is complete when tests demonstrate that:
 - shard pressure evicts toward each shard's assigned target, while an oversized download empties its shard and remains cached even when aggregate retained payload exceeds the configured target.
 - pressure-driven in-memory compaction can release unrequested cached payload without changing results, and
   normal access and victim selection avoid full scans of all live shard entries.
-- disk-write queues remain bounded and queue pressure does not block or fail successful lookups.
+- disk-write queues enforce their payload-byte and entry-count limits; queue pressure does not block or fail
+  successful lookups.
 - evicted queued writes cannot later publish stale state, while already-active current writes can complete safely.
 - failed or uncertain disk writes never become disk hits.
 - explicit batches group small entries in immutable 1-MiB chunks with 4-KiB-aligned payload storage.
@@ -378,12 +380,13 @@ The MVP is complete when tests demonstrate that:
 - allocator stress tests report useful utilization, fragmentation, allocation latency, and rewrite traffic
   across the target size distribution.
 - buffered and direct modes return identical requested bytes, and requested direct mode never silently falls back.
-- Linux supports direct mode on a capable filesystem, with simultaneous reads and writes through bounded io_uring submission.
+- Linux supports direct mode on a capable filesystem, with simultaneous reads and writes through io_uring queues
+  that enforce waiting-request and active-request limits.
 - disk hits verify the whole covering entry, return only requested bytes, and do not read neighboring entries.
 - corrupted or uncertain disk bytes always miss and are never returned.
 - restart recovers a safe useful subset after injected crashes.
 - unsupported persistent formats are reset and logged safely.
-- disk capacities of at least 1 TiB are representable with bounded internal accounting.
+- disk capacities of at least 1 TiB are representable with limits on memory used by free-space accounting and entry indexes.
 - the memory-only gate runs exact and expanded downloader controls with 1, 4, 16, and 64 shards through
   32 GiB, compares actual retained payload, and reports policy throughput.
 - the controlled native-Foyer comparison and separate end-to-end prefetch benchmark produce the metrics

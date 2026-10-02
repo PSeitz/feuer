@@ -1,4 +1,4 @@
-//! Bounded best-effort scheduling; one writer drains explicit immutable batches.
+//! Best-effort disk writes: at most 256 queued entries, drained by one writer in batches of at most 64.
 
 mod metrics;
 #[cfg(test)]
@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 const MAX_QUEUED_ENTRIES: usize = 256;
 const MAX_BATCH_ENTRIES: usize = 64;
 
-/// A bounded queue scheduling best-effort disk writes.
+/// A disk-write queue that skips downloads when its entry capacity is exhausted.
 pub(crate) struct DiskWriteQueue {
     sender: mpsc::Sender<PendingDiskWrite>,
     metrics: Arc<DiskWriteQueueMetrics>,

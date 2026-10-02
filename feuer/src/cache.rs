@@ -33,7 +33,7 @@ struct CacheState {
 /// A cloneable handle to one Feuer cache.
 ///
 /// Lookups check memory, then integrity-checked disk, then the per-call callback.
-/// Disk writes are bounded and best-effort. Opening requires Linux direct I/O
+/// Disk writes are best-effort; a full 256-entry queue skips new writes. Opening requires Linux direct I/O
 /// and io_uring. Background recovery adds disk entries incrementally without gating lookups or writes.
 #[derive(Clone)]
 pub struct TieredMemoryDiskCache {
@@ -61,7 +61,7 @@ impl TieredMemoryDiskCache {
     }
 
     /// Opens a cache with metrics registered through `mixtrics`.
-    /// Labels are bounded and contain no object identities or cache names. Caches
+    /// Label values are defined by Feuer and contain no object identities or cache names. Caches
     /// sharing a registry contribute to the same counters and aggregate gauges.
     #[cfg(target_os = "linux")]
     pub async fn open_with_metrics(config: CacheConfig, registry: &BoxedRegistry) -> Result<Self, DiskRangeCacheError> {

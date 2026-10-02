@@ -93,7 +93,7 @@ has no capacity limit and is not persisted across restarts; its memory grows wit
 Scores still decay, measured in requests across all keys.
 
 Memory may trim an entry to previously requested ranges instead of evicting it.
-Trimming uses bounded recent-access events with an age limit, not the full counter set.
+Trimming uses recent-access events with per-object count and age limits, not the full counter set.
 A trimming plan uses a history snapshot; newer accesses do not invalidate it. Cached-range changes
 are still checked before publishing bytes copied outside the memory shard lock.
 

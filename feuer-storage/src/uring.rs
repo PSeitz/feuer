@@ -444,7 +444,7 @@ struct IoQueue {
     directory_lock: Option<Arc<File>>,
     // Eventfd polled alongside the ring so new work need not wait for completion.
     wake_fd: Arc<OwnedFd>,
-    // Bounded waiting requests; receive only into free active slots to preserve backpressure.
+    // Holds up to active.len() waiting requests; receive only into free active slots.
     receiver: mpsc::Receiver<IoRequest>,
     // Owns in-flight requests through completion; CQEs identify their slot indices.
     active: Vec<Option<IoRequest>>,
@@ -566,8 +566,8 @@ impl Drop for IoQueue {
         self.receiver.close();
         if self.active.iter().any(Option::is_some) {
             // An abnormal queue exit cannot prove the kernel has stopped using pointers.
-            // Closing a ring may tear it down asynchronously. Leak only the bounded active
-            // set and file/lock owners rather than risking use-after-free or early reuse.
+            // Closing a ring may tear it down asynchronously. Leak only requests still in active
+            // slots and file/lock owners rather than risking use-after-free or early reuse.
             // Normal shutdown drains all completions and never takes this path.
             tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
             for mut request in self.active.iter_mut().filter_map(Option::take) {

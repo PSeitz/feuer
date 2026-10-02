@@ -21,7 +21,7 @@ impl fmt::Debug for IoOperationMetrics {
 ///
 /// Feuer's public API does not expose this as a statistics snapshot. The
 /// handles emit counters, gauges and histograms through the configured
-/// `mixtrics` registry using only bounded labels.
+/// `mixtrics` registry with read/write operation and success/error outcome labels.
 #[derive(Debug)]
 pub struct IoMetrics {
     read: IoOperationMetrics,
@@ -30,7 +30,7 @@ pub struct IoMetrics {
 }
 
 impl IoMetrics {
-    /// Registers fixed-file I/O metrics using only bounded labels.
+    /// Registers fixed-file I/O metrics with read/write operation and success/error outcome labels.
     pub fn new(registry: &BoxedRegistry) -> Arc<Self> {
         let operations = registry.register_counter_vec(
             "feuer_disk_io_total".into(),

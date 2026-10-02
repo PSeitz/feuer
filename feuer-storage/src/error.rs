@@ -1,6 +1,6 @@
 use std::{collections::TryReserveError, fmt, io, path::PathBuf};
 
-/// One bounded data-file operation.
+/// The directory or data-file operation being performed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IoOperation {
     /// Create the cache directory.
@@ -22,7 +22,7 @@ pub enum IoOperation {
 }
 
 impl IoOperation {
-    /// Returns the stable bounded label used by traces and metrics.
+    /// Returns the operation's fixed string label for traces and metrics.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CreateDirectory => "create_directory",
@@ -43,7 +43,7 @@ impl fmt::Display for IoOperation {
     }
 }
 
-/// The kind of data-file error used for bounded diagnostic labels.
+/// The data-file error category reported in diagnostics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DataFileErrorKind {
     /// The fixed-file configuration is invalid.
@@ -61,7 +61,7 @@ pub enum DataFileErrorKind {
 }
 
 impl DataFileErrorKind {
-    /// Returns the stable bounded label used by traces and metrics.
+    /// Returns the error category's fixed string label for traces and metrics.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidConfiguration => "invalid_configuration",

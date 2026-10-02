@@ -17,7 +17,7 @@ use crate::{ByteRange, ObjectKeyHash, config::read_env_number};
 /// Default maximum entries inspected in one retention-policy sample.
 pub const RECLAIM_SAMPLE_SIZE: usize = 64;
 
-/// Chooses the next bounded, rotating sample from a dense candidate list.
+/// Chooses up to `sample_size` candidates, advancing through the list and wrapping at its end.
 pub fn sample_candidates(next_candidate: &mut usize, candidate_count: usize, sample_size: usize) -> (usize, usize) {
     if candidate_count == 0 {
         return (0, 0);
@@ -39,7 +39,8 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 /// Standalone request history shared by both cache tiers, independent of their shards and entries.
 /// Object keys select one of 64 independently locked history maps; the request clock remains global.
 /// Every distinct key and requested-range counter is retained for this object's lifetime, even after
-/// cache eviction. Recent trimming events remain bounded. History is not persisted across restarts.
+/// cache eviction. Trimming retains at most `MAX_ACCESS_EVENTS_PER_KEY` events per object key.
+/// History is not persisted across restarts.
 pub struct ObjectAccessHistories {
     shards: [Mutex<FxHashMap<ObjectKeyHash, RangeAccessHistory>>; ACCESS_HISTORY_SHARDS],
     clock: AtomicU64,
@@ -164,7 +165,8 @@ impl DecayedAccessCount {
     }
 }
 
-/// Per-range decayed counts for scoring and bounded request events for range trimming.
+/// Per-range decayed counts for scoring and recent request events for range trimming.
+/// Trimming events have a per-object count limit and an age limit measured in requests across all keys.
 /// Distinct requested ranges must not overlap; cached ranges may cover several requests.
 /// Unlike trimming events, distinct counters are never removed or capped.
 #[derive(Default)]

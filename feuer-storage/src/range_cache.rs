@@ -266,7 +266,8 @@ impl DiskRangeCache {
     ///
     /// Entries share a payload chunk only when their complete aligned payloads fit inside it.
     /// Multi-chunk entries own their chunks exclusively. Partially filled chunks are finalized too.
-    /// Pressure eviction is bounded; unavailable capacity causes admission to be skipped, not waited for.
+    /// Each shard batch allows at most 64 eviction attempts and charges at most 4,096 chunks to removed entries.
+    /// Unavailable capacity causes admission to be skipped, not waited for.
     /// Callers bound batch size and concurrency: payload slices are retained until writing completes.
     /// Dropping this future does not abort its detached writer or release storage needed by submitted I/O.
     pub async fn insert_batch(&self, downloads: Vec<(ObjectKeyHash, Download)>) -> Result<usize, DiskRangeCacheError> {
@@ -501,7 +502,8 @@ impl DiskRangeCache {
 }
 
 impl DiskCacheShard {
-    /// Advances bounded policy work and evicts at most one entry, never its neighbors.
+    /// Samples up to `reclaim_sample_size` entries and evicts at most one that fits the remaining chunk budget.
+    /// Consumes one attempt when sampling; removed entries consume their chunk count. Neighbors are not evicted.
     /// Chunk release is left to ownership.
     fn evict_candidate(
         &self,
