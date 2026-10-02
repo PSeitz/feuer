@@ -11,13 +11,14 @@ use std::{
 
 use crate::DiskMetrics;
 
-/// Payload chunks stay immutable while owned; metadata updates require caller-owned synchronization.
 pub(super) const CHUNK_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub(super) struct DiskChunkAllocator {
     free: Arc<Mutex<DiskChunkAvailability>>,
     pub(super) chunk_capacity: u64,
+    /// First chunk address -> reserved region and number of entries using it.
+    payload_chunks: Arc<Mutex<BTreeMap<u64, (DiskRegion, usize)>>>,
 }
 
 /// Free disk-chunk ranges and availability accounting.
@@ -26,9 +27,6 @@ struct DiskChunkAvailability {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
     free_chunk_count_by_start: BTreeMap<u64, u64>,
     available_chunks: u64,
-    // First chunk number and recovery claim bits. Releasing chunks does not clear their bits,
-    // so recovery cannot reserve a previously claimed chunk again.
-    recovery_claims: Option<(u64, Vec<u64>)>,
     metrics: Arc<DiskMetrics>,
 }
 
@@ -50,19 +48,9 @@ impl DiskChunkAvailability {
         }
         let count = chunks.end - chunks.start;
         self.available_chunks -= count;
+        self.metrics.free_chunks.decrease(count);
+        self.metrics.allocated_chunks.increase(count);
         Some(())
-    }
-
-    fn mark_claimed(&mut self, chunks: Range<u64>) {
-        if let Some((start, words)) = &mut self.recovery_claims {
-            for chunk in chunks {
-                if let Some(relative) = chunk.checked_sub(*start)
-                    && let Some(word) = words.get_mut((relative / 64) as usize)
-                {
-                    *word |= 1 << (relative % 64);
-                }
-            }
-        }
     }
 
     fn release(&mut self, chunks: Range<u64>) {
@@ -124,51 +112,40 @@ impl DiskChunkAllocator {
         metrics.free_chunks.increase(chunk_capacity);
         Some(Self {
             chunk_capacity,
+            payload_chunks: Arc::new(Mutex::new(BTreeMap::new())),
             free: Arc::new(Mutex::new(DiskChunkAvailability {
                 free_chunk_count_by_start: BTreeMap::from([(disk_range.start / CHUNK_BYTES, chunk_capacity)]),
                 available_chunks: chunk_capacity,
-                recovery_claims: None,
                 metrics,
             })),
         })
     }
 
-    /// Must run before exposing the allocator to writes. Only the startup scan needs these bits.
-    pub(super) fn start_recovery(&self, start: u64, end: u64) {
-        self.free.lock().unwrap().recovery_claims = Some((
-            start / CHUNK_BYTES,
-            vec![0; ((end - start) / CHUNK_BYTES).div_ceil(64) as usize],
-        ));
-    }
-
-    pub(super) fn finish_recovery(&self) {
-        self.free.lock().unwrap().recovery_claims = None;
-    }
-
-    /// Reserves old chunks for inspection without marking them claimed. Previously claimed chunks
-    /// never recover again, even after their new owners release them.
+    /// Reserves chunks at a known address during startup, before writes are allowed.
     pub(super) fn reserve_for_recovery(&self, first: u64, count: u64) -> Option<DiskRegion> {
         let chunks = first..first.checked_add(count)?;
         let mut free = self.free.lock().unwrap();
-        let (start, words) = free.recovery_claims.as_ref()?;
-        for chunk in chunks.clone() {
-            let relative = chunk.checked_sub(*start)?;
-            if words.get((relative / 64) as usize)? & (1 << (relative % 64)) != 0 {
-                return None;
-            }
-        }
         free.remove_free_chunks(chunks.clone())?;
-        free.metrics.free_chunks.decrease(count);
-        free.metrics.allocated_chunks.increase(count);
-        Some(self.region(chunks, false))
+        Some(self.region(chunks))
     }
 
-    /// Startup payload recovery retains every region and reports metrics for each batch.
-    /// Metadata is already reserved; retained regions prevent payload chunks from being claimed twice.
-    pub(super) fn recover_payload_chunks(&self, first: u64, count: u64) -> Option<DiskRegion> {
-        let chunks = first..first.checked_add(count)?;
-        self.free.lock().unwrap().remove_free_chunks(chunks.clone())?;
-        Some(self.region(chunks, true))
+    /// Reserves a recovered payload or counts another entry using the same chunks.
+    pub(super) fn recover_payload(&self, payload: &Range<u64>) -> Option<()> {
+        let mut chunks = self.payload_chunks.lock().unwrap();
+        if let Some((_, (region, entries))) = chunks.range_mut(..=payload.start).next_back()
+            && region.range().contains(&payload.start)
+        {
+            if payload.end > region.range().end {
+                return None;
+            }
+            *entries += 1;
+        } else {
+            let first = payload.start / CHUNK_BYTES;
+            let region = self.reserve_for_recovery(first, payload.end.div_ceil(CHUNK_BYTES) - first)?;
+            region.mark_recovered();
+            chunks.insert(region.range().start, (region, 1));
+        }
+        Some(())
     }
 
     /// Reserves one contiguous run of whole chunks. Failure consumes no space.
@@ -183,19 +160,37 @@ impl DiskChunkAllocator {
             .find(|(_, length)| **length >= count)?;
         let chunks = start..start + count;
         free.remove_free_chunks(chunks.clone())?;
-        free.mark_claimed(chunks.clone());
-        free.metrics.free_chunks.decrease(count);
-        free.metrics.allocated_chunks.increase(count);
-        Some(self.region(chunks, false))
+        Some(self.region(chunks))
     }
 
-    fn region(&self, chunks: Range<u64>, recovered: bool) -> DiskRegion {
+    /// Retains a written chunk run until all its entries are removed.
+    pub(super) fn retain_payloads(&self, region: DiskRegion, entries: usize) {
+        self.payload_chunks
+            .lock()
+            .unwrap()
+            .insert(region.range().start, (region, entries));
+    }
+
+    /// Removes one entry's use of its chunks; queued writes can still delay reuse.
+    pub(super) fn remove_payload(&self, address: u64) {
+        let mut chunks = self.payload_chunks.lock().unwrap();
+        if let Some((&start, (region, entries))) = chunks.range_mut(..=address).next_back()
+            && region.range().contains(&address)
+        {
+            *entries -= 1;
+            if *entries == 0 {
+                chunks.remove(&start);
+            }
+        }
+    }
+
+    fn region(&self, chunks: Range<u64>) -> DiskRegion {
         DiskRegion {
             range: chunks.start * CHUNK_BYTES..chunks.end * CHUNK_BYTES,
             reservation: Arc::new(ChunkReservation {
                 free: self.free.clone(),
                 chunks,
-                recovered: AtomicBool::new(recovered),
+                recovered: AtomicBool::new(false),
             }),
         }
     }
@@ -208,7 +203,7 @@ pub(super) struct DiskRegion {
     reservation: Arc<ChunkReservation>,
 }
 
-/// Ownership of consecutive whole chunks, shared by entry regions and read guards.
+/// Ownership of consecutive whole chunks, shared by the allocator and queued writes.
 #[derive(Debug)]
 struct ChunkReservation {
     free: Arc<Mutex<DiskChunkAvailability>>,
@@ -234,38 +229,12 @@ impl DiskRegion {
         }
     }
 
-    /// Counts all recovered chunks until their last owner/read guard releases them.
+    /// Counts recovered chunks until the allocator and queued writes release them.
     pub(super) fn mark_recovered(&self) {
-        let mut free = self.reservation.free.lock().unwrap();
-        free.mark_claimed(self.reservation.chunks.clone());
+        let free = self.reservation.free.lock().unwrap();
         if !self.reservation.recovered.swap(true, Ordering::Relaxed) {
             free.metrics.recovered_chunks.increase(self.chunk_count());
         }
-    }
-
-    pub(super) fn read_guard(&self) -> ChunkGuard {
-        ChunkGuard {
-            region: self.slice(self.range()),
-        }
-    }
-}
-
-/// Prevents all reserved chunks from being reused while a read depends on this region.
-/// In-place metadata updates require separate caller-owned read/write synchronization.
-#[derive(Debug)]
-pub(super) struct ChunkGuard {
-    region: DiskRegion,
-}
-
-impl Clone for ChunkGuard {
-    fn clone(&self) -> Self {
-        self.region.read_guard()
-    }
-}
-
-impl ChunkGuard {
-    pub(super) fn range(&self) -> Range<u64> {
-        self.region.range()
     }
 }
 
@@ -288,39 +257,35 @@ mod tests {
     use std::sync::Barrier;
 
     #[test]
-    fn recovery_claims_survive_release_but_inspection_does_not_claim_chunks() {
-        let allocator = DiskChunkAllocator::for_disk_range(3 * CHUNK_BYTES..7 * CHUNK_BYTES).unwrap();
-        allocator.start_recovery(3 * CHUNK_BYTES, 7 * CHUNK_BYTES);
-        let inspected = allocator.reserve_for_recovery(5, 2).unwrap();
-        assert_eq!(inspected.range(), 5 * CHUNK_BYTES..7 * CHUNK_BYTES);
-        assert!(allocator.reserve_for_recovery(5, 1).is_none());
-        let written = allocator.reserve_chunks(1).unwrap();
-        assert_eq!(written.range().start, 3 * CHUNK_BYTES);
-        drop(written);
-        assert!(allocator.reserve_for_recovery(3, 1).is_none());
-        // Even a partly claimed range must fail atomically.
-        assert!(allocator.reserve_for_recovery(3, 2).is_none());
-        drop(inspected);
-        let recovered = allocator.reserve_for_recovery(5, 2).unwrap();
-        recovered.mark_recovered();
-        let guard = recovered.read_guard();
-        drop(recovered);
-        assert_eq!(allocator.available_bytes(), 2 * CHUNK_BYTES);
-        drop(guard);
-        assert_eq!(allocator.available_bytes(), 4 * CHUNK_BYTES);
-        assert!(allocator.reserve_for_recovery(5, 2).is_none());
-        let all = allocator.reserve_chunks(4).unwrap();
-        assert_eq!(all.range(), 3 * CHUNK_BYTES..7 * CHUNK_BYTES);
-        drop(all);
-        allocator.finish_recovery();
-        assert!(allocator.reserve_for_recovery(4, 1).is_none());
+    fn allocator_removes_payloads_without_releasing_shared_chunks_or_queued_writes() {
+        let allocator = DiskChunkAllocator::new(CHUNK_BYTES).unwrap();
+        let write = allocator.reserve_chunks(1).unwrap();
+        allocator.retain_payloads(write.slice(write.range()), 2);
+        allocator.remove_payload(0);
+        assert_eq!(allocator.available_bytes(), 0);
+        allocator.remove_payload(4096);
+        assert_eq!(allocator.available_bytes(), 0);
+        drop(write);
+        assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
+    }
+
+    #[test]
+    fn overlapping_recovery_records_share_chunks_but_cannot_claim_metadata() {
+        let allocator = DiskChunkAllocator::new(2 * CHUNK_BYTES).unwrap();
+        let _metadata = allocator.reserve_for_recovery(0, 1).unwrap();
+        assert!(allocator.recover_payload(&(0..4096)).is_none());
+        assert!(allocator.recover_payload(&(CHUNK_BYTES..CHUNK_BYTES + 4096)).is_some());
+        assert!(allocator.recover_payload(&(CHUNK_BYTES..CHUNK_BYTES + 8192)).is_some());
+        allocator.remove_payload(CHUNK_BYTES);
+        assert_eq!(allocator.available_bytes(), 0);
+        allocator.remove_payload(CHUNK_BYTES);
+        assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
     }
 
     #[test]
     fn writes_and_recovery_cannot_reserve_the_same_chunks_concurrently() {
         for _ in 0..100 {
             let allocator = DiskChunkAllocator::new(2 * CHUNK_BYTES).unwrap();
-            allocator.start_recovery(0, 2 * CHUNK_BYTES);
             let barrier = Arc::new(Barrier::new(2));
             let writer = allocator.clone();
             let writer_barrier = barrier.clone();
@@ -340,7 +305,6 @@ mod tests {
         let (registry, backend) = registry();
         let allocator = DiskChunkAllocator::with_metrics(0..3 * CHUNK_BYTES, DiskMetrics::new(&backend)).unwrap();
         let recovered_chunks = || value(&registry, "feuer_disk_recovered_chunks", &[]);
-        allocator.start_recovery(0, 3 * CHUNK_BYTES);
         let inspected = allocator.reserve_for_recovery(0, 3).unwrap();
         assert_eq!(recovered_chunks(), 0.0);
         drop(inspected);
@@ -349,12 +313,10 @@ mod tests {
         recovered.mark_recovered();
         shared.mark_recovered();
         assert_eq!(recovered_chunks(), 3.0);
-        let guard = shared.read_guard();
-        let other_guard = guard.clone();
-        allocator.finish_recovery();
-        drop((recovered, shared, guard));
+        allocator.retain_payloads(shared, 1);
+        drop(recovered);
         assert_eq!(recovered_chunks(), 3.0);
-        drop(other_guard);
+        allocator.remove_payload(4096);
         assert_eq!(recovered_chunks(), 0.0);
         let written = allocator.reserve_chunks(3).unwrap();
         assert_eq!(recovered_chunks(), 0.0);
@@ -372,7 +334,7 @@ mod tests {
         assert_eq!(chunks("free"), 3.0);
         let region = allocator.reserve_chunks(2).unwrap();
         assert_eq!(chunks("allocated"), 2.0);
-        let guard = region.slice(4096..8192).read_guard();
+        let guard = region.slice(4096..8192);
         drop(region);
         assert_eq!(chunks("free"), 1.0);
         drop(guard);
@@ -441,16 +403,16 @@ mod tests {
     }
 
     #[test]
-    fn slices_and_concurrent_readers_prevent_reuse_of_the_whole_run() {
+    fn queued_writes_prevent_reuse_of_the_whole_run() {
         let allocator = DiskChunkAllocator::new(3 * CHUNK_BYTES).unwrap();
         let region = allocator.reserve_chunks(3).unwrap();
         let first = region.slice(4096..8192);
         let second = region.slice(CHUNK_BYTES..2 * CHUNK_BYTES);
-        let final_guard = first.read_guard();
+        let final_guard = first.slice(first.range());
         let barrier = Arc::new(Barrier::new(9));
         std::thread::scope(|scope| {
             for _ in 0..8 {
-                let guard = second.read_guard();
+                let guard = second.slice(second.range());
                 let barrier = barrier.clone();
                 scope.spawn(move || {
                     barrier.wait();
@@ -541,7 +503,7 @@ mod tests {
                 scope.spawn(move || {
                     for _ in 0..1000 {
                         let region = allocator.reserve_chunks(2).unwrap();
-                        let guard = region.read_guard();
+                        let guard = region.slice(region.range());
                         drop(region);
                         drop(guard);
                     }

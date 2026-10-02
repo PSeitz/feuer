@@ -15,10 +15,7 @@ use feuer_memory::{AlignedBuffer, BufferPool};
 use io_uring::{IoUring, opcode, squeue, types};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{
-    IoOperation,
-    allocation::{ChunkGuard, DiskRegion},
-};
+use crate::{IoOperation, allocation::DiskRegion};
 
 // Buffer addresses, physical offsets, and I/O lengths use this alignment.
 // Opening verifies that the filesystem's direct-I/O requirements divide it.
@@ -131,13 +128,13 @@ impl ReadQueue {
         })
     }
 
-    pub(crate) fn allocate_buffer(&self, length: usize, read_guard: Option<ChunkGuard>) -> io::Result<AlignedIoBuffer> {
-        AlignedIoBuffer::new(length, read_guard, &self.buffer_pool)
+    pub(crate) fn allocate_buffer(&self, length: usize) -> io::Result<AlignedBuffer> {
+        self.buffer_pool.allocate(length)
     }
 
     pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
         let permit = self.handle.reserve_request().await?;
-        let buffer = self.allocate_buffer(length, None)?;
+        let buffer = self.allocate_buffer(length)?;
         Ok(self
             .handle
             .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
@@ -148,16 +145,14 @@ impl ReadQueue {
 
     /// One metadata read. Never waits for channel capacity or allocates a buffer without it.
     /// The scanner retries later when the channel is full; admitted requests run in FIFO order.
-    pub(crate) async fn try_read_recovery_chunk(&self, region: ChunkGuard) -> io::Result<Option<Bytes>> {
+    pub(crate) async fn try_read_recovery_chunk(&self, offset: u64) -> io::Result<Option<Bytes>> {
         let length = MAX_IO_REQUEST_BYTES;
-        let offset = region.range().start;
-        assert_eq!(region.range().end - offset, length as u64);
         let permit = match self.handle.sender.as_ref().unwrap().try_reserve() {
             Ok(permit) => permit,
             Err(mpsc::error::TrySendError::Full(_)) => return Ok(None),
             Err(mpsc::error::TrySendError::Closed(_)) => return Err(queue_stopped_error()),
         };
-        let buffer = self.allocate_buffer(length, Some(region))?;
+        let buffer = self.allocate_buffer(length)?;
         Ok(Some(
             self.handle
                 .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
@@ -171,9 +166,9 @@ impl ReadQueue {
     pub(crate) async fn read_into(
         &self,
         offset: u64,
-        buffer: AlignedIoBuffer,
+        buffer: AlignedBuffer,
         destination: Range<usize>,
-    ) -> io::Result<AlignedIoBuffer> {
+    ) -> io::Result<AlignedBuffer> {
         let permit = self.handle.reserve_request().await?;
         Ok(self
             .handle
@@ -217,45 +212,9 @@ fn queue_stopped_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "io_uring queue stopped")
 }
 
-/// Read memory and disk ownership retained until kernel I/O completes.
-pub(crate) struct AlignedIoBuffer {
-    // Release disk ownership before the allocation can return to its memory pool.
-    read_guard: Option<ChunkGuard>,
-    buffer: AlignedBuffer,
-}
-
-impl AlignedIoBuffer {
-    fn new(length: usize, read_guard: Option<ChunkGuard>, pool: &Arc<BufferPool>) -> io::Result<Self> {
-        Ok(Self {
-            read_guard,
-            buffer: pool.allocate(length)?,
-        })
-    }
-
-    pub(crate) fn capacity(&self) -> usize {
-        self.buffer.capacity()
-    }
-
-    pub(crate) fn into_bytes(self) -> Bytes {
-        // No I/O owns the buffer now; returned bytes must not retain disk regions.
-        drop(self.read_guard);
-        self.buffer.into_bytes()
-    }
-
-    fn as_mut_slice(&mut self) -> &mut [u8] {
-        self.buffer.as_mut_slice()
-    }
-}
-
-impl AsRef<[u8]> for AlignedIoBuffer {
-    fn as_ref(&self) -> &[u8] {
-        self.buffer.as_ref()
-    }
-}
-
 /// Memory retained by a read or vectored write until completion.
 enum IoBuffers {
-    Read(AlignedIoBuffer),
+    Read(AlignedBuffer),
     Write {
         bytes: Vec<Bytes>,
         vectors: Vec<libc::iovec>,
@@ -327,7 +286,7 @@ impl IoBuffers {
         }
     }
 
-    fn into_read(self) -> AlignedIoBuffer {
+    fn into_read(self) -> AlignedBuffer {
         match self {
             Self::Read(buffer) => buffer,
             Self::Write { .. } => unreachable!("write result cannot be used as a read buffer"),

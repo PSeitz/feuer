@@ -1,19 +1,16 @@
 //! Mutable metadata pages. The shard's async I/O lock serializes reads and writes.
-//! Removed records retain their payload reservations until invalidation writes complete.
 //! Writes are not synced to stable storage; recovery is best-effort after a crash.
 
 use std::collections::BTreeSet;
 
 use super::{page_format::*, *};
 
-/// Metadata pages in reserved chunks, with reusable record slots and pending invalidations.
+/// Metadata pages in reserved chunks, with reusable record slots and dirty pages.
 #[derive(Default)]
 pub(super) struct MetadataPages {
     pub(super) chunks: Vec<MetadataChunk>,
     free_slots: Vec<(usize, usize)>,
     dirty_pages: BTreeSet<(usize, usize)>,
-    pending_payload_releases: Vec<DiskRegion>,
-    pub(super) closing: bool,
 }
 
 /// One reserved metadata chunk and its independently checksummed pages.
@@ -22,9 +19,8 @@ pub(super) struct MetadataChunk {
     pub(super) bytes: Vec<u8>,
 }
 
-/// One entry's metadata slot and the store containing it.
+/// One entry's record position in the metadata chunks.
 pub(super) struct MetadataSlot {
-    pages: Weak<Mutex<MetadataPages>>,
     pub(super) chunk: usize,
     pub(super) slot: usize,
 }
@@ -114,9 +110,8 @@ impl MetadataPages {
         self.dirty_pages.insert((chunk, page));
     }
 
-    /// Clears a record and makes its slot reusable.
-    pub(super) fn clear_record(&mut self, chunk: usize, slot: usize) {
-        self.set_record(chunk, slot, &[0; ENTRY_METADATA_BYTES]);
+    /// Recycles a slot without invalidating its old record. Reads validate payload checksums.
+    pub(super) fn release_slot(&mut self, chunk: usize, slot: usize) {
         self.free_slots.push((chunk, slot));
     }
 
@@ -137,22 +132,6 @@ impl MetadataPages {
         self.dirty_pages.insert((chunk_index, page));
         self.free_slots
             .extend((page * RECORDS_PER_PAGE..(page + 1) * RECORDS_PER_PAGE).map(|slot| (chunk_index, slot)));
-    }
-}
-
-impl Drop for DiskEntry {
-    fn drop(&mut self) {
-        if let Some(slot) = &self.metadata_slot
-            && let Some(pages) = slot.pages.upgrade()
-        {
-            let mut pages = pages.lock().unwrap();
-            if !pages.closing {
-                pages.clear_record(slot.chunk, slot.slot);
-                pages
-                    .pending_payload_releases
-                    .push(self.payload_region.slice(self.payload_region.range()));
-            }
-        }
     }
 }
 
@@ -195,32 +174,22 @@ impl DiskCacheShard {
     }
 
     pub(super) fn record_entry(&self, key: &ObjectKeyHash, entry: &mut DiskEntry) {
-        let record = encode_entry_metadata(key, entry.object_range, &entry.payload_region, entry.payload_checksum);
+        let record = encode_entry_metadata(key, entry.object_range, &entry.payload_range, entry.payload_checksum);
         let mut pages = self.metadata.lock().unwrap();
         let (chunk, slot) = pages
             .free_slots
             .pop()
             .expect("metadata slots reserved before packing payloads");
         pages.set_record(chunk, slot, &record);
-        entry.metadata_slot = Some(self.metadata_slot(chunk, slot));
+        entry.metadata_slot = Some(MetadataSlot { chunk, slot });
     }
 
-    pub(super) fn metadata_slot(&self, chunk: usize, slot: usize) -> MetadataSlot {
-        MetadataSlot {
-            pages: Arc::downgrade(&self.metadata),
-            chunk,
-            slot,
-        }
-    }
-
-    /// Snapshot dirty pages without holding a synchronous lock over I/O. Concurrent removals
-    /// create another dirty version and keep their reservations until that version is flushed.
+    /// Called under metadata_io. Slot recycling does not modify page contents.
     pub(super) async fn flush_metadata(&self, file: &DataFile) -> DataFileResult<()> {
-        let (page_locations, payload_release_count, writes) = {
+        let writes: Vec<_> = {
             let pages = self.metadata.lock().unwrap();
-            let page_locations = pages.dirty_pages.clone();
-            let payload_release_count = pages.pending_payload_releases.len();
-            let writes: Vec<_> = page_locations
+            pages
+                .dirty_pages
                 .iter()
                 .map(|&(chunk, page)| {
                     let chunk = &pages.chunks[chunk];
@@ -231,23 +200,12 @@ impl DiskCacheShard {
                         Bytes::copy_from_slice(&chunk.bytes[offset..offset + METADATA_PAGE_BYTES]),
                     )
                 })
-                .collect();
-            (page_locations, payload_release_count, writes)
+                .collect()
         };
-        for (region, bytes) in &writes {
-            file.write_parts(region.slice(region.range()), &[(0, bytes.clone())])
-                .await?;
+        for (region, bytes) in writes {
+            file.write_parts(region, &[(0, bytes)]).await?;
         }
-        let mut pages = self.metadata.lock().unwrap();
-        for ((chunk, page), (_, bytes)) in page_locations.into_iter().zip(writes) {
-            let offset = page * METADATA_PAGE_BYTES;
-            if pages.chunks[chunk].bytes[offset..offset + METADATA_PAGE_BYTES] == bytes[..] {
-                pages.dirty_pages.remove(&(chunk, page));
-            }
-        }
-        // Errors and canceled flushes leave both dirty pages and payload ownership in the store.
-        // Removals arriving during I/O belong to the next flush and retain their reservations.
-        pages.pending_payload_releases.drain(..payload_release_count);
+        self.metadata.lock().unwrap().dirty_pages.clear();
         Ok(())
     }
 }

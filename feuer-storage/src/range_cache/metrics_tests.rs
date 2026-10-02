@@ -254,31 +254,9 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
     cache.insert_batch(vec![("third".into(), download(4))]).await.unwrap();
     assert_eq!(triggering(), 1.0);
 
-    // Evictions still count when a read guard prevents reuse and insertion fails.
-    let guard = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash::from("third")][&0]
-        .payload_region
-        .read_guard();
-    assert_eq!(
-        cache.insert_batch(vec![("blocked".into(), download(4))]).await.unwrap(),
-        0
-    );
-    assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
+    assert_eq!(cache.insert_batch(vec![("next".into(), download(4))]).await.unwrap(), 1);
+    assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
     assert_eq!(triggering(), 2.0);
-    assert_eq!(
-        value(
-            &registry,
-            "feuer_disk_write_entries_total",
-            &[("outcome", "no_capacity")]
-        ),
-        1.0
-    );
-    // No victims remain, so an unsuccessful eviction search must not count.
-    cache
-        .insert_batch(vec![("still-blocked".into(), download(4))])
-        .await
-        .unwrap();
-    assert_eq!(triggering(), 2.0);
-    drop(guard);
 }
 
 #[tokio::test]
@@ -288,8 +266,7 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
     let key = ObjectKeyHash::from("corrupt");
     cache.insert_batch(vec![(key, download(4))]).await.unwrap();
     let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&0]
-        .payload_region
-        .range()
+        .payload_range
         .start;
     cache
         .disk
@@ -316,8 +293,8 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
         1.0
     );
     assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
-    // Both metadata and the payload awaiting invalidation writes remain reserved.
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 0.0);
+    // Only metadata remains reserved; payload reuse does not wait for invalidation writes.
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 1.0);
 }
 
 #[tokio::test]

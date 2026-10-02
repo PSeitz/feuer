@@ -6,7 +6,7 @@ use bytes::Bytes;
 use feuer_types::{ByteRange, ObjectKeyHash};
 use twox_hash::XxHash64;
 
-use crate::allocation::DiskRegion;
+use std::ops::Range;
 
 /// Size in bytes of a metadata page, including its header and padding.
 /// Each entry metadata page holds 84 complete 48-byte records and 16 padding bytes.
@@ -73,7 +73,7 @@ pub(super) fn validate_page<'a>(
 pub(super) fn encode_entry_metadata(
     key: &ObjectKeyHash,
     object_range: ByteRange,
-    payload_region: &DiskRegion,
+    payload_range: &Range<u64>,
     payload_checksum: u64,
 ) -> Bytes {
     let mut bytes = Vec::with_capacity(ENTRY_METADATA_BYTES);
@@ -81,7 +81,7 @@ pub(super) fn encode_entry_metadata(
     for value in [
         object_range.start(),
         object_range.len(),
-        payload_region.range().start,
+        payload_range.start,
         payload_checksum,
     ] {
         bytes.extend_from_slice(&value.to_le_bytes());

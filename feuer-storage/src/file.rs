@@ -16,11 +16,7 @@ use fs4::fs_std::FileExt as LockFileExt;
 use tokio::runtime::Handle;
 use tracing::{Instrument, Span, field};
 
-use crate::{
-    DataFileError, DataFileResult, IoMetrics, IoOperation,
-    allocation::{ChunkGuard, DiskRegion},
-    uring,
-};
+use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, allocation::DiskRegion, uring};
 
 const DATA_FILE_NAME: &str = "data";
 const LOCK_FILE_NAME: &str = ".feuer.lock";
@@ -43,12 +39,10 @@ struct DataFileState {
 ///
 /// # Caller-owned concurrency and cancellation
 ///
-/// Callers must prevent overlapping I/O when either operation is a write. This
-/// applies to physical byte ranges rounded outward to 4 KiB boundaries, not just
-/// the requested bytes of an unaligned read.
-/// Multiple reads may run concurrently. The upper storage layer owns disk-region
-/// allocation and read guards; this file neither checks conflicts nor protects
-/// disk regions from reuse.
+/// Callers must prevent overlapping writes, including physical byte ranges rounded
+/// outward to 4 KiB boundaries. Reads may overlap writes when callers validate the
+/// returned owned buffer against an expected checksum before using its contents.
+/// This file neither checks conflicts nor protects disk regions from reuse.
 ///
 /// Dropping an I/O future does not cancel submitted kernel I/O. In particular,
 /// an abandoned write may still modify disk. Its disk region must remain reserved
@@ -142,8 +136,8 @@ impl DataFile {
 
     /// Reads exactly the requested bytes with at most two partial alignment pages
     /// of overhead. The result may retain alignment padding in its backing allocation.
-    /// Callers must prevent writes to the aligned byte range while this read
-    /// depends on its contents; see [`DataFile`]'s concurrency contract.
+    /// Callers must either prevent overlapping writes or validate the returned
+    /// bytes against an expected checksum; see [`DataFile`]'s concurrency contract.
     pub async fn read_at(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
         self.measure_io(IoOperation::Read, offset, length, async {
             check_range_fits_file(IoOperation::Read, offset, length as u64, self.state.capacity)?;
@@ -153,17 +147,16 @@ impl DataFile {
             let alignment = uring::DIRECT_IO_ALIGNMENT_BYTES as u64;
             let leading_padding_bytes = offset % alignment;
             let aligned_range = offset - leading_padding_bytes..(offset + length as u64).next_multiple_of(alignment);
-            let (bytes, _) = self.read_aligned_range(aligned_range, None).await?;
+            let (bytes, _) = self.read_aligned_range(aligned_range).await?;
             Ok(bytes.slice(leading_padding_bytes as usize..leading_padding_bytes as usize + length))
         })
         .await
     }
 
     /// Reads one contiguous payload into a buffer, omitting final alignment padding.
-    pub(crate) async fn read_region(&self, region: ChunkGuard, length: usize) -> DataFileResult<(Bytes, usize)> {
-        let range = region.range();
+    pub(crate) async fn read_region(&self, range: Range<u64>, length: usize) -> DataFileResult<(Bytes, usize)> {
         self.measure_io(IoOperation::Read, range.start, length, async {
-            let (bytes, capacity) = self.read_aligned_range(range, Some(region)).await?;
+            let (bytes, capacity) = self.read_aligned_range(range).await?;
             assert_eq!(bytes.len(), length.next_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
             Ok((bytes.slice(..length), capacity))
         })
@@ -171,7 +164,7 @@ impl DataFile {
     }
 
     /// Reads a complete metadata chunk, retrying when the read channel is full.
-    /// The caller serializes metadata updates; the guard prevents chunk reuse.
+    /// Recovery finishes before any writes begin.
     pub(crate) async fn read_recovery_chunk(&self, region: &DiskRegion) -> DataFileResult<Bytes> {
         let length = uring::MAX_IO_REQUEST_BYTES;
         let address = region.range().start;
@@ -180,7 +173,7 @@ impl DataFile {
                 let result = self
                     .state
                     .read_queue
-                    .try_read_recovery_chunk(region.read_guard())
+                    .try_read_recovery_chunk(address)
                     .await
                     .map_err(|source| DataFileError::Io {
                         operation: IoOperation::Read,
@@ -282,11 +275,7 @@ impl DataFile {
         result
     }
 
-    async fn read_aligned_range(
-        &self,
-        range: Range<u64>,
-        read_guard: Option<ChunkGuard>,
-    ) -> DataFileResult<(Bytes, usize)> {
+    async fn read_aligned_range(&self, range: Range<u64>) -> DataFileResult<(Bytes, usize)> {
         let operation = IoOperation::Read;
         check_range_fits_file(operation, range.start, range.end - range.start, self.state.capacity)?;
         let buffer_length = usize::try_from(range.end - range.start).map_err(|_| DataFileError::LengthOverflow {
@@ -298,11 +287,7 @@ impl DataFile {
             path: self.state.data_path.clone(),
             source,
         };
-        let mut buffer = self
-            .state
-            .read_queue
-            .allocate_buffer(buffer_length, read_guard)
-            .map_err(io_error)?;
+        let mut buffer = self.state.read_queue.allocate_buffer(buffer_length).map_err(io_error)?;
         for offset in (range.start..range.end).step_by(uring::MAX_IO_REQUEST_BYTES) {
             let destination_offset = (offset - range.start) as usize;
             let read_length = (range.end - offset).min(uring::MAX_IO_REQUEST_BYTES as u64) as usize;

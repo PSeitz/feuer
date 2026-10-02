@@ -36,8 +36,7 @@ pub(super) async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskRa
 
 impl DiskEntry {
     fn single_chunk_start(&self) -> Option<u64> {
-        (self.payload_region.chunk_count() == 1)
-            .then_some(self.payload_region.range().start / CHUNK_BYTES * CHUNK_BYTES)
+        (self.chunk_count() == 1).then_some(self.payload_range.start / CHUNK_BYTES * CHUNK_BYTES)
     }
 }
 
@@ -53,7 +52,7 @@ pub(super) async fn entry_disk_ranges(
     let address = pages.chunks[slot.chunk].region.range().start
         + (slot.slot / page_format::RECORDS_PER_PAGE * METADATA_PAGE_BYTES) as u64;
     let metadata = address..address + METADATA_PAGE_BYTES as u64;
-    (vec![entry.payload_region.range()], vec![metadata])
+    (vec![entry.payload_range.clone()], vec![metadata])
 }
 
 #[tokio::test]
@@ -181,8 +180,8 @@ fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighb
     }
     let mut owners = BTreeMap::<u64, Vec<usize>>::new();
     for (entry_number, (_, entry)) in batch.entries.iter().enumerate() {
-        let first_chunk = entry.payload_region.range().start / CHUNK_BYTES;
-        let end_chunk = entry.payload_region.range().end.div_ceil(CHUNK_BYTES);
+        let first_chunk = entry.payload_range.start / CHUNK_BYTES;
+        let end_chunk = entry.payload_range.end.div_ceil(CHUNK_BYTES);
         assert_eq!(entry.single_chunk_start().is_some(), end_chunk - first_chunk == 1);
         for chunk in first_chunk..end_chunk {
             owners.entry(chunk).or_default().push(entry_number);
@@ -235,7 +234,7 @@ fn failed_payload_growth_leaves_addresses_unchanged() {
             &download(0, CHUNK_BYTES as usize - METADATA_PAGE_BYTES),
         )
         .unwrap();
-    let payload = batch.entries[0].1.payload_region.range();
+    let payload = batch.entries[0].1.payload_range.clone();
     assert_eq!(
         batch.pack_download(
             &allocator,
@@ -245,13 +244,13 @@ fn failed_payload_growth_leaves_addresses_unchanged() {
         Err(1)
     );
     assert_eq!(batch.entries.len(), 1);
-    assert_eq!(batch.entries[0].1.payload_region.range(), payload);
+    assert_eq!(batch.entries[0].1.payload_range, payload);
     // A smaller payload can use the final aligned bytes without moving existing payloads.
     batch
         .pack_download(&allocator, &ObjectKeyHash::from("second"), &download(0, 1))
         .unwrap();
-    assert_eq!(batch.entries[0].1.payload_region.range(), payload);
-    assert_eq!(batch.entries[1].1.payload_region.range(), payload.end..CHUNK_BYTES);
+    assert_eq!(batch.entries[0].1.payload_range, payload);
+    assert_eq!(batch.entries[1].1.payload_range, payload.end..CHUNK_BYTES);
     assert_eq!(batch.regions[0].used_bytes, CHUNK_BYTES);
     assert_eq!(batch.chunk_count(), 1);
 }
@@ -307,7 +306,7 @@ async fn eviction_preserves_a_newer_replacement() {
 }
 
 #[tokio::test]
-async fn multi_chunk_eviction_preserves_an_in_progress_read_until_its_guards_drop() {
+async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
     let key = ObjectKeyHash::from("large");
     let source = download(3, CHUNK_BYTES as usize + 17);
@@ -315,33 +314,24 @@ async fn multi_chunk_eviction_preserves_an_in_progress_read_until_its_guards_dro
     let read = {
         let index = cache.disk.shards[0].entry_index.lock().unwrap();
         let entry = index.covering_entry(&key, source.downloaded_range()).unwrap();
-        PayloadChunkGuard {
+        PayloadRead {
             object_range: entry.object_range,
             payload_checksum: entry.payload_checksum,
-            payload_region: entry.payload_region.read_guard(),
+            payload_range: entry.payload_range.clone(),
         }
     };
-    assert!(
-        !cache
-            .insert(ObjectKeyHash::from("new"), download(0, CHUNK_BYTES as usize))
-            .await
-            .unwrap()
-    );
-    assert!(cache.get(&key, range(3, 4)).await.is_none());
-    assert_eq!(
-        read.read_verified_range(&cache.disk.file, range(3, 20))
-            .await
-            .unwrap()
-            .unwrap()
-            .0,
-        source.bytes().slice(..17)
-    );
-    drop(read);
     assert!(
         cache
             .insert(ObjectKeyHash::from("new"), download(0, CHUNK_BYTES as usize))
             .await
             .unwrap()
+    );
+    assert!(cache.get(&key, range(3, 4)).await.is_none());
+    assert!(
+        read.read_verified_range(&cache.disk.file, range(3, 20))
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -542,7 +532,9 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     assert_eq!(history.clock(), 5); // Raw storage reads do not record a second event.
     history.record_access(&hot, range(50, 51));
     assert_eq!(history.clock(), 6);
-    cache.disk.shards[0].entry_index.lock().unwrap().remove(&hot, 0);
+    let shard = &cache.disk.shards[0];
+    let entry = shard.entry_index.lock().unwrap().remove(&hot, 0).unwrap();
+    shard.remove_payload(entry);
     drop(memory);
     drop(cache);
     assert_eq!(history.recent_requested_ranges(&hot).len(), 5);
@@ -654,7 +646,7 @@ async fn alignment_padding_is_not_part_of_the_entry_checksum() {
 }
 
 #[tokio::test]
-async fn a_written_payload_chunk_is_immutable_until_all_entries_and_readers_release_it() {
+async fn removing_one_shared_payload_does_not_free_its_neighbors_chunks() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let first = ObjectKeyHash::from("first");
     let neighbor = ObjectKeyHash::from("neighbor");
@@ -671,13 +663,10 @@ async fn a_written_payload_chunk_is_immutable_until_all_entries_and_readers_rele
         .read_at(CHUNK_BYTES, CHUNK_BYTES as usize)
         .await
         .unwrap();
-    let read_guard = {
-        let mut index = cache.disk.shards[0].entry_index.lock().unwrap();
-        let entry = index.remove(&first, 3).unwrap();
-        entry.payload_region.read_guard()
-    };
-    // Neither the removed entry's bytes nor the unwritten tail can accept a later batch.
-    assert!(!cache.insert(first, download(100, 1024)).await.unwrap());
+    let shard = &cache.disk.shards[0];
+    let entry = shard.entry_index.lock().unwrap().remove(&first, 3).unwrap();
+    shard.remove_payload(entry);
+    assert!(shard.allocator.reserve_chunks(1).is_none());
     assert_eq!(
         cache
             .disk
@@ -687,11 +676,9 @@ async fn a_written_payload_chunk_is_immutable_until_all_entries_and_readers_rele
             .unwrap(),
         original
     );
-    // Pressure removed the neighbor from lookup, but the reader still prevents reuse.
-    assert!(cache.get(&neighbor, range(7, 4104)).await.is_none());
-    assert!(!cache.insert(first, download(100, 1024)).await.unwrap());
-    drop(read_guard);
+    assert!(cache.get(&neighbor, range(7, 4104)).await.is_some());
     assert!(cache.insert(first, download(100, 1024)).await.unwrap());
+    assert!(cache.get(&neighbor, range(7, 4104)).await.is_none());
     assert_eq!(
         cache.get(&first, range(100, 1124)).await.unwrap(),
         download(100, 1024).bytes()
@@ -851,7 +838,13 @@ async fn long_keys_do_not_allocate_extra_metadata_chunks() {
     );
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), CHUNK_BYTES);
     assert_eq!(cache.get(&key, range(0, 1)).await.unwrap(), download(0, 1).bytes());
-    cache.disk.shards[0].entry_index.lock().unwrap().remove(&key, 0);
+    let entry = cache.disk.shards[0]
+        .entry_index
+        .lock()
+        .unwrap()
+        .remove(&key, 0)
+        .unwrap();
+    cache.disk.shards[0].remove_payload(entry);
     let shard = &cache.disk.shards[0];
     let _io = shard.metadata_io.lock().await;
     shard.flush_metadata(&cache.disk.file).await.unwrap();
@@ -1021,26 +1014,24 @@ async fn canceled_requester_does_not_abort_the_reservation_owner() {
 }
 
 #[tokio::test]
-async fn readers_keep_replaced_payload_reserved_but_results_do_not() {
+async fn read_addresses_and_results_do_not_delay_replaced_payload_reuse() {
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
     let key = ObjectKeyHash::from("object");
     cache.insert(key, download(5, 100)).await.unwrap();
     let (guard, payload_checksum) = {
         let index = cache.disk.shards[0].entry_index.lock().unwrap();
         let entry = index.covering_entry(&key, range(6, 7)).unwrap();
-        (entry.payload_region.read_guard(), entry.payload_checksum)
+        (entry.payload_range.clone(), entry.payload_checksum)
     };
     let result = cache.get(&key, range(6, 7)).await.unwrap();
     cache.insert(key, download(0, 200)).await.unwrap();
     let bytes = cache
         .disk
         .file
-        .read_at(guard.range().start, PAYLOAD_ALIGNMENT_BYTES as usize)
+        .read_at(guard.start, PAYLOAD_ALIGNMENT_BYTES as usize)
         .await
         .unwrap();
     assert_eq!(XxHash64::oneshot(0, &bytes[..100]), payload_checksum);
-    assert!(cache.disk.shards[0].allocator.reserve_chunks(1).is_none());
-    drop(guard);
     let reused = cache.disk.shards[0].allocator.reserve_chunks(1).unwrap();
     assert_eq!(reused.range(), CHUNK_BYTES..2 * CHUNK_BYTES);
     assert_eq!(result, download(6, 1).bytes());
@@ -1243,13 +1234,11 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
 }
 
 #[test]
-fn index_batch_insertion_keeps_covered_ranges() {
-    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
-    let region = allocator.reserve_chunks(1).unwrap();
+fn index_insertion_removes_covered_ranges_and_duplicate_starts() {
     let key = ObjectKeyHash::from("object");
     let (registry, backend) = crate::test_metrics::registry();
     let mut index = DiskEntryIndex::new(DiskMetrics::new(&backend));
-    let mut entries = Vec::from([range(10, 20), range(0, 30), range(15, 16)].map(|object_range| {
+    let entries = [range(10, 20), range(0, 30), range(15, 16), range(0, 30), range(0, 40)].map(|object_range| {
         (
             key,
             DiskEntry {
@@ -1257,23 +1246,24 @@ fn index_batch_insertion_keeps_covered_ranges() {
                 eviction_position: 0,
                 object_range,
                 payload_checksum: 0,
-                payload_region: region.slice(0..4096),
+                payload_range: 0..4096,
                 metadata_slot: None,
             },
         )
-    }));
-    let capacity = entries.capacity();
-    index.insert_batch(&mut entries);
-    assert!(entries.is_empty());
-    assert_eq!(entries.capacity(), capacity);
-    assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 3.0);
+    });
+    let removed: usize = entries
+        .into_iter()
+        .map(|(key, entry)| index.insert(key, entry).len())
+        .sum();
+    assert_eq!(removed, 4);
+    assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 1.0);
     assert_eq!(
         crate::test_metrics::value(&registry, "feuer_disk_payload_bytes", &[]),
-        41.0
+        40.0
     );
-    assert_eq!(index.entries_by_key[&key].len(), 3);
-    assert_eq!(index.entries_by_key[&key][&0].object_range, range(0, 30));
-    assert_eq!(index.eviction_candidates.len(), 3);
+    assert_eq!(index.entries_by_key[&key].len(), 1);
+    assert_eq!(index.entries_by_key[&key][&0].object_range, range(0, 40));
+    assert_eq!(index.eviction_candidates.len(), 1);
     for (position, (key, start)) in index.eviction_candidates.iter().enumerate() {
         assert_eq!(index.entries_by_key[key][start].eviction_position, position);
     }
@@ -1281,12 +1271,10 @@ fn index_batch_insertion_keeps_covered_ranges() {
 
 #[test]
 fn invalidation_preserves_different_contents_but_may_discard_an_identical_replacement() {
-    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
-    let region = allocator.reserve_chunks(1).unwrap();
-    let read = PayloadChunkGuard {
+    let read = PayloadRead {
         object_range: range(0, 3),
         payload_checksum: XxHash64::oneshot(0, b"old"),
-        payload_region: region.slice(8192..12288).read_guard(),
+        payload_range: 8192..12288,
     };
     for replacement in [b"old", b"new"] {
         let mut index = DiskEntryIndex::new(DiskMetrics::noop());
@@ -1297,7 +1285,7 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
                 eviction_position: 0,
                 object_range: range(0, 3),
                 payload_checksum: XxHash64::oneshot(0, replacement),
-                payload_region: region.slice(8192..12288),
+                payload_range: 8192..12288,
                 metadata_slot: None,
             },
         );

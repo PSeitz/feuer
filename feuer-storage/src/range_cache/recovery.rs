@@ -17,69 +17,37 @@ impl DiskRangeCacheState {
         let shard_disk_range = shard_disk_range(self.file.capacity(), self.shards.len(), shard_index);
         // Reserve every metadata chunk before accepting any payload addresses from the records.
         shard.load_metadata_chain(&self.file, shard_disk_range.clone()).await;
-        let mut payload_chunks = BTreeMap::<u64, DiskRegion>::new();
-        let mut payload_ranges = BTreeMap::<u64, u64>::new();
-        let count = shard.metadata.lock().unwrap().chunks.len();
-        let mut entries = Vec::new();
-        for chunk in 0..count {
-            let mut recovered_chunks = 0;
-            {
-                let mut pages = shard.metadata.lock().unwrap();
-                for slot in 0..RECORDS_PER_CHUNK {
-                    let record = pages.chunks[chunk].record(slot);
-                    if record.iter().all(|&byte| byte == 0) {
-                        continue;
+        let mut pages = shard.metadata.lock().unwrap();
+        let mut index = shard.entry_index.lock().unwrap();
+        for chunk in 0..pages.chunks.len() {
+            for slot in 0..RECORDS_PER_CHUNK {
+                let record = pages.chunks[chunk].record(slot);
+                if record.iter().all(|&byte| byte == 0) {
+                    continue;
+                }
+                let entry = decode_entry_metadata(record, shard_disk_range.clone()).filter(|(key, _, _, payload)| {
+                    self.shard_index_for_key(key) == shard_index && shard.allocator.recover_payload(payload).is_some()
+                });
+                let Some((key, object_range, checksum, payload_range)) = entry else {
+                    pages.release_slot(chunk, slot);
+                    continue;
+                };
+                let entry = DiskEntry {
+                    in_flight_read: Weak::new(),
+                    eviction_position: 0,
+                    object_range,
+                    payload_checksum: checksum,
+                    metadata_slot: Some(metadata::MetadataSlot { chunk, slot }),
+                    payload_range,
+                };
+                for entry in index.insert(key, entry) {
+                    shard.allocator.remove_payload(entry.payload_range.start);
+                    if let Some(slot) = entry.metadata_slot {
+                        pages.release_slot(slot.chunk, slot.slot);
                     }
-                    let entry =
-                        decode_entry_metadata(record, shard_disk_range.clone()).filter(|(key, _, _, payload)| {
-                            self.shard_index_for_key(key) == shard_index
-                                && payload_ranges
-                                    .range(..payload.end)
-                                    .next_back()
-                                    .is_none_or(|(_, end)| *end <= payload.start)
-                        });
-                    let Some((key, object_range, checksum, payload)) = entry else {
-                        pages.clear_record(chunk, slot);
-                        continue;
-                    };
-                    let start = payload.start / CHUNK_BYTES * CHUNK_BYTES;
-                    let end = payload.end.next_multiple_of(CHUNK_BYTES);
-                    if let std::collections::btree_map::Entry::Vacant(entry) = payload_chunks.entry(start) {
-                        let Some(region) = shard
-                            .allocator
-                            .recover_payload_chunks(start / CHUNK_BYTES, (end - start) / CHUNK_BYTES)
-                        else {
-                            pages.clear_record(chunk, slot);
-                            continue;
-                        };
-                        recovered_chunks += region.chunk_count();
-                        entry.insert(region);
-                    }
-                    let region = &payload_chunks[&start];
-                    if payload.end > region.range().end {
-                        pages.clear_record(chunk, slot);
-                        continue;
-                    }
-                    let payload_region = region.slice(payload.clone());
-                    let entry = DiskEntry {
-                        in_flight_read: Weak::new(),
-                        eviction_position: 0,
-                        object_range,
-                        payload_checksum: checksum,
-                        metadata_slot: Some(shard.metadata_slot(chunk, slot)),
-                        payload_region,
-                    };
-                    payload_ranges.insert(payload.start, payload.end);
-                    entries.push((key, entry));
                 }
             }
-            // Account for retained payload chunks before publishing the batch.
-            self.metrics.free_chunks.decrease(recovered_chunks);
-            self.metrics.allocated_chunks.increase(recovered_chunks);
-            self.metrics.recovered_chunks.increase(recovered_chunks);
-            shard.entry_index.lock().unwrap().insert_batch(&mut entries);
         }
-        shard.allocator.finish_recovery();
     }
 }
 

@@ -74,7 +74,7 @@ impl DiskMetrics {
         );
         let chunks = registry.register_gauge_vec(
             "feuer_disk_chunks".into(),
-            "Live allocator capacity in 1-MiB chunks; allocated includes owners and read guards".into(),
+            "Live allocator capacity in 1-MiB chunks; allocated includes payloads, metadata, and queued writes".into(),
             &["state"],
         );
         let payload = registry.register_gauge_vec(

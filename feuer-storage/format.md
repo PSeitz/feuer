@@ -57,7 +57,7 @@ A metadata chunk contains 256 independently checksummed **4-KiB pages**:
 | 0–254 | 84 entry records per page: 21,420 records per chunk |
 | 255 | Next metadata chunk's address; `u64::MAX` means there is no next chunk |
 
-Metadata chunks remain reserved while open; cleared record slots are reusable.
+Metadata chunks remain reserved while open; released record slots are reusable without clearing them.
 
 ### Page layout
 
@@ -104,8 +104,9 @@ chunks are not appended to; individual payload holes are not reused.
 1. Complete metadata chunk initialization writes before linking to them.
 2. Complete payload writes before writing entry records, and metadata writes before
    publishing entries in memory. Metadata updates require read/write synchronization.
-3. Complete record invalidation writes before releasing payload chunks for reuse.
-   All entry owners and read guards must also release those chunks.
+3. The allocator releases payload chunks when their last payload is removed and queued
+   writes complete. Released record slots are overwritten by later entries, not invalidated.
+   Readers validate owned buffers against the expected checksum after I/O.
 
 No `fsync` or `fdatasync` is issued. Write completion does not guarantee durability
 or persistence ordering after power loss; recovery is best-effort.
@@ -118,6 +119,9 @@ invalid addresses, cycles, or corrupt links terminate a chain. Corrupt record pa
 are discarded independently.
 
 Metadata chunks are reserved before validating entry records and reconstructing payload
-ownership. Range arithmetic, alignment, file bounds, and conflicting byte ranges
-are checked. Repairs are flushed before subsequent writes reuse space. Closing does
-not invalidate live records. Missing or corrupt payloads become cache misses when read.
+occupancy. Range arithmetic, alignment, and file bounds are checked; payloads cannot
+claim metadata chunks. Overlapping stale records can share payload reservations.
+Duplicate starts and contained ranges are removed while rebuilding the index.
+Repairs are flushed by subsequent writes. Closing does not invalidate live records.
+Stale records may survive reuse; missing or corrupt payloads become cache misses when read,
+subject to the usual checksum-collision limitation.
