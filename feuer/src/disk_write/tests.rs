@@ -51,7 +51,7 @@ fn enqueue(disk_write_queue: &DiskWriteQueue, memory: &MemoryCache, key: &str) {
 }
 
 #[test]
-fn queue_saturation_is_nonblocking_and_bounded_by_entries() {
+fn full_queue_skips_writes_without_waiting_or_rejecting_memory_admission() {
     let memory = MemoryCache::new(1024);
     let (disk_write_queue, mut receiver) = DiskWriteQueue::channel(1);
     enqueue(&disk_write_queue, &memory, "first");

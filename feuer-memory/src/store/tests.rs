@@ -469,7 +469,7 @@ fn access_history_survives_same_object_eviction_during_replacement() {
 }
 
 #[test]
-fn access_history_is_bounded_and_preserves_repeated_exact_requests() {
+fn access_history_caps_event_count_and_preserves_repeated_requests() {
     let cache = cache(1);
     let key = ObjectKeyHash::from("object");
     insert(&cache, key, download(range(0, 1), Bytes::from_static(b"a")));

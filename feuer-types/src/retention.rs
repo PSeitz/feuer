@@ -473,7 +473,7 @@ mod tests {
     }
 
     #[test]
-    fn sampling_is_bounded_and_value_comparison_does_not_overflow() {
+    fn samples_at_most_64_candidates_and_compares_large_costs_per_byte_without_overflow() {
         let mut cursor = 0;
         assert_eq!(sample_candidates(&mut cursor, 0, RECLAIM_SAMPLE_SIZE), (0, 0));
         assert_eq!(sample_candidates(&mut cursor, 100, RECLAIM_SAMPLE_SIZE), (0, 64));
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn approximate_decay_is_monotonic_and_bounded() {
+    fn decayed_count_never_increases_and_relative_error_is_at_most_6_15_percent() {
         let accesses = DecayedAccessCount {
             count: 1.0,
             observed_at_access: 1,
