@@ -57,7 +57,7 @@ impl DiskCacheShard {
         let mut pages = metadata::MetadataPages::default();
         let mut address = shard_disk_range.start;
         while address != NO_CHUNK {
-            if !address.is_multiple_of(CHUNK_BYTES) || !shard_disk_range.contains(&address) {
+            if !address.is_multiple_of(CHUNK_BYTES) {
                 break;
             }
             let Some(mut region) = self.allocator.reserve_for_recovery(address / CHUNK_BYTES, 1) else {
@@ -106,16 +106,14 @@ impl DiskCacheShard {
     }
 }
 
-fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?))
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
 fn valid_payload_range(range: &Range<u64>, shard_disk_range: Range<u64>) -> bool {
-    range.start < range.end
-        && range.start >= shard_disk_range.start
+    range.start >= shard_disk_range.start
         && range.end <= shard_disk_range.end
         && range.start.is_multiple_of(PAYLOAD_ALIGNMENT_BYTES)
-        && range.end.is_multiple_of(PAYLOAD_ALIGNMENT_BYTES)
         && (range.end <= (range.start / CHUNK_BYTES + 1) * CHUNK_BYTES || range.start.is_multiple_of(CHUNK_BYTES))
 }
 
@@ -127,13 +125,12 @@ fn decode_entry_metadata(bytes: &[u8], shard_disk_range: Range<u64>) -> Option<E
     if bytes.len() != ENTRY_METADATA_BYTES {
         return None;
     }
-    let key = ObjectKeyHash(u128::from_le_bytes(bytes[..16].try_into().ok()?));
-    let start = read_u64(bytes, 16)?;
-    let range = ByteRange::new(start, start.checked_add(read_u64(bytes, 24)?)?).ok()?;
-    let checksum = read_u64(bytes, 40)?;
-    let start = read_u64(bytes, 32)?;
-    let length =
-        range.len().checked_add(PAYLOAD_ALIGNMENT_BYTES - 1)? / PAYLOAD_ALIGNMENT_BYTES * PAYLOAD_ALIGNMENT_BYTES;
+    let key = ObjectKeyHash(u128::from_le_bytes(bytes[..16].try_into().unwrap()));
+    let start = read_u64(bytes, 16);
+    let range = ByteRange::new(start, start.checked_add(read_u64(bytes, 24))?).ok()?;
+    let checksum = read_u64(bytes, 40);
+    let start = read_u64(bytes, 32);
+    let length = range.len().checked_next_multiple_of(PAYLOAD_ALIGNMENT_BYTES)?;
     let payload = start..start.checked_add(length)?;
     valid_payload_range(&payload, shard_disk_range).then_some((key, range, checksum, payload))
 }
