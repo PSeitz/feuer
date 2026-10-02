@@ -114,8 +114,8 @@ struct TraceRequest {
 }
 
 impl TraceRequest {
-    /// Checks that the requested range stays within the object's byte bounds.
-    fn check_requested_range_bounds(&self, index: usize) -> Result<(), String> {
+    /// Checks that the requested byte range fits in the object.
+    fn check_range_fits_object(&self, index: usize) -> Result<(), String> {
         if self.requested_range.end() > self.object_size {
             return Err(format!(
                 "operation {index} requests {}..{} beyond object size {}",
@@ -454,7 +454,7 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// Loads the trace workload, validates request order and bounds, and precomputes download ranges.
+/// Loads the trace workload, checks request order and that ranges fit in objects, and precomputes download ranges.
 fn load_trace_workload(args: &ReplayArgs, download_config: DownloadExpansionConfig) -> Result<ReplayWorkload, String> {
     let mut requests = load_trace()?;
     if let Some(operations) = args.operations {
@@ -464,7 +464,7 @@ fn load_trace_workload(args: &ReplayArgs, download_config: DownloadExpansionConf
         return Err("trace is empty".to_owned());
     }
     for (index, request) in requests.iter().enumerate() {
-        request.check_requested_range_bounds(index)?;
+        request.check_range_fits_object(index)?;
         if index > 0 && request.timestamp_millis < requests[index - 1].timestamp_millis {
             return Err(format!(
                 "operation {index} has a timestamp earlier than its predecessor"

@@ -21,9 +21,9 @@ async fn metadata_chains_start_at_each_shards_first_chunk_without_a_sidecar() {
                 .await
                 .unwrap()
         );
-        let bounds = shard_disk_range(cache.disk.file.capacity(), cache.disk.shards.len(), index);
+        let shard_disk_range = shard_disk_range(cache.disk.file.capacity(), cache.disk.shards.len(), index);
         let pages = cache.disk.shards[index].metadata.lock().unwrap();
-        assert_eq!(pages.chunks[0].region.range().start, bounds.start);
+        assert_eq!(pages.chunks[0].region.range().start, shard_disk_range.start);
     }
     assert!(!directory.path().join("recovery-heads").exists());
     let cache = reopen(directory.path(), cache).await;
@@ -327,7 +327,7 @@ async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
 }
 
 #[test]
-fn decoder_rejects_malformed_lengths_and_payload_bounds() {
+fn decoder_rejects_invalid_object_ranges_and_payload_addresses() {
     let allocator = DiskChunkAllocator::for_disk_range(0..4 * CHUNK_BYTES).unwrap();
     let region = allocator.reserve_chunks(1).unwrap();
     let record = encode_entry_metadata(&ObjectKeyHash(1), range(0, 100), &region.slice(0..4096), 9);

@@ -14,9 +14,9 @@ impl DiskRangeCacheState {
     /// Recovers a shard's entries from metadata records before the cache becomes available.
     pub(super) async fn recover_shard(&self, shard_index: usize) {
         let shard = &self.shards[shard_index];
-        let bounds = shard_disk_range(self.file.capacity(), self.shards.len(), shard_index);
+        let shard_disk_range = shard_disk_range(self.file.capacity(), self.shards.len(), shard_index);
         // Reserve every metadata chunk before accepting any payload addresses from the records.
-        shard.load_metadata_chain(&self.file, bounds.clone()).await;
+        shard.load_metadata_chain(&self.file, shard_disk_range.clone()).await;
         let mut payload_chunks = BTreeMap::<u64, DiskRegion>::new();
         let mut payload_ranges = BTreeMap::<u64, u64>::new();
         let count = shard.metadata.lock().unwrap().chunks.len();
@@ -30,13 +30,14 @@ impl DiskRangeCacheState {
                     if record.iter().all(|&byte| byte == 0) {
                         continue;
                     }
-                    let entry = decode_entry_metadata(record, bounds.clone()).filter(|(key, _, _, payload)| {
-                        self.shard_index_for_key(key) == shard_index
-                            && payload_ranges
-                                .range(..payload.end)
-                                .next_back()
-                                .is_none_or(|(_, end)| *end <= payload.start)
-                    });
+                    let entry =
+                        decode_entry_metadata(record, shard_disk_range.clone()).filter(|(key, _, _, payload)| {
+                            self.shard_index_for_key(key) == shard_index
+                                && payload_ranges
+                                    .range(..payload.end)
+                                    .next_back()
+                                    .is_none_or(|(_, end)| *end <= payload.start)
+                        });
                     let Some((key, object_range, checksum, payload)) = entry else {
                         pages.clear_record(chunk, slot);
                         continue;
@@ -84,11 +85,11 @@ impl DiskRangeCacheState {
 
 impl DiskCacheShard {
     /// Reads the metadata chain and resets invalid record pages before reserving payload chunks.
-    async fn load_metadata_chain(&self, file: &DataFile, bounds: Range<u64>) {
+    async fn load_metadata_chain(&self, file: &DataFile, shard_disk_range: Range<u64>) {
         let mut pages = metadata::MetadataPages::default();
-        let mut address = bounds.start;
+        let mut address = shard_disk_range.start;
         while address != NO_CHUNK {
-            if !address.is_multiple_of(CHUNK_BYTES) || !bounds.contains(&address) {
+            if !address.is_multiple_of(CHUNK_BYTES) || !shard_disk_range.contains(&address) {
                 break;
             }
             let Some(region) = self.allocator.reserve_for_recovery(address / CHUNK_BYTES, 1) else {
@@ -141,10 +142,10 @@ fn read_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(offset..offset + 8)?.try_into().ok()?))
 }
 
-fn valid_payload_range(range: &Range<u64>, bounds: Range<u64>) -> bool {
+fn valid_payload_range(range: &Range<u64>, shard_disk_range: Range<u64>) -> bool {
     range.start < range.end
-        && range.start >= bounds.start
-        && range.end <= bounds.end
+        && range.start >= shard_disk_range.start
+        && range.end <= shard_disk_range.end
         && range.start.is_multiple_of(PAYLOAD_ALIGNMENT_BYTES)
         && range.end.is_multiple_of(PAYLOAD_ALIGNMENT_BYTES)
         && (range.end <= (range.start / CHUNK_BYTES + 1) * CHUNK_BYTES || range.start.is_multiple_of(CHUNK_BYTES))
@@ -154,7 +155,7 @@ fn valid_payload_range(range: &Range<u64>, bounds: Range<u64>) -> bool {
 type EntryMetadata = (ObjectKeyHash, ByteRange, u64, Range<u64>);
 
 /// Decodes an entry's metadata, rejecting payload ranges outside the shard or with invalid alignment.
-fn decode_entry_metadata(bytes: &[u8], bounds: Range<u64>) -> Option<EntryMetadata> {
+fn decode_entry_metadata(bytes: &[u8], shard_disk_range: Range<u64>) -> Option<EntryMetadata> {
     if bytes.len() != ENTRY_METADATA_BYTES {
         return None;
     }
@@ -166,7 +167,7 @@ fn decode_entry_metadata(bytes: &[u8], bounds: Range<u64>) -> Option<EntryMetada
     let length =
         range.len().checked_add(PAYLOAD_ALIGNMENT_BYTES - 1)? / PAYLOAD_ALIGNMENT_BYTES * PAYLOAD_ALIGNMENT_BYTES;
     let payload = start..start.checked_add(length)?;
-    valid_payload_range(&payload, bounds).then_some((key, range, checksum, payload))
+    valid_payload_range(&payload, shard_disk_range).then_some((key, range, checksum, payload))
 }
 
 #[cfg(test)]

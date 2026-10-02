@@ -50,8 +50,8 @@ pub enum DataFileErrorKind {
     InvalidConfiguration,
     /// Another cache instance owns the cache directory.
     AlreadyOpen,
-    /// A positional operation exceeds the configured file capacity.
-    OutOfBounds,
+    /// The requested byte range exceeds capacity, including lengths too large to represent.
+    RangeExceedsCapacity,
     /// A request-sized read buffer could not be allocated.
     Allocation,
     /// An operating-system file operation failed.
@@ -61,12 +61,12 @@ pub enum DataFileErrorKind {
 }
 
 impl DataFileErrorKind {
-    /// Returns the error category's fixed string label for traces and metrics.
+    /// Returns the error category's string label for tracing spans.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidConfiguration => "invalid_configuration",
             Self::AlreadyOpen => "already_open",
-            Self::OutOfBounds => "out_of_bounds",
+            Self::RangeExceedsCapacity => "range_exceeds_capacity",
             Self::Allocation => "allocation",
             Self::Io => "io",
             Self::Task => "task",
@@ -99,9 +99,9 @@ pub enum DataFileError {
         /// The rejected data-file path.
         path: PathBuf,
     },
-    /// A positional request does not fit in the configured capacity.
+    /// The requested byte range exceeds the file's capacity.
     #[error("{operation} range at offset {offset} with length {length} exceeds data-file capacity {capacity}")]
-    OutOfBounds {
+    RangeExceedsCapacity {
         /// The rejected operation.
         operation: IoOperation,
         /// The requested file offset.
@@ -159,7 +159,7 @@ impl DataFileError {
         match self {
             Self::InvalidCapacity | Self::InvalidDataFile { .. } => DataFileErrorKind::InvalidConfiguration,
             Self::AlreadyOpen { .. } => DataFileErrorKind::AlreadyOpen,
-            Self::OutOfBounds { .. } | Self::LengthOverflow { .. } => DataFileErrorKind::OutOfBounds,
+            Self::RangeExceedsCapacity { .. } | Self::LengthOverflow { .. } => DataFileErrorKind::RangeExceedsCapacity,
             Self::Allocation { .. } => DataFileErrorKind::Allocation,
             Self::Io { .. } => DataFileErrorKind::Io,
             Self::RuntimeUnavailable | Self::Task { .. } => DataFileErrorKind::Task,
@@ -173,7 +173,7 @@ impl DataFileError {
             Self::AlreadyOpen { .. } => IoOperation::LockDirectory,
             Self::InvalidDataFile { .. } => IoOperation::InspectDataFile,
             Self::RuntimeUnavailable => IoOperation::OpenDataFile,
-            Self::OutOfBounds { operation, .. }
+            Self::RangeExceedsCapacity { operation, .. }
             | Self::LengthOverflow { operation, .. }
             | Self::Io { operation, .. }
             | Self::Task { operation, .. } => *operation,

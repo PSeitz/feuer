@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn bounds_events_without_coalescing_repeated_ranges() {
+    fn keeps_newest_events_without_merging_repeated_ranges() {
         let repeated = range(10, 20);
         let mut history = RangeAccessHistory::default();
         let limit = *MAX_ACCESS_EVENTS_PER_KEY;

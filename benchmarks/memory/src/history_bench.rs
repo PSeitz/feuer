@@ -10,7 +10,7 @@ fn history_recording_contention() {
     let requests = load_trace().unwrap();
     assert!(!requests.is_empty());
     for (index, request) in requests.iter().enumerate() {
-        request.check_requested_range_bounds(index).unwrap();
+        request.check_range_fits_object(index).unwrap();
     }
     let keys: HashSet<_> = requests.iter().map(|request| &request.object_key).collect();
     let ranges: HashSet<_> = requests

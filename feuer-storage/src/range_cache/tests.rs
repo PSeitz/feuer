@@ -1120,7 +1120,9 @@ async fn failed_chunk_write_releases_the_batch_without_publication() {
                 (ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize)),
             ])
             .await,
-        Err(DiskRangeCacheError::DataFile(DataFileError::OutOfBounds { .. }))
+        Err(DiskRangeCacheError::DataFile(
+            DataFileError::RangeExceedsCapacity { .. }
+        ))
     ));
     assert!(cache.get(&ObjectKeyHash::from("small"), range(0, 1)).await.is_none());
     assert!(cache.get(&ObjectKeyHash::from("large"), range(0, 1)).await.is_none());

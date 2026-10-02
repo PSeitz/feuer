@@ -146,7 +146,7 @@ impl DataFile {
     /// depends on its contents; see [`DataFile`]'s concurrency contract.
     pub async fn read_at(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
         self.measure_io(IoOperation::Read, offset, length, async {
-            check_file_bounds(IoOperation::Read, offset, length as u64, self.state.capacity)?;
+            check_range_fits_file(IoOperation::Read, offset, length as u64, self.state.capacity)?;
             if length == 0 {
                 return Ok(Bytes::new());
             }
@@ -212,7 +212,7 @@ impl DataFile {
         assert!(offset.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64));
         assert!(bytes.len().is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
         self.measure_io(IoOperation::Write, offset, bytes.len(), async {
-            check_file_bounds(IoOperation::Write, offset, bytes.len() as u64, self.state.capacity)?;
+            check_range_fits_file(IoOperation::Write, offset, bytes.len() as u64, self.state.capacity)?;
             for start in (0..bytes.len()).step_by(uring::MAX_IO_REQUEST_BYTES) {
                 let end = (start + uring::MAX_IO_REQUEST_BYTES).min(bytes.len());
                 self.state
@@ -242,7 +242,7 @@ impl DataFile {
         let offset = range.start;
         let length = (range.end - range.start) as usize;
         self.measure_io(IoOperation::Write, offset, length, async {
-            check_file_bounds(IoOperation::Write, offset, length as u64, self.state.capacity)?;
+            check_range_fits_file(IoOperation::Write, offset, length as u64, self.state.capacity)?;
             self.state
                 .write_queue
                 .write_parts(offset, length, parts, Some(region))
@@ -288,7 +288,7 @@ impl DataFile {
         read_guard: Option<ChunkGuard>,
     ) -> DataFileResult<(Bytes, usize)> {
         let operation = IoOperation::Read;
-        check_file_bounds(operation, range.start, range.end - range.start, self.state.capacity)?;
+        check_range_fits_file(operation, range.start, range.end - range.start, self.state.capacity)?;
         let buffer_length = usize::try_from(range.end - range.start).map_err(|_| DataFileError::LengthOverflow {
             operation,
             length: usize::MAX,
@@ -418,10 +418,10 @@ fn check_direct_io_alignment(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-/// Checks that the requested bytes fit within file bounds, rejecting offset-plus-length overflow.
-fn check_file_bounds(operation: IoOperation, offset: u64, length: u64, capacity: u64) -> DataFileResult<()> {
+/// Checks that the requested byte range fits in the file, rejecting offset-plus-length overflow.
+fn check_range_fits_file(operation: IoOperation, offset: u64, length: u64, capacity: u64) -> DataFileResult<()> {
     if offset.checked_add(length).is_none_or(|end| end > capacity) {
-        return Err(DataFileError::OutOfBounds {
+        return Err(DataFileError::RangeExceedsCapacity {
             operation,
             offset,
             length,
@@ -517,19 +517,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_out_of_bounds_and_accepts_empty_ranges() {
+    async fn rejects_ranges_exceeding_capacity_and_accepts_empty_ranges() {
         let temp = tempdir().unwrap();
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
         assert_eq!(
             file.read_at(CAPACITY - 1, 2).await.unwrap_err().kind(),
-            DataFileErrorKind::OutOfBounds
+            DataFileErrorKind::RangeExceedsCapacity
         );
         assert_eq!(
             file.write_at(u64::MAX - 4095, &Bytes::from(vec![0; 4096]))
                 .await
                 .unwrap_err()
                 .kind(),
-            DataFileErrorKind::OutOfBounds
+            DataFileErrorKind::RangeExceedsCapacity
         );
         assert!(file.read_at(CAPACITY, 0).await.unwrap().is_empty());
         file.write_at(CAPACITY, &Bytes::new()).await.unwrap();
