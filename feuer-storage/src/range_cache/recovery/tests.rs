@@ -92,7 +92,7 @@ async fn follows_last_page_link_and_recovers_every_record_across_chunks() {
 }
 
 #[tokio::test]
-async fn multiple_batches_update_one_metadata_chunk_and_reuse_record_slots() {
+async fn multiple_batches_update_one_metadata_chunk_and_reuse_entry_metadata() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
     let shard = &cache.disk.shards[0];
     for i in 0..20 {
@@ -127,15 +127,23 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     let shard = &cache.disk.shards[0];
     let entry = shard.entry_index.lock().unwrap().remove(&key, 0).unwrap();
     let address = entry.payload_range.start;
-    let (chunk, slot) = entry.metadata_slot.unwrap();
-    let pages = shard.metadata.lock().unwrap();
-    let record = pages.chunks[chunk].record(slot).to_vec();
+    let (chunk_index, entry_metadata_index) = entry.metadata.unwrap();
+    let metadata = shard.metadata.lock().unwrap();
+    let entry_metadata_bytes = metadata.chunks[chunk_index]
+        .entry_metadata_bytes(entry_metadata_index)
+        .to_vec();
     drop(entry); // Must not lock metadata or release the allocator's payload.
-    assert_eq!(pages.chunks[chunk].record(slot), record);
+    assert_eq!(
+        metadata.chunks[chunk_index].entry_metadata_bytes(entry_metadata_index),
+        entry_metadata_bytes
+    );
     assert!(shard.allocator.reserve_chunks(1).is_none());
     shard.allocator.remove_payload(address);
     assert!(shard.allocator.reserve_chunks(1).is_some());
-    assert_eq!(pages.chunks[chunk].record(slot), record);
+    assert_eq!(
+        metadata.chunks[chunk_index].entry_metadata_bytes(entry_metadata_index),
+        entry_metadata_bytes
+    );
 }
 
 #[tokio::test]
@@ -268,7 +276,7 @@ async fn failed_metadata_flush_does_not_delay_payload_reuse() {
         .await
         .unwrap();
     let _io = shard.metadata_io.lock().await;
-    // Recycling slots produces no metadata writes, even across multiple pages.
+    // Making entry metadata available for overwrite produces no writes, even across multiple pages.
     shard.flush_metadata(&short_file).await.unwrap();
     shard.metadata.lock().unwrap().set_last_chunk_link(NO_CHUNK);
     assert!(shard.flush_metadata(&short_file).await.is_err());
@@ -365,7 +373,7 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
             assert_eq!(index.eviction_candidates, vec![(key, 0)]);
             assert_eq!(index.entries_by_key[&key][&0].eviction_position, 0);
         }
-        assert_eq!(shard.allocator.available_metadata_slots(), RECORDS_PER_CHUNK - 1);
+        assert_eq!(shard.allocator.available_metadata_count(), RECORDS_PER_CHUNK - 1);
         assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 1.0);
         assert_eq!(
             crate::test_metrics::value(&registry, "feuer_disk_payload_bytes", &[]),
@@ -389,10 +397,10 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
             recovered_chunks
         );
         assert!(cache.insert(ObjectKeyHash(3), download(0, 1)).await.unwrap());
-        let (_, slot) = shard.entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(3)][&0]
-            .metadata_slot
+        let (_, entry_metadata_index) = shard.entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(3)][&0]
+            .metadata
             .unwrap();
-        assert_ne!(slot, if second_length == 100 { 0 } else { 1 });
+        assert_ne!(entry_metadata_index, if second_length == 100 { 0 } else { 1 });
         assert_eq!(shard.metadata.lock().unwrap().chunks.len(), 1);
         drop(cache);
         assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 0.0);

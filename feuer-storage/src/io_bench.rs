@@ -23,8 +23,8 @@ impl ReadQueue {
                 "benchmark requires a read-only file",
             ));
         }
-        // Raw read-only benchmarks need no cache directory lock. Retain the same
-        // file in that ownership slot; leave queue and buffer lifetime logic intact.
+        // Raw read-only benchmarks need no cache directory lock. Use the same
+        // file for the directory-lock argument to preserve the queue's ownership logic.
         uring::ReadQueue::new(file.clone(), file, feuer_memory::BufferPool::unpooled()).map(Self)
     }
 

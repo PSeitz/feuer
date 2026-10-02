@@ -18,8 +18,11 @@ pub(super) struct MetadataChunk {
     pub(super) bytes: Vec<u8>,
 }
 
-fn record_offset(slot: usize) -> usize {
-    slot / RECORDS_PER_PAGE * METADATA_PAGE_BYTES + PAGE_HEADER_BYTES + slot % RECORDS_PER_PAGE * ENTRY_METADATA_BYTES
+/// Byte offset of one entry's metadata within a chunk, skipping metadata page headers.
+fn entry_metadata_offset(entry_metadata_index: usize) -> usize {
+    entry_metadata_index / RECORDS_PER_PAGE * METADATA_PAGE_BYTES
+        + PAGE_HEADER_BYTES
+        + entry_metadata_index % RECORDS_PER_PAGE * ENTRY_METADATA_BYTES
 }
 
 impl MetadataChunk {
@@ -67,22 +70,23 @@ impl MetadataChunk {
         Some(u64::from_le_bytes(contents[..8].try_into().ok()?))
     }
 
-    pub(super) fn record(&self, slot: usize) -> &[u8] {
-        let offset = record_offset(slot);
+    /// The 48 bytes describing one entry's key, object range, payload address, and checksum.
+    pub(super) fn entry_metadata_bytes(&self, entry_metadata_index: usize) -> &[u8] {
+        let offset = entry_metadata_offset(entry_metadata_index);
         &self.bytes[offset..offset + ENTRY_METADATA_BYTES]
     }
 }
 
 impl MetadataPages {
-    fn set_record(&mut self, chunk: usize, slot: usize, record: &[u8]) {
-        let offset = record_offset(slot);
-        let bytes = &mut self.chunks[chunk].bytes;
-        bytes[offset..offset + ENTRY_METADATA_BYTES].copy_from_slice(record);
-        let page = slot / RECORDS_PER_PAGE;
+    fn set_entry_metadata(&mut self, chunk_index: usize, entry_metadata_index: usize, entry_metadata: &[u8]) {
+        let offset = entry_metadata_offset(entry_metadata_index);
+        let bytes = &mut self.chunks[chunk_index].bytes;
+        bytes[offset..offset + ENTRY_METADATA_BYTES].copy_from_slice(entry_metadata);
+        let page = entry_metadata_index / RECORDS_PER_PAGE;
         let page_bytes = &mut bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES];
         let checksum = XxHash64::oneshot(0, &page_bytes[8..]);
         page_bytes[..8].copy_from_slice(&checksum.to_le_bytes());
-        self.dirty_pages.insert((chunk, page));
+        self.dirty_pages.insert((chunk_index, page));
     }
 
     pub(super) fn set_last_chunk_link(&mut self, address: u64) {
@@ -94,10 +98,11 @@ impl MetadataPages {
 }
 
 impl DiskCacheShard {
+    /// Ensures metadata capacity for new entries, adding a chunk if needed.
     /// Called under metadata_io, before reserving payload chunks. The allocator returns the
     /// shard's first chunk for a new chain. New chunks are initialized before linking to them.
-    pub(super) async fn ensure_metadata_slots(&self, file: &DataFile, count: usize) -> DataFileResult<bool> {
-        if self.allocator.available_metadata_slots() >= count {
+    pub(super) async fn ensure_metadata_capacity(&self, file: &DataFile, count: usize) -> DataFileResult<bool> {
+        if self.allocator.available_metadata_count() >= count {
             return Ok(true);
         }
         let Some(region) = self.allocator.reserve_chunks(1) else {
@@ -118,14 +123,15 @@ impl DiskCacheShard {
     }
 
     pub(super) fn record_entry(&self, key: &ObjectKeyHash, entry: &mut DiskEntry) {
-        let record = encode_entry_metadata(key, entry.object_range, &entry.payload_range, entry.payload_checksum);
-        let (chunk, slot) = self
+        let entry_metadata =
+            encode_entry_metadata(key, entry.object_range, &entry.payload_range, entry.payload_checksum);
+        let (chunk_index, entry_metadata_index) = self
             .allocator
-            .reserve_metadata_slot()
-            .expect("metadata slots reserved before packing payloads");
+            .reserve_metadata()
+            .expect("metadata capacity ensured before packing payloads");
         let mut pages = self.metadata.lock().unwrap();
-        pages.set_record(chunk, slot, &record);
-        entry.metadata_slot = Some((chunk, slot));
+        pages.set_entry_metadata(chunk_index, entry_metadata_index, &entry_metadata);
+        entry.metadata = Some((chunk_index, entry_metadata_index));
     }
 
     /// Called under metadata_io.

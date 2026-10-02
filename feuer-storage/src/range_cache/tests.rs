@@ -47,10 +47,10 @@ pub(super) async fn entry_disk_ranges(
     let shard = &cache.disk.shards[cache.disk.shard_index_for_key(key)];
     let index = shard.entry_index.lock().unwrap();
     let entry = index.entries_by_key[key].first_key_value().unwrap().1;
-    let (chunk, slot) = entry.metadata_slot.unwrap();
+    let (chunk_index, entry_metadata_index) = entry.metadata.unwrap();
     let pages = shard.metadata.lock().unwrap();
-    let address =
-        pages.chunks[chunk].region.range().start + (slot / page_format::RECORDS_PER_PAGE * METADATA_PAGE_BYTES) as u64;
+    let address = pages.chunks[chunk_index].region.range().start
+        + (entry_metadata_index / page_format::RECORDS_PER_PAGE * METADATA_PAGE_BYTES) as u64;
     let metadata = address..address + METADATA_PAGE_BYTES as u64;
     (vec![entry.payload_range.clone()], vec![metadata])
 }
@@ -1236,7 +1236,7 @@ fn index_insertion_removes_covered_ranges_and_duplicate_starts() {
                 object_range,
                 payload_checksum: 0,
                 payload_range: 0..4096,
-                metadata_slot: None,
+                metadata: None,
             },
         )
     });
@@ -1275,7 +1275,7 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
                 object_range: range(0, 3),
                 payload_checksum: XxHash64::oneshot(0, replacement),
                 payload_range: 8192..12288,
-                metadata_slot: None,
+                metadata: None,
             },
         );
         index.remove_entry_matching_read(&ObjectKeyHash::from("object"), &read);

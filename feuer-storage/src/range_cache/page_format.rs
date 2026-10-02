@@ -1,5 +1,5 @@
 //! Experimental v13 metadata-only chunks. Each chunk contains 255 independently checksummed
-//! record pages and one checksummed next-chunk page. Zero records are unused slots.
+//! record pages and one checksummed next-chunk page. All-zero entry metadata is unused.
 //! Payloads live in separate chunks. Records never cross page boundaries.
 
 use bytes::Bytes;

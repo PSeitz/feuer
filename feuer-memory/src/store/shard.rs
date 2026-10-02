@@ -13,7 +13,7 @@ use crate::{BufferPool, MemoryMetrics};
 /// Minimum requests across all keys since admission before payload compaction is allowed.
 pub(super) const MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION: u64 = 64;
 
-/// An entry's payload bytes, object range, allocation capacity, candidate slot, and admission clock.
+/// An entry's payload bytes, object range, allocation capacity, candidate index, and admission clock.
 struct MemoryEntry {
     /// Exact object interval represented by `bytes`.
     range: ByteRange,
@@ -21,8 +21,8 @@ struct MemoryEntry {
     bytes: Bytes,
     /// Capacity of the backing allocation, possibly larger than the visible payload.
     capacity: u64,
-    /// This entry's slot in the list sampled for trimming or eviction.
-    candidate_slot: usize,
+    /// Index of this entry's candidate in the list sampled for trimming or eviction.
+    candidate_index: usize,
     /// Request clock at admission.
     admitted_at_access: u64,
 }
@@ -99,16 +99,16 @@ struct ReclaimCandidateList {
 
 impl ReclaimCandidateList {
     fn register(&mut self, candidate: ObjectKeyAndRangeStart) -> usize {
-        let slot = self.entries.len();
+        let candidate_index = self.entries.len();
         self.entries.push(candidate);
-        slot
+        candidate_index
     }
 
-    /// Removes `slot` and returns the candidate moved into it, if any.
-    fn remove(&mut self, slot: usize) -> Option<ObjectKeyAndRangeStart> {
-        let last_slot = self.entries.len() - 1;
-        self.entries.swap_remove(slot);
-        let moved_candidate = (slot != last_slot).then(|| self.entries[slot].clone());
+    /// Removes the candidate at this index and returns the candidate moved there, if any.
+    fn remove(&mut self, candidate_index: usize) -> Option<ObjectKeyAndRangeStart> {
+        let last_index = self.entries.len() - 1;
+        self.entries.swap_remove(candidate_index);
+        let moved_candidate = (candidate_index != last_index).then(|| self.entries[candidate_index].clone());
         if self.entries.is_empty() {
             self.cursor = 0;
         } else {
@@ -278,7 +278,7 @@ impl MemoryCacheShard {
     ) {
         self.used_bytes += capacity;
         self.buffer_pool.add_cached(capacity);
-        let candidate_slot = self.candidates.register(ObjectKeyAndRangeStart {
+        let candidate_index = self.candidates.register(ObjectKeyAndRangeStart {
             object_key,
             start: range.start(),
         });
@@ -287,7 +287,7 @@ impl MemoryCacheShard {
             range,
             bytes,
             capacity,
-            candidate_slot,
+            candidate_index,
             admitted_at_access: access_clock,
         };
 
@@ -306,7 +306,7 @@ impl MemoryCacheShard {
     fn insert_trimmed_entry(&mut self, object_key: &ObjectKeyHash, range: ByteRange, bytes: Bytes, access_clock: u64) {
         let capacity = bytes.len() as u64;
         self.buffer_pool.add_cached(capacity);
-        let candidate_slot = self.candidates.register(ObjectKeyAndRangeStart {
+        let candidate_index = self.candidates.register(ObjectKeyAndRangeStart {
             object_key: *object_key,
             start: range.start(),
         });
@@ -315,7 +315,7 @@ impl MemoryCacheShard {
             range,
             bytes,
             capacity,
-            candidate_slot,
+            candidate_index,
             admitted_at_access: access_clock,
         };
         let replaced = entries.by_start.insert(range.start(), entry);
@@ -361,7 +361,7 @@ impl MemoryCacheShard {
             (removed_entry, object_has_no_entries)
         };
 
-        self.remove_eviction_candidate(removed_entry.candidate_slot);
+        self.remove_eviction_candidate(removed_entry.candidate_index);
         if object_has_no_entries {
             self.entries_by_key.remove(object_key);
         }
@@ -371,8 +371,8 @@ impl MemoryCacheShard {
         Some(removed_bytes)
     }
 
-    fn remove_eviction_candidate(&mut self, slot: usize) {
-        let moved_candidate = self.candidates.remove(slot);
+    fn remove_eviction_candidate(&mut self, candidate_index: usize) {
+        let moved_candidate = self.candidates.remove(candidate_index);
         let Some(moved_candidate) = moved_candidate else {
             return;
         };
@@ -381,7 +381,7 @@ impl MemoryCacheShard {
             .get_mut(&moved_candidate.object_key)
             .and_then(|entries| entries.by_start.get_mut(&moved_candidate.start))
             .expect("a moved sampling candidate must still refer to an indexed entry");
-        entry.candidate_slot = slot;
+        entry.candidate_index = candidate_index;
     }
 
     /// Samples up to `reclaim_sample_size` entries and selects the lowest retrieval cost per retained byte.

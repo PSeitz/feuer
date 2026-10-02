@@ -1,4 +1,4 @@
-//! Ownership and reuse of consecutive whole chunks and metadata record positions.
+//! Ownership and reuse of consecutive whole chunks and entry metadata.
 
 use std::{
     collections::BTreeMap,
@@ -18,13 +18,15 @@ pub(super) struct DiskChunkAllocator {
     payload_chunks: Arc<Mutex<BTreeMap<u64, (DiskRegion, usize)>>>,
 }
 
-/// Free disk chunks and metadata record positions, with chunk accounting.
+/// Free disk chunks and entry metadata, with chunk accounting.
 #[derive(Debug)]
 struct DiskAvailability {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
     free_chunk_count_by_start: BTreeMap<u64, u64>,
     available_chunks: u64,
-    metadata_slots: Vec<(usize, usize)>,
+    /// Metadata available for overwrite, identified by (metadata chunk index, entry metadata index).
+    /// Only these indexes are tracked here; disk space is reserved in whole chunks.
+    available_metadata: Vec<(usize, usize)>,
     metrics: Arc<DiskMetrics>,
 }
 
@@ -114,28 +116,34 @@ impl DiskChunkAllocator {
             free: Arc::new(Mutex::new(DiskAvailability {
                 free_chunk_count_by_start: BTreeMap::from([(disk_range.start / CHUNK_BYTES, chunk_capacity)]),
                 available_chunks: chunk_capacity,
-                metadata_slots: Vec::new(),
+                available_metadata: Vec::new(),
                 metrics,
             })),
         })
     }
 
-    /// Registers the record positions in a newly initialized metadata chunk.
-    pub(super) fn add_metadata_chunk(&self, chunk: usize, records: usize) {
+    /// Makes entry metadata in a newly initialized metadata chunk available for overwrite.
+    pub(super) fn add_metadata_chunk(&self, chunk_index: usize, entry_count: usize) {
         let mut free = self.free.lock().unwrap();
-        free.metadata_slots.extend((0..records).rev().map(|slot| (chunk, slot)));
+        free.available_metadata.extend(
+            (0..entry_count)
+                .rev()
+                .map(|entry_metadata_index| (chunk_index, entry_metadata_index)),
+        );
     }
 
-    pub(super) fn available_metadata_slots(&self) -> usize {
-        self.free.lock().unwrap().metadata_slots.len()
+    pub(super) fn available_metadata_count(&self) -> usize {
+        self.free.lock().unwrap().available_metadata.len()
     }
 
-    pub(super) fn reserve_metadata_slot(&self) -> Option<(usize, usize)> {
-        self.free.lock().unwrap().metadata_slots.pop()
+    /// Reserves space to write metadata. Returns (metadata chunk index, entry metadata index).
+    pub(super) fn reserve_metadata(&self) -> Option<(usize, usize)> {
+        self.free.lock().unwrap().available_metadata.pop()
     }
 
-    pub(super) fn release_metadata_slot(&self, slot: (usize, usize)) {
-        self.free.lock().unwrap().metadata_slots.push(slot);
+    /// Allows existing metadata to be overwritten. Does not erase bytes or release chunks.
+    pub(super) fn allow_metadata_overwrite(&self, metadata: (usize, usize)) {
+        self.free.lock().unwrap().available_metadata.push(metadata);
     }
 
     /// Reserves chunks at a known address during startup, before writes are allowed.
@@ -146,21 +154,24 @@ impl DiskChunkAllocator {
         Some(self.region(chunks))
     }
 
-    /// Reserves a recovered payload or counts another entry using the same chunks.
-    pub(super) fn recover_payload(&self, payload: &Range<u64>) -> Option<()> {
-        let mut chunks = self.payload_chunks.lock().unwrap();
-        if let Some((_, (region, entries))) = chunks.range_mut(..=payload.start).next_back()
-            && region.range().contains(&payload.start)
+    /// Reserves a payload's chunks, sharing an existing reservation when it contains the payload.
+    pub(super) fn reserve_payload_chunks(&self, payload_range: &Range<u64>) -> Option<()> {
+        let mut payload_chunks = self.payload_chunks.lock().unwrap();
+        if let Some((_, (region, entry_count))) = payload_chunks.range_mut(..=payload_range.start).next_back()
+            && region.range().contains(&payload_range.start)
         {
-            if payload.end > region.range().end {
+            if payload_range.end > region.range().end {
                 return None;
             }
-            *entries += 1;
+            *entry_count += 1;
         } else {
-            let first = payload.start / CHUNK_BYTES;
-            let mut region = self.reserve_for_recovery(first, payload.end.div_ceil(CHUNK_BYTES) - first)?;
+            let first_chunk_number = payload_range.start / CHUNK_BYTES;
+            let mut region = self.reserve_for_recovery(
+                first_chunk_number,
+                payload_range.end.div_ceil(CHUNK_BYTES) - first_chunk_number,
+            )?;
             region.mark_recovered();
-            chunks.insert(region.range().start, (region, 1));
+            payload_chunks.insert(region.range().start, (region, 1));
         }
         Some(())
     }
@@ -274,9 +285,17 @@ mod tests {
     fn overlapping_recovery_records_share_chunks_but_cannot_claim_metadata() {
         let allocator = DiskChunkAllocator::new(2 * CHUNK_BYTES).unwrap();
         let _metadata = allocator.reserve_for_recovery(0, 1).unwrap();
-        assert!(allocator.recover_payload(&(0..4096)).is_none());
-        assert!(allocator.recover_payload(&(CHUNK_BYTES..CHUNK_BYTES + 4096)).is_some());
-        assert!(allocator.recover_payload(&(CHUNK_BYTES..CHUNK_BYTES + 8192)).is_some());
+        assert!(allocator.reserve_payload_chunks(&(0..4096)).is_none());
+        assert!(
+            allocator
+                .reserve_payload_chunks(&(CHUNK_BYTES..CHUNK_BYTES + 4096))
+                .is_some()
+        );
+        assert!(
+            allocator
+                .reserve_payload_chunks(&(CHUNK_BYTES..CHUNK_BYTES + 8192))
+                .is_some()
+        );
         allocator.remove_payload(CHUNK_BYTES);
         assert_eq!(allocator.available_bytes(), 0);
         allocator.remove_payload(CHUNK_BYTES);

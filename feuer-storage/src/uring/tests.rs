@@ -135,7 +135,7 @@ fn full_ring_does_not_block_the_other_direction() {
 }
 
 #[tokio::test]
-async fn full_active_slots_keep_channel_full_until_completion() {
+async fn active_request_limit_keeps_channel_full_until_completion() {
     let (mut queue, sender) = queue();
     let mut replies = Vec::new();
     for _ in 0..MAX_IN_FLIGHT_READS {
@@ -162,8 +162,8 @@ async fn full_active_slots_keep_channel_full_until_completion() {
 
         queue.ring.submit_and_wait(MAX_IN_FLIGHT_READS).unwrap();
         for completion in queue.ring.completion() {
-            let slot = completion.user_data() as usize;
-            let mut request = queue.active[slot].take().unwrap();
+            let request_index = completion.user_data() as usize;
+            let mut request = queue.active[request_index].take().unwrap();
             assert!(!request.apply_completion_result(completion.result()).unwrap());
             request.send_result(Ok(()));
         }

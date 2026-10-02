@@ -22,7 +22,7 @@ use crate::IoOperation;
 pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = feuer_memory::BUFFER_ALIGNMENT;
 // Maximum bytes transferred by one I/O request, including alignment padding.
 pub(crate) const MAX_IO_REQUEST_BYTES: usize = 1024 * 1024;
-// Each direction has this many active slots plus an equally sized waiting channel.
+// Each direction has this many active requests plus an equally sized waiting channel.
 const MAX_IN_FLIGHT_READS: usize = 64;
 // Local-SSD benchmarks saturated 1-MiB writes at QD8. QD64 added no write-only
 // throughput, but raised write p99 from 4.6 to 47 ms and worsened small-read latency.
@@ -328,14 +328,14 @@ impl IoRequest {
         }
     }
 
-    fn submission_entry(&mut self, fd: i32, slot: usize) -> squeue::Entry {
+    fn submission_entry(&mut self, fd: i32, request_index: usize) -> squeue::Entry {
         self.buffers
             .submission_entry(
                 types::Fd(fd),
                 self.offset + self.completed_bytes as u64,
                 self.destination.start + self.completed_bytes..self.destination.end,
             )
-            .user_data(slot as u64)
+            .user_data(request_index as u64)
     }
 
     /// Applies a kernel completion result to the completed-byte count.
@@ -389,9 +389,9 @@ struct IoQueue {
     directory_lock: Option<Arc<File>>,
     // Eventfd polled alongside the ring so new work need not wait for completion.
     wake_fd: Arc<OwnedFd>,
-    // Holds up to active.len() waiting requests; receive only into free active slots.
+    // Holds up to active.len() waiting requests; receive only when the active array has room.
     receiver: mpsc::Receiver<IoRequest>,
-    // Owns in-flight requests through completion; CQEs identify their slot indices.
+    // Owns in-flight requests through completion; kernel completions identify their array indexes.
     active: Vec<Option<IoRequest>>,
 }
 
@@ -401,12 +401,17 @@ impl IoQueue {
         let mut completions = Vec::with_capacity(self.active.len());
         loop {
             completions.extend(self.ring.completion().map(|cqe| (cqe.user_data(), cqe.result())));
-            for (slot, result) in completions.drain(..) {
-                let slot = slot as usize;
-                let request = self.active[slot].as_mut().expect("completion for inactive slot");
+            for (request_index, result) in completions.drain(..) {
+                let request_index = request_index as usize;
+                let request = self.active[request_index]
+                    .as_mut()
+                    .expect("completion for inactive request");
                 match request.apply_completion_result(result) {
-                    Ok(true) => self.queue_active_request(slot),
-                    result => self.active[slot].take().unwrap().send_result(result.map(|_| ())),
+                    Ok(true) => self.queue_active_request(request_index),
+                    result => self.active[request_index]
+                        .take()
+                        .unwrap()
+                        .send_result(result.map(|_| ())),
                 }
             }
             let disconnected = self.receive_requests();
@@ -430,11 +435,11 @@ impl IoQueue {
         }
     }
 
-    /// Receives uncanceled requests into free active slots and prepares their submissions.
+    /// Receives uncanceled requests into the active array where it is empty and prepares their submissions.
     /// Returns true when the channel is disconnected and drained.
     fn receive_requests(&mut self) -> bool {
-        for slot in 0..self.active.len() {
-            if self.active[slot].is_some() {
+        for request_index in 0..self.active.len() {
+            if self.active[request_index].is_some() {
                 continue;
             }
             let request = loop {
@@ -445,25 +450,25 @@ impl IoQueue {
                     Err(mpsc::error::TryRecvError::Disconnected) => return true,
                 }
             };
-            self.active[slot] = Some(request);
-            self.queue_active_request(slot);
+            self.active[request_index] = Some(request);
+            self.queue_active_request(request_index);
         }
         false
     }
 
     /// Queues the active request's remaining I/O in the ring without submitting it to the kernel yet.
-    fn queue_active_request(&mut self, slot: usize) {
-        let entry = self.active[slot]
+    fn queue_active_request(&mut self, request_index: usize) {
+        let entry = self.active[request_index]
             .as_mut()
             .unwrap()
-            .submission_entry(self.file.as_ref().unwrap().as_raw_fd(), slot);
-        // SAFETY: all referenced resources are owned by the active slot through completion.
-        // The ring is sized for all active slots, each with at most one submitted or queued SQE.
+            .submission_entry(self.file.as_ref().unwrap().as_raw_fd(), request_index);
+        // SAFETY: all referenced resources are owned by the active request through completion.
+        // The ring is sized for all active requests, each with at most one submitted or queued SQE.
         unsafe {
             self.ring
                 .submission()
                 .push(&entry)
-                .expect("ring sized for all active slots")
+                .expect("ring sized for all active requests")
         };
     }
 
@@ -511,8 +516,8 @@ impl Drop for IoQueue {
         self.receiver.close();
         if self.active.iter().any(Option::is_some) {
             // An abnormal queue exit cannot prove the kernel has stopped using pointers.
-            // Closing a ring may tear it down asynchronously. Leak only requests still in active
-            // slots and file/lock owners rather than risking use-after-free or early reuse.
+            // Closing a ring may tear it down asynchronously. Leak only active requests
+            // and file/lock owners rather than risking use-after-free or early reuse.
             // Normal shutdown drains all completions and never takes this path.
             tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
             for mut request in self.active.iter_mut().filter_map(Option::take) {

@@ -100,7 +100,7 @@ struct UnwrittenShardBatch {
 /// Verified bytes or failure shared by concurrent reads of one stored entry.
 type EntryReadResult = OnceCell<Result<(Bytes, usize), DiskLookupOutcome>>;
 
-/// One entry's object range, payload disk range and checksum, metadata slot, eviction position, and shared read.
+/// One entry's object range, payload disk range and checksum, metadata, eviction position, and shared read.
 struct DiskEntry {
     // In-flight deduplication: concurrent readers share one disk read and checksum verification.
     // Only concurrent callers retain the result; the index must not cache payload bytes.
@@ -109,7 +109,8 @@ struct DiskEntry {
     object_range: ByteRange,
     payload_checksum: u64,
     payload_range: Range<u64>,
-    metadata_slot: Option<(usize, usize)>,
+    /// Metadata chunk and entry metadata indexes identifying this entry's 48-byte disk metadata.
+    metadata: Option<(usize, usize)>,
 }
 
 /// The disk address, object range, and expected checksum for one payload read.
@@ -332,7 +333,9 @@ impl DiskRangeCache {
                             let previous_entry_count = batch.entries.len();
                             let previous_chunks_left = chunks_left;
                             loop {
-                                let ready = match shard.ensure_metadata_slots(&disk.file, batch.entries.len() + 1).await
+                                let ready = match shard
+                                    .ensure_metadata_capacity(&disk.file, batch.entries.len() + 1)
+                                    .await
                                 {
                                     Ok(ready) => ready,
                                     Err(error) => {
@@ -557,12 +560,12 @@ impl DiskEntry {
 }
 
 impl DiskCacheShard {
-    /// Return an entry's payload usage and record position to the allocator. Neither index removal nor
-    /// entry destruction has side effects on disk ownership or metadata.
+    /// Removes an entry's use of payload chunks and makes its entry metadata available for overwrite.
+    /// Neither index removal nor entry destruction has side effects on disk ownership or metadata.
     fn remove_payload(&self, entry: DiskEntry) {
         self.allocator.remove_payload(entry.payload_range.start);
-        if let Some(slot) = entry.metadata_slot {
-            self.allocator.release_metadata_slot(slot);
+        if let Some(metadata) = entry.metadata {
+            self.allocator.allow_metadata_overwrite(metadata);
         }
     }
 }
@@ -705,7 +708,7 @@ impl UnwrittenShardBatch {
                 object_range,
                 payload_checksum,
                 payload_range,
-                metadata_slot: None,
+                metadata: None,
             },
         ));
         Ok(())
