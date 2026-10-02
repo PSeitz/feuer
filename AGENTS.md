@@ -25,6 +25,7 @@ Each entry's payload occupies one contiguous disk byte range, with no metadata g
 - Naming is important. Prefer concrete, descriptive names that explain what something represents or protects.
 - Describe what a type represents in plain language before proposing its name. Derive the name from that description, using its concrete terms rather than substituting conventional labels. Check every meaningful word in the proposed name against the description. If it is absent, revise the name, not the description to justify it.
 - Do not use "extent" in names or explanations. Use concrete, descriptive terms such as "disk region" or "cached byte range" instead.
+- Do not use "bounded" in names. It doesn't mean anything.
 - Use `chunk` for a 1-MiB disk chunk, not `unit` or `block`. Use `page` for a 4-KiB metadata page. Payload chunks are not organized into pages. Payload is plain bytes in 4-KiB-aligned disk byte ranges; metadata chunks contain 4-KiB pages.
 - Use `DiskRegion` for a reserved byte range in the backing file.
 - Use `DiskRegionReadGuard` for the guard that prevents a disk region from being reused while a read depends on it. In-place metadata updates require separate read/write synchronization. Multiple reads may hold guards concurrently. Eviction may remove the cache entry, but reuse must wait until all guards are released.
