@@ -26,8 +26,8 @@ Small payloads share chunks within an explicit batch. Each complete aligned payl
 its shared chunk. Larger entries reserve consecutive whole chunks exclusively, including unused
 tails. The allocator retains payload reservations; index entries and readers hold only addresses.
 Individual payload holes are never reused. `src/allocation.rs` tracks coalesced free chunk runs;
-`DiskRegion` slices share reservations between the allocator and queued writes. Scattered chunks
-are never combined for one entry.
+each `DiskRegion` has one owner: a batch, the allocator, or a metadata chunk. I/O requests carry
+addresses and buffers, not reservations. Scattered chunks are never combined for one entry.
 
 Metadata pages are mutable. A shard's async metadata I/O lock serializes reads and updates, separately
 from allocator ownership. Its short synchronous metadata lock protects cached page bytes, free slots,
@@ -53,10 +53,10 @@ Publication is not transactional across shards. `insert_batch_checked` retains c
 invokes the synchronous publication check under the index lock. Rejected and superseded entries
 release their payload occupancy and metadata slots without invalidation writes.
 
-Each queued write retains its reserved region through completion despite caller cancellation.
-The detached writer finishes submitted I/O. Failed metadata updates leave dirty pages available
-for retry without preventing payload reuse. An abnormal queue failure retains active I/O resources
-when completion cannot be established.
+The detached writer retains its batch reservations during normal writes. Queued I/O retains buffers,
+not disk space: an abandoned write can overwrite a reused payload, producing a checksum miss.
+Failed metadata updates leave dirty pages available for retry without preventing payload reuse.
+An abnormal queue failure retains active I/O resources when completion cannot be established.
 
 Callers bound batch size and concurrency. Payload buffers and cached metadata pages are outside the
 raw I/O queue's memory budget. Metadata writes add foreground write cost; this layout's write
@@ -81,8 +81,8 @@ Free capacity in another shard cannot satisfy admission.
 Index removal and entry destruction change neither metadata nor disk occupancy. Eviction explicitly
 releases the allocator's payload reservation and recycles its metadata slot without changing the
 old record. The allocator keeps one reservation and entry count per chunk run. Shared chunks become
-free after their last entry is removed and queued writes complete, without waiting for readers. Payload chunks described by the same metadata chunk do not share
-lifetimes. Metadata updates require no metadata reads because pages are cached in memory.
+free after their last entry is removed, without waiting for readers or queued writes. Payload chunks
+described by the same metadata chunk do not share lifetimes. Metadata updates require no metadata reads because pages are cached in memory.
 Closing the in-memory index does not invalidate live entries needed by the next open.
 
 ## Format and recovery

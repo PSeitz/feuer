@@ -128,7 +128,7 @@ pub enum DiskRangeCacheError {
     /// Raw storage failed.
     #[error(transparent)]
     DataFile(#[from] DataFileError),
-    /// The task that owns a disk write failed; queued writes retain their chunks until completion.
+    /// The task performing a disk write failed; submitted I/O may still finish.
     #[error("disk write task failed: {0}")]
     WriteTaskFailed(#[source] tokio::task::JoinError),
 }
@@ -260,7 +260,7 @@ impl DiskRangeCache {
     /// Each shard batch allows at most 64 eviction attempts and charges at most 4,096 chunks to removed entries.
     /// Unavailable capacity causes admission to be skipped, not waited for.
     /// Callers bound batch size and concurrency: payload slices are retained until writing completes.
-    /// Dropping this future does not abort its detached writer or release storage needed by submitted I/O.
+    /// Dropping this future does not abort its detached writer.
     pub async fn insert_batch(&self, downloads: Vec<(ObjectKeyHash, Download)>) -> Result<usize, DiskRangeCacheError> {
         self.insert_batch_checked(
             downloads
@@ -737,7 +737,7 @@ impl UnwrittenShardBatch {
                 if parts.first().is_none_or(|(start, _)| *start != 0) {
                     parts.insert(0, (0, Bytes::new()));
                 }
-                let chunk = prepared.region.slice(address + offset..address + offset + CHUNK_BYTES);
+                let chunk = address + offset..address + offset + CHUNK_BYTES;
                 if let Err(error) = file.write_parts(chunk, &parts).await {
                     tracing::warn!(target: "feuer::storage", %error, "batch write failed");
                     return Err(error.into());

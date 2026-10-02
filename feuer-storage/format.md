@@ -104,9 +104,10 @@ chunks are not appended to; individual payload holes are not reused.
 1. Complete metadata chunk initialization writes before linking to them.
 2. Complete payload writes before writing entry records, and metadata writes before
    publishing entries in memory. Metadata updates require read/write synchronization.
-3. The allocator releases payload chunks when their last payload is removed and queued
-   writes complete. Released record slots are overwritten by later entries, not invalidated.
-   Readers validate owned buffers against the expected checksum after I/O.
+3. The allocator releases payload chunks when their last entry is removed. Neither reads
+   nor queued writes reserve disk space. Released record slots are overwritten by later entries,
+   not invalidated. Readers validate owned buffers against the expected checksum after I/O;
+   late writes to reused payloads can cause checksum misses.
 
 No `fsync` or `fdatasync` is issued. Write completion does not guarantee durability
 or persistence ordering after power loss; recovery is best-effort.

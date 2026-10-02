@@ -16,7 +16,7 @@ use fs4::fs_std::FileExt as LockFileExt;
 use tokio::runtime::Handle;
 use tracing::{Instrument, Span, field};
 
-use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, allocation::DiskRegion, uring};
+use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, uring};
 
 const DATA_FILE_NAME: &str = "data";
 const LOCK_FILE_NAME: &str = ".feuer.lock";
@@ -39,20 +39,14 @@ struct DataFileState {
 ///
 /// # Caller-owned concurrency and cancellation
 ///
-/// Callers must prevent overlapping writes, including physical byte ranges rounded
-/// outward to 4 KiB boundaries. Reads may overlap writes when callers validate the
-/// returned owned buffer against an expected checksum before using its contents.
 /// This file neither checks conflicts nor protects disk regions from reuse.
+/// Overlapping I/O can overwrite or mix disk contents. Callers must either serialize
+/// conflicting access or validate returned buffers against expected checksums and
+/// accept mismatches as cache misses.
 ///
-/// Dropping an I/O future does not cancel submitted kernel I/O. In particular,
-/// an abandoned write may still modify disk. Its disk region must remain reserved
-/// and protected against conflicting access until the submitted I/O completes.
-/// Keep the write future running to completion in the task that owns the region;
-/// abandoning the result must not abort that task or release its reservation.
-/// On queue failure, do not reuse regions whose completion is unknown.
-/// Submitted buffers remain owned by this I/O layer until completion, even when
-/// the caller drops its future. A canceled read whose result is discarded no
-/// longer requires its disk contents to remain unchanged.
+/// Dropping an I/O future does not cancel submitted kernel I/O. An abandoned write
+/// can overwrite a reused region, even after a newer write completes. The queue
+/// retains I/O buffers until completion, but holds no disk reservations.
 ///
 /// Capacity must be a positive multiple of 4096. Opening fails
 /// if io_uring or verified O_DIRECT alignment is unavailable; there is no fallback.
@@ -165,9 +159,8 @@ impl DataFile {
 
     /// Reads a complete metadata chunk, retrying when the read channel is full.
     /// Recovery finishes before any writes begin.
-    pub(crate) async fn read_recovery_chunk(&self, region: &DiskRegion) -> DataFileResult<Bytes> {
+    pub(crate) async fn read_recovery_chunk(&self, address: u64) -> DataFileResult<Bytes> {
         let length = uring::MAX_IO_REQUEST_BYTES;
-        let address = region.range().start;
         self.measure_io(IoOperation::Read, address, length, async {
             loop {
                 let result = self
@@ -192,11 +185,9 @@ impl DataFile {
     /// Writes bytes at a 4096-byte-aligned offset; the byte count must also be a multiple of 4096.
     ///
     /// Retains aligned byte slices directly; copies unaligned inputs into aligned
-    /// buffers of at most 1 MiB each. Callers must protect the full aligned byte range from
-    /// conflicting access through completion.
-    /// Dropping this future may leave a partial write and does not stop submitted
-    /// writes: retain the disk region until they complete, as described in
-    /// [`DataFile`]'s cancellation contract. Publish a cached byte range only after success.
+    /// buffers of at most 1 MiB each. Dropping this future may leave a partial write
+    /// and does not stop submitted writes; see [`DataFile`]'s concurrency contract.
+    /// Publish a cached byte range only after success.
     ///
     /// # Panics
     ///
@@ -210,12 +201,7 @@ impl DataFile {
                 let end = (start + uring::MAX_IO_REQUEST_BYTES).min(bytes.len());
                 self.state
                     .write_queue
-                    .write_parts(
-                        offset + start as u64,
-                        end - start,
-                        &[(0, bytes.slice(start..end))],
-                        None,
-                    )
+                    .write_parts(offset + start as u64, end - start, &[(0, bytes.slice(start..end))])
                     .await
                     .map_err(|source| DataFileError::Io {
                         operation: IoOperation::Write,
@@ -229,16 +215,15 @@ impl DataFile {
     }
 
     /// Writes an aligned region of at most 1 MiB from parts starting at zero, without
-    /// an intermediate region buffer. Gaps are zero-filled. The queue retains ownership until completion.
-    pub(crate) async fn write_parts(&self, region: DiskRegion, parts: &[(usize, Bytes)]) -> DataFileResult<()> {
-        let range = region.range();
+    /// an intermediate region buffer. Gaps are zero-filled. The queue retains only I/O buffers.
+    pub(crate) async fn write_parts(&self, range: Range<u64>, parts: &[(usize, Bytes)]) -> DataFileResult<()> {
         let offset = range.start;
         let length = (range.end - range.start) as usize;
         self.measure_io(IoOperation::Write, offset, length, async {
             check_range_fits_file(IoOperation::Write, offset, length as u64, self.state.capacity)?;
             self.state
                 .write_queue
-                .write_parts(offset, length, parts, Some(region))
+                .write_parts(offset, length, parts)
                 .await
                 .map_err(|source| DataFileError::Io {
                     operation: IoOperation::Write,

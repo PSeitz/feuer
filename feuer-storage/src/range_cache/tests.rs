@@ -1123,7 +1123,7 @@ async fn failed_chunk_write_releases_the_batch_without_publication() {
 }
 
 #[test]
-fn chunk_write_owner_holds_shared_storage_until_released() {
+fn unwritten_batch_owns_its_chunks() {
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
     let mut batch = UnwrittenShardBatch::default();
     batch
@@ -1132,14 +1132,8 @@ fn chunk_write_owner_holds_shared_storage_until_released() {
     batch
         .pack_download(&allocator, &ObjectKeyHash::from("b"), &download(0, 10))
         .unwrap();
-    let owners: Vec<_> = batch
-        .regions
-        .iter()
-        .map(|chunk| chunk.region.slice(chunk.region.range()))
-        .collect();
-    drop(batch);
     assert_eq!(allocator.available_bytes(), 0);
-    drop(owners);
+    drop(batch);
     assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
 }
 

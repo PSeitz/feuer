@@ -423,9 +423,10 @@ async fn stale_metadata_after_payload_reuse_recovers_as_a_checksum_miss() {
     cache
         .disk
         .file
-        .write_parts(reused, &[(0, Bytes::from(vec![99; CHUNK_BYTES as usize]))])
+        .write_parts(reused.range(), &[(0, Bytes::from(vec![99; CHUNK_BYTES as usize]))])
         .await
         .unwrap();
+    drop(reused);
     let cache = reopen(directory.path(), cache).await;
     assert!(cache.contains(&key, range(0, 100)));
     assert!(cache.get(&key, range(0, 100)).await.is_none());

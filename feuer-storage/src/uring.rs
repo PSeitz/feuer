@@ -15,7 +15,7 @@ use feuer_memory::{AlignedBuffer, BufferPool};
 use io_uring::{IoUring, opcode, squeue, types};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{IoOperation, allocation::DiskRegion};
+use crate::IoOperation;
 
 // Buffer addresses, physical offsets, and I/O lengths use this alignment.
 // Opening verifies that the filesystem's direct-I/O requirements divide it.
@@ -192,17 +192,11 @@ impl WriteQueue {
 
     /// Writes parts at aligned offsets, starting at zero; gaps become zero.
     /// Aligned payload slices are retained directly; only other bytes need a copy.
-    pub(crate) async fn write_parts(
-        &self,
-        offset: u64,
-        length: usize,
-        parts: &[(usize, Bytes)],
-        region: Option<DiskRegion>,
-    ) -> io::Result<()> {
+    pub(crate) async fn write_parts(&self, offset: u64, length: usize, parts: &[(usize, Bytes)]) -> io::Result<()> {
         assert!(length > 0 && length <= MAX_IO_REQUEST_BYTES);
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         let permit = self.handle.reserve_request().await?;
-        let buffers = IoBuffers::from_write_parts(length, parts, region)?;
+        let buffers = IoBuffers::from_write_parts(length, parts)?;
         self.handle.submit_and_wait(offset, buffers, 0..length, permit).await?;
         Ok(())
     }
@@ -218,15 +212,13 @@ enum IoBuffers {
     Write {
         bytes: Vec<Bytes>,
         vectors: Vec<libc::iovec>,
-        // Retained through completion, even if the caller drops its future.
-        _region: Option<DiskRegion>,
     },
 }
 
 impl IoBuffers {
     /// Builds buffers from write parts, retaining aligned slices and copying the rest with zero padding.
     /// This prepares memory only; it does not issue a disk write.
-    fn from_write_parts(length: usize, parts: &[(usize, Bytes)], region: Option<DiskRegion>) -> io::Result<Self> {
+    fn from_write_parts(length: usize, parts: &[(usize, Bytes)]) -> io::Result<Self> {
         assert_eq!(parts.first().map(|part| part.0), Some(0));
         let mut buffers = Vec::new();
         for (index, (offset, bytes)) in parts.iter().enumerate() {
@@ -251,7 +243,6 @@ impl IoBuffers {
         Ok(Self::Write {
             vectors: Vec::with_capacity(buffers.len()),
             bytes: buffers,
-            _region: region,
         })
     }
 

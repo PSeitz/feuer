@@ -60,10 +60,10 @@ impl DiskCacheShard {
             if !address.is_multiple_of(CHUNK_BYTES) || !shard_disk_range.contains(&address) {
                 break;
             }
-            let Some(region) = self.allocator.reserve_for_recovery(address / CHUNK_BYTES, 1) else {
+            let Some(mut region) = self.allocator.reserve_for_recovery(address / CHUNK_BYTES, 1) else {
                 break;
             };
-            let Ok(bytes) = file.read_recovery_chunk(&region).await else {
+            let Ok(bytes) = file.read_recovery_chunk(address).await else {
                 break;
             };
             // An unwritten chunk ends the chain; a new shard initializes its first chunk on insertion.

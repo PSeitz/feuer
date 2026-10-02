@@ -12,7 +12,6 @@ fn request(operation: IoOperation, offset: u64, length: usize) -> (IoRequest, Io
         IoBuffers::Write {
             bytes: vec![buffer.into_bytes()],
             vectors: Vec::with_capacity(1),
-            _region: None,
         }
     } else {
         IoBuffers::Read(buffer_pool().allocate(length).unwrap())
@@ -194,7 +193,6 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
             0,
             DIRECT_IO_ALIGNMENT_BYTES,
             &[(0, Bytes::from(vec![0x99; DIRECT_IO_ALIGNMENT_BYTES]))],
-            None,
         )
         .await
         .unwrap();
@@ -234,27 +232,35 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
 }
 
 #[test]
-fn canceled_submitted_write_retains_resources() {
+fn canceled_submitted_write_retains_buffers_but_not_disk_space() {
     let (mut queue, sender) = queue();
     let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_REQUEST_BYTES as u64).unwrap();
+    let region = allocator.reserve_chunks(1).unwrap();
+    let pool = buffer_pool();
+    let mut buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
+    buffer.as_mut_slice().fill(0x99);
+    let address = buffer.as_ref().as_ptr();
     let (mut write, reply) = request(IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
-    if let IoBuffers::Write { _region: region, .. } = &mut write.buffers {
-        *region = allocator.reserve_chunks(1);
-    }
+    write.buffers = IoBuffers::from_write_parts(DIRECT_IO_ALIGNMENT_BYTES, &[(0, buffer.into_bytes())]).unwrap();
     sender.try_send(write).unwrap();
     drop(sender);
     queue.receive_requests();
     // The write has reached the kernel, but its completion is not yet processed.
     queue.ring.submit_and_wait(1).unwrap();
     drop(reply);
+    drop(region);
     queue.receive_requests();
-    assert!(allocator.reserve_chunks(1).is_none());
+    let reused = allocator.reserve_chunks(1).unwrap();
+    assert_eq!(reused.range().start, 0);
     assert!(queue.active[0].is_some());
+    let other = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
+    assert_ne!(other.as_ref().as_ptr(), address);
     queue.process_requests_until_disconnected().unwrap();
     assert!(queue.active.iter().all(Option::is_none));
-    assert_eq!(allocator.available_bytes(), MAX_IO_REQUEST_BYTES as u64);
+    let buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
+    assert_eq!(buffer.as_ref().as_ptr(), address);
 
-    // Only read/reuse the region after completion, not after dropping the receiver.
+    // The abandoned write still reached the reused disk range.
     let (mut read_queue, sender) = self::queue();
     read_queue.file = queue.file.clone();
     read_queue.directory_lock = queue.directory_lock.clone();
@@ -429,11 +435,11 @@ async fn reads_into_consecutive_slices_without_reallocating() {
     let write = WriteQueue::new(file.clone(), lock.clone()).unwrap();
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     write
-        .write_parts(0, page, &[(0, Bytes::from(vec![0x99; page]))], None)
+        .write_parts(0, page, &[(0, Bytes::from(vec![0x99; page]))])
         .await
         .unwrap();
     write
-        .write_parts((2 * page) as u64, page, &[(0, Bytes::from(vec![0x77; page]))], None)
+        .write_parts((2 * page) as u64, page, &[(0, Bytes::from(vec![0x77; page]))])
         .await
         .unwrap();
     let mut buffer = read.allocate_buffer(3 * page).unwrap();
@@ -490,7 +496,7 @@ fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
         dirty.as_mut_slice().fill(0xff);
         drop(dirty);
         let parts = [(0, source.slice(1..length + 1)), (page, source.slice(..page + 17))];
-        let mut buffers = IoBuffers::from_write_parts(4 * page, &parts, None).unwrap();
+        let mut buffers = IoBuffers::from_write_parts(4 * page, &parts).unwrap();
         assert_eq!(pool.idle_bytes(), 32 * 1024);
         buffers.submission_entry(types::Fd(-1), page as u64, page..4 * page);
         let IoBuffers::Write { bytes, vectors, .. } = buffers else {

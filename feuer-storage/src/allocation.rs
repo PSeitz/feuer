@@ -3,10 +3,7 @@
 use std::{
     collections::BTreeMap,
     ops::Range,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use crate::DiskMetrics;
@@ -141,7 +138,7 @@ impl DiskChunkAllocator {
             *entries += 1;
         } else {
             let first = payload.start / CHUNK_BYTES;
-            let region = self.reserve_for_recovery(first, payload.end.div_ceil(CHUNK_BYTES) - first)?;
+            let mut region = self.reserve_for_recovery(first, payload.end.div_ceil(CHUNK_BYTES) - first)?;
             region.mark_recovered();
             chunks.insert(region.range().start, (region, 1));
         }
@@ -171,7 +168,7 @@ impl DiskChunkAllocator {
             .insert(region.range().start, (region, entries));
     }
 
-    /// Removes one entry's use of its chunks; queued writes can still delay reuse.
+    /// Removes one entry's use of its chunks, releasing the run after its last entry.
     pub(super) fn remove_payload(&self, address: u64) {
         let mut chunks = self.payload_chunks.lock().unwrap();
         if let Some((&start, (region, entries))) = chunks.range_mut(..=address).next_back()
@@ -186,62 +183,48 @@ impl DiskChunkAllocator {
 
     fn region(&self, chunks: Range<u64>) -> DiskRegion {
         DiskRegion {
-            range: chunks.start * CHUNK_BYTES..chunks.end * CHUNK_BYTES,
-            reservation: Arc::new(ChunkReservation {
-                free: self.free.clone(),
-                chunks,
-                recovered: AtomicBool::new(false),
-            }),
+            free: self.free.clone(),
+            chunks,
+            recovered: false,
         }
     }
 }
 
-/// A reserved byte range in the backing file. Subranges retain all reserved chunks.
+/// One owner's reservation of consecutive whole chunks in the backing file.
 #[derive(Debug)]
 pub(super) struct DiskRegion {
-    range: Range<u64>,
-    reservation: Arc<ChunkReservation>,
-}
-
-/// Ownership of consecutive whole chunks, shared by the allocator and queued writes.
-#[derive(Debug)]
-struct ChunkReservation {
     free: Arc<Mutex<DiskChunkAvailability>>,
     chunks: Range<u64>,
-    recovered: AtomicBool,
+    recovered: bool,
 }
 
 impl DiskRegion {
     pub(super) fn range(&self) -> Range<u64> {
-        self.range.clone()
+        self.chunks.start * CHUNK_BYTES..self.chunks.end * CHUNK_BYTES
     }
 
     pub(super) fn chunk_count(&self) -> u64 {
-        self.reservation.chunks.end - self.reservation.chunks.start
+        self.chunks.end - self.chunks.start
     }
 
-    /// Creates a subrange sharing ownership of all reserved chunks.
-    pub(super) fn slice(&self, range: Range<u64>) -> Self {
-        assert!(self.range.start <= range.start && range.start < range.end && range.end <= self.range.end);
-        Self {
-            range,
-            reservation: self.reservation.clone(),
-        }
-    }
-
-    /// Counts recovered chunks until the allocator and queued writes release them.
-    pub(super) fn mark_recovered(&self) {
-        let free = self.reservation.free.lock().unwrap();
-        if !self.reservation.recovered.swap(true, Ordering::Relaxed) {
-            free.metrics.recovered_chunks.increase(self.chunk_count());
+    /// Counts recovered chunks until their reservation is released.
+    pub(super) fn mark_recovered(&mut self) {
+        if !self.recovered {
+            self.free
+                .lock()
+                .unwrap()
+                .metrics
+                .recovered_chunks
+                .increase(self.chunk_count());
+            self.recovered = true;
         }
     }
 }
 
-impl Drop for ChunkReservation {
+impl Drop for DiskRegion {
     fn drop(&mut self) {
         let mut free = self.free.lock().unwrap();
-        if *self.recovered.get_mut() {
+        if self.recovered {
             free.metrics
                 .recovered_chunks
                 .decrease(self.chunks.end - self.chunks.start);
@@ -257,15 +240,13 @@ mod tests {
     use std::sync::Barrier;
 
     #[test]
-    fn allocator_removes_payloads_without_releasing_shared_chunks_or_queued_writes() {
+    fn allocator_releases_shared_chunks_after_the_last_entry() {
         let allocator = DiskChunkAllocator::new(CHUNK_BYTES).unwrap();
-        let write = allocator.reserve_chunks(1).unwrap();
-        allocator.retain_payloads(write.slice(write.range()), 2);
+        let region = allocator.reserve_chunks(1).unwrap();
+        allocator.retain_payloads(region, 2);
         allocator.remove_payload(0);
         assert_eq!(allocator.available_bytes(), 0);
         allocator.remove_payload(4096);
-        assert_eq!(allocator.available_bytes(), 0);
-        drop(write);
         assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
     }
 
@@ -301,20 +282,18 @@ mod tests {
     }
 
     #[test]
-    fn recovered_chunks_follow_shared_ownership_until_reuse() {
+    fn recovered_chunk_metrics_follow_allocator_ownership_until_reuse() {
         let (registry, backend) = registry();
         let allocator = DiskChunkAllocator::with_metrics(0..3 * CHUNK_BYTES, DiskMetrics::new(&backend)).unwrap();
         let recovered_chunks = || value(&registry, "feuer_disk_recovered_chunks", &[]);
         let inspected = allocator.reserve_for_recovery(0, 3).unwrap();
         assert_eq!(recovered_chunks(), 0.0);
         drop(inspected);
-        let recovered = allocator.reserve_for_recovery(0, 3).unwrap();
-        let shared = recovered.slice(4096..2 * CHUNK_BYTES);
+        let mut recovered = allocator.reserve_for_recovery(0, 3).unwrap();
         recovered.mark_recovered();
-        shared.mark_recovered();
+        recovered.mark_recovered();
         assert_eq!(recovered_chunks(), 3.0);
-        allocator.retain_payloads(shared, 1);
-        drop(recovered);
+        allocator.retain_payloads(recovered, 1);
         assert_eq!(recovered_chunks(), 3.0);
         allocator.remove_payload(4096);
         assert_eq!(recovered_chunks(), 0.0);
@@ -334,10 +313,9 @@ mod tests {
         assert_eq!(chunks("free"), 3.0);
         let region = allocator.reserve_chunks(2).unwrap();
         assert_eq!(chunks("allocated"), 2.0);
-        let guard = region.slice(4096..8192);
-        drop(region);
+        allocator.retain_payloads(region, 1);
         assert_eq!(chunks("free"), 1.0);
-        drop(guard);
+        allocator.remove_payload(4096);
         assert_eq!(chunks("free"), 3.0);
         assert_eq!(chunks("allocated"), 0.0);
         drop(allocator);
@@ -400,32 +378,6 @@ mod tests {
         assert!(allocator.reserve_chunks(1).is_none());
         drop((first, second));
         assert_all_chunks_free(&allocator, 2 * CHUNK_BYTES);
-    }
-
-    #[test]
-    fn queued_writes_prevent_reuse_of_the_whole_run() {
-        let allocator = DiskChunkAllocator::new(3 * CHUNK_BYTES).unwrap();
-        let region = allocator.reserve_chunks(3).unwrap();
-        let first = region.slice(4096..8192);
-        let second = region.slice(CHUNK_BYTES..2 * CHUNK_BYTES);
-        let final_guard = first.slice(first.range());
-        let barrier = Arc::new(Barrier::new(9));
-        std::thread::scope(|scope| {
-            for _ in 0..8 {
-                let guard = second.slice(second.range());
-                let barrier = barrier.clone();
-                scope.spawn(move || {
-                    barrier.wait();
-                    assert_eq!(guard.range(), CHUNK_BYTES..2 * CHUNK_BYTES);
-                });
-            }
-            drop((region, first, second));
-            assert!(allocator.reserve_chunks(1).is_none());
-            barrier.wait();
-        });
-        assert!(allocator.reserve_chunks(1).is_none());
-        drop(final_guard);
-        assert_all_chunks_free(&allocator, 3 * CHUNK_BYTES);
     }
 
     #[test]
@@ -503,9 +455,7 @@ mod tests {
                 scope.spawn(move || {
                     for _ in 0..1000 {
                         let region = allocator.reserve_chunks(2).unwrap();
-                        let guard = region.slice(region.range());
                         drop(region);
-                        drop(guard);
                     }
                 });
             }

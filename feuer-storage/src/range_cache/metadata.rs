@@ -156,11 +156,8 @@ impl DiskCacheShard {
         };
         let chunk = MetadataChunk::empty(region);
         let address = chunk.region.range().start;
-        file.write_parts(
-            chunk.region.slice(chunk.region.range()),
-            &[(0, Bytes::copy_from_slice(&chunk.bytes))],
-        )
-        .await?;
+        file.write_parts(chunk.region.range(), &[(0, Bytes::copy_from_slice(&chunk.bytes))])
+            .await?;
         {
             let mut pages = self.metadata.lock().unwrap();
             if let Some(last) = pages.chunks.len().checked_sub(1) {
@@ -196,7 +193,7 @@ impl DiskCacheShard {
                     let offset = page * METADATA_PAGE_BYTES;
                     let start = chunk.region.range().start + offset as u64;
                     (
-                        chunk.region.slice(start..start + METADATA_PAGE_BYTES as u64),
+                        start..start + METADATA_PAGE_BYTES as u64,
                         Bytes::copy_from_slice(&chunk.bytes[offset..offset + METADATA_PAGE_BYTES]),
                     )
                 })
