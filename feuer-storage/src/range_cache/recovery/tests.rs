@@ -2,7 +2,6 @@ use super::*;
 use crate::range_cache::tests::{download, open_test_cache, range};
 
 async fn reopen(directory: &Path, cache: DiskRangeCache) -> DiskRangeCache {
-    cache.disk.save_metadata_chain_starts().unwrap();
     let capacity = cache.disk.file.capacity();
     drop(cache);
     DiskRangeCache::open(directory, capacity, IoMetrics::noop())
@@ -10,65 +9,30 @@ async fn reopen(directory: &Path, cache: DiskRangeCache) -> DiskRangeCache {
         .unwrap()
 }
 
-#[test]
-fn metadata_chain_starts_validate_checksum_version_and_shard_ranges() {
-    let chain_starts = MetadataChainStarts {
-        capacity: 8 * CHUNK_BYTES,
-        first_chunk_addresses: vec![0, 6 * CHUNK_BYTES],
-    };
-    let encoded = chain_starts.encode();
-    assert_eq!(
-        MetadataChainStarts::decode(&encoded).unwrap().first_chunk_addresses,
-        chain_starts.first_chunk_addresses
-    );
-    let mut old_format = encoded.clone();
-    old_format[..8].copy_from_slice(b"FEUEND10");
-    let checksum_offset = old_format.len() - 8;
-    let checksum = XxHash64::oneshot(0, &old_format[..checksum_offset]);
-    old_format[checksum_offset..].copy_from_slice(&checksum.to_le_bytes());
-    assert!(MetadataChainStarts::decode(&old_format).is_none());
-    for offset in [0, 8, 16, 24, encoded.len() - 1] {
-        let mut bad = encoded.clone();
-        bad[offset] ^= 1;
-        assert!(MetadataChainStarts::decode(&bad).is_none());
+#[tokio::test]
+async fn metadata_chains_start_at_each_shards_first_chunk_without_a_sidecar() {
+    let (directory, cache) = open_test_cache(256 * CHUNK_BYTES).await;
+    let cache = reopen(directory.path(), cache).await;
+    assert_eq!(cache.disk.shards.len(), 2);
+    for index in 0..cache.disk.shards.len() {
+        assert!(
+            cache
+                .insert(ObjectKeyHash(index as u128), download(0, 1))
+                .await
+                .unwrap()
+        );
+        let bounds = shard_range(cache.disk.file.capacity(), cache.disk.shards.len(), index);
+        let pages = cache.disk.shards[index].metadata.lock().unwrap();
+        assert_eq!(pages.chunks[0].region.range().start, bounds.start);
     }
-    for address in [1, 4 * CHUNK_BYTES, u64::MAX - 1] {
-        let chain_starts = MetadataChainStarts {
-            capacity: 8 * CHUNK_BYTES,
-            first_chunk_addresses: vec![address, NO_CHUNK],
-        };
-        assert!(MetadataChainStarts::decode(&chain_starts.encode()).is_none());
+    assert!(!directory.path().join("recovery-heads").exists());
+    let cache = reopen(directory.path(), cache).await;
+    for index in 0..cache.disk.shards.len() {
+        assert_eq!(
+            cache.get(&ObjectKeyHash(index as u128), range(0, 1)).await.unwrap(),
+            download(0, 1).bytes()
+        );
     }
-}
-
-#[test]
-fn incompatible_metadata_chain_starts_reset_durably_and_ignore_interrupted_replacements() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join(METADATA_CHAIN_STARTS_FILE_NAME);
-    let chain_starts = MetadataChainStarts {
-        capacity: 8 * CHUNK_BYTES,
-        first_chunk_addresses: vec![0],
-    };
-    chain_starts.save(&path).unwrap();
-    fs::write(path.with_extension("tmp"), b"interrupted").unwrap();
-    assert_eq!(
-        MetadataChainStartsPath::open(directory.path(), 8 * CHUNK_BYTES, 1)
-            .unwrap()
-            .1,
-        vec![0]
-    );
-    assert_eq!(
-        MetadataChainStartsPath::open(directory.path(), 4 * CHUNK_BYTES, 1)
-            .unwrap()
-            .1,
-        vec![NO_CHUNK]
-    );
-    assert_eq!(
-        MetadataChainStarts::decode(&fs::read(path).unwrap())
-            .unwrap()
-            .first_chunk_addresses,
-        vec![NO_CHUNK]
-    );
 }
 
 #[tokio::test]
@@ -208,9 +172,7 @@ async fn torn_record_page_does_not_reject_other_pages() {
             .unwrap(),
         entries
     );
-    let address = cache.disk.shards[0]
-        .first_metadata_chunk_address
-        .load(Ordering::Relaxed);
+    let address = 0;
     let mut bytes = cache
         .disk
         .file
@@ -238,9 +200,7 @@ async fn corrupt_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
     for cyclic in [false, true] {
         let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
         assert!(cache.insert(ObjectKeyHash(1), download(0, 1)).await.unwrap());
-        let address = cache.disk.shards[0]
-            .first_metadata_chunk_address
-            .load(Ordering::Relaxed);
+        let address: u64 = 0;
         let offset = address + (RECORD_PAGES * METADATA_PAGE_BYTES) as u64;
         let mut page = vec![0; METADATA_PAGE_BYTES];
         encode_page(
@@ -319,7 +279,6 @@ async fn a_write_after_open_replaces_recovered_entries() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(10, 10)).await.unwrap());
-    cache.disk.save_metadata_chain_starts().unwrap();
     let capacity = cache.disk.file.capacity();
     drop(cache);
     let cache = DiskRangeCache::open(directory.path(), capacity, IoMetrics::noop())
@@ -347,9 +306,7 @@ async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
             .unwrap(),
         2
     );
-    let address = cache.disk.shards[0]
-        .first_metadata_chunk_address
-        .load(Ordering::Relaxed);
+    let address = 0;
     let mut bytes = cache
         .disk
         .file

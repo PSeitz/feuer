@@ -122,8 +122,8 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
 
 ## In progress: disk range-cache prototype
 
-[`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) specifies the experimental layout and
-background recovery and remaining crash testing. `DiskRangeCache::insert_batch` groups smaller entries together within each
+[`feuer-storage/format.md`](feuer-storage/format.md) describes the experimental disk format;
+[`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) covers runtime behavior and remaining crash testing. `DiskRangeCache::insert_batch` groups smaller entries together within each
 shard, assembles whole chunks including entry metadata, writes each chunk once, and then
 publishes after containment revalidation. Partial final chunks are finalized too. Later batches cannot fill them. Full keys and exact
 object ranges map to one contiguous physical range each. Payload bytes have no metadata gaps, including at chunk boundaries. Entry metadata stores
@@ -154,11 +154,10 @@ remain indexed and may keep a partially empty chunk unavailable. No eviction met
 Each shard batch is limited to 64 sampled decisions and 4,096 chunks charged to removed entries. Guarded or active
 storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
 disk cache to a memory cache's evidence. Public tier orchestration now uses it.
-Recovery follows per-shard metadata heads and last-page links, reading exactly 1 MiB per metadata chunk without
-scanning payload chunks. Heads are saved in a checksummed, atomically replaced `recovery-heads` file. Reads remain
-available during recovery; writes wait for their shard's metadata recovery before updating its pages. Corrupt record
-pages are discarded independently; invalid or cyclic links terminate the chain. Layout changes reset the heads.
-See the prototype document for checkpoint, synchronization, and validation details.
+Recovery starts at each shard's first chunk and follows last-page links, reading exactly 1 MiB per metadata chunk
+without scanning payload chunks. Fixed starts need no `recovery-heads` file or periodic checkpoint. Open waits for
+all shards to recover before reads and writes become available. Corrupt record pages are discarded independently;
+invalid or cyclic links terminate the chain. See the format document for write ordering and recovery details.
 No comparative layout/performance claim is established.
 
 The range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller

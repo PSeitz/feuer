@@ -1,161 +1,15 @@
 //! Recover entries by following metadata-only chunks, never by scanning payload chunks.
 
-use std::{
-    fs::{self, File},
-    io::{self, Read, Write},
-    ops::Range,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::ops::Range;
 
 use super::{page_format::*, *};
-
-const METADATA_CHAIN_STARTS_FORMAT_ID: &[u8; 8] = b"FEUMET11";
-const METADATA_CHAIN_STARTS_FILE_NAME: &str = "recovery-heads";
-const METADATA_CHAIN_SAVE_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Path to the file storing the metadata-chain starts.
-pub(super) struct MetadataChainStartsPath {
-    path: PathBuf,
-}
-
-/// Starting addresses of the shards' metadata chains and the data-file capacity needed to interpret them.
-struct MetadataChainStarts {
-    capacity: u64,
-    first_chunk_addresses: Vec<u64>,
-}
 
 pub(super) fn shard_range(capacity: u64, count: usize, index: usize) -> Range<u64> {
     let chunks = capacity / CHUNK_BYTES;
     chunks * index as u64 / count as u64 * CHUNK_BYTES..chunks * (index + 1) as u64 / count as u64 * CHUNK_BYTES
 }
 
-impl MetadataChainStarts {
-    fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(METADATA_CHAIN_STARTS_FORMAT_ID);
-        bytes.extend_from_slice(&self.capacity.to_le_bytes());
-        bytes.extend_from_slice(&(self.first_chunk_addresses.len() as u64).to_le_bytes());
-        for address in &self.first_chunk_addresses {
-            bytes.extend_from_slice(&address.to_le_bytes());
-        }
-        bytes.extend_from_slice(&XxHash64::oneshot(0, &bytes).to_le_bytes());
-        bytes
-    }
-
-    fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 40 || &bytes[..8] != METADATA_CHAIN_STARTS_FORMAT_ID {
-            return None;
-        }
-        let capacity = read_u64(bytes, 8)?;
-        let shards = usize::try_from(read_u64(bytes, 16)?).ok()?;
-        if !(1..=64).contains(&shards)
-            || capacity == 0
-            || capacity > i64::MAX as u64
-            || !capacity.is_multiple_of(CHUNK_BYTES)
-        {
-            return None;
-        }
-        let length = 24 + 8 * shards;
-        if bytes.len() != length + 8 || read_u64(bytes, length)? != XxHash64::oneshot(0, &bytes[..length]) {
-            return None;
-        }
-        let first_chunk_addresses: Vec<_> = bytes[24..length]
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|bytes| u64::from_le_bytes(*bytes))
-            .collect();
-        for (index, &address) in first_chunk_addresses.iter().enumerate() {
-            let range = shard_range(capacity, shards, index);
-            if address != NO_CHUNK
-                && (!address.is_multiple_of(CHUNK_BYTES) || address < range.start || address >= range.end)
-            {
-                return None;
-            }
-        }
-        Some(Self {
-            capacity,
-            first_chunk_addresses,
-        })
-    }
-
-    fn save(&self, path: &Path) -> io::Result<()> {
-        let temporary = path.with_extension("tmp");
-        let mut file = File::create(&temporary)?;
-        file.write_all(&self.encode())?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        File::open(path.parent().unwrap())?.sync_all()
-    }
-}
-
-impl MetadataChainStartsPath {
-    pub(super) fn open(directory: &Path, capacity: u64, shards: usize) -> io::Result<(Self, Vec<u64>)> {
-        let path = directory.join(METADATA_CHAIN_STARTS_FILE_NAME);
-        let mut bytes = Vec::new();
-        let saved = File::open(&path).and_then(|file| file.take(1024).read_to_end(&mut bytes));
-        let chain_starts = match saved.ok().and_then(|_| MetadataChainStarts::decode(&bytes)) {
-            Some(chain_starts)
-                if chain_starts.capacity == capacity && chain_starts.first_chunk_addresses.len() == shards =>
-            {
-                chain_starts
-            }
-            _ => {
-                tracing::info!(target: "feuer::storage", metadata_chain_starts_file = %path.display(), "resetting incompatible or missing metadata-chain starts");
-                let chain_starts = MetadataChainStarts {
-                    capacity,
-                    first_chunk_addresses: vec![NO_CHUNK; shards],
-                };
-                chain_starts.save(&path)?;
-                chain_starts
-            }
-        };
-        Ok((Self { path }, chain_starts.first_chunk_addresses))
-    }
-}
-
 impl DiskRangeCacheState {
-    fn metadata_chain_starts(&self) -> MetadataChainStarts {
-        MetadataChainStarts {
-            capacity: self.file.capacity(),
-            first_chunk_addresses: self
-                .shards
-                .iter()
-                .map(|shard| shard.first_metadata_chunk_address.load(Ordering::Relaxed))
-                .collect(),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn save_metadata_chain_starts(&self) -> io::Result<()> {
-        self.metadata_chain_starts().save(&self.metadata_chain_starts_path.path)
-    }
-
-    pub(super) fn start_metadata_chain_save_task(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
-        let mut saved_addresses = self.metadata_chain_starts().first_chunk_addresses;
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(METADATA_CHAIN_SAVE_INTERVAL).await;
-                let Some(disk) = weak.upgrade() else { return };
-                let chain_starts = disk.metadata_chain_starts();
-                if chain_starts.first_chunk_addresses == saved_addresses {
-                    continue;
-                }
-                match tokio::task::spawn_blocking(move || {
-                    chain_starts.save(&disk.metadata_chain_starts_path.path)?;
-                    Ok::<_, io::Error>(chain_starts.first_chunk_addresses)
-                })
-                .await
-                {
-                    Ok(Ok(addresses)) => saved_addresses = addresses,
-                    result => tracing::warn!(target: "feuer::storage", ?result, "could not save metadata-chain starts"),
-                }
-            }
-        });
-    }
-
     /// Scan a shard's metadata before the cache becomes available.
     pub(super) async fn recover_shard(&self, shard_index: usize) {
         let shard = &self.shards[shard_index];
@@ -232,7 +86,7 @@ impl DiskCacheShard {
     /// Read and repair the metadata chain before any entry can claim payload chunks.
     async fn load_metadata_chain(&self, file: &DataFile, bounds: Range<u64>) {
         let mut pages = metadata::MetadataPages::default();
-        let mut address = self.first_metadata_chunk_address.load(Ordering::Relaxed);
+        let mut address = bounds.start;
         while address != NO_CHUNK {
             if !address.is_multiple_of(CHUNK_BYTES) || !bounds.contains(&address) {
                 break;
@@ -243,6 +97,10 @@ impl DiskCacheShard {
             let Ok(bytes) = file.read_recovery_chunk(&region).await else {
                 break;
             };
+            // An unwritten chunk ends the chain; a new shard initializes its first chunk on insertion.
+            if bytes.iter().all(|&byte| byte == 0) {
+                break;
+            }
             region.mark_recovered();
             let chunk = metadata::MetadataChunk {
                 region,
@@ -274,9 +132,6 @@ impl DiskCacheShard {
         }
         if address != NO_CHUNK {
             pages.end_chain();
-        }
-        if pages.chunks.is_empty() {
-            self.first_metadata_chunk_address.store(NO_CHUNK, Ordering::Relaxed);
         }
         *self.metadata.lock().unwrap() = pages;
     }

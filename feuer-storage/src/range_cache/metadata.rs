@@ -160,7 +160,8 @@ impl MetadataPages {
 }
 
 impl DiskCacheShard {
-    /// Called under metadata_io; new chunks are initialized before the previous chunk links to them.
+    /// Called under metadata_io, before reserving payload chunks. The allocator returns the
+    /// shard's first chunk for a new chain. New chunks are initialized before linking to them.
     pub(super) async fn ensure_metadata_slots(&self, file: &DataFile, count: usize) -> DataFileResult<bool> {
         if self.metadata.lock().unwrap().free_slots.len() >= count {
             return Ok(true);
@@ -182,8 +183,6 @@ impl DiskCacheShard {
             if let Some(last) = pages.chunks.len().checked_sub(1) {
                 pages.chunks[last].set_next(address);
                 pages.dirty_pages.insert((last, RECORD_PAGES));
-            } else {
-                self.first_metadata_chunk_address.store(address, Ordering::Relaxed);
             }
             pages.add_chunk(chunk);
         }

@@ -12,10 +12,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt,
     path::Path,
-    sync::{
-        Arc, Mutex, Weak,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex, Weak},
     time::Instant,
 };
 
@@ -45,7 +42,7 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 /// An experimental disk range cache used by the public tiered cache.
 ///
 /// Explicit batches pack payloads into immutable 1-MiB chunks. Separate mutable metadata chunks
-/// hold entry records and links between metadata chunks.
+/// hold entry records and links between metadata chunks. Each shard's chain starts at its first chunk.
 /// Entries have plain payload bytes, 4-KiB-aligned storage, and a checksum in their entry metadata.
 /// Reads verify the whole covering entry, returning only requested bytes. Reuse requires a wholly free chunk.
 /// The key hash selects an independently allocated shard; admission may fail despite space elsewhere.
@@ -64,7 +61,6 @@ struct DiskRangeCacheState {
     shards: Box<[DiskCacheShard]>,
     access_histories: Arc<ObjectAccessHistories>,
     metrics: Arc<DiskMetrics>,
-    metadata_chain_starts_path: recovery::MetadataChainStartsPath,
 }
 
 /// An independently allocated disk-cache shard with live range lookup.
@@ -74,7 +70,6 @@ struct DiskCacheShard {
     entry_index: Mutex<DiskEntryIndex>,
     metadata: Arc<Mutex<metadata::MetadataPages>>,
     metadata_io: tokio::sync::Mutex<()>,
-    first_metadata_chunk_address: AtomicU64,
 }
 
 /// Disk entries indexed by object key and range start, with dense rotating eviction candidates.
@@ -143,9 +138,6 @@ pub enum DiskRangeCacheError {
     /// The task that owns a disk write failed; queued writes retain their chunks until completion.
     #[error("disk write task failed: {0}")]
     WriteTaskFailed(#[source] tokio::task::JoinError),
-    /// The metadata-chain starts file could not be opened or durably reset.
-    #[error("opening metadata-chain starts file failed: {0}")]
-    OpenMetadataChainStarts(#[source] std::io::Error),
 }
 
 impl fmt::Debug for DiskRangeCache {
@@ -222,31 +214,19 @@ impl DiskRangeCache {
             return Err(DiskRangeCacheError::InvalidCapacity);
         }
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
-        let directory = directory.as_ref().to_path_buf();
-        let file = DataFile::open_with_buffer_pool(&directory, capacity, io_metrics, buffer_pool).await?;
+        let file = DataFile::open_with_buffer_pool(directory, capacity, io_metrics, buffer_pool).await?;
         let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
-        let lock_owner = file.clone();
-        let (metadata_chain_starts_path, first_chunk_addresses) = tokio::task::spawn_blocking(move || {
-            let _lock_owner = lock_owner;
-            recovery::MetadataChainStartsPath::open(&directory, capacity, num_shards)
-        })
-        .await
-        .map_err(|error| DiskRangeCacheError::OpenMetadataChainStarts(std::io::Error::other(error)))?
-        .map_err(DiskRangeCacheError::OpenMetadataChainStarts)?;
         let shards = (0..num_shards)
             .map(|shard_index| {
                 let range = recovery::shard_range(capacity, num_shards, shard_index);
                 let allocator = DiskChunkAllocator::with_metrics(range.clone(), metrics.clone()).unwrap();
-                if first_chunk_addresses[shard_index] != page_format::NO_CHUNK {
-                    allocator.start_recovery(range.start, range.end);
-                }
+                allocator.start_recovery(range.start, range.end);
                 DiskCacheShard {
                     reclaim_sample_size,
                     allocator,
                     entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
                     metadata: Arc::new(Mutex::new(metadata::MetadataPages::default())),
                     metadata_io: tokio::sync::Mutex::new(()),
-                    first_metadata_chunk_address: AtomicU64::new(first_chunk_addresses[shard_index]),
                 }
             })
             .collect();
@@ -255,7 +235,6 @@ impl DiskRangeCache {
             shards,
             access_histories,
             metrics,
-            metadata_chain_starts_path,
         });
         let started = Instant::now();
         tracing::info!(target: "feuer::storage", "starting disk cache recovery");
@@ -268,7 +247,6 @@ impl DiskRangeCache {
             result.expect("shard recovery task failed");
         }
         tracing::info!(target: "feuer::storage", elapsed_seconds = started.elapsed().as_secs_f64(), "disk cache recovery finished");
-        disk.start_metadata_chain_save_task();
         Ok(Self { disk })
     }
 

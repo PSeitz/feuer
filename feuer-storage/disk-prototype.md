@@ -40,8 +40,8 @@ writes those chunks once. Partially filled payload chunks are finalized too; lat
 append. Metadata growth never moves payload addresses. Storage adds no batching delay.
 
 New metadata chunks are fully initialized and synchronized before linking them from the preceding
-chunk. The first chunk is initialized before publishing its head address. Thus a committed link
-never deliberately targets a reserved-but-unwritten chunk. Payload writes finish before their
+chunk. Each shard's first chunk is its fixed chain start and needs no incoming link. Thus a committed
+link never deliberately targets a reserved-but-unwritten chunk. Payload writes finish before their
 metadata records are written. Dirty metadata pages are written as 4-KiB updates, not full-chunk
 rewrites, and synchronized before publication. The last-page link has its own checksum.
 
@@ -83,17 +83,9 @@ Closing the in-memory index does not invalidate live entries needed by the next 
 
 ## Format and recovery
 
-`src/range_cache/page_format.rs` defines experimental **v11**. Records contain a 128-bit key hash,
-object offset and length, one payload address, and the payload checksum. Aligned payload length is
-derived from object length. Zero records are free slots. Each 4-KiB page is independently checksummed
-with seed-zero XXHash64, binding its tag, address, ordinal, count, and contents. Records never cross
-page boundaries. Corrupt record pages are discarded independently; corrupt links stop the chain.
-There is no aggregate checksum spanning mutable pages.
-
-`recovery-heads` is a small checksummed file containing capacity and one metadata-chain head per
-shard. Heads are checkpointed by atomic replacement every ten seconds. Missing, invalid, or
-incompatible inventory resets to empty heads; v10 inventories are not migrated. A stale inventory
-may omit a newly created shard chain. There is no final checkpoint-on-close guarantee.
+[format.md](format.md) documents experimental **v11**: shard boundaries, fixed chain starts,
+page headers, entry records, checksums, and write ordering. Each metadata chain starts at the first
+chunk of its shard. There is no `recovery-heads` file or periodic address checkpoint.
 
 Recovery follows links using **one 1-MiB read per metadata chunk**. It never scans payload chunks to
 find metadata. Bounded read-channel admission remains FIFO. All metadata chunks in a shard are
@@ -119,6 +111,6 @@ TMPDIR=/mnt/local-ssd cargo test --locked -p feuer-storage --lib
 Tests cover links between full metadata chunks, one full-chunk recovery read independent of payload
 size, mutable record-slot reuse, independently reclaimable payloads, durable invalidation plus read
 guards before reuse, failed-invalidation retry, malformed/cyclic links, corrupt record pages,
-metadata/payload ownership conflicts, replacement after reopening, format resets, and payload checksum
+metadata/payload ownership conflicts, fixed chain starts, replacement after reopening, and payload checksum
 failures. Existing tests cover packing, fragmentation, cancellation, eviction, and contiguous payloads
 up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v11.
