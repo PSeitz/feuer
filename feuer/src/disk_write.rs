@@ -22,11 +22,10 @@ pub(crate) struct DiskWriteQueue {
     metrics: Arc<DiskWriteQueueMetrics>,
 }
 
-/// The exact memory admission authorizing a queued or active disk write.
+/// The memory-cached range and accounting for a queued or active disk write.
 struct DiskWriteSource {
     key: ObjectKeyHash,
     range: ByteRange,
-    entry_id: u64,
     queued_at: Option<Instant>,
     metrics: Arc<DiskWriteQueueMetrics>,
 }
@@ -91,7 +90,7 @@ impl DiskWriteQueue {
 
     /// Enqueues a disk write if the queue has capacity, without waiting for space.
     /// Full or closed queues discard the download and record the corresponding outcome.
-    pub(crate) fn enqueue_if_capacity(&self, key: ObjectKeyHash, download: Download, entry_id: u64) {
+    pub(crate) fn enqueue_if_capacity(&self, key: ObjectKeyHash, download: Download) {
         let permit = match self.sender.try_reserve() {
             Ok(permit) => permit,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -109,14 +108,13 @@ impl DiskWriteQueue {
         let source = DiskWriteSource {
             key,
             range: download.downloaded_range(),
-            entry_id,
             queued_at: Some(Instant::now()),
             metrics: self.metrics.clone(),
         };
         permit.send(PendingDiskWrite { download, source });
     }
 
-    /// Writes queued downloads in batches, checking their memory identities before publication.
+    /// Writes queued downloads in batches, checking their cached ranges before publication.
     async fn write_queued_batches(
         mut receiver: mpsc::Receiver<PendingDiskWrite>,
         memory: Arc<MemoryCache>,
@@ -134,10 +132,7 @@ impl DiskWriteQueue {
                     source.record_dequeue();
                     // This is the transition from queued to active. Later eviction may
                     // discard publication, but cannot cancel issued I/O or release its regions.
-                    if memory
-                        .with_current_entry(&source.key, source.range, source.entry_id, || ())
-                        .is_none()
-                    {
+                    if memory.with_cached_range(&source.key, source.range, || ()).is_none() {
                         source.metrics.record(DiskWriteQueueOutcome::Stale);
                         return None;
                     }
@@ -152,7 +147,7 @@ impl DiskWriteQueue {
                 .insert_batch_checked(downloads, move |source, publish| {
                     // Lock order is disk index -> memory shard. No memory operation
                     // acquires a disk lock; eviction cannot race this publication.
-                    memory.with_current_entry(&source.key, source.range, source.entry_id, publish);
+                    memory.with_cached_range(&source.key, source.range, publish);
                 })
                 .await
             {

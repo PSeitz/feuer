@@ -220,7 +220,8 @@ create no access, and cannot affect lookup results or caller-held slices.
 
 Lookup and access recording must not scan every live shard entry. Victim selection samples a bounded number
 of entries. Scoring work depends on the distinct requested ranges each candidate covers.
-Copies made outside the metadata lock require entry-identity and cached-range generation revalidation.
+Copies made outside the metadata lock require exact-range and cached-range generation revalidation.
+Reinsertion of the same immutable range may accept an earlier copy.
 Access history is only policy input: newer accesses do not invalidate a trimming snapshot.
 
 ## 7. Best-effort disk writes
@@ -231,13 +232,14 @@ Disk writes are bounded and best-effort, not mandatory.
 - The pending-write queue is bounded by both bytes and entry count.
 - Under queue pressure, the internal policy may skip or replace a disk-write candidate. This never fails
   an otherwise successful lookup.
-- If a memory-cached range is evicted before its queued write starts, that write is canceled or discarded.
+- If the exact key and range are no longer cached in memory when a queued write starts, that write is
+  canceled or discarded. Reinsertion of the same immutable range allows an earlier write to proceed.
 - A write already issued to the operating system may finish after memory eviction or caller cancellation.
   Its `DiskRegion` must remain reserved and protected against conflicting access until the submitted I/O
   completes. Abandoning its result does not stop the write. The task owning the reservation must keep
   awaiting completion rather than being aborted. A region whose completion is unknown after queue failure
-  must not be reused. A completed write may publish a disk entry only if its generation is still current
-  and the disk policy still admits it.
+  must not be reused. A completed write may publish a disk entry only if its exact key and range are still
+  cached in memory and the disk policy still admits it.
 - A failed write is logged and never becomes disk-lookup-visible. Its memory entry, if still present, remains
   subject to ordinary memory policy.
 

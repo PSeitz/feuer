@@ -169,17 +169,15 @@ impl TieredMemoryDiskCache {
             metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
             return Ok(requested_bytes);
         }
-        let entry_id = self.state.memory.insert(object_key, download.clone());
+        let inserted = self.state.memory.insert(object_key, download.clone());
         #[cfg(target_os = "linux")]
-        if let Some(entry_id) = entry_id {
-            self.state
-                .disk_write_queue
-                .enqueue_if_capacity(object_key, download, entry_id);
+        if inserted {
+            self.state.disk_write_queue.enqueue_if_capacity(object_key, download);
         } else {
             self.state.disk_write_queue.record_already_in_memory();
         }
         #[cfg(not(target_os = "linux"))]
-        let _ = entry_id;
+        let _ = inserted;
 
         metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
         Ok(requested_bytes)

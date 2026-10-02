@@ -59,15 +59,16 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
   configurable via `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES`) and requested bytes. Only cached ranges
   covering the exact request receive credit. Counter metadata is not capped per object.
 - A dense rotating candidate ring supplies a shared sample of at most 64 live entries per pressure decision.
-  The victim has the lowest retrieval value per retained byte, with monotonic entry identity breaking ties.
+  The victim has the lowest retrieval value per retained byte, with object key and range breaking ties.
   Registration and removal are constant-work and leave no stale candidate backlog.
 - After a grace of 64 requests across all keys, the selected victim is trimmed to observed requests if
   that releases at least one quarter of its payload. Otherwise it is evicted. Grace never prevents eviction.
 - Compaction merges only overlapping or adjacent observed intervals and copies them into independent `Bytes`.
   It preserves exact coverage, updates accounting and metrics, creates no access, and leaves caller-held
   slices valid.
-- Copying happens outside the shard lock. Entry identity and structural generation checks reject output
-  invalidated by same-object cached-range changes. New accesses do not invalidate a trimming snapshot.
+- Copying happens outside the shard lock. Exact-range and structural generation checks reject output
+  invalidated by same-object cached-range changes. Reinsertion of the same immutable range may accept an
+  earlier copy. New accesses do not invalidate a trimming snapshot.
   Admission falls back to eviction when cached-range changes invalidate a copy.
 
 There is no periodic compaction, separate prefetch-promotion state, or public policy configuration.
@@ -178,9 +179,10 @@ checks passed for the changed files.
   but not limited or charged to the memory-cache capacity.
 - One worker drains up to 64 entries into an explicit immutable batch. There is no batching timer or flush API.
   Queue saturation skips candidates without blocking or failing successful lookups.
-- Queued writes are discarded if their exact memory admission was evicted, replaced, or compacted.
-- Active writes retain reservations through completion despite cancellation. Publication checks the original
-  memory-entry identity under the memory shard lock, within the disk index lock. No memory operation takes
+- Queued writes are discarded if their exact key and range are no longer cached in memory. Reinsertion of
+  the same immutable range allows an earlier write to proceed.
+- Active writes retain reservations through completion despite cancellation. Publication checks the exact
+  cached key and range under the memory shard lock, within the disk index lock. No memory operation takes
   a disk lock. Stale writes are discarded, and disk containment/allocation policy can still skip entries.
 - Failed writes are logged and remain invisible. Shared evidence survives queued and active disk writes.
 - Requests record exactly once before lookup, including requests that fail or are later canceled. Callback results already
@@ -228,7 +230,7 @@ permanently excluded by the design.
 
 ### Integrity and recovery
 
-- Extend current memory-identity publication checks when tier-aware retention policy is implemented.
+- Extend current cached-range publication checks when tier-aware retention policy is implemented.
 - Validate the versioned metadata format and whole-entry XXHash64 checksums against injected crash and reuse cases.
 - Exercise incremental recovery and scan-end resets on real Linux direct I/O and io_uring.
 - Validate recovery after process and machine crashes, beyond metadata corruption and reuse tests.

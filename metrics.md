@@ -208,8 +208,9 @@ Queue and storage counters describe different stages: do not sum all their
 values as a total number of disk-write attempts. `queued` is admission, not a
 terminal outcome. Queue `already_covered` means disk already covers the callback
 download. `redundant` means memory declined a contained download. Queue `stale`
-means the original memory admission expired before writing. Storage `stale`
-means it expired before publication, after writing.
+means the exact key and range are no longer cached in memory before writing.
+Storage `stale` means they are no longer cached before publication, after writing.
+Reinsertion of the same immutable range does not make a write stale.
 
 A storage `failed` outcome means its shard batch write failed. Entries abandoned
 before a terminal decision, including later shards skipped after a batch error,
@@ -217,8 +218,8 @@ count as `canceled`. Canceling the caller does not cancel a detached storage
 writer: that writer continues to report its actual terminal outcome.
 
 Written entries are not necessarily published entries. Successful writes can be
-discarded because another entry already covers them or their memory admission
-is stale. Gauges follow ownership so rejection, cancellation, errors and normal
+discarded because another disk entry already covers them or their exact key and
+range are no longer cached in memory. Gauges follow ownership so rejection, cancellation, errors and normal
 completion release their counts along with the associated payload budget.
 
 ## Existing metrics

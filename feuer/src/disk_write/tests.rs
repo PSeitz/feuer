@@ -46,8 +46,8 @@ fn queue_metrics_cover_enqueue_pressure_dequeue_and_cancellation() {
 fn enqueue(disk_write_queue: &DiskWriteQueue, memory: &MemoryCache, key: &str) {
     let key = ObjectKeyHash::from(key);
     let download = Download::new(3, Bytes::from_static(b"abcd")).unwrap();
-    let id = memory.insert(key, download.clone()).unwrap();
-    disk_write_queue.enqueue_if_capacity(key, download, id);
+    assert!(memory.insert(key, download.clone()));
+    disk_write_queue.enqueue_if_capacity(key, download);
 }
 
 #[test]
@@ -69,7 +69,7 @@ fn queue_saturation_is_nonblocking_and_bounded_by_entries() {
 }
 
 #[tokio::test]
-async fn eviction_and_reinsertion_cancel_old_queued_writes_while_current_entries_batch_together() {
+async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
     let directory = tempfile::tempdir().unwrap();
     let memory = Arc::new(MemoryCache::new(4096));
     let disk = DiskRangeCache::open(directory.path(), 2 << 20, IoMetrics::noop())
@@ -90,9 +90,8 @@ async fn eviction_and_reinsertion_cancel_old_queued_writes_while_current_entries
     drop(disk_write_queue);
     DiskWriteQueue::write_queued_batches(receiver, memory.clone(), disk.clone()).await;
     assert!(!disk.contains(&ObjectKeyHash::from("evicted"), range));
-    assert!(!disk.contains(&ObjectKeyHash::from("readmitted"), range));
     // One metadata chunk leaves one payload chunk; the drained batch must share it.
-    for key in ["live-a", "live-b"] {
+    for key in ["live-a", "readmitted", "live-b"] {
         assert_eq!(
             disk.get(&ObjectKeyHash::from(key), range).await.unwrap(),
             Bytes::from_static(b"abcd")
@@ -105,7 +104,7 @@ async fn eviction_and_reinsertion_cancel_old_queued_writes_while_current_entries
     }
     assert_eq!(
         value(&registry, "feuer_disk_write_queue_total", &[("outcome", "stale")]),
-        2.0
+        1.0
     );
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 0.0);
     assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);

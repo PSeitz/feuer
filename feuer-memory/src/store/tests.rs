@@ -38,10 +38,7 @@ fn cached_slices_and_idle_buffers_share_allocation_accounting() {
     assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), capacity as f64);
     assert_eq!(cache.get(&key, range(0, 1)).unwrap().as_ptr(), bytes.as_ptr());
     // A redundant insertion does not charge the shared allocation again.
-    assert_eq!(
-        cache.insert_with_capacity(key, Download::new(0, bytes.clone()).unwrap(), capacity),
-        None
-    );
+    assert!(!cache.insert_with_capacity(key, Download::new(0, bytes.clone()).unwrap(), capacity));
     assert_eq!(cache.used_bytes(), capacity as u64);
     cache.remove(&key, range(0, 1));
     assert_eq!(cache.used_bytes(), 0); // caller-only results are outside the budget
@@ -127,28 +124,26 @@ fn trimming_replaces_allocation_capacity_with_copied_payload_capacity() {
 }
 
 #[test]
-fn disk_write_identity_expires_on_removal_replacement_and_reinsertion() {
+fn cached_range_check_accepts_reinsertion_but_rejects_removal_and_replacement() {
     let cache = cache(1024);
     let key = ObjectKeyHash::from("disk-source");
     let payload = Download::new(10, Bytes::from_static(b"abcd")).unwrap();
     let range = payload.downloaded_range();
-    let id = cache.insert(key, payload.clone()).unwrap();
-    assert_eq!(cache.with_current_entry(&key, range, id, || 7), Some(7));
-    assert_eq!(cache.insert(key, payload.clone()), None);
+    assert!(cache.insert(key, payload.clone()));
+    assert_eq!(cache.with_cached_range(&key, range, || 7), Some(7));
+    assert!(!cache.insert(key, payload.clone()));
     assert!(cache.remove(&key, range));
-    let replacement_id = cache.insert(key, payload).unwrap();
-    assert_ne!(id, replacement_id);
     assert!(
         cache
-            .with_current_entry(&key, range, id, || panic!("stale admission"))
+            .with_cached_range(&key, range, || panic!("removed range"))
             .is_none()
     );
-    cache.insert(key, Download::new(9, Bytes::from_static(b"abcdef")).unwrap());
+    assert!(cache.insert(key, payload));
+    assert_eq!(cache.with_cached_range(&key, range, || 7), Some(7));
+    cache.insert(key, Download::new(9, Bytes::from_static(b"xabcdy")).unwrap());
     assert!(
         cache
-            .with_current_entry(&key, range, replacement_id, || panic!(
-                "admission replaced by a containing download"
-            ))
+            .with_cached_range(&key, range, || panic!("range replaced by a containing download"))
             .is_none()
     );
 }
@@ -217,20 +212,20 @@ fn eviction_triggering_insertions_count_once_per_attempt_not_per_victim() {
 }
 
 #[test]
-fn equal_cost_eviction_uses_entry_age_not_sample_order() {
+fn equal_cost_eviction_uses_key_order_not_sample_order() {
     let cache = cache(3);
     let payload = Download::new(0, Bytes::from_static(b"x")).unwrap();
     let range = payload.downloaded_range();
-    for key in ["a", "b", "c"] {
-        cache.insert(ObjectKeyHash::from(key), payload.clone());
+    for key in [0, 1, 2] {
+        cache.insert(ObjectKeyHash(key), payload.clone());
     }
-    // Removing the first candidate moves c ahead of the older b in the sample.
-    assert!(cache.remove(&ObjectKeyHash::from("a"), range));
-    cache.insert(ObjectKeyHash::from("d"), payload.clone());
-    cache.insert(ObjectKeyHash::from("e"), payload);
-    assert!(cache.get(&ObjectKeyHash::from("b"), range).is_none());
-    for key in ["c", "d", "e"] {
-        assert!(cache.get(&ObjectKeyHash::from(key), range).is_some());
+    // Removing the first candidate moves key 2 ahead of key 1 in the sample.
+    assert!(cache.remove(&ObjectKeyHash(0), range));
+    cache.insert(ObjectKeyHash(3), payload.clone());
+    cache.insert(ObjectKeyHash(4), payload);
+    assert!(cache.get(&ObjectKeyHash(1), range).is_none());
+    for key in [2, 3, 4] {
+        assert!(cache.get(&ObjectKeyHash(key), range).is_some());
     }
 }
 
@@ -257,7 +252,7 @@ fn reclaim_sampling_advances_past_contained_ranges() {
     // The partial overlap is eligible; the two ranges fully contained in the incoming download were skipped.
     assert!(matches!(
         shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, 3, &cache.access_histories, false),
-        InsertOrReclaimResult::Complete(Some(_))
+        InsertOrReclaimResult::Complete(true)
     ));
     assert_eq!(shard.entry_count(), 1);
     assert_eq!(shard.used_bytes(), 3);
@@ -727,8 +722,8 @@ fn new_accesses_do_not_invalidate_a_copied_range_trim() {
 }
 
 #[test]
-fn cached_range_changes_still_invalidate_copied_trimming() {
-    for change in 0..3 {
+fn range_trim_revalidates_ranges_but_accepts_reinsertion() {
+    for change in 0..4 {
         let cache = cache(20);
         let key = ObjectKeyHash::from("source");
         let source = download(range(0, 10), Bytes::from_static(b"abcdefghij"));
@@ -757,18 +752,31 @@ fn cached_range_changes_still_invalidate_copied_trimming() {
             }
             1 => {
                 assert!(cache.remove(&key, range(0, 10)));
-                cache.insert(key, source);
+                // The replacement may have a different allocation charge for the same bytes.
+                cache.insert_with_capacity(key, source, 16);
+            }
+            2 => {
+                cache.insert(key, download(range(12, 13), Bytes::from_static(b"x")));
             }
             _ => {
-                cache.insert(key, download(range(12, 13), Bytes::from_static(b"x")));
+                assert!(cache.remove(&key, range(0, 10)));
+                cache.insert(key, download(range(0, 11), Bytes::from_static(b"abcdefghijk")));
             }
         }
         let bytes_before = cache.used_bytes();
-        assert!(
-            !cache.shards[0]
+        assert_eq!(
+            cache.shards[0]
                 .lock()
-                .publish_range_trim(replacement, cache.access_histories.clock())
+                .publish_range_trim(replacement, cache.access_histories.clock()),
+            change == 1
         );
+        if change == 1 {
+            assert_eq!(cache.used_bytes(), 2);
+            assert_eq!(cache.entry_count(), 1);
+            assert_eq!(cache.get(&key, range(2, 4)).unwrap(), Bytes::from_static(b"cd"));
+            assert!(cache.get(&key, range(0, 10)).is_none());
+            continue;
+        }
         assert_eq!(cache.used_bytes(), bytes_before);
         if change != 0 {
             assert_eq!(

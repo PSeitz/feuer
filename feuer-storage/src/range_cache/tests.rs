@@ -922,36 +922,40 @@ async fn racing_equal_and_containing_writes_revalidate_publication() {
 }
 
 #[tokio::test]
-async fn completed_write_revalidates_memory_identity_before_publication() {
+async fn completed_write_revalidates_cached_ranges_but_accepts_reinsertions() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let memory = Arc::new(feuer_memory::MemoryCache::new(1 << 20));
     let mut entries = Vec::new();
     // Different lengths exercise token association through batch sorting.
-    for (key, length) in [("stale", 200), ("current", 100)] {
+    for (key, length) in [("evicted", 300), ("readmitted", 200), ("current", 100)] {
         let key = ObjectKeyHash::from(key);
         let source = download(0, length);
         let range = source.downloaded_range();
-        let id = memory.insert(key, source.clone()).unwrap();
-        entries.push((key, source, (key, range, id)));
+        assert!(memory.insert(key, source.clone()));
+        entries.push((key, source, (key, range)));
     }
     let published = cache
-        .insert_batch_checked(entries, move |(key, range, id), publish| {
-            if key == &ObjectKeyHash::from("stale") {
-                // Called only after complete I/O: readmitting the identical range must
-                // not authorize publication from the old memory admission.
+        .insert_batch_checked(entries, move |(key, range), publish| {
+            // Called only after complete I/O: the exact range must still be cached,
+            // but reinsertion is valid because the object is immutable.
+            if key == &ObjectKeyHash::from("evicted") || key == &ObjectKeyHash::from("readmitted") {
                 assert!(memory.remove(key, *range));
-                memory.insert(*key, download(range.start(), range.len() as usize));
             }
-            memory.with_current_entry(key, *range, *id, publish);
+            if key == &ObjectKeyHash::from("readmitted") {
+                assert!(memory.insert(*key, download(range.start(), range.len() as usize)));
+            }
+            memory.with_cached_range(key, *range, publish);
         })
         .await
         .unwrap();
-    assert_eq!(published, 1);
-    assert!(!cache.contains(&ObjectKeyHash::from("stale"), range(0, 200)));
-    assert_eq!(
-        cache.get(&ObjectKeyHash::from("current"), range(0, 100)).await.unwrap(),
-        download(0, 100).bytes()
-    );
+    assert_eq!(published, 2);
+    assert!(!cache.contains(&ObjectKeyHash::from("evicted"), range(0, 300)));
+    for (key, length) in [("readmitted", 200), ("current", 100)] {
+        assert_eq!(
+            cache.get(&ObjectKeyHash::from(key), range(0, length)).await.unwrap(),
+            download(0, length as usize).bytes()
+        );
+    }
 }
 
 #[tokio::test]

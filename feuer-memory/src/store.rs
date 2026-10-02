@@ -154,32 +154,31 @@ impl MemoryCache {
     /// If an existing entry contains the download, the supplied payload is
     /// discarded. A larger download replaces entries it fully contains, while
     /// partial overlaps coexist.
-    /// Returns the new shard-local entry identity, or `None` for a redundant download.
-    pub fn insert(&self, object_key: ObjectKeyHash, download: Download) -> Option<u64> {
+    /// Returns whether the download was inserted rather than already covered.
+    pub fn insert(&self, object_key: ObjectKeyHash, download: Download) -> bool {
         let capacity = download.bytes().len();
         self.insert_with_capacity(object_key, download, capacity)
     }
 
     /// Caches bytes while charging their backing allocation, even if they are a smaller slice.
     /// Shared allocations are conservatively charged once per cached entry.
-    pub fn insert_with_capacity(&self, object_key: ObjectKeyHash, download: Download, capacity: usize) -> Option<u64> {
+    pub fn insert_with_capacity(&self, object_key: ObjectKeyHash, download: Download, capacity: usize) -> bool {
         let (downloaded_range, bytes) = download.into_parts();
         assert!(capacity >= bytes.len());
         self.admit_download(object_key, downloaded_range, bytes, capacity as u64)
     }
 
-    /// Runs a short synchronous action only while this exact admission remains cached.
+    /// Runs a short synchronous action while an entry with this exact key and range is cached.
     /// Eviction, replacement and compaction cannot intervene before the action finishes.
     /// The action must not reenter this memory cache or perform I/O.
-    pub fn with_current_entry<R>(
+    pub fn with_cached_range<R>(
         &self,
         object_key: &ObjectKeyHash,
         range: ByteRange,
-        entry_id: u64,
         action: impl FnOnce() -> R,
     ) -> Option<R> {
         let shard = self.shards[self.shard_index(object_key)].lock();
-        shard.contains_entry(object_key, range, entry_id).then(action)
+        shard.contains_entry(object_key, range).then(action)
     }
 
     fn admit_download(
@@ -188,7 +187,7 @@ impl MemoryCache {
         downloaded_range: ByteRange,
         bytes: Bytes,
         capacity: u64,
-    ) -> Option<u64> {
+    ) -> bool {
         let shard_index = self.shard_index(&object_key);
         let mut allow_range_trim = true;
         let mut evicted_any_entry = false;
@@ -202,11 +201,11 @@ impl MemoryCache {
                 allow_range_trim,
             );
             match insert_or_reclaim_result {
-                InsertOrReclaimResult::Complete(entry_id) => {
+                InsertOrReclaimResult::Complete(inserted) => {
                     if evicted_any_entry {
                         self.metrics.eviction_triggering_insertions.increase(1);
                     }
-                    return entry_id;
+                    return inserted;
                 }
                 InsertOrReclaimResult::Evicted => evicted_any_entry = true,
                 InsertOrReclaimResult::Retry => continue,
