@@ -101,15 +101,18 @@ chunks are not appended to; individual payload holes are not reused.
 
 ## Write ordering and reuse
 
-1. Initialize and synchronize metadata chunks before linking to them.
-2. Complete payload writes before writing entry records; synchronize metadata before
+1. Complete metadata chunk initialization writes before linking to them.
+2. Complete payload writes before writing entry records, and metadata writes before
    publishing entries in memory. Metadata updates require read/write synchronization.
-3. Invalidate and synchronize records before releasing payload chunks for reuse.
+3. Complete record invalidation writes before releasing payload chunks for reuse.
    All entry owners and read guards must also release those chunks.
+
+No `fsync` or `fdatasync` is issued. Write completion does not guarantee durability
+or persistence ordering after power loss; recovery is best-effort.
 
 ## Recovery
 
-Open waits for recovery. Recovery follows metadata links with one 1-MiB read per
+Open waits for recovery, which runs on Tokio's blocking pool. Recovery follows metadata links with one 1-MiB read per
 metadata chunk; it never scans payload chunks. Zero-filled chunks, read failures,
 invalid addresses, cycles, or corrupt links terminate a chain. Corrupt record pages
 are discarded independently.

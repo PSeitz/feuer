@@ -39,11 +39,12 @@ consume approximately 1 MiB of memory per metadata chunk, plus free-slot bookkee
 writes those chunks once. Partially filled payload chunks are finalized too; later batches cannot
 append. Metadata growth never moves payload addresses. Storage adds no batching delay.
 
-New metadata chunks are fully initialized and synchronized before linking them from the preceding
-chunk. Each shard's first chunk is its fixed chain start and needs no incoming link. Thus a committed
-link never deliberately targets a reserved-but-unwritten chunk. Payload writes finish before their
-metadata records are written. Dirty metadata pages are written as 4-KiB updates, not full-chunk
-rewrites, and synchronized before publication. The last-page link has its own checksum.
+New metadata chunk initialization writes complete before linking them from the preceding chunk.
+Each shard's first chunk is its fixed chain start and needs no incoming link. Payload writes finish
+before their metadata records are written. Dirty metadata pages are written as 4-KiB updates, not
+full-chunk rewrites, and complete before publication. The last-page link has its own checksum.
+No `fsync` or `fdatasync` is issued; this completion order is not a persistence-ordering guarantee
+after power loss.
 
 Publication rechecks containment, larger entries first: broader entries replace contained entries,
 while partial overlaps coexist. Contained entries and entries that cannot fit are skipped.
@@ -57,8 +58,8 @@ payload reservations available for retry; uncertain payloads are not released fo
 queue failure retains active I/O resources when completion cannot be established.
 
 Callers bound batch size and concurrency. Payload buffers and cached metadata pages are outside the
-raw I/O queue's memory budget. Metadata synchronization adds foreground write cost; this layout's
-write throughput has not yet been compared against v10.
+raw I/O queue's memory budget. Metadata writes add foreground write cost; this layout's write
+throughput has not yet been compared against v10.
 
 ## Reads and eviction
 
@@ -76,7 +77,7 @@ than waiting for read guards. Free capacity in another shard cannot satisfy admi
 
 Removing an entry clears its metadata record in memory and retains its payload reservation on a
 pending-invalidation list. The next write flushes these invalidations **before trying to reuse the
-payload space**. Completed invalidations are synchronized before their reservations are released;
+payload space**. Invalidation writes complete before their reservations are released;
 read guards can retain the payload longer. Payload chunks described by the same metadata chunk do
 not share lifetimes. Metadata updates require no metadata reads because pages are cached in memory.
 Closing the in-memory index does not invalidate live entries needed by the next open.
@@ -93,7 +94,8 @@ reserved before records can claim payload addresses; duplicate, cyclic, out-of-s
 claims cannot reserve the same chunks twice. Record decoding checks range arithmetic, alignment,
 shard identity, and payload overlap. Payload reservations are shared where entries share a chunk.
 Entries are indexed during opening, and temporary allocator claim bits are released afterward.
-Opening returns only after every shard has been scanned.
+Each shard's recovery runs on Tokio's blocking pool, using io_uring for reads. Opening returns only
+after every shard has been scanned.
 
 Corrupt pages/links are repaired in the in-memory metadata image and flushed before subsequent
 writes can reuse space. Recovery does not read payloads: their checksums are verified on every hit.
@@ -109,7 +111,7 @@ TMPDIR=/mnt/local-ssd cargo test --locked -p feuer-storage --lib
 ```
 
 Tests cover links between full metadata chunks, one full-chunk recovery read independent of payload
-size, mutable record-slot reuse, independently reclaimable payloads, durable invalidation plus read
+size, mutable record-slot reuse, independently reclaimable payloads, completed invalidation writes plus read
 guards before reuse, failed-invalidation retry, malformed/cyclic links, corrupt record pages,
 metadata/payload ownership conflicts, fixed chain starts, replacement after reopening, and payload checksum
 failures. Existing tests cover packing, fragmentation, cancellation, eviction, and contiguous payloads

@@ -316,7 +316,7 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
         1.0
     );
     assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
-    // Both metadata and the payload awaiting durable invalidation remain reserved.
+    // Both metadata and the payload awaiting invalidation writes remain reserved.
     assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 0.0);
 }
 

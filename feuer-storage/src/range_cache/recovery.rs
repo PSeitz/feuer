@@ -10,7 +10,7 @@ pub(super) fn shard_range(capacity: u64, count: usize, index: usize) -> Range<u6
 }
 
 impl DiskRangeCacheState {
-    /// Scan a shard's metadata before the cache becomes available.
+    /// Scan a shard's metadata on a blocking thread before the cache becomes available.
     pub(super) async fn recover_shard(&self, shard_index: usize) {
         let shard = &self.shards[shard_index];
         let bounds = shard_range(self.file.capacity(), self.shards.len(), shard_index);
@@ -71,12 +71,11 @@ impl DiskRangeCacheState {
                     entries.push((key, storage));
                 }
             }
-            // Report before yielding; cancellation can then release regions with balanced metrics.
+            // Account for retained payload chunks before publishing the batch.
             self.metrics.free_chunks.decrease(recovered_chunks);
             self.metrics.allocated_chunks.increase(recovered_chunks);
             self.metrics.recovered_chunks.increase(recovered_chunks);
             shard.entry_index.lock().unwrap().insert_batch(&mut entries);
-            tokio::task::yield_now().await;
         }
         shard.allocator.finish_recovery();
     }

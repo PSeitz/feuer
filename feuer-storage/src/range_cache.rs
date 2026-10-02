@@ -241,7 +241,10 @@ impl DiskRangeCache {
         let mut recovery_tasks = tokio::task::JoinSet::new();
         for index in 0..disk.shards.len() {
             let disk = disk.clone();
-            recovery_tasks.spawn(async move { disk.recover_shard(index).await });
+            // Poll recovery on a blocking thread, including metadata parsing and index rebuilding.
+            // Its io_uring reads still use the runtime for asynchronous completion.
+            recovery_tasks
+                .spawn_blocking(move || tokio::runtime::Handle::current().block_on(disk.recover_shard(index)));
         }
         while let Some(result) = recovery_tasks.join_next().await {
             result.expect("shard recovery task failed");

@@ -29,7 +29,6 @@ const LOCK_FILE_NAME: &str = ".feuer.lock";
 struct DataFileState {
     read_queue: uring::ReadQueue,
     write_queue: uring::WriteQueue,
-    file: Arc<File>,
     data_path: PathBuf,
     capacity: u64,
 }
@@ -261,23 +260,6 @@ impl DataFile {
         .await
     }
 
-    /// Makes completed metadata invalidations durable before their payload chunks can be reused.
-    pub(crate) async fn sync_data(&self) -> DataFileResult<()> {
-        let file = self.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let _owner = &file;
-            file.state.file.sync_data()
-        })
-        .await
-        .map_err(io::Error::other)
-        .and_then(|result| result);
-        result.map_err(|source| DataFileError::Io {
-            operation: IoOperation::Write,
-            path: self.state.data_path.clone(),
-            source,
-        })
-    }
-
     async fn measure_io<T>(
         &self,
         operation: IoOperation,
@@ -404,7 +386,6 @@ fn open_file_state(directory: PathBuf, capacity: u64, buffer_pool: Arc<BufferPoo
     Ok(DataFileState {
         read_queue,
         write_queue,
-        file,
         data_path,
         capacity,
     })

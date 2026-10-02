@@ -162,7 +162,7 @@ impl DiskChunkAllocator {
         Some(self.region(chunks, false))
     }
 
-    /// Startup payload recovery retains every region and reports batch metrics before yielding.
+    /// Startup payload recovery retains every region and reports metrics for each batch.
     /// Metadata is already reserved; retained regions prevent payload chunks from being claimed twice.
     pub(super) fn recover_payload_chunks(&self, first: u64, count: u64) -> Option<DiskRegion> {
         let chunks = first..first.checked_add(count)?;

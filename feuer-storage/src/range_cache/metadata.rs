@@ -1,5 +1,6 @@
 //! Mutable metadata pages. The shard's async I/O lock serializes reads and writes.
-//! Removed records retain their payload reservations until invalidation is durable.
+//! Removed records retain their payload reservations until invalidation writes complete.
+//! Writes are not synced to stable storage; recovery is best-effort after a crash.
 
 use std::collections::BTreeSet;
 
@@ -176,8 +177,6 @@ impl DiskCacheShard {
             &[(0, Bytes::copy_from_slice(&chunk.bytes))],
         )
         .await?;
-        // A durable link must never expose an uninitialized successor after a crash.
-        file.sync_data().await?;
         {
             let mut pages = self.metadata.lock().unwrap();
             if let Some(last) = pages.chunks.len().checked_sub(1) {
@@ -233,9 +232,6 @@ impl DiskCacheShard {
         for (region, bytes) in &writes {
             file.write_parts(region.slice(region.range()), &[(0, bytes.clone())])
                 .await?;
-        }
-        if !dirty.is_empty() {
-            file.sync_data().await?;
         }
         let mut pages = self.metadata.lock().unwrap();
         for ((chunk, page), (_, bytes)) in dirty.into_iter().zip(writes) {
