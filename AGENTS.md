@@ -31,5 +31,4 @@ Metadata is separate from payload chunks, including when an entry spans multiple
 - Do not use "extent" in names or explanations. Use concrete, descriptive terms such as "disk region" or "cached byte range" instead.
 - Do not use "bounded" in names. It doesn't mean anything.
 - Use `chunk` for a 1-MiB disk chunk, not `unit` or `block`. Use `page` for a 4-KiB metadata page. Payload chunks are not organized into pages. Payload is plain bytes in 4-KiB-aligned disk byte ranges; metadata chunks contain 4-KiB pages.
-- Use `DiskRegion` for a reserved byte range in the backing file.
 - Do not call this guard a "lease" or "pin". It has no expiration and is unrelated to Rust's `Pin`. It does not imply a global lock or serialized reads.
