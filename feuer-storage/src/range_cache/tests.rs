@@ -315,7 +315,7 @@ async fn multi_chunk_eviction_preserves_an_in_progress_read_until_its_guards_dro
     let read = {
         let index = cache.disk.shards[0].entry_index.lock().unwrap();
         let entry = index.covering_entry(&key, source.downloaded_range()).unwrap();
-        GuardedObjectRangeRead {
+        GuardedDiskPayload {
             object_range: entry.object_range,
             payload_checksum: entry.payload_checksum,
             payload_region: entry.payload_region.read_guard(),
@@ -1281,7 +1281,7 @@ fn index_batch_insertion_keeps_covered_ranges() {
 fn invalidation_preserves_different_contents_but_may_discard_an_identical_replacement() {
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
     let region = allocator.reserve_chunks(1).unwrap();
-    let read = GuardedObjectRangeRead {
+    let read = GuardedDiskPayload {
         object_range: range(0, 3),
         payload_checksum: XxHash64::oneshot(0, b"old"),
         payload_region: region.slice(8192..12288).read_guard(),

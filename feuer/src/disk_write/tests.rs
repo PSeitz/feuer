@@ -18,7 +18,7 @@ fn queue_metrics_cover_enqueue_pressure_dequeue_and_cancellation() {
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 4.0);
     assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 1.0);
     let mut active = receiver.try_recv().unwrap();
-    active.source.record_dequeue();
+    active.entry_and_metrics.record_dequeue();
     assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 4.0);
     assert_eq!(value(&registry, "feuer_disk_write_queue_duration_seconds", &[]), 1.0);

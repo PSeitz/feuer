@@ -28,7 +28,7 @@ use twox_hash::XxHash64;
 
 use crate::{
     DataFile, DataFileError, DataFileResult, DiskMetrics, IoMetrics,
-    allocation::{CHUNK_BYTES, DiskChunkAllocator, DiskRegion, DiskRegionReadGuard},
+    allocation::{CHUNK_BYTES, ChunkGuard, DiskChunkAllocator, DiskRegion},
     disk_metrics::{DiskLookupOutcome, DiskWriteAttempt, DiskWriteOutcome},
 };
 #[cfg(test)]
@@ -99,7 +99,7 @@ struct UnwrittenShardBatch {
 /// Verified bytes or failure shared by concurrent reads of one stored entry.
 type EntryReadResult = OnceCell<Result<(Bytes, usize), DiskLookupOutcome>>;
 
-/// One indexed disk entry, including storage, eviction bookkeeping, and in-flight reads.
+/// One entry's object range, payload region and checksum, metadata slot, eviction position, and shared read.
 struct DiskEntry {
     // In-flight deduplication: concurrent readers share one disk read and checksum verification.
     // Only concurrent callers retain the result; the index must not cache payload bytes.
@@ -120,11 +120,11 @@ impl Drop for DiskRangeCacheState {
     }
 }
 
-/// A guarded object-range read, with the expected checksum and contiguous payload region.
-struct GuardedObjectRangeRead {
+/// A disk payload's byte ranges and expected checksum, with a guard keeping its chunks reserved.
+struct GuardedDiskPayload {
     object_range: ByteRange,
     payload_checksum: u64,
-    payload_region: DiskRegionReadGuard,
+    payload_region: ChunkGuard,
 }
 
 /// Failure opening or writing to the experimental disk range cache. Read uncertainty becomes a miss.
@@ -219,7 +219,7 @@ impl DiskRangeCache {
         let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
         let shards = (0..num_shards)
             .map(|shard_index| {
-                let range = recovery::shard_range(capacity, num_shards, shard_index);
+                let range = recovery::shard_disk_range(capacity, num_shards, shard_index);
                 let allocator = DiskChunkAllocator::with_metrics(range.clone(), metrics.clone()).unwrap();
                 allocator.start_recovery(range.start, range.end);
                 DiskCacheShard {
@@ -463,7 +463,7 @@ impl DiskRangeCache {
                 result
             });
             (
-                GuardedObjectRangeRead {
+                GuardedDiskPayload {
                     object_range: entry.object_range,
                     payload_checksum: entry.payload_checksum,
                     payload_region: entry.payload_region.read_guard(),
@@ -634,7 +634,7 @@ impl DiskEntryIndex {
     }
 
     /// Removes the indexed entry matching the failed read's expected start and checksum.
-    fn remove_entry_matching_read(&mut self, key: &ObjectKeyHash, read: &GuardedObjectRangeRead) {
+    fn remove_entry_matching_read(&mut self, key: &ObjectKeyHash, read: &GuardedDiskPayload) {
         let start = read.object_range.start();
         // Preserve different contents. Discarding a newer identical copy is an acceptable miss.
         if self
@@ -767,7 +767,7 @@ impl UnwrittenShardBatch {
     }
 }
 
-impl GuardedObjectRangeRead {
+impl GuardedDiskPayload {
     /// Reads the whole entry, verifies its checksum, and returns only the requested byte range.
     async fn read_verified_range(
         &self,

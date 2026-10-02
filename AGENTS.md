@@ -28,5 +28,5 @@ Each entry's payload occupies one contiguous disk byte range, with no metadata g
 - Do not use "bounded" in names. It doesn't mean anything.
 - Use `chunk` for a 1-MiB disk chunk, not `unit` or `block`. Use `page` for a 4-KiB metadata page. Payload chunks are not organized into pages. Payload is plain bytes in 4-KiB-aligned disk byte ranges; metadata chunks contain 4-KiB pages.
 - Use `DiskRegion` for a reserved byte range in the backing file.
-- Use `DiskRegionReadGuard` for the guard that prevents a disk region from being reused while a read depends on it. In-place metadata updates require separate read/write synchronization. Multiple reads may hold guards concurrently. Eviction may remove the cache entry, but reuse must wait until all guards are released.
+- Use `ChunkGuard` for the guard that prevents a disk region from being reused while a read depends on it. In-place metadata updates require separate read/write synchronization. Multiple reads may hold guards concurrently. Eviction may remove the cache entry, but reuse must wait until all guards are released.
 - Do not call this guard a "lease" or "pin". It has no expiration and is unrelated to Rust's `Pin`. It does not imply a global lock or serialized reads.

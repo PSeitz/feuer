@@ -18,7 +18,7 @@ use tracing::{Instrument, Span, field};
 
 use crate::{
     DataFileError, DataFileResult, IoMetrics, IoOperation,
-    allocation::{DiskRegion, DiskRegionReadGuard},
+    allocation::{ChunkGuard, DiskRegion},
     uring,
 };
 
@@ -160,11 +160,7 @@ impl DataFile {
     }
 
     /// Reads one contiguous payload into a buffer, omitting final alignment padding.
-    pub(crate) async fn read_region(
-        &self,
-        region: DiskRegionReadGuard,
-        length: usize,
-    ) -> DataFileResult<(Bytes, usize)> {
+    pub(crate) async fn read_region(&self, region: ChunkGuard, length: usize) -> DataFileResult<(Bytes, usize)> {
         let range = region.range();
         self.measure_io(IoOperation::Read, range.start, length, async {
             let (bytes, capacity) = self.read_aligned_range(range, Some(region)).await?;
@@ -289,7 +285,7 @@ impl DataFile {
     async fn read_aligned_range(
         &self,
         range: Range<u64>,
-        read_guard: Option<DiskRegionReadGuard>,
+        read_guard: Option<ChunkGuard>,
     ) -> DataFileResult<(Bytes, usize)> {
         let operation = IoOperation::Read;
         check_file_bounds(operation, range.start, range.end - range.start, self.state.capacity)?;

@@ -4,16 +4,17 @@ use std::ops::Range;
 
 use super::{page_format::*, *};
 
-pub(super) fn shard_range(capacity: u64, count: usize, index: usize) -> Range<u64> {
+/// The disk byte range assigned to one shard.
+pub(super) fn shard_disk_range(capacity: u64, count: usize, index: usize) -> Range<u64> {
     let chunks = capacity / CHUNK_BYTES;
     chunks * index as u64 / count as u64 * CHUNK_BYTES..chunks * (index + 1) as u64 / count as u64 * CHUNK_BYTES
 }
 
 impl DiskRangeCacheState {
-    /// Scan a shard's metadata on a blocking thread before the cache becomes available.
+    /// Recovers a shard's entries from metadata records before the cache becomes available.
     pub(super) async fn recover_shard(&self, shard_index: usize) {
         let shard = &self.shards[shard_index];
-        let bounds = shard_range(self.file.capacity(), self.shards.len(), shard_index);
+        let bounds = shard_disk_range(self.file.capacity(), self.shards.len(), shard_index);
         // Reserve every metadata chunk before accepting any payload addresses from the records.
         shard.load_metadata_chain(&self.file, bounds.clone()).await;
         let mut payload_chunks = BTreeMap::<u64, DiskRegion>::new();
@@ -29,7 +30,7 @@ impl DiskRangeCacheState {
                     if record.iter().all(|&byte| byte == 0) {
                         continue;
                     }
-                    let entry = decode_entry(record, bounds.clone()).filter(|(key, _, _, payload)| {
+                    let entry = decode_entry_metadata(record, bounds.clone()).filter(|(key, _, _, payload)| {
                         self.shard_index_for_key(key) == shard_index
                             && payload_ranges
                                 .range(..payload.end)
@@ -37,7 +38,7 @@ impl DiskRangeCacheState {
                                 .is_none_or(|(_, end)| *end <= payload.start)
                     });
                     let Some((key, object_range, checksum, payload)) = entry else {
-                        pages.discard_record(chunk, slot);
+                        pages.clear_record(chunk, slot);
                         continue;
                     };
                     let start = payload.start / CHUNK_BYTES * CHUNK_BYTES;
@@ -47,7 +48,7 @@ impl DiskRangeCacheState {
                             .allocator
                             .recover_payload_chunks(start / CHUNK_BYTES, (end - start) / CHUNK_BYTES)
                         else {
-                            pages.discard_record(chunk, slot);
+                            pages.clear_record(chunk, slot);
                             continue;
                         };
                         recovered_chunks += region.chunk_count();
@@ -55,7 +56,7 @@ impl DiskRangeCacheState {
                     }
                     let region = &payload_chunks[&start];
                     if payload.end > region.range().end {
-                        pages.discard_record(chunk, slot);
+                        pages.clear_record(chunk, slot);
                         continue;
                     }
                     let payload_region = region.slice(payload.clone());
@@ -82,7 +83,7 @@ impl DiskRangeCacheState {
 }
 
 impl DiskCacheShard {
-    /// Read and repair the metadata chain before any entry can claim payload chunks.
+    /// Reads the metadata chain and resets invalid record pages before reserving payload chunks.
     async fn load_metadata_chain(&self, file: &DataFile, bounds: Range<u64>) {
         let mut pages = metadata::MetadataPages::default();
         let mut address = bounds.start;
@@ -121,7 +122,7 @@ impl DiskCacheShard {
                     count == RECORDS_PER_PAGE as u64 && contents[PAGE_CONTENT_BYTES..].iter().all(|&byte| byte == 0)
                 });
                 if !valid {
-                    pages.repair_page(chunk_index, page);
+                    pages.reset_record_page(chunk_index, page);
                 }
             }
             match next_chunk_address {
@@ -149,9 +150,11 @@ fn valid_payload_range(range: &Range<u64>, bounds: Range<u64>) -> bool {
         && (range.end <= (range.start / CHUNK_BYTES + 1) * CHUNK_BYTES || range.start.is_multiple_of(CHUNK_BYTES))
 }
 
-type DecodedEntry = (ObjectKeyHash, ByteRange, u64, Range<u64>);
+/// An entry's object key, object range, payload checksum, and payload disk range.
+type EntryMetadata = (ObjectKeyHash, ByteRange, u64, Range<u64>);
 
-fn decode_entry(bytes: &[u8], bounds: Range<u64>) -> Option<DecodedEntry> {
+/// Decodes an entry's metadata, rejecting payload ranges outside the shard or with invalid alignment.
+fn decode_entry_metadata(bytes: &[u8], bounds: Range<u64>) -> Option<EntryMetadata> {
     if bytes.len() != ENTRY_METADATA_BYTES {
         return None;
     }

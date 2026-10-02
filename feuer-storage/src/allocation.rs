@@ -243,8 +243,8 @@ impl DiskRegion {
         }
     }
 
-    pub(super) fn read_guard(&self) -> DiskRegionReadGuard {
-        DiskRegionReadGuard {
+    pub(super) fn read_guard(&self) -> ChunkGuard {
+        ChunkGuard {
             region: self.slice(self.range()),
         }
     }
@@ -253,17 +253,17 @@ impl DiskRegion {
 /// Prevents all reserved chunks from being reused while a read depends on this region.
 /// In-place metadata updates require separate caller-owned read/write synchronization.
 #[derive(Debug)]
-pub(super) struct DiskRegionReadGuard {
+pub(super) struct ChunkGuard {
     region: DiskRegion,
 }
 
-impl Clone for DiskRegionReadGuard {
+impl Clone for ChunkGuard {
     fn clone(&self) -> Self {
         self.region.read_guard()
     }
 }
 
-impl DiskRegionReadGuard {
+impl ChunkGuard {
     pub(super) fn range(&self) -> Range<u64> {
         self.region.range()
     }

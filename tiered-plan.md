@@ -257,7 +257,7 @@ details. Any bytes made lookup-visible on disk must still be attributable to an 
 known downloaded object bytes.
 
 The upper storage layer, not the I/O queue, prevents conflicting reads and writes across physical byte
-ranges rounded outward to the I/O alignment. A `DiskRegionReadGuard` prevents overwriting or reusing a disk
+ranges rounded outward to the I/O alignment. A `ChunkGuard` prevents overwriting or reusing a disk
 region while a read depends on its contents. Multiple reads may hold guards concurrently. A canceled read
 whose result is discarded no longer needs unchanged disk contents, but its submitted I/O buffer must still
 survive until completion. The I/O layer owns that buffer lifetime.

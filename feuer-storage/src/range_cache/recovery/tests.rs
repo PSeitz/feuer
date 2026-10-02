@@ -21,7 +21,7 @@ async fn metadata_chains_start_at_each_shards_first_chunk_without_a_sidecar() {
                 .await
                 .unwrap()
         );
-        let bounds = shard_range(cache.disk.file.capacity(), cache.disk.shards.len(), index);
+        let bounds = shard_disk_range(cache.disk.file.capacity(), cache.disk.shards.len(), index);
         let pages = cache.disk.shards[index].metadata.lock().unwrap();
         assert_eq!(pages.chunks[0].region.range().start, bounds.start);
     }
@@ -331,10 +331,10 @@ fn decoder_rejects_malformed_lengths_and_payload_bounds() {
     let allocator = DiskChunkAllocator::for_disk_range(0..4 * CHUNK_BYTES).unwrap();
     let region = allocator.reserve_chunks(1).unwrap();
     let record = encode_entry_metadata(&ObjectKeyHash(1), range(0, 100), &region.slice(0..4096), 9);
-    assert!(decode_entry(&record, 0..4 * CHUNK_BYTES).is_some());
+    assert!(decode_entry_metadata(&record, 0..4 * CHUNK_BYTES).is_some());
     for (offset, value) in [(16, u64::MAX), (24, 0), (24, u64::MAX), (32, 1), (32, 4 * CHUNK_BYTES)] {
         let mut invalid = record.to_vec();
         invalid[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-        assert!(decode_entry(&invalid, 0..4 * CHUNK_BYTES).is_none());
+        assert!(decode_entry_metadata(&invalid, 0..4 * CHUNK_BYTES).is_none());
     }
 }

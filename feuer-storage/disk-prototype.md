@@ -66,7 +66,7 @@ throughput has not yet been compared against v10.
 
 `get` reads and hashes the complete covering entry against its XXHash64 checksum, excluding alignment
 padding, then returns exactly the requested bytes. It reads neither metadata nor neighboring entries.
-A read acquires one `DiskRegionReadGuard` under the range-index lock and retains it through verification.
+A read acquires one `ChunkGuard` under the range-index lock and retains it through verification.
 Returned bytes retain no disk ownership. A checksum mismatch removes the entry only if its expected
 checksum still matches the failed read; discarding a newer identical copy remains an allowed miss.
 

@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     IoOperation,
-    allocation::{DiskRegion, DiskRegionReadGuard},
+    allocation::{ChunkGuard, DiskRegion},
 };
 
 // Buffer addresses, physical offsets, and I/O lengths use this alignment.
@@ -131,11 +131,7 @@ impl ReadQueue {
         })
     }
 
-    pub(crate) fn allocate_buffer(
-        &self,
-        length: usize,
-        read_guard: Option<DiskRegionReadGuard>,
-    ) -> io::Result<AlignedIoBuffer> {
+    pub(crate) fn allocate_buffer(&self, length: usize, read_guard: Option<ChunkGuard>) -> io::Result<AlignedIoBuffer> {
         AlignedIoBuffer::new(length, read_guard, &self.buffer_pool)
     }
 
@@ -152,7 +148,7 @@ impl ReadQueue {
 
     /// One metadata read. Never waits for channel capacity or allocates a buffer without it.
     /// The scanner retries later when the channel is full; admitted requests run in FIFO order.
-    pub(crate) async fn try_read_recovery_chunk(&self, region: DiskRegionReadGuard) -> io::Result<Option<Bytes>> {
+    pub(crate) async fn try_read_recovery_chunk(&self, region: ChunkGuard) -> io::Result<Option<Bytes>> {
         let length = MAX_IO_REQUEST_BYTES;
         let offset = region.range().start;
         assert_eq!(region.range().end - offset, length as u64);
@@ -224,12 +220,12 @@ fn queue_stopped_error() -> io::Error {
 /// Read memory and disk ownership retained until kernel I/O completes.
 pub(crate) struct AlignedIoBuffer {
     // Release disk ownership before the allocation can return to its memory pool.
-    read_guard: Option<DiskRegionReadGuard>,
+    read_guard: Option<ChunkGuard>,
     buffer: AlignedBuffer,
 }
 
 impl AlignedIoBuffer {
-    fn new(length: usize, read_guard: Option<DiskRegionReadGuard>, pool: &Arc<BufferPool>) -> io::Result<Self> {
+    fn new(length: usize, read_guard: Option<ChunkGuard>, pool: &Arc<BufferPool>) -> io::Result<Self> {
         Ok(Self {
             read_guard,
             buffer: pool.allocate(length)?,

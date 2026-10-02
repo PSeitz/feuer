@@ -22,8 +22,8 @@ pub(crate) struct DiskWriteQueue {
     metrics: Arc<DiskWriteQueueMetrics>,
 }
 
-/// The memory-cached range and accounting for a queued or active disk write.
-struct DiskWriteSource {
+/// A disk write's memory-entry key and range, queue time, and metrics.
+struct DiskWriteEntryAndMetrics {
     key: ObjectKeyHash,
     range: ByteRange,
     queued_at: Option<Instant>,
@@ -32,10 +32,10 @@ struct DiskWriteSource {
 
 struct PendingDiskWrite {
     download: Download,
-    source: DiskWriteSource,
+    entry_and_metrics: DiskWriteEntryAndMetrics,
 }
 
-impl DiskWriteSource {
+impl DiskWriteEntryAndMetrics {
     /// Records dequeue time and removes this write from the queued-entry accounting.
     fn record_dequeue(&mut self) {
         let queued_at = self.queued_at.take().expect("queued write dequeued once");
@@ -44,7 +44,7 @@ impl DiskWriteSource {
     }
 }
 
-impl Drop for DiskWriteSource {
+impl Drop for DiskWriteEntryAndMetrics {
     fn drop(&mut self) {
         self.metrics.pending_bytes.decrease(self.range.len());
         if self.queued_at.is_some() {
@@ -105,13 +105,16 @@ impl DiskWriteQueue {
         self.metrics.record(DiskWriteQueueOutcome::Queued);
         self.metrics.queued_entries.increase(1);
         self.metrics.pending_bytes.increase(download.downloaded_range().len());
-        let source = DiskWriteSource {
+        let entry_and_metrics = DiskWriteEntryAndMetrics {
             key,
             range: download.downloaded_range(),
             queued_at: Some(Instant::now()),
             metrics: self.metrics.clone(),
         };
-        permit.send(PendingDiskWrite { download, source });
+        permit.send(PendingDiskWrite {
+            download,
+            entry_and_metrics,
+        });
     }
 
     /// Writes queued downloads in batches, checking that their memory entries are present before publication.
@@ -128,26 +131,31 @@ impl DiskWriteQueue {
             }
             let downloads = pending_writes
                 .into_iter()
-                .filter_map(|PendingDiskWrite { download, mut source }| {
-                    source.record_dequeue();
-                    // This is the transition from queued to active. Later eviction may
-                    // discard publication, but cannot cancel issued I/O or release its regions.
-                    if !memory.with_entry_locked(&source.key, source.range, || ()) {
-                        source.metrics.record(DiskWriteQueueOutcome::Stale);
-                        return None;
-                    }
-                    Some((source.key, download, source))
-                })
+                .filter_map(
+                    |PendingDiskWrite {
+                         download,
+                         mut entry_and_metrics,
+                     }| {
+                        entry_and_metrics.record_dequeue();
+                        // This is the transition from queued to active. Later eviction may
+                        // discard publication, but cannot cancel issued I/O or release its regions.
+                        if !memory.with_entry_locked(&entry_and_metrics.key, entry_and_metrics.range, || ()) {
+                            entry_and_metrics.metrics.record(DiskWriteQueueOutcome::Stale);
+                            return None;
+                        }
+                        Some((entry_and_metrics.key, download, entry_and_metrics))
+                    },
+                )
                 .collect::<Vec<_>>();
             if downloads.is_empty() {
                 continue;
             }
             let memory = memory.clone();
             if let Err(error) = disk
-                .insert_batch_checked(downloads, move |source, publish| {
+                .insert_batch_checked(downloads, move |entry_and_metrics, publish| {
                     // Lock order is disk index -> memory shard. No memory operation
                     // acquires a disk lock; eviction cannot race this publication.
-                    memory.with_entry_locked(&source.key, source.range, publish);
+                    memory.with_entry_locked(&entry_and_metrics.key, entry_and_metrics.range, publish);
                 })
                 .await
             {

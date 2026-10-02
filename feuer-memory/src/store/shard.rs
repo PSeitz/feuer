@@ -13,7 +13,7 @@ use crate::{BufferPool, MemoryMetrics};
 /// Minimum requests across all keys since admission before payload compaction is allowed.
 pub(super) const MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION: u64 = 64;
 
-/// A memory entry's payload bytes, object range, allocation capacity, and eviction bookkeeping.
+/// An entry's payload bytes, object range, allocation capacity, candidate slot, and admission clock.
 struct MemoryEntry {
     /// Exact object interval represented by `bytes`.
     range: ByteRange,
@@ -21,7 +21,7 @@ struct MemoryEntry {
     bytes: Bytes,
     /// Capacity of the backing allocation, possibly larger than the visible payload.
     capacity: u64,
-    /// This entry's slot in the eviction candidate ring.
+    /// This entry's slot in the list sampled for trimming or eviction.
     candidate_slot: usize,
     /// Request clock at admission.
     admitted_at_access: u64,
@@ -57,7 +57,7 @@ impl ObjectEntries {
     }
 
     /// Collects byte ranges identifying contained entries and sums their allocation charges.
-    fn ranges_contained_by(&self, range: ByteRange) -> ContainedEntryRanges {
+    fn contained_entry_ranges(&self, range: ByteRange) -> ContainedEntryRanges {
         let mut contained_ranges = ContainedEntryRanges::default();
         for (_, entry) in self.by_start.range(range.start()..range.end()) {
             if range.contains(entry.range) {
@@ -76,9 +76,9 @@ struct ContainedEntryRanges {
     allocation_bytes: u64,
 }
 
-/// Usage removed while admitting one download.
+/// Allocation bytes and entry count removed from the shard.
 #[derive(Default)]
-struct RemovedCacheUsage {
+struct RemovedEntryUsage {
     allocation_bytes: u64,
     entry_count: u64,
 }
@@ -90,14 +90,14 @@ struct ObjectKeyAndRangeStart {
     start: u64,
 }
 
-/// Rotating ring of cached-range candidates for reclaiming memory by trimming or eviction.
+/// A list of entry keys and range starts, sampled in rotation to choose an entry to trim or evict.
 #[derive(Default)]
-struct ReclaimCandidateRing {
+struct ReclaimCandidateList {
     entries: Vec<ObjectKeyAndRangeStart>,
     cursor: usize,
 }
 
-impl ReclaimCandidateRing {
+impl ReclaimCandidateList {
     fn register(&mut self, candidate: ObjectKeyAndRangeStart) -> usize {
         let slot = self.entries.len();
         self.entries.push(candidate);
@@ -122,7 +122,7 @@ impl ReclaimCandidateRing {
     }
 }
 
-/// The cached range selected for reclaiming memory.
+/// Object key and range identifying the entry selected for trimming or eviction.
 struct ReclaimCandidate {
     object_key: ObjectKeyHash,
     range: ByteRange,
@@ -181,7 +181,7 @@ pub(super) struct MemoryCacheShard {
     used_bytes: u64,
     entries_by_key: FxHashMap<ObjectKeyHash, ObjectEntries>,
     /// Object keys and range starts, sampled in rotation to choose a range to trim or evict.
-    candidates: ReclaimCandidateRing,
+    candidates: ReclaimCandidateList,
     metrics: Arc<MemoryMetrics>,
     buffer_pool: Arc<BufferPool>,
 }
@@ -193,7 +193,7 @@ impl MemoryCacheShard {
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             used_bytes: 0,
             entries_by_key: FxHashMap::default(),
-            candidates: ReclaimCandidateRing::default(),
+            candidates: ReclaimCandidateList::default(),
             metrics,
             buffer_pool,
         }
@@ -211,8 +211,8 @@ impl MemoryCacheShard {
             .map(|entry| entry.requested_bytes(requested_range))
     }
 
-    /// Tries to admit the download or reclaim space by evicting one range or preparing a trim.
-    /// Cached ranges fully contained in the incoming download will be replaced on insertion.
+    /// Tries to admit the download or reclaim space by evicting one entry or preparing a trim.
+    /// Entries whose ranges are fully contained in the incoming download will be replaced on insertion.
     /// Their bytes are already subtracted when checking capacity, so eviction sampling skips them.
     /// If a sample has no eligible victim, the caller releases the lock before trying the next sample
     /// to bound sampling work per lock hold.
@@ -230,17 +230,17 @@ impl MemoryCacheShard {
                 self.metrics.record_redundant();
                 return InsertOrReclaimResult::Complete(false);
             }
-            Some(entries) => entries.ranges_contained_by(range),
+            Some(entries) => entries.contained_entry_ranges(range),
             None => ContainedEntryRanges::default(),
         };
         let added_bytes = capacity;
-        let used_bytes_without_contained_ranges = self.used_bytes - contained_ranges.allocation_bytes;
+        let used_bytes_without_contained_entries = self.used_bytes - contained_ranges.allocation_bytes;
         let max_existing_bytes = self.capacity.saturating_sub(added_bytes);
 
-        if used_bytes_without_contained_ranges <= max_existing_bytes {
+        if used_bytes_without_contained_entries <= max_existing_bytes {
             let removal = self.remove_contained_entries(object_key, &contained_ranges.ranges);
             debug_assert_eq!(removal.allocation_bytes, contained_ranges.allocation_bytes);
-            self.insert_downloaded_range(*object_key, range, bytes.clone(), capacity, access_histories.clock());
+            self.insert_download_entry(*object_key, range, bytes.clone(), capacity, access_histories.clock());
 
             if removal.entry_count != 0 {
                 self.metrics
@@ -262,13 +262,13 @@ impl MemoryCacheShard {
 
         let removed_bytes = self
             .remove_entry(&candidate.object_key, candidate.range)
-            .expect("a sampled pressure candidate cannot disappear while its shard is locked");
+            .expect("an entry selected for eviction cannot disappear while its shard is locked");
         self.metrics.decrease_usage(removed_bytes, 1);
         InsertOrReclaimResult::Evicted
     }
 
-    /// Inserts a downloaded range, charging its backing allocation capacity.
-    fn insert_downloaded_range(
+    /// Inserts an entry holding downloaded bytes, charging its backing allocation capacity.
+    fn insert_download_entry(
         &mut self,
         object_key: ObjectKeyHash,
         range: ByteRange,
@@ -302,8 +302,8 @@ impl MemoryCacheShard {
             .is_some_and(|entry| entry.range == range)
     }
 
-    /// Inserts a trimmed range into the index and candidate ring; the caller accounts for its bytes.
-    fn insert_trimmed_range(&mut self, object_key: &ObjectKeyHash, range: ByteRange, bytes: Bytes, access_clock: u64) {
+    /// Inserts an entry holding bytes retained by trimming; the caller accounts for its bytes.
+    fn insert_trimmed_entry(&mut self, object_key: &ObjectKeyHash, range: ByteRange, bytes: Bytes, access_clock: u64) {
         let capacity = bytes.len() as u64;
         self.buffer_pool.add_cached(capacity);
         let candidate_slot = self.candidates.register(ObjectKeyAndRangeStart {
@@ -323,12 +323,12 @@ impl MemoryCacheShard {
     }
 
     /// Removes entries whose byte ranges were found contained in the incoming download.
-    fn remove_contained_entries(&mut self, object_key: &ObjectKeyHash, ranges: &[ByteRange]) -> RemovedCacheUsage {
-        let mut removal = RemovedCacheUsage::default();
+    fn remove_contained_entries(&mut self, object_key: &ObjectKeyHash, ranges: &[ByteRange]) -> RemovedEntryUsage {
+        let mut removal = RemovedEntryUsage::default();
         for &range in ranges {
             let removed_bytes = self
                 .remove_entry(object_key, range)
-                .expect("the contained cached range was just found");
+                .expect("the contained entry was just found");
             removal.allocation_bytes += removed_bytes;
             removal.entry_count += 1;
         }
@@ -380,7 +380,7 @@ impl MemoryCacheShard {
             .entries_by_key
             .get_mut(&moved_candidate.object_key)
             .and_then(|entries| entries.by_start.get_mut(&moved_candidate.start))
-            .expect("a moved policy candidate must still refer to a live entry");
+            .expect("a moved sampling candidate must still refer to an indexed entry");
         entry.candidate_slot = slot;
     }
 
@@ -400,11 +400,11 @@ impl MemoryCacheShard {
             let entries = self
                 .entries_by_key
                 .get(&candidate.object_key)
-                .expect("every policy candidate must have an object index");
+                .expect("every sampling candidate must have an object index");
             let entry = entries
                 .by_start
                 .get(&candidate.start)
-                .expect("every policy candidate must identify a live entry");
+                .expect("every sampling candidate must identify an indexed entry");
             if candidate.object_key == *admitting_key && admitting_range.contains(entry.range) {
                 continue;
             }
@@ -434,11 +434,11 @@ impl MemoryCacheShard {
         let entries = self
             .entries_by_key
             .get(&candidate.object_key)
-            .expect("a selected pressure candidate must have an object index");
+            .expect("an entry selected for trimming must have an object index");
         let entry = entries
             .by_start
             .get(&candidate.range.start())
-            .expect("a selected pressure candidate must identify a live entry");
+            .expect("an entry selected for trimming must still be indexed");
         let access_clock = access_histories.clock();
         if access_clock.saturating_sub(entry.admitted_at_access) < MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
             return None;
@@ -476,7 +476,7 @@ impl MemoryCacheShard {
             retained_bytes += bytes.len() as u64;
             retained_entries += 1;
             self.used_bytes += bytes.len() as u64;
-            self.insert_trimmed_range(&replacement.object_key, retained_range, bytes, access_clock);
+            self.insert_trimmed_entry(&replacement.object_key, retained_range, bytes, access_clock);
         }
 
         let reclaimed_bytes = removed_bytes - retained_bytes;

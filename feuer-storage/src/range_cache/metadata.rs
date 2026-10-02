@@ -114,27 +114,29 @@ impl MetadataPages {
         self.dirty_pages.insert((chunk, page));
     }
 
-    pub(super) fn discard_record(&mut self, chunk: usize, slot: usize) {
+    /// Clears a record and makes its slot reusable.
+    pub(super) fn clear_record(&mut self, chunk: usize, slot: usize) {
         self.set_record(chunk, slot, &[0; ENTRY_METADATA_BYTES]);
         self.free_slots.push((chunk, slot));
     }
 
-    pub(super) fn repair_page(&mut self, chunk: usize, page: usize) {
+    /// Resets a record page to empty records and makes all its slots reusable.
+    pub(super) fn reset_record_page(&mut self, chunk_index: usize, page: usize) {
         self.free_slots
-            .retain(|&(c, slot)| c != chunk || slot / RECORDS_PER_PAGE != page);
-        let item = &mut self.chunks[chunk];
+            .retain(|&(chunk, slot)| chunk != chunk_index || slot / RECORDS_PER_PAGE != page);
+        let chunk = &mut self.chunks[chunk_index];
         encode_page(
-            &mut item.bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES],
+            &mut chunk.bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES],
             ENTRY_METADATA_PAGE_TAG,
             0,
-            item.region.range().start + (page * METADATA_PAGE_BYTES) as u64,
+            chunk.region.range().start + (page * METADATA_PAGE_BYTES) as u64,
             page as u64,
             RECORDS_PER_PAGE as u64,
             &[],
         );
-        self.dirty_pages.insert((chunk, page));
+        self.dirty_pages.insert((chunk_index, page));
         self.free_slots
-            .extend((page * RECORDS_PER_PAGE..(page + 1) * RECORDS_PER_PAGE).map(|slot| (chunk, slot)));
+            .extend((page * RECORDS_PER_PAGE..(page + 1) * RECORDS_PER_PAGE).map(|slot| (chunk_index, slot)));
     }
 }
 
@@ -145,7 +147,7 @@ impl Drop for DiskEntry {
         {
             let mut pages = pages.lock().unwrap();
             if !pages.closing {
-                pages.discard_record(slot.chunk, slot.slot);
+                pages.clear_record(slot.chunk, slot.slot);
                 pages
                     .pending_payload_releases
                     .push(self.payload_region.slice(self.payload_region.range()));
@@ -214,11 +216,11 @@ impl DiskCacheShard {
     /// Snapshot dirty pages without holding a synchronous lock over I/O. Concurrent removals
     /// create another dirty version and keep their reservations until that version is flushed.
     pub(super) async fn flush_metadata(&self, file: &DataFile) -> DataFileResult<()> {
-        let (dirty, release_count, writes) = {
+        let (page_locations, payload_release_count, writes) = {
             let pages = self.metadata.lock().unwrap();
-            let dirty = pages.dirty_pages.clone();
-            let release_count = pages.pending_payload_releases.len();
-            let writes: Vec<_> = dirty
+            let page_locations = pages.dirty_pages.clone();
+            let payload_release_count = pages.pending_payload_releases.len();
+            let writes: Vec<_> = page_locations
                 .iter()
                 .map(|&(chunk, page)| {
                     let chunk = &pages.chunks[chunk];
@@ -230,14 +232,14 @@ impl DiskCacheShard {
                     )
                 })
                 .collect();
-            (dirty, release_count, writes)
+            (page_locations, payload_release_count, writes)
         };
         for (region, bytes) in &writes {
             file.write_parts(region.slice(region.range()), &[(0, bytes.clone())])
                 .await?;
         }
         let mut pages = self.metadata.lock().unwrap();
-        for ((chunk, page), (_, bytes)) in dirty.into_iter().zip(writes) {
+        for ((chunk, page), (_, bytes)) in page_locations.into_iter().zip(writes) {
             let offset = page * METADATA_PAGE_BYTES;
             if pages.chunks[chunk].bytes[offset..offset + METADATA_PAGE_BYTES] == bytes[..] {
                 pages.dirty_pages.remove(&(chunk, page));
@@ -245,7 +247,7 @@ impl DiskCacheShard {
         }
         // Errors and canceled flushes leave both dirty pages and payload ownership in the store.
         // Removals arriving during I/O belong to the next flush and retain their reservations.
-        pages.pending_payload_releases.drain(..release_count);
+        pages.pending_payload_releases.drain(..payload_release_count);
         Ok(())
     }
 }
