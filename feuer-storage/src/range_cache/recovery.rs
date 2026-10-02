@@ -59,7 +59,7 @@ impl DiskRangeCacheState {
                         continue;
                     }
                     let payload_region = region.slice(payload.clone());
-                    let storage = DiskEntry {
+                    let entry = DiskEntry {
                         in_flight_read: Weak::new(),
                         eviction_position: 0,
                         object_range,
@@ -68,7 +68,7 @@ impl DiskRangeCacheState {
                         payload_region,
                     };
                     payload_ranges.insert(payload.start, payload.end);
-                    entries.push((key, storage));
+                    entries.push((key, entry));
                 }
             }
             // Account for retained payload chunks before publishing the batch.
@@ -105,7 +105,7 @@ impl DiskCacheShard {
                 region,
                 bytes: bytes.to_vec(),
             };
-            let next = chunk.next();
+            let next_chunk_address = chunk.next_chunk_address();
             let chunk_index = pages.add_chunk(chunk);
             for page in 0..RECORD_PAGES {
                 let bytes =
@@ -124,8 +124,8 @@ impl DiskCacheShard {
                     pages.repair_page(chunk_index, page);
                 }
             }
-            match next {
-                Some(next) => address = next,
+            match next_chunk_address {
+                Some(next_chunk_address) => address = next_chunk_address,
                 None => break,
             }
         }

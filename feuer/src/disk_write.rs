@@ -114,7 +114,7 @@ impl DiskWriteQueue {
         permit.send(PendingDiskWrite { download, source });
     }
 
-    /// Writes queued downloads in batches, checking their cached ranges before publication.
+    /// Writes queued downloads in batches, checking that their memory entries are present before publication.
     async fn write_queued_batches(
         mut receiver: mpsc::Receiver<PendingDiskWrite>,
         memory: Arc<MemoryCache>,
@@ -132,7 +132,7 @@ impl DiskWriteQueue {
                     source.record_dequeue();
                     // This is the transition from queued to active. Later eviction may
                     // discard publication, but cannot cancel issued I/O or release its regions.
-                    if memory.with_cached_range(&source.key, source.range, || ()).is_none() {
+                    if !memory.with_entry_locked(&source.key, source.range, || ()) {
                         source.metrics.record(DiskWriteQueueOutcome::Stale);
                         return None;
                     }
@@ -147,7 +147,7 @@ impl DiskWriteQueue {
                 .insert_batch_checked(downloads, move |source, publish| {
                     // Lock order is disk index -> memory shard. No memory operation
                     // acquires a disk lock; eviction cannot race this publication.
-                    memory.with_cached_range(&source.key, source.range, publish);
+                    memory.with_entry_locked(&source.key, source.range, publish);
                 })
                 .await
             {

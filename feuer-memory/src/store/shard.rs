@@ -13,8 +13,8 @@ use crate::{BufferPool, MemoryMetrics};
 /// Minimum requests across all keys since admission before payload compaction is allowed.
 pub(super) const MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION: u64 = 64;
 
-/// One retained downloaded range.
-struct CachedRange {
+/// A memory entry's payload bytes, object range, allocation capacity, and eviction bookkeeping.
+struct MemoryEntry {
     /// Exact object interval represented by `bytes`.
     range: ByteRange,
     /// Retained payload; lookup results share slices of this allocation.
@@ -27,7 +27,7 @@ struct CachedRange {
     admitted_at_access: u64,
 }
 
-impl CachedRange {
+impl MemoryEntry {
     fn requested_bytes(&self, requested_range: ByteRange) -> Bytes {
         debug_assert!(self.range.contains(requested_range));
         let start = usize::try_from(requested_range.start() - self.range.start())
@@ -38,27 +38,27 @@ impl CachedRange {
     }
 }
 
-/// Ordered cached downloaded ranges for one cache key.
+/// One object's entries, indexed by their starting byte offset.
 ///
-/// No cached range fully contains another. Partial overlaps remain indexed.
+/// No entry's range fully contains another. Partial overlaps remain indexed.
 /// Because starts and ends both increase, the predecessor of a request start
 /// is the only possible covering entry.
 #[derive(Default)]
-struct ObjectCachedRanges {
+struct ObjectEntries {
     /// Entries ordered by exact start for predecessor-based covering lookup.
-    by_start: BTreeMap<u64, CachedRange>,
+    by_start: BTreeMap<u64, MemoryEntry>,
 }
 
-impl ObjectCachedRanges {
+impl ObjectEntries {
     /// Finds the entry whose byte range covers the entire request.
-    fn covering_entry(&self, range: ByteRange) -> Option<&CachedRange> {
+    fn covering_entry(&self, range: ByteRange) -> Option<&MemoryEntry> {
         let (_, entry) = self.by_start.range(..=range.start()).next_back()?;
         entry.range.contains(range).then_some(entry)
     }
 
-    /// Collects cached ranges contained by the incoming range and their allocation charges.
-    fn ranges_contained_by(&self, range: ByteRange) -> ContainedCachedRanges {
-        let mut contained_ranges = ContainedCachedRanges::default();
+    /// Collects byte ranges identifying contained entries and sums their allocation charges.
+    fn ranges_contained_by(&self, range: ByteRange) -> ContainedEntryRanges {
+        let mut contained_ranges = ContainedEntryRanges::default();
         for (_, entry) in self.by_start.range(range.start()..range.end()) {
             if range.contains(entry.range) {
                 contained_ranges.ranges.push(entry.range);
@@ -69,9 +69,9 @@ impl ObjectCachedRanges {
     }
 }
 
-/// Cached ranges fully contained in an incoming download, with their allocation charges.
+/// Byte ranges identifying contained entries, plus their total allocation charge.
 #[derive(Default)]
-struct ContainedCachedRanges {
+struct ContainedEntryRanges {
     ranges: Vec<ByteRange>,
     allocation_bytes: u64,
 }
@@ -179,7 +179,7 @@ pub(super) struct MemoryCacheShard {
     capacity: u64,
     pub(super) reclaim_sample_size: usize,
     used_bytes: u64,
-    ranges: FxHashMap<ObjectKeyHash, ObjectCachedRanges>,
+    entries_by_key: FxHashMap<ObjectKeyHash, ObjectEntries>,
     /// Object keys and range starts, sampled in rotation to choose a range to trim or evict.
     candidates: ReclaimCandidateRing,
     metrics: Arc<MemoryMetrics>,
@@ -192,7 +192,7 @@ impl MemoryCacheShard {
             capacity,
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             used_bytes: 0,
-            ranges: FxHashMap::default(),
+            entries_by_key: FxHashMap::default(),
             candidates: ReclaimCandidateRing::default(),
             metrics,
             buffer_pool,
@@ -205,7 +205,7 @@ impl MemoryCacheShard {
     }
 
     pub(super) fn get(&self, object_key: &ObjectKeyHash, requested_range: ByteRange) -> Option<Bytes> {
-        self.ranges
+        self.entries_by_key
             .get(object_key)?
             .covering_entry(requested_range)
             .map(|entry| entry.requested_bytes(requested_range))
@@ -225,13 +225,13 @@ impl MemoryCacheShard {
         access_histories: &ObjectAccessHistories,
         allow_range_trim: bool,
     ) -> InsertOrReclaimResult {
-        let contained_ranges = match self.ranges.get(object_key) {
+        let contained_ranges = match self.entries_by_key.get(object_key) {
             Some(entries) if entries.covering_entry(range).is_some() => {
                 self.metrics.record_redundant();
                 return InsertOrReclaimResult::Complete(false);
             }
             Some(entries) => entries.ranges_contained_by(range),
-            None => ContainedCachedRanges::default(),
+            None => ContainedEntryRanges::default(),
         };
         let added_bytes = capacity;
         let used_bytes_without_contained_ranges = self.used_bytes - contained_ranges.allocation_bytes;
@@ -282,8 +282,8 @@ impl MemoryCacheShard {
             object_key,
             start: range.start(),
         });
-        let entries = self.ranges.entry(object_key).or_default();
-        let entry = CachedRange {
+        let entries = self.entries_by_key.entry(object_key).or_default();
+        let entry = MemoryEntry {
             range,
             bytes,
             capacity,
@@ -296,7 +296,7 @@ impl MemoryCacheShard {
     }
 
     pub(super) fn contains_entry(&self, key: &ObjectKeyHash, range: ByteRange) -> bool {
-        self.ranges
+        self.entries_by_key
             .get(key)
             .and_then(|entries| entries.by_start.get(&range.start()))
             .is_some_and(|entry| entry.range == range)
@@ -310,8 +310,8 @@ impl MemoryCacheShard {
             object_key: *object_key,
             start: range.start(),
         });
-        let entries = self.ranges.entry(*object_key).or_default();
-        let entry = CachedRange {
+        let entries = self.entries_by_key.entry(*object_key).or_default();
+        let entry = MemoryEntry {
             range,
             bytes,
             capacity,
@@ -347,25 +347,25 @@ impl MemoryCacheShard {
     /// Removes one entry from the shard and returns its allocation charge.
     /// Subtracts those bytes from shard usage; the caller updates metrics.
     fn remove_entry(&mut self, object_key: &ObjectKeyHash, range: ByteRange) -> Option<u64> {
-        let (removed_range, object_has_no_cached_ranges) = {
-            let object_cached_ranges = self.ranges.get_mut(object_key)?;
-            let cached_range = object_cached_ranges.by_start.get(&range.start())?;
-            if cached_range.range != range {
+        let (removed_entry, object_has_no_entries) = {
+            let entries = self.entries_by_key.get_mut(object_key)?;
+            let entry = entries.by_start.get(&range.start())?;
+            if entry.range != range {
                 return None;
             }
-            let removed_range = object_cached_ranges
+            let removed_entry = entries
                 .by_start
                 .remove(&range.start())
                 .expect("the exact entry was checked immediately before removal");
-            let object_has_no_cached_ranges = object_cached_ranges.by_start.is_empty();
-            (removed_range, object_has_no_cached_ranges)
+            let object_has_no_entries = entries.by_start.is_empty();
+            (removed_entry, object_has_no_entries)
         };
 
-        self.remove_eviction_candidate(removed_range.candidate_slot);
-        if object_has_no_cached_ranges {
-            self.ranges.remove(object_key);
+        self.remove_eviction_candidate(removed_entry.candidate_slot);
+        if object_has_no_entries {
+            self.entries_by_key.remove(object_key);
         }
-        let removed_bytes = removed_range.capacity;
+        let removed_bytes = removed_entry.capacity;
         self.used_bytes -= removed_bytes;
         self.buffer_pool.remove_cached(removed_bytes);
         Some(removed_bytes)
@@ -377,7 +377,7 @@ impl MemoryCacheShard {
             return;
         };
         let entry = self
-            .ranges
+            .entries_by_key
             .get_mut(&moved_candidate.object_key)
             .and_then(|entries| entries.by_start.get_mut(&moved_candidate.start))
             .expect("a moved policy candidate must still refer to a live entry");
@@ -393,12 +393,12 @@ impl MemoryCacheShard {
     ) -> Option<ReclaimCandidate> {
         let (sample_start, sample_count) = self.candidates.sample(self.reclaim_sample_size);
         let candidate_count = self.candidates.entries.len();
-        let mut selected_candidate: Option<(&ObjectKeyHash, &CachedRange, f64)> = None;
+        let mut selected_candidate: Option<(&ObjectKeyHash, &MemoryEntry, f64)> = None;
 
         for offset in 0..sample_count {
             let candidate = &self.candidates.entries[(sample_start + offset) % candidate_count];
             let entries = self
-                .ranges
+                .entries_by_key
                 .get(&candidate.object_key)
                 .expect("every policy candidate must have an object index");
             let entry = entries
@@ -432,7 +432,7 @@ impl MemoryCacheShard {
         access_histories: &ObjectAccessHistories,
     ) -> Option<RangeTrimSource> {
         let entries = self
-            .ranges
+            .entries_by_key
             .get(&candidate.object_key)
             .expect("a selected pressure candidate must have an object index");
         let entry = entries
@@ -466,7 +466,7 @@ impl MemoryCacheShard {
 
         for (retained_range, bytes) in replacement.retained_payloads {
             if self
-                .ranges
+                .entries_by_key
                 .get(&replacement.object_key)
                 .and_then(|entries| entries.covering_entry(retained_range))
                 .is_some()

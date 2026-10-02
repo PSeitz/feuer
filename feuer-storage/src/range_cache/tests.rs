@@ -47,7 +47,7 @@ pub(super) async fn entry_disk_ranges(
 ) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
     let shard = &cache.disk.shards[cache.disk.shard_index_for_key(key)];
     let index = shard.entry_index.lock().unwrap();
-    let entry = index.ranges_by_key[key].first_key_value().unwrap().1;
+    let entry = index.entries_by_key[key].first_key_value().unwrap().1;
     let slot = entry.metadata_slot.as_ref().unwrap();
     let pages = shard.metadata.lock().unwrap();
     let address = pages.chunks[slot.chunk].region.range().start
@@ -82,7 +82,7 @@ async fn exact_unaligned_reads_containment_and_key_hash_identity() {
     assert!(!cache.insert(key, source).await.unwrap());
     assert!(!cache.insert(key, download(7, 100)).await.unwrap());
     let index = cache.disk.shards[0].entry_index.lock().unwrap();
-    assert_eq!(index.ranges_by_key[&key].len(), 1);
+    assert_eq!(index.entries_by_key[&key].len(), 1);
 }
 
 #[tokio::test]
@@ -275,10 +275,10 @@ async fn pressure_reclaims_shared_and_exclusive_chunks_during_mixed_size_churn()
         let index = cache.disk.shards[0].entry_index.lock().unwrap();
         assert_eq!(
             index.eviction_candidates.len(),
-            index.ranges_by_key.values().map(BTreeMap::len).sum::<usize>()
+            index.entries_by_key.values().map(BTreeMap::len).sum::<usize>()
         );
         for (position, (key, start)) in index.eviction_candidates.iter().enumerate() {
-            assert_eq!(index.ranges_by_key[key][start].eviction_position, position);
+            assert_eq!(index.entries_by_key[key][start].eviction_position, position);
         }
     }
 }
@@ -353,15 +353,15 @@ async fn eviction_budgets_and_active_reservations_bound_reclamation() {
     let shard = &cache.disk.shards[0];
     let mut attempts_left = 0;
     let mut chunks_left = MAX_EVICTION_CHUNKS;
-    assert!(!shard.evict_candidate(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
+    assert!(!shard.sample_and_evict_entry(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
     attempts_left = 1;
     chunks_left = 1;
-    assert!(shard.evict_candidate(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
+    assert!(shard.sample_and_evict_entry(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
     assert_eq!(attempts_left, 0);
     assert!(cache.get(&key, range(0, 1)).await.is_some());
     attempts_left = 1;
     chunks_left = MAX_EVICTION_CHUNKS;
-    assert!(shard.evict_candidate(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
+    assert!(shard.sample_and_evict_entry(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
     let _io = shard.metadata_io.lock().await;
     shard.flush_metadata(&cache.disk.file).await.unwrap();
     drop(_io);
@@ -408,7 +408,7 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
     let shard = &cache.disk.shards[0];
     let mut attempts_left = 1;
     let mut chunks_left = MAX_EVICTION_CHUNKS;
-    assert!(shard.evict_candidate(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
+    assert!(shard.sample_and_evict_entry(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
     assert!(cache.get(&cold, range(0, 1)).await.is_none());
     assert!(cache.get(&hot, range(0, 1)).await.is_some());
     assert_eq!(shard.allocator.available_bytes(), 0); // Hot neighbor still owns the chunk.
@@ -761,7 +761,7 @@ async fn partial_overlaps_coexist_without_assembly_and_a_covering_range_replaces
     let returned = cache.get(&key, range(11, 19)).await.unwrap();
     assert!(cache.insert(key, download(5, 50)).await.unwrap());
     assert_eq!(
-        cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key].len(),
+        cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key].len(),
         1
     );
     assert_eq!(returned, download(11, 8).bytes());
@@ -828,7 +828,7 @@ async fn batch_skips_oversized_and_contained_entries_without_losing_accepted_ent
             .is_none()
     );
     assert_eq!(
-        cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&ObjectKeyHash::from("object")].len(),
+        cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash::from("object")].len(),
         1
     );
 }
@@ -919,9 +919,9 @@ async fn racing_equal_and_containing_writes_revalidate_publication() {
         task.await.unwrap();
     }
     let key = ObjectKeyHash::from("object");
-    let ranges: Vec<_> = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key]
+    let ranges: Vec<_> = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key]
         .values()
-        .map(|storage| storage.object_range)
+        .map(|entry| entry.object_range)
         .collect();
     assert_eq!(ranges, [range(0, 200), range(300, 350)]);
     assert_eq!(cache.get(&key, range(0, 200)).await.unwrap(), download(0, 200).bytes());
@@ -950,7 +950,7 @@ async fn completed_write_revalidates_cached_ranges_but_accepts_reinsertions() {
             if key == &ObjectKeyHash::from("readmitted") {
                 assert!(memory.insert(*key, download(range.start(), range.len() as usize)));
             }
-            memory.with_cached_range(key, *range, publish);
+            memory.with_entry_locked(key, *range, publish);
         })
         .await
         .unwrap();
@@ -1027,8 +1027,8 @@ async fn readers_keep_replaced_payload_reserved_but_results_do_not() {
     cache.insert(key, download(5, 100)).await.unwrap();
     let (guard, payload_checksum) = {
         let index = cache.disk.shards[0].entry_index.lock().unwrap();
-        let storage = index.covering_entry(&key, range(6, 7)).unwrap();
-        (storage.payload_region.read_guard(), storage.payload_checksum)
+        let entry = index.covering_entry(&key, range(6, 7)).unwrap();
+        (entry.payload_region.read_guard(), entry.payload_checksum)
     };
     let result = cache.get(&key, range(6, 7)).await.unwrap();
     cache.insert(key, download(0, 200)).await.unwrap();
@@ -1083,7 +1083,7 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
                 .entry_index
                 .lock()
                 .unwrap()
-                .ranges_by_key
+                .entries_by_key
                 .contains_key(&key)
         );
         assert!(cache.insert(key, download(3, 50)).await.unwrap());
@@ -1269,11 +1269,11 @@ fn index_batch_insertion_keeps_covered_ranges() {
         crate::test_metrics::value(&registry, "feuer_disk_payload_bytes", &[]),
         41.0
     );
-    assert_eq!(index.ranges_by_key[&key].len(), 3);
-    assert_eq!(index.ranges_by_key[&key][&0].object_range, range(0, 30));
+    assert_eq!(index.entries_by_key[&key].len(), 3);
+    assert_eq!(index.entries_by_key[&key][&0].object_range, range(0, 30));
     assert_eq!(index.eviction_candidates.len(), 3);
     for (position, (key, start)) in index.eviction_candidates.iter().enumerate() {
-        assert_eq!(index.ranges_by_key[key][start].eviction_position, position);
+        assert_eq!(index.entries_by_key[key][start].eviction_position, position);
     }
 }
 

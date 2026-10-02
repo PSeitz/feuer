@@ -73,9 +73,9 @@ struct DiskCacheShard {
     metadata_io: tokio::sync::Mutex<()>,
 }
 
-/// Disk entries indexed by object key and range start, with dense rotating eviction candidates.
+/// Disk entries indexed by object key and range start, with a list sampled in rotation for eviction.
 struct DiskEntryIndex {
-    ranges_by_key: FxHashMap<ObjectKeyHash, BTreeMap<u64, DiskEntry>>,
+    entries_by_key: FxHashMap<ObjectKeyHash, BTreeMap<u64, DiskEntry>>,
     eviction_candidates: Vec<(ObjectKeyHash, u64)>,
     next_candidate: usize,
     metrics: Arc<DiskMetrics>,
@@ -365,7 +365,7 @@ impl DiskRangeCache {
                                 // Evicting cannot help an entry that exceeds the capacity left by this batch.
                                 if chunks_needed
                                     > shard.allocator.chunk_capacity - batch.chunk_count() - metadata_chunks
-                                    || !shard.evict_candidate(
+                                    || !shard.sample_and_evict_entry(
                                         &disk.access_histories,
                                         &mut attempts_left,
                                         &mut chunks_left,
@@ -398,21 +398,21 @@ impl DiskRangeCache {
                     {
                         let mut index = shard.entry_index.lock().unwrap();
                         // Publish larger entries first so contained batch members need not publish at all.
-                        for ((key, storage), (publication_value, mut attempt)) in
+                        for ((key, entry), (publication_value, mut attempt)) in
                             entries.into_iter().zip(publication_values).rev()
                         {
-                            let object_range = storage.object_range;
+                            let object_range = entry.object_range;
                             // Another writer or an earlier entry in this batch may already cover this range.
                             if index.covering_entry(&key, object_range).is_some() {
                                 attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
                                 continue;
                             }
                             attempt.set_outcome(DiskWriteOutcome::Stale);
-                            let mut entry = Some((key, storage));
+                            let mut unpublished_entry = Some((key, entry));
                             publish_if_accepted(&publication_value, &mut || {
-                                if let Some((key, storage)) = entry.take() {
-                                    index.remove_contained_entries(&key, storage.object_range);
-                                    index.insert(key, storage);
+                                if let Some((key, entry)) = unpublished_entry.take() {
+                                    index.remove_contained_entries(&key, entry.object_range);
+                                    index.insert(key, entry);
                                     published_entries += 1;
                                     attempt.set_outcome(DiskWriteOutcome::Published);
                                 }
@@ -451,22 +451,22 @@ impl DiskRangeCache {
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
         let (guarded_read, in_flight_read) = {
             let mut index = shard.entry_index.lock().unwrap();
-            let Some(storage) = index.covering_entry(key, requested) else {
+            let Some(entry) = index.covering_entry(key, requested) else {
                 metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
                 return None;
             };
-            let start = storage.object_range.start();
-            let storage = index.ranges_by_key.get_mut(key).unwrap().get_mut(&start).unwrap();
-            let in_flight_read = storage.in_flight_read.upgrade().unwrap_or_else(|| {
+            let start = entry.object_range.start();
+            let entry = index.entries_by_key.get_mut(key).unwrap().get_mut(&start).unwrap();
+            let in_flight_read = entry.in_flight_read.upgrade().unwrap_or_else(|| {
                 let result = Arc::new(OnceCell::new());
-                storage.in_flight_read = Arc::downgrade(&result);
+                entry.in_flight_read = Arc::downgrade(&result);
                 result
             });
             (
                 GuardedObjectRangeRead {
-                    object_range: storage.object_range,
-                    payload_checksum: storage.payload_checksum,
-                    payload_region: storage.payload_region.read_guard(),
+                    object_range: entry.object_range,
+                    payload_checksum: entry.payload_checksum,
+                    payload_region: entry.payload_region.read_guard(),
                 },
                 in_flight_read,
             )
@@ -516,10 +516,11 @@ impl DiskRangeCache {
 
 impl DiskCacheShard {
     /// Samples up to `reclaim_sample_size` entries and evicts at most one that fits the remaining chunk budget.
+    /// Returns whether sampling occurred, even if no entry was evicted.
     /// Consumes one attempt when sampling; removed entries consume their chunk count. Neighbors are not evicted.
     /// Removed entries' payload chunks remain reserved until metadata invalidation completes
     /// and all region owners and read guards release them.
-    fn evict_candidate(
+    fn sample_and_evict_entry(
         &self,
         access_histories: &ObjectAccessHistories,
         attempts_left: &mut usize,
@@ -540,7 +541,7 @@ impl DiskCacheShard {
         for sample_offset in 0..sample_count {
             let position = (sample_start + sample_offset) % candidate_count;
             let (key, range_start) = &index.eviction_candidates[position];
-            let entry = &index.ranges_by_key[key][range_start];
+            let entry = &index.entries_by_key[key][range_start];
             if entry.payload_region.chunk_count() as usize > *chunks_left {
                 continue;
             }
@@ -554,7 +555,7 @@ impl DiskCacheShard {
         }
         if let Some((position, ..)) = selected_candidate {
             let (key, start) = index.eviction_candidates[position];
-            *chunks_left -= index.ranges_by_key[&key][&start].payload_region.chunk_count() as usize;
+            *chunks_left -= index.entries_by_key[&key][&start].payload_region.chunk_count() as usize;
             index.remove(&key, start);
         }
         true
@@ -564,7 +565,7 @@ impl DiskCacheShard {
 impl DiskEntryIndex {
     fn new(metrics: Arc<DiskMetrics>) -> Self {
         Self {
-            ranges_by_key: FxHashMap::default(),
+            entries_by_key: FxHashMap::default(),
             eviction_candidates: Vec::new(),
             next_candidate: 0,
             metrics,
@@ -573,7 +574,7 @@ impl DiskEntryIndex {
 
     /// Removes entries whose byte ranges are contained in the incoming range.
     fn remove_contained_entries(&mut self, key: &ObjectKeyHash, object_range: ByteRange) {
-        if let Some(entries) = self.ranges_by_key.get(key) {
+        if let Some(entries) = self.entries_by_key.get(key) {
             let replaced_range_starts: Vec<_> = entries
                 .range(object_range.start()..object_range.end())
                 .filter_map(|(&start, entry)| object_range.contains(entry.object_range).then_some(start))
@@ -584,12 +585,12 @@ impl DiskEntryIndex {
         }
     }
 
-    fn insert(&mut self, key: ObjectKeyHash, storage: DiskEntry) {
-        self.insert_entries(std::iter::once((key, storage)));
+    fn insert(&mut self, key: ObjectKeyHash, entry: DiskEntry) {
+        self.insert_entries(std::iter::once((key, entry)));
     }
 
     fn insert_batch(&mut self, entries: &mut Vec<(ObjectKeyHash, DiskEntry)>) {
-        self.ranges_by_key.reserve(entries.len());
+        self.entries_by_key.reserve(entries.len());
         self.eviction_candidates.reserve(entries.len());
         self.insert_entries(entries.drain(..));
     }
@@ -597,39 +598,39 @@ impl DiskEntryIndex {
     fn insert_entries(&mut self, entries: impl IntoIterator<Item = (ObjectKeyHash, DiskEntry)>) {
         let mut entry_count = 0;
         let mut payload_bytes = 0;
-        for (key, mut storage) in entries {
-            let object_range = storage.object_range;
-            storage.eviction_position = self.eviction_candidates.len();
+        for (key, mut entry) in entries {
+            let object_range = entry.object_range;
+            entry.eviction_position = self.eviction_candidates.len();
             entry_count += 1;
             payload_bytes += object_range.len();
             self.eviction_candidates.push((key, object_range.start()));
-            self.ranges_by_key
+            self.entries_by_key
                 .entry(key)
                 .or_default()
-                .insert(object_range.start(), storage);
+                .insert(object_range.start(), entry);
         }
         self.metrics.entries.increase(entry_count);
         self.metrics.payload_bytes.increase(payload_bytes);
     }
 
     fn remove(&mut self, key: &ObjectKeyHash, start: u64) -> Option<DiskEntry> {
-        let entries = self.ranges_by_key.get_mut(key)?;
-        let storage = entries.remove(&start)?;
+        let entries = self.entries_by_key.get_mut(key)?;
+        let entry = entries.remove(&start)?;
         self.metrics.entries.decrease(1);
-        self.metrics.payload_bytes.decrease(storage.object_range.len());
+        self.metrics.payload_bytes.decrease(entry.object_range.len());
         if entries.is_empty() {
-            self.ranges_by_key.remove(key);
+            self.entries_by_key.remove(key);
         }
-        self.eviction_candidates.swap_remove(storage.eviction_position);
-        if let Some((moved_key, moved_start)) = self.eviction_candidates.get(storage.eviction_position) {
-            self.ranges_by_key
+        self.eviction_candidates.swap_remove(entry.eviction_position);
+        if let Some((moved_key, moved_start)) = self.eviction_candidates.get(entry.eviction_position) {
+            self.entries_by_key
                 .get_mut(moved_key)
                 .unwrap()
                 .get_mut(moved_start)
                 .unwrap()
-                .eviction_position = storage.eviction_position;
+                .eviction_position = entry.eviction_position;
         }
-        Some(storage)
+        Some(entry)
     }
 
     /// Removes the indexed entry matching the failed read's expected start and checksum.
@@ -637,10 +638,10 @@ impl DiskEntryIndex {
         let start = read.object_range.start();
         // Preserve different contents. Discarding a newer identical copy is an acceptable miss.
         if self
-            .ranges_by_key
+            .entries_by_key
             .get(key)
             .and_then(|entries| entries.get(&start))
-            .is_some_and(|storage| storage.payload_checksum == read.payload_checksum)
+            .is_some_and(|entry| entry.payload_checksum == read.payload_checksum)
         {
             self.remove(key, start);
         }
@@ -649,8 +650,8 @@ impl DiskEntryIndex {
     /// Finds the entry whose byte range covers the entire request.
     fn covering_entry(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&DiskEntry> {
         // Retained ranges never contain one another, so their ends increase with their starts.
-        let (_, storage) = self.ranges_by_key.get(key)?.range(..=requested.start()).next_back()?;
-        storage.object_range.contains(requested).then_some(storage)
+        let (_, entry) = self.entries_by_key.get(key)?.range(..=requested.start()).next_back()?;
+        entry.object_range.contains(requested).then_some(entry)
     }
 }
 
@@ -658,7 +659,7 @@ impl Drop for DiskEntryIndex {
     fn drop(&mut self) {
         self.metrics.entries.decrease(self.eviction_candidates.len() as u64);
         self.metrics.payload_bytes.decrease(
-            self.ranges_by_key
+            self.entries_by_key
                 .values()
                 .flat_map(|entries| entries.values())
                 .map(|entry| entry.object_range.len())

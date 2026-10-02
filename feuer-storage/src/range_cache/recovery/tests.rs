@@ -76,8 +76,11 @@ async fn follows_last_page_link_and_recovers_every_record_across_chunks() {
     {
         let pages = cache.disk.shards[0].metadata.lock().unwrap();
         assert_eq!(pages.chunks.len(), 2);
-        assert_eq!(pages.chunks[0].next(), Some(pages.chunks[1].region.range().start));
-        assert_eq!(pages.chunks[1].next(), Some(NO_CHUNK));
+        assert_eq!(
+            pages.chunks[0].next_chunk_address(),
+            Some(pages.chunks[1].region.range().start)
+        );
+        assert_eq!(pages.chunks[1].next_chunk_address(), Some(NO_CHUNK));
     }
     let cache = reopen(directory.path(), cache).await;
     for i in 0..entries {
@@ -105,7 +108,7 @@ async fn multiple_batches_update_one_metadata_chunk_and_reuse_record_slots() {
         .entry_index
         .lock()
         .unwrap()
-        .ranges_by_key
+        .entries_by_key
         .keys()
         .copied()
         .collect();
@@ -122,7 +125,7 @@ async fn invalidation_and_read_guard_both_precede_payload_reuse() {
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 1)).await.unwrap());
     let shard = &cache.disk.shards[0];
-    let guard = shard.entry_index.lock().unwrap().ranges_by_key[&key][&0]
+    let guard = shard.entry_index.lock().unwrap().entries_by_key[&key][&0]
         .payload_region
         .read_guard();
     drop(shard.entry_index.lock().unwrap().remove(&key, 0));
@@ -220,7 +223,7 @@ async fn corrupt_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
         assert!(cache.get(&ObjectKeyHash(1), range(0, 1)).await.is_some());
         assert!(cache.insert(ObjectKeyHash(2), download(0, 1)).await.unwrap());
         assert_eq!(
-            cache.disk.shards[0].metadata.lock().unwrap().chunks[0].next(),
+            cache.disk.shards[0].metadata.lock().unwrap().chunks[0].next_chunk_address(),
             Some(NO_CHUNK)
         );
     }
@@ -231,7 +234,7 @@ async fn payload_corruption_remains_a_checksum_miss() {
     let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 1)).await.unwrap());
-    let payload = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key][&0]
+    let payload = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&0]
         .payload_region
         .range();
     cache
@@ -288,7 +291,7 @@ async fn a_write_after_open_replaces_recovered_entries() {
     let cache = reopen(directory.path(), cache).await;
     assert_eq!(cache.get(&key, range(0, 100)).await.unwrap(), download(0, 100).bytes());
     assert_eq!(
-        cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key].len(),
+        cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key].len(),
         1
     );
 }

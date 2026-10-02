@@ -168,17 +168,12 @@ impl MemoryCache {
         self.admit_download(object_key, downloaded_range, bytes, capacity as u64)
     }
 
-    /// Runs a short synchronous action while an entry with this exact key and range is cached.
-    /// Eviction, replacement and compaction cannot intervene before the action finishes.
+    /// Runs an action while the shard lock prevents an entry from being removed, replaced, or trimmed.
+    /// Returns whether the action ran; skips it if no entry has this exact key and range.
     /// The action must not reenter this memory cache or perform I/O.
-    pub fn with_cached_range<R>(
-        &self,
-        object_key: &ObjectKeyHash,
-        range: ByteRange,
-        action: impl FnOnce() -> R,
-    ) -> Option<R> {
+    pub fn with_entry_locked(&self, object_key: &ObjectKeyHash, range: ByteRange, action: impl FnOnce()) -> bool {
         let shard = self.shards[self.shard_index(object_key)].lock();
-        shard.contains_entry(object_key, range).then(action)
+        shard.contains_entry(object_key, range).then(action).is_some()
     }
 
     fn admit_download(

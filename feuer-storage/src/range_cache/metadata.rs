@@ -48,11 +48,12 @@ impl MetadataChunk {
             );
         }
         let mut chunk = Self { region, bytes };
-        chunk.set_next(NO_CHUNK);
+        chunk.set_next_chunk_address(NO_CHUNK);
         chunk
     }
 
-    fn set_next(&mut self, address: u64) {
+    /// Sets the next metadata chunk's disk address, or `NO_CHUNK` to end the chain.
+    fn set_next_chunk_address(&mut self, address: u64) {
         let offset = RECORD_PAGES * METADATA_PAGE_BYTES;
         encode_page(
             &mut self.bytes[offset..],
@@ -65,7 +66,9 @@ impl MetadataChunk {
         );
     }
 
-    pub(super) fn next(&self) -> Option<u64> {
+    /// Reads the next metadata chunk's disk address, or `NO_CHUNK` at the end of the chain.
+    /// Returns `None` if the link page is invalid.
+    pub(super) fn next_chunk_address(&self) -> Option<u64> {
         let offset = RECORD_PAGES * METADATA_PAGE_BYTES;
         let (count, contents) = validate_page(
             &self.bytes[offset..],
@@ -154,7 +157,7 @@ impl Drop for DiskEntry {
 impl MetadataPages {
     pub(super) fn end_chain(&mut self) {
         if let Some(last) = self.chunks.len().checked_sub(1) {
-            self.chunks[last].set_next(NO_CHUNK);
+            self.chunks[last].set_next_chunk_address(NO_CHUNK);
             self.dirty_pages.insert((last, RECORD_PAGES));
         }
     }
@@ -180,7 +183,7 @@ impl DiskCacheShard {
         {
             let mut pages = self.metadata.lock().unwrap();
             if let Some(last) = pages.chunks.len().checked_sub(1) {
-                pages.chunks[last].set_next(address);
+                pages.chunks[last].set_next_chunk_address(address);
                 pages.dirty_pages.insert((last, RECORD_PAGES));
             }
             pages.add_chunk(chunk);

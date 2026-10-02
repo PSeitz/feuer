@@ -116,7 +116,7 @@ async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation()
     {
         let mut index = cache.disk.shards[0].entry_index.lock().unwrap();
         index
-            .ranges_by_key
+            .entries_by_key
             .get_mut(&key)
             .unwrap()
             .get_mut(&10)
@@ -255,7 +255,7 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
     assert_eq!(triggering(), 1.0);
 
     // Evictions still count when a read guard prevents reuse and insertion fails.
-    let guard = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&ObjectKeyHash::from("third")][&0]
+    let guard = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash::from("third")][&0]
         .payload_region
         .read_guard();
     assert_eq!(
@@ -287,7 +287,7 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
     let request = ByteRange::new(0, 1).unwrap();
     let key = ObjectKeyHash::from("corrupt");
     cache.insert_batch(vec![(key, download(4))]).await.unwrap();
-    let address = cache.disk.shards[0].entry_index.lock().unwrap().ranges_by_key[&key][&0]
+    let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&0]
         .payload_region
         .range()
         .start;
