@@ -150,7 +150,9 @@ impl Drop for BufferPool {
 }
 
 /// One owned, initialized, 4-KiB-aligned allocation with a separate exposed length.
-/// It returns to its originating pool only after the last Bytes owner releases it.
+/// It returns to its originating pool only after the last Bytes owner drops it.
+///
+/// This buffer is strongly aligned with my values (performance)
 pub struct AlignedBuffer {
     ptr: NonNull<u8>,
     layout: Layout,
