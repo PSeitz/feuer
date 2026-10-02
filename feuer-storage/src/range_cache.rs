@@ -120,8 +120,8 @@ impl Drop for DiskRangeCacheState {
     }
 }
 
-/// A disk payload's byte ranges and expected checksum, with a guard keeping its chunks reserved.
-struct GuardedDiskPayload {
+/// Keeps a payload's chunks reserved and carries its object byte range and expected checksum.
+struct PayloadChunkGuard {
     object_range: ByteRange,
     payload_checksum: u64,
     payload_region: ChunkGuard,
@@ -463,7 +463,7 @@ impl DiskRangeCache {
                 result
             });
             (
-                GuardedDiskPayload {
+                PayloadChunkGuard {
                     object_range: entry.object_range,
                     payload_checksum: entry.payload_checksum,
                     payload_region: entry.payload_region.read_guard(),
@@ -634,7 +634,7 @@ impl DiskEntryIndex {
     }
 
     /// Removes the indexed entry matching the failed read's expected start and checksum.
-    fn remove_entry_matching_read(&mut self, key: &ObjectKeyHash, read: &GuardedDiskPayload) {
+    fn remove_entry_matching_read(&mut self, key: &ObjectKeyHash, read: &PayloadChunkGuard) {
         let start = read.object_range.start();
         // Preserve different contents. Discarding a newer identical copy is an acceptable miss.
         if self
@@ -767,7 +767,7 @@ impl UnwrittenShardBatch {
     }
 }
 
-impl GuardedDiskPayload {
+impl PayloadChunkGuard {
     /// Reads the whole entry, verifies its checksum, and returns only the requested byte range.
     async fn read_verified_range(
         &self,
