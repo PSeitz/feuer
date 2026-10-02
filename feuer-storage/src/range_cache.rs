@@ -64,7 +64,7 @@ struct DiskRangeCacheState {
     metrics: Arc<DiskMetrics>,
 }
 
-/// An independently allocated disk-cache shard with live range lookup.
+/// One disk-cache shard's chunk allocator, entry index, metadata pages, and metadata I/O lock.
 struct DiskCacheShard {
     reclaim_sample_size: usize,
     allocator: DiskChunkAllocator,
@@ -145,7 +145,7 @@ impl fmt::Debug for DiskRangeCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DiskRangeCache")
             .field("capacity", &self.disk.file.capacity())
-            .field("arenas", &self.disk.shards.len())
+            .field("shards", &self.disk.shards.len())
             .finish_non_exhaustive()
     }
 }
@@ -281,15 +281,15 @@ impl DiskRangeCache {
         .await
     }
 
-    /// Writes a batch with per-entry publication checks owned by the caller.
-    /// `with_current` must synchronously invoke `publish` once if its token is still current,
-    /// keeping it current throughout publication, or not invoke it to discard the completed write.
-    /// It runs under the disk index lock and must not reenter disk storage or perform I/O.
-    /// The detached writer retains tokens and reservations even if this future is canceled.
+    /// Writes a batch and passes each entry's caller-supplied value to `publish_if_accepted` to decide whether to publish.
+    /// The callback must synchronously invoke `publish` once to accept the entry, or not invoke it to discard it.
+    /// Any condition the callback checks to accept the entry must remain true until `publish` returns.
+    /// The callback runs under the disk index lock and must not reenter disk storage or perform I/O.
+    /// The detached writer retains caller-supplied values and disk reservations even if this future is canceled.
     pub async fn insert_batch_checked<T, F>(
         &self,
         downloads: Vec<(ObjectKeyHash, Download, T)>,
-        with_current: F,
+        publish_if_accepted: F,
     ) -> Result<usize, DiskRangeCacheError>
     where
         T: Send + 'static,
@@ -298,14 +298,26 @@ impl DiskRangeCache {
         let disk = self.disk.clone();
         let downloads: Vec<_> = downloads
             .into_iter()
-            .map(|(key, download, token)| (key, download, token, DiskWriteAttempt::new(disk.metrics.clone())))
+            .map(|(key, download, publication_value)| {
+                (
+                    key,
+                    download,
+                    publication_value,
+                    DiskWriteAttempt::new(disk.metrics.clone()),
+                )
+            })
             .collect();
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
         runtime
             .spawn(async move {
                 let mut downloads_by_shard: Vec<Vec<_>> = (0..disk.shards.len()).map(|_| Vec::new()).collect();
-                for (key, download, token, attempt) in downloads {
-                    downloads_by_shard[disk.shard_index_for_key(&key)].push((key, download, token, attempt));
+                for (key, download, publication_value, attempt) in downloads {
+                    downloads_by_shard[disk.shard_index_for_key(&key)].push((
+                        key,
+                        download,
+                        publication_value,
+                        attempt,
+                    ));
                 }
                 let mut published_entries = 0;
                 for (shard, mut downloads) in disk.shards.iter().zip(downloads_by_shard) {
@@ -316,15 +328,15 @@ impl DiskRangeCache {
                     shard.flush_metadata(&disk.file).await?;
                     downloads.sort_by_key(|(_, download, _, _)| download.bytes().len());
                     let mut batch = UnwrittenShardBatch::default();
-                    let mut publication_tokens: Vec<(T, DiskWriteAttempt)> = Vec::new();
+                    let mut publication_values: Vec<(T, DiskWriteAttempt)> = Vec::new();
                     let mut attempts_left = MAX_EVICTION_ATTEMPTS;
                     let mut chunks_left = MAX_EVICTION_CHUNKS;
-                    for (key, download, token, mut attempt) in downloads {
+                    for (key, download, publication_value, mut attempt) in downloads {
                         if shard
                             .entry_index
                             .lock()
                             .unwrap()
-                            .covering_range(&key, download.downloaded_range())
+                            .covering_entry(&key, download.downloaded_range())
                             .is_none()
                         {
                             let previous_entry_count = batch.entries.len();
@@ -335,7 +347,7 @@ impl DiskRangeCache {
                                     Ok(ready) => ready,
                                     Err(error) => {
                                         attempt.set_outcome(DiskWriteOutcome::Failed);
-                                        for (_, pending) in &mut publication_tokens {
+                                        for (_, pending) in &mut publication_values {
                                             pending.set_outcome(DiskWriteOutcome::Failed);
                                         }
                                         return Err(error.into());
@@ -366,7 +378,7 @@ impl DiskRangeCache {
                             // Only actual removals consume the chunk budget; sampling alone does not.
                             attempt.evicted = chunks_left != previous_chunks_left;
                             if batch.entries.len() != previous_entry_count {
-                                publication_tokens.push((token, attempt));
+                                publication_values.push((publication_value, attempt));
                             } else {
                                 attempt.set_outcome(DiskWriteOutcome::NoCapacity);
                             }
@@ -377,7 +389,7 @@ impl DiskRangeCache {
                     let entries = match batch.write_chunks(&disk.file, &disk.metrics, shard).await {
                         Ok(entries) => entries,
                         Err(error) => {
-                            for (_, attempt) in &mut publication_tokens {
+                            for (_, attempt) in &mut publication_values {
                                 attempt.set_outcome(DiskWriteOutcome::Failed);
                             }
                             return Err(error);
@@ -386,19 +398,20 @@ impl DiskRangeCache {
                     {
                         let mut index = shard.entry_index.lock().unwrap();
                         // Publish larger entries first so contained batch members need not publish at all.
-                        for ((key, storage), (token, mut attempt)) in entries.into_iter().zip(publication_tokens).rev()
+                        for ((key, storage), (publication_value, mut attempt)) in
+                            entries.into_iter().zip(publication_values).rev()
                         {
                             let object_range = storage.object_range;
                             // Another writer or an earlier entry in this batch may already cover this range.
-                            if index.covering_range(&key, object_range).is_some() {
+                            if index.covering_entry(&key, object_range).is_some() {
                                 attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
                                 continue;
                             }
                             attempt.set_outcome(DiskWriteOutcome::Stale);
                             let mut entry = Some((key, storage));
-                            with_current(&token, &mut || {
+                            publish_if_accepted(&publication_value, &mut || {
                                 if let Some((key, storage)) = entry.take() {
-                                    index.remove_covered_ranges(&key, storage.object_range);
+                                    index.remove_contained_entries(&key, storage.object_range);
                                     index.insert(key, storage);
                                     published_entries += 1;
                                     attempt.set_outcome(DiskWriteOutcome::Published);
@@ -420,7 +433,7 @@ impl DiskRangeCache {
             .entry_index
             .lock()
             .unwrap()
-            .covering_range(key, range)
+            .covering_entry(key, range)
             .is_some()
     }
 
@@ -438,7 +451,7 @@ impl DiskRangeCache {
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
         let (guarded_read, in_flight_read) = {
             let mut index = shard.entry_index.lock().unwrap();
-            let Some(storage) = index.covering_range(key, requested) else {
+            let Some(storage) = index.covering_entry(key, requested) else {
                 metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
                 return None;
             };
@@ -504,7 +517,8 @@ impl DiskRangeCache {
 impl DiskCacheShard {
     /// Samples up to `reclaim_sample_size` entries and evicts at most one that fits the remaining chunk budget.
     /// Consumes one attempt when sampling; removed entries consume their chunk count. Neighbors are not evicted.
-    /// Chunk release is left to ownership.
+    /// Removed entries' payload chunks remain reserved until metadata invalidation completes
+    /// and all region owners and read guards release them.
     fn evict_candidate(
         &self,
         access_histories: &ObjectAccessHistories,
@@ -530,7 +544,7 @@ impl DiskCacheShard {
             if entry.payload_region.chunk_count() as usize > *chunks_left {
                 continue;
             }
-            let retrieval_cost = access_histories.retention_score(key, entry.object_range);
+            let retrieval_cost = access_histories.decayed_retrieval_cost(key, entry.object_range);
             let payload_bytes = entry.object_range.len();
             if selected_candidate.is_none_or(|(_, selected_cost, selected_bytes)| {
                 compare_cost_per_byte(retrieval_cost, payload_bytes, selected_cost, selected_bytes).is_lt()
@@ -557,8 +571,8 @@ impl DiskEntryIndex {
         }
     }
 
-    // Remove entries fully covered by a write; recovery skips this cleanup.
-    fn remove_covered_ranges(&mut self, key: &ObjectKeyHash, object_range: ByteRange) {
+    /// Removes entries whose byte ranges are contained in the incoming range.
+    fn remove_contained_entries(&mut self, key: &ObjectKeyHash, object_range: ByteRange) {
         if let Some(entries) = self.ranges_by_key.get(key) {
             let replaced_range_starts: Vec<_> = entries
                 .range(object_range.start()..object_range.end())
@@ -632,7 +646,8 @@ impl DiskEntryIndex {
         }
     }
 
-    fn covering_range(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&DiskEntry> {
+    /// Finds the entry whose byte range covers the entire request.
+    fn covering_entry(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&DiskEntry> {
         // Retained ranges never contain one another, so their ends increase with their starts.
         let (_, storage) = self.ranges_by_key.get(key)?.range(..=requested.start()).next_back()?;
         storage.object_range.contains(requested).then_some(storage)
@@ -658,7 +673,6 @@ impl DiskRangeCacheState {
     }
 }
 
-/// Computes metadata storage bytes, including page headers and final padding.
 impl UnwrittenShardBatch {
     /// Packs one download's payload into reserved chunks without writing it.
     /// Allocation failure leaves the batch unchanged and reports the required number of new chunks.

@@ -23,9 +23,8 @@ use crate::{
 // Buffer addresses, physical offsets, and I/O lengths use this alignment.
 // Opening verifies that the filesystem's direct-I/O requirements divide it.
 pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = feuer_memory::BUFFER_ALIGNMENT;
-// Maximum physical bytes per chunk, including alignment padding. DataFile
-// reduces the logical chunk size when its starting offset is unaligned.
-pub(crate) const MAX_IO_CHUNK_BYTES: usize = 1024 * 1024;
+// Maximum bytes transferred by one I/O request, including alignment padding.
+pub(crate) const MAX_IO_REQUEST_BYTES: usize = 1024 * 1024;
 // Each direction has this many active slots plus an equally sized waiting channel.
 const MAX_IN_FLIGHT_READS: usize = 64;
 // Local-SSD benchmarks saturated 1-MiB writes at QD8. QD64 added no write-only
@@ -154,7 +153,7 @@ impl ReadQueue {
     /// One metadata read. Never waits for channel capacity or allocates a buffer without it.
     /// The scanner retries later when the channel is full; admitted requests run in FIFO order.
     pub(crate) async fn try_read_recovery_chunk(&self, region: DiskRegionReadGuard) -> io::Result<Option<Bytes>> {
-        let length = MAX_IO_CHUNK_BYTES;
+        let length = MAX_IO_REQUEST_BYTES;
         let offset = region.range().start;
         assert_eq!(region.range().end - offset, length as u64);
         let permit = match self.handle.sender.as_ref().unwrap().try_reserve() {
@@ -209,7 +208,7 @@ impl WriteQueue {
         parts: &[(usize, Bytes)],
         region: Option<DiskRegion>,
     ) -> io::Result<()> {
-        assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);
+        assert!(length > 0 && length <= MAX_IO_REQUEST_BYTES);
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         let permit = self.handle.reserve_request().await?;
         let buffers = IoBuffers::from_write_parts(length, parts, region)?;
@@ -373,7 +372,7 @@ impl IoRequest {
             IoBuffers::Read(buffer) => assert!(destination.end <= buffer.as_ref().len()),
             IoBuffers::Write { bytes, .. } => assert_eq!(destination, 0..bytes.iter().map(Bytes::len).sum()),
         }
-        assert!(length > 0 && length <= MAX_IO_CHUNK_BYTES);
+        assert!(length > 0 && length <= MAX_IO_REQUEST_BYTES);
         Self {
             offset,
             buffers,

@@ -177,7 +177,7 @@ impl DataFile {
     /// Reads a complete metadata chunk, retrying when the read channel is full.
     /// The caller serializes metadata updates; the guard prevents chunk reuse.
     pub(crate) async fn read_recovery_chunk(&self, region: &DiskRegion) -> DataFileResult<Bytes> {
-        let length = uring::MAX_IO_CHUNK_BYTES;
+        let length = uring::MAX_IO_REQUEST_BYTES;
         let address = region.range().start;
         self.measure_io(IoOperation::Read, address, length, async {
             loop {
@@ -200,7 +200,7 @@ impl DataFile {
         .await
     }
 
-    /// Writes complete 4096-byte-aligned blocks.
+    /// Writes bytes at a 4096-byte-aligned offset; the byte count must also be a multiple of 4096.
     ///
     /// Retains aligned byte slices directly; copies unaligned inputs into aligned
     /// buffers of at most 1 MiB each. Callers must protect the full aligned byte range from
@@ -217,8 +217,8 @@ impl DataFile {
         assert!(bytes.len().is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
         self.measure_io(IoOperation::Write, offset, bytes.len(), async {
             check_file_bounds(IoOperation::Write, offset, bytes.len() as u64, self.state.capacity)?;
-            for start in (0..bytes.len()).step_by(uring::MAX_IO_CHUNK_BYTES) {
-                let end = (start + uring::MAX_IO_CHUNK_BYTES).min(bytes.len());
+            for start in (0..bytes.len()).step_by(uring::MAX_IO_REQUEST_BYTES) {
+                let end = (start + uring::MAX_IO_REQUEST_BYTES).min(bytes.len());
                 self.state
                     .write_queue
                     .write_parts(
@@ -307,9 +307,9 @@ impl DataFile {
             .read_queue
             .allocate_buffer(buffer_length, read_guard)
             .map_err(io_error)?;
-        for offset in (range.start..range.end).step_by(uring::MAX_IO_CHUNK_BYTES) {
+        for offset in (range.start..range.end).step_by(uring::MAX_IO_REQUEST_BYTES) {
             let destination_offset = (offset - range.start) as usize;
-            let read_length = (range.end - offset).min(uring::MAX_IO_CHUNK_BYTES as u64) as usize;
+            let read_length = (range.end - offset).min(uring::MAX_IO_REQUEST_BYTES as u64) as usize;
             buffer = self
                 .state
                 .read_queue
@@ -454,7 +454,7 @@ mod tests {
     use crate::DataFileErrorKind;
     use tempfile::tempdir;
 
-    const CAPACITY: u64 = 4 * uring::MAX_IO_CHUNK_BYTES as u64;
+    const CAPACITY: u64 = 4 * uring::MAX_IO_REQUEST_BYTES as u64;
 
     #[test]
     fn public_io_types_are_send_sync_static() {
@@ -479,7 +479,7 @@ mod tests {
         // Exercise multi-chunk writes, unaligned reads across a chunk boundary,
         // and the final physical page.
         let payload = Bytes::from(
-            (0..uring::MAX_IO_CHUNK_BYTES + 4096)
+            (0..uring::MAX_IO_REQUEST_BYTES + 4096)
                 .map(|index| (index % 251) as u8)
                 .collect::<Vec<_>>(),
         );
@@ -633,12 +633,12 @@ mod tests {
         }
         drop(file); // joins the queue thread, even if completion receivers were dropped
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
-        file.write_at(0, &Bytes::from(vec![0x55; uring::MAX_IO_CHUNK_BYTES]))
+        file.write_at(0, &Bytes::from(vec![0x55; uring::MAX_IO_REQUEST_BYTES]))
             .await
             .unwrap();
         assert_eq!(
-            file.read_at(0, uring::MAX_IO_CHUNK_BYTES).await.unwrap(),
-            Bytes::from(vec![0x55; uring::MAX_IO_CHUNK_BYTES])
+            file.read_at(0, uring::MAX_IO_REQUEST_BYTES).await.unwrap(),
+            Bytes::from(vec![0x55; uring::MAX_IO_REQUEST_BYTES])
         );
     }
 

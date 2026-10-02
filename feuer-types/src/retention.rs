@@ -79,22 +79,22 @@ impl ObjectAccessHistories {
         self.clock.load(AtomicOrdering::Relaxed)
     }
 
-    /// Sums decay-weighted retrieval costs for requests fully contained in `cached_range`.
-    /// Eviction compares this score per payload byte. Unknown keys have zero score.
-    pub fn retention_score(&self, key: &ObjectKeyHash, cached_range: ByteRange) -> f64 {
+    /// Sums retrieval costs for contained requests, weighted by decayed access counts.
+    /// Eviction compares this cost per retained byte. Unknown keys have zero cost.
+    pub fn decayed_retrieval_cost(&self, key: &ObjectKeyHash, cached_range: ByteRange) -> f64 {
         let objects = self.shard(key).lock().unwrap();
-        objects
-            .get(key)
-            .map_or(0.0, |history| history.retention_score(cached_range, self.clock()))
+        objects.get(key).map_or(0.0, |history| {
+            history.decayed_retrieval_cost(cached_range, self.clock())
+        })
     }
 
     /// Snapshots recent requested ranges for trimming. Later accesses do not invalidate the snapshot:
     /// it guides a retention policy, not the correctness of the cached bytes.
-    pub fn active_ranges(&self, key: &ObjectKeyHash) -> Vec<ByteRange> {
+    pub fn recent_requested_ranges(&self, key: &ObjectKeyHash) -> Vec<ByteRange> {
         let objects = self.shard(key).lock().unwrap();
-        objects
-            .get(key)
-            .map_or_else(Vec::new, |history| history.active_ranges(self.clock()).collect())
+        objects.get(key).map_or_else(Vec::new, |history| {
+            history.recent_requested_ranges(self.clock()).collect()
+        })
     }
 
     fn shard(&self, key: &ObjectKeyHash) -> &Mutex<FxHashMap<ObjectKeyHash, RangeAccessHistory>> {
@@ -123,7 +123,7 @@ pub static MAX_ACCESS_AGE_ACCESSES: LazyLock<u64> = LazyLock::new(|| {
     read_env_number("FEUER_MAX_ACCESS_AGE_ACCESSES", 262_144, 1).unwrap_or_else(|error| panic!("{error}"))
 });
 
-/// One exact requested interval and its observation clock.
+/// A requested byte range and the global request-counter value assigned when the access was recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RangeAccess {
     range: ByteRange,
@@ -197,17 +197,17 @@ impl RangeAccessHistory {
         });
     }
 
-    /// Iterates exact requested ranges that still contribute to range trimming.
-    pub fn active_ranges(&self, access_clock: u64) -> impl Iterator<Item = ByteRange> + '_ {
+    /// Iterates requested byte ranges from events within the trimming age limit, including repeats.
+    pub fn recent_requested_ranges(&self, access_clock: u64) -> impl Iterator<Item = ByteRange> + '_ {
         self.events
             .iter()
             .filter(move |event| is_within_range_trim_age_limit(**event, access_clock))
             .map(|event| event.range)
     }
 
-    /// Sums decay-weighted retrieval costs for requests fully contained in `cached_range`.
-    /// Eviction compares this score per payload byte.
-    pub fn retention_score(&self, cached_range: ByteRange, access_clock: u64) -> f64 {
+    /// Sums retrieval costs for contained requests, weighted by decayed access counts.
+    /// The caller compares this cost per retained byte when selecting an entry to evict.
+    pub fn decayed_retrieval_cost(&self, cached_range: ByteRange, access_clock: u64) -> f64 {
         let fixed_retrieval_cost = *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64;
         if let Some(&count_index) = self.access_count_indices.get(&cached_range) {
             // Non-overlapping requests mean an exact match cannot contain another request.
@@ -268,8 +268,11 @@ mod tests {
             let mut history = RangeAccessHistory::default();
             history.record(range(0, 4), 0);
             history.record(range(0, 4), 0);
-            assert_eq!(history.retention_score(range(0, 8), 0), (fixed_cost as f64 + 4.0) * 2.0);
-            assert_eq!(history.retention_score(range(4, 8), 0), 0.0);
+            assert_eq!(
+                history.decayed_retrieval_cost(range(0, 8), 0),
+                (fixed_cost as f64 + 4.0) * 2.0
+            );
+            assert_eq!(history.decayed_retrieval_cost(range(4, 8), 0), 0.0);
             return;
         }
         for fixed_cost in [0, 1_000_000, 10_000_000, u64::MAX] {
@@ -297,7 +300,7 @@ mod tests {
             assert_eq!(history.len(), limit);
             assert_eq!(history.ranges()[0], range(3, 4));
             assert_eq!(history.ranges()[limit - 1], range(limit as u64 + 2, limit as u64 + 3));
-            assert!(history.retention_score(range(0, 1), 0) > 0.0);
+            assert!(history.decayed_retrieval_cost(range(0, 1), 0) > 0.0);
             return;
         }
         for limit in [1, 256] {
@@ -319,8 +322,8 @@ mod tests {
             assert_eq!(*ACCESS_COUNT_HALF_LIFE, half_life);
             let mut history = RangeAccessHistory::default();
             history.record(range(0, 1), 0);
-            let cost = history.retention_score(range(0, 1), 0);
-            assert_eq!(history.retention_score(range(0, 1), half_life), cost * 0.5);
+            let cost = history.decayed_retrieval_cost(range(0, 1), 0);
+            assert_eq!(history.decayed_retrieval_cost(range(0, 1), half_life), cost * 0.5);
             return;
         }
         for (setting, half_life) in [
@@ -349,9 +352,9 @@ mod tests {
             assert_eq!(*MAX_ACCESS_AGE_ACCESSES, 65_536);
             let mut history = RangeAccessHistory::default();
             history.record(range(0, 1), 0);
-            assert!(history.retention_score(range(0, 1), 65_536) > 0.0);
-            assert!(history.retention_score(range(0, 1), 65_537) > 0.0);
-            assert_eq!(history.active_ranges(65_537).count(), 0);
+            assert!(history.decayed_retrieval_cost(range(0, 1), 65_536) > 0.0);
+            assert!(history.decayed_retrieval_cost(range(0, 1), 65_537) > 0.0);
+            assert_eq!(history.recent_requested_ranges(65_537).count(), 0);
             history.record(range(1, 2), 65_537);
             assert_eq!(history.ranges(), vec![range(1, 2)]);
             return;
@@ -369,15 +372,15 @@ mod tests {
     fn history_needs_no_cached_entry_and_keeps_distinct_counters() {
         let histories = ObjectAccessHistories::new();
         let key = ObjectKeyHash::from("object");
-        assert_eq!(histories.retention_score(&key, range(0, 1)), 0.0);
-        assert!(histories.active_ranges(&key).is_empty());
+        assert_eq!(histories.decayed_retrieval_cost(&key, range(0, 1)), 0.0);
+        assert!(histories.recent_requested_ranges(&key).is_empty());
         assert!(histories.shards.iter().all(|shard| shard.lock().unwrap().is_empty()));
         histories.record_access(&key, range(0, 1));
         for _ in 0..*MAX_ACCESS_EVENTS_PER_KEY + 1 {
             histories.record_access(&key, range(2, 3));
         }
-        assert!(!histories.active_ranges(&key).contains(&range(0, 1)));
-        assert!(histories.retention_score(&key, range(0, 1)) > 0.0);
+        assert!(!histories.recent_requested_ranges(&key).contains(&range(0, 1)));
+        assert!(histories.decayed_retrieval_cost(&key, range(0, 1)) > 0.0);
         let objects = histories.shard(&key).lock().unwrap();
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[&key].access_counts.len(), 2);
@@ -408,8 +411,8 @@ mod tests {
             expected.record(range(0, 1), clock);
         }
         assert_eq!(
-            actual.retention_score(range(0, 1), 8000),
-            expected.retention_score(range(0, 1), 8000)
+            actual.decayed_retrieval_cost(range(0, 1), 8000),
+            expected.decayed_retrieval_cost(range(0, 1), 8000)
         );
     }
 
@@ -426,8 +429,8 @@ mod tests {
             let _locked = histories.shard(&locked_key).lock().unwrap();
             scope.spawn(|| {
                 histories.record_access(&other, range(0, 1));
-                assert!(histories.retention_score(&other, range(0, 1)) > 0.0);
-                assert_eq!(histories.active_ranges(&other), vec![range(0, 1)]);
+                assert!(histories.decayed_retrieval_cost(&other, range(0, 1)) > 0.0);
+                assert_eq!(histories.recent_requested_ranges(&other), vec![range(0, 1)]);
                 done.send(()).unwrap();
             });
             received.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
@@ -468,7 +471,7 @@ mod tests {
         for _ in 0..*MAX_ACCESS_AGE_ACCESSES + 1 {
             histories.record_access(&ObjectKeyHash::from("other"), range(0, 1));
         }
-        assert!(histories.active_ranges(&old).is_empty());
+        assert!(histories.recent_requested_ranges(&old).is_empty());
         assert_eq!(histories.shard(&old).lock().unwrap()[&old].access_counts.len(), 1);
         histories.record_access(&old, range(0, 1));
         assert_eq!(histories.shard(&old).lock().unwrap()[&old].access_counts.len(), 1);
@@ -514,18 +517,18 @@ mod tests {
         let mut history = RangeAccessHistory::default();
         let cost = *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + requested.len() as f64;
         history.record(requested, 0);
-        assert_eq!(history.retention_score(cached_range, 0), cost);
+        assert_eq!(history.decayed_retrieval_cost(cached_range, 0), cost);
         assert_eq!(
-            history.retention_score(cached_range, *ACCESS_COUNT_HALF_LIFE),
+            history.decayed_retrieval_cost(cached_range, *ACCESS_COUNT_HALF_LIFE),
             cost * 0.5
         );
         history.record(requested, *ACCESS_COUNT_HALF_LIFE);
         assert_eq!(
-            history.retention_score(cached_range, *ACCESS_COUNT_HALF_LIFE),
+            history.decayed_retrieval_cost(cached_range, *ACCESS_COUNT_HALF_LIFE),
             cost * 1.5
         );
         assert_eq!(
-            history.retention_score(cached_range, *ACCESS_COUNT_HALF_LIFE * 2),
+            history.decayed_retrieval_cost(cached_range, *ACCESS_COUNT_HALF_LIFE * 2),
             cost * 0.75
         );
     }
@@ -545,7 +548,7 @@ mod tests {
             assert_eq!(history.access_counts[index].0, requested);
         }
         assert_eq!(
-            history.retention_score(first, *ACCESS_COUNT_HALF_LIFE),
+            history.decayed_retrieval_cost(first, *ACCESS_COUNT_HALF_LIFE),
             (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 1.0) * 1.5
         );
     }
@@ -574,7 +577,7 @@ mod tests {
                             * (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + (end - start) as f64)
                     })
                     .sum();
-                let actual = history.retention_score(range(start, end), 10_000);
+                let actual = history.decayed_retrieval_cost(range(start, end), 10_000);
                 // Expanded-range sums follow insertion order rather than sorted range order.
                 assert!(
                     (actual - expected).abs() <= expected.abs() * 1e-12,
@@ -582,7 +585,10 @@ mod tests {
                 );
             }
         }
-        assert_eq!(RangeAccessHistory::default().retention_score(range(0, 1), 0), 0.0);
+        assert_eq!(
+            RangeAccessHistory::default().decayed_retrieval_cost(range(0, 1), 0),
+            0.0
+        );
     }
 
     #[test]
@@ -594,7 +600,7 @@ mod tests {
         }
         assert!(!history.ranges().contains(&range(0, 1)));
         assert_eq!(
-            history.retention_score(range(0, 1), 0),
+            history.decayed_retrieval_cost(range(0, 1), 0),
             *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 1.0
         );
     }
@@ -632,7 +638,7 @@ mod tests {
             .map(|clock| (-((30_000 - clock) as f64) / *ACCESS_COUNT_HALF_LIFE as f64).exp2())
             .sum();
         let actual =
-            history.retention_score(range(0, 100), 30_000) / (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 100.0);
+            history.decayed_retrieval_cost(range(0, 100), 30_000) / (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 100.0);
         // Each event undergoes at most one decay per recorded access, including the final read.
         let max_decay_steps = clocks.len() as i32;
         assert!(actual >= expected * (1.0_f64 - 1e-7).powi(max_decay_steps));
@@ -645,26 +651,26 @@ mod tests {
         history.record(range(3, 7), 0);
 
         assert_eq!(
-            history.retention_score(range(0, 8), 0),
+            history.decayed_retrieval_cost(range(0, 8), 0),
             *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 4.0
         );
-        assert_eq!(history.retention_score(range(3, 5), 0), 0.0);
-        assert_eq!(history.retention_score(range(5, 8), 0), 0.0);
+        assert_eq!(history.decayed_retrieval_cost(range(3, 5), 0), 0.0);
+        assert_eq!(history.decayed_retrieval_cost(range(5, 8), 0), 0.0);
 
         let mut history = RangeAccessHistory::default();
         history.record(range(3, 5), 0);
         history.record(range(5, 8), 0);
         assert_eq!(
-            history.retention_score(range(3, 5), 0),
+            history.decayed_retrieval_cost(range(3, 5), 0),
             *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 2.0
         );
         assert_eq!(
-            history.retention_score(range(0, 8), 0),
+            history.decayed_retrieval_cost(range(0, 8), 0),
             (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 2.0) + (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 3.0)
         );
         history.record(range(u64::MAX - 1, u64::MAX), 0);
         assert_eq!(
-            history.retention_score(range(u64::MAX - 1, u64::MAX), 0),
+            history.decayed_retrieval_cost(range(u64::MAX - 1, u64::MAX), 0),
             *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 1.0
         );
     }

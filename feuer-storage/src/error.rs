@@ -154,7 +154,7 @@ pub enum DataFileError {
 }
 
 impl DataFileError {
-    /// Returns the stable category of this error.
+    /// Returns this error's category without its path, offsets, or underlying error details.
     pub const fn kind(&self) -> DataFileErrorKind {
         match self {
             Self::InvalidCapacity | Self::InvalidDataFile { .. } => DataFileErrorKind::InvalidConfiguration,

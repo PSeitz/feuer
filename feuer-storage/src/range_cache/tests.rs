@@ -314,7 +314,7 @@ async fn multi_chunk_eviction_preserves_an_in_progress_read_until_its_guards_dro
     cache.insert(key, source.clone()).await.unwrap();
     let read = {
         let index = cache.disk.shards[0].entry_index.lock().unwrap();
-        let entry = index.covering_range(&key, source.downloaded_range()).unwrap();
+        let entry = index.covering_entry(&key, source.downloaded_range()).unwrap();
         GuardedObjectRangeRead {
             object_range: entry.object_range,
             payload_checksum: entry.payload_checksum,
@@ -463,7 +463,10 @@ async fn pressure_replacement_preserves_evidence_while_the_last_old_entry_is_rem
     cache.insert(key, download(5, 10)).await.unwrap();
     cache.access_histories().record_access(&key, range(6, 7));
     assert!(cache.insert(key, download(0, 20)).await.unwrap());
-    assert_eq!(cache.access_histories().active_ranges(&key), vec![range(6, 7)]);
+    assert_eq!(
+        cache.access_histories().recent_requested_ranges(&key),
+        vec![range(6, 7)]
+    );
     assert!(cache.get(&key, range(0, 20)).await.is_some());
 }
 
@@ -478,16 +481,19 @@ async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
     for _ in 0..3 {
         histories.record_access(&key, range(0, 1));
     }
-    let original_cost = histories.retention_score(&key, range(0, 100));
+    let original_cost = histories.decayed_retrieval_cost(&key, range(0, 100));
     assert!(original_cost > 0.0);
-    assert_eq!(histories.retention_score(&key, range(200, 300)), 0.0);
+    assert_eq!(histories.decayed_retrieval_cost(&key, range(200, 300)), 0.0);
     // Successful lookups are recorded explicitly; raw storage reads/writes do not double-count.
     assert!(cache.get(&key, range(0, 1)).await.is_some());
     assert_eq!(histories.clock(), 3);
     for _ in 0..*ACCESS_COUNT_HALF_LIFE {
         histories.record_access(&key, range(200, 201));
     }
-    assert_eq!(histories.retention_score(&key, range(0, 100)), original_cost * 0.5);
+    assert_eq!(
+        histories.decayed_retrieval_cost(&key, range(0, 100)),
+        original_cost * 0.5
+    );
     assert!(cache.insert(ObjectKeyHash::from("new"), download(0, 1)).await.unwrap());
     assert!(cache.get(&key, range(0, 1)).await.is_none());
     assert!(cache.get(&key, range(200, 201)).await.is_some());
@@ -539,8 +545,8 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     cache.disk.shards[0].entry_index.lock().unwrap().remove(&hot, 0);
     drop(memory);
     drop(cache);
-    assert_eq!(history.active_ranges(&hot).len(), 5);
-    assert!(history.retention_score(&hot, range(0, 100)) > 0.0);
+    assert_eq!(history.recent_requested_ranges(&hot).len(), 5);
+    assert!(history.decayed_retrieval_cost(&hot, range(0, 100)) > 0.0);
 }
 
 #[tokio::test]
@@ -926,7 +932,7 @@ async fn completed_write_revalidates_cached_ranges_but_accepts_reinsertions() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let memory = Arc::new(feuer_memory::MemoryCache::new(1 << 20));
     let mut entries = Vec::new();
-    // Different lengths exercise token association through batch sorting.
+    // Different lengths verify that sorting keeps each entry with its publication value.
     for (key, length) in [("evicted", 300), ("readmitted", 200), ("current", 100)] {
         let key = ObjectKeyHash::from(key);
         let source = download(0, length);
@@ -1021,7 +1027,7 @@ async fn readers_keep_replaced_payload_reserved_but_results_do_not() {
     cache.insert(key, download(5, 100)).await.unwrap();
     let (guard, payload_checksum) = {
         let index = cache.disk.shards[0].entry_index.lock().unwrap();
-        let storage = index.covering_range(&key, range(6, 7)).unwrap();
+        let storage = index.covering_entry(&key, range(6, 7)).unwrap();
         (storage.payload_region.read_guard(), storage.payload_checksum)
     };
     let result = cache.get(&key, range(6, 7)).await.unwrap();
@@ -1296,7 +1302,7 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
         index.remove_entry_matching_read(&ObjectKeyHash::from("object"), &read);
         assert_eq!(
             index
-                .covering_range(&ObjectKeyHash::from("object"), range(0, 3))
+                .covering_entry(&ObjectKeyHash::from("object"), range(0, 3))
                 .is_some(),
             replacement != b"old"
         );

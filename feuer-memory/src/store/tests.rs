@@ -172,7 +172,7 @@ fn cache(capacity: u64) -> MemoryCache {
 }
 
 fn accessed_ranges(cache: &MemoryCache, key: &ObjectKeyHash) -> Vec<ByteRange> {
-    cache.access_histories.active_ranges(key)
+    cache.access_histories.recent_requested_ranges(key)
 }
 
 fn access_history_len(cache: &MemoryCache, key: &ObjectKeyHash) -> usize {
@@ -814,7 +814,7 @@ fn removing_the_last_cached_range_keeps_its_access_history() {
     assert_eq!(access_history_len(&cache, &key), 1);
     let history = cache.access_histories.clone();
     drop(cache);
-    assert!(history.retention_score(&key, range(0, 1)) > 0.0);
+    assert!(history.decayed_retrieval_cost(&key, range(0, 1)) > 0.0);
 }
 
 #[test]

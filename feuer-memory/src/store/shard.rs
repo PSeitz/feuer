@@ -50,8 +50,8 @@ struct ObjectCachedRanges {
 }
 
 impl ObjectCachedRanges {
-    /// Finds the cached range covering the entire requested range.
-    fn covering_range(&self, range: ByteRange) -> Option<&CachedRange> {
+    /// Finds the entry whose byte range covers the entire request.
+    fn covering_entry(&self, range: ByteRange) -> Option<&CachedRange> {
         let (_, entry) = self.by_start.range(..=range.start()).next_back()?;
         entry.range.contains(range).then_some(entry)
     }
@@ -207,7 +207,7 @@ impl MemoryCacheShard {
     pub(super) fn get(&self, object_key: &ObjectKeyHash, requested_range: ByteRange) -> Option<Bytes> {
         self.ranges
             .get(object_key)?
-            .covering_range(requested_range)
+            .covering_entry(requested_range)
             .map(|entry| entry.requested_bytes(requested_range))
     }
 
@@ -226,7 +226,7 @@ impl MemoryCacheShard {
         allow_range_trim: bool,
     ) -> InsertOrReclaimResult {
         let contained_ranges = match self.ranges.get(object_key) {
-            Some(entries) if entries.covering_range(range).is_some() => {
+            Some(entries) if entries.covering_entry(range).is_some() => {
                 self.metrics.record_redundant();
                 return InsertOrReclaimResult::Complete(false);
             }
@@ -238,7 +238,7 @@ impl MemoryCacheShard {
         let max_existing_bytes = self.capacity.saturating_sub(added_bytes);
 
         if used_bytes_without_contained_ranges <= max_existing_bytes {
-            let removal = self.remove_contained_ranges(object_key, &contained_ranges.ranges);
+            let removal = self.remove_contained_entries(object_key, &contained_ranges.ranges);
             debug_assert_eq!(removal.allocation_bytes, contained_ranges.allocation_bytes);
             self.insert_downloaded_range(*object_key, range, bytes.clone(), capacity, access_histories.clock());
 
@@ -322,8 +322,8 @@ impl MemoryCacheShard {
         debug_assert!(replaced.is_none());
     }
 
-    /// Removes cached ranges already found fully contained in the incoming download.
-    fn remove_contained_ranges(&mut self, object_key: &ObjectKeyHash, ranges: &[ByteRange]) -> RemovedCacheUsage {
+    /// Removes entries whose byte ranges were found contained in the incoming download.
+    fn remove_contained_entries(&mut self, object_key: &ObjectKeyHash, ranges: &[ByteRange]) -> RemovedCacheUsage {
         let mut removal = RemovedCacheUsage::default();
         for &range in ranges {
             let removed_bytes = self
@@ -409,7 +409,7 @@ impl MemoryCacheShard {
                 continue;
             }
 
-            let retrieval_cost = access_histories.retention_score(&candidate.object_key, entry.range);
+            let retrieval_cost = access_histories.decayed_retrieval_cost(&candidate.object_key, entry.range);
             if selected_candidate.is_none_or(|(selected_key, selected_entry, selected_cost)| {
                 compare_cost_per_byte(retrieval_cost, entry.capacity, selected_cost, selected_entry.capacity)
                     .then_with(|| candidate.object_key.cmp(selected_key))
@@ -443,7 +443,10 @@ impl MemoryCacheShard {
         if access_clock.saturating_sub(entry.admitted_at_access) < MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
             return None;
         }
-        let plan = plan_range_trim(entry.range, access_histories.active_ranges(&candidate.object_key))?;
+        let plan = plan_range_trim(
+            entry.range,
+            access_histories.recent_requested_ranges(&candidate.object_key),
+        )?;
         Some(RangeTrimSource {
             object_key: candidate.object_key,
             plan,
@@ -465,7 +468,7 @@ impl MemoryCacheShard {
             if self
                 .ranges
                 .get(&replacement.object_key)
-                .and_then(|entries| entries.covering_range(retained_range))
+                .and_then(|entries| entries.covering_entry(retained_range))
                 .is_some()
             {
                 continue;

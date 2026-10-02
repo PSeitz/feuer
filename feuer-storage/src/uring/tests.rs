@@ -28,7 +28,7 @@ fn queue() -> (IoQueue, mpsc::Sender<IoRequest>) {
         .custom_flags(libc::O_DIRECT)
         .open(temporary.path())
         .unwrap();
-    file.set_len(MAX_IO_CHUNK_BYTES as u64).unwrap();
+    file.set_len(MAX_IO_REQUEST_BYTES as u64).unwrap();
     // SAFETY: eventfd returns a fresh descriptor, checked before assuming ownership.
     let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     assert!(fd >= 0);
@@ -236,7 +236,7 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
 #[test]
 fn canceled_submitted_write_retains_resources() {
     let (mut queue, sender) = queue();
-    let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
+    let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_REQUEST_BYTES as u64).unwrap();
     let (mut write, reply) = request(IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
     if let IoBuffers::Write { _region: region, .. } = &mut write.buffers {
         *region = allocator.reserve_chunks(1);
@@ -252,7 +252,7 @@ fn canceled_submitted_write_retains_resources() {
     assert!(queue.active[0].is_some());
     queue.process_requests_until_disconnected().unwrap();
     assert!(queue.active.iter().all(Option::is_none));
-    assert_eq!(allocator.available_bytes(), MAX_IO_CHUNK_BYTES as u64);
+    assert_eq!(allocator.available_bytes(), MAX_IO_REQUEST_BYTES as u64);
 
     // Only read/reuse the region after completion, not after dropping the receiver.
     let (mut read_queue, sender) = self::queue();
@@ -301,7 +301,7 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
         pool.clone(),
     )
     .unwrap();
-    let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
+    let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_REQUEST_BYTES as u64).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap();
     let reservations = handle
         .handle
@@ -374,7 +374,7 @@ async fn queue_exit_releases_admission_waiters_and_queued_requests() {
     for mut reply in replies {
         assert!(matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
     }
-    let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_CHUNK_BYTES as u64).unwrap();
+    let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_REQUEST_BYTES as u64).unwrap();
     let chunk = allocator.reserve_chunks(1).unwrap();
     assert_eq!(
         handle

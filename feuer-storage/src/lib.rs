@@ -1,8 +1,8 @@
-//! Private Linux range-storage foundations for Feuer.
+//! Linux direct-I/O file access and a disk range cache for Feuer.
 //!
-//! A fixed-capacity O_DIRECT file with up to 64 active reads and 8 active writes through io_uring,
-//! plus an experimental disk range cache with connected allocation, entry metadata writes and integrity-checked reads.
-//! Used by public tiered lookup and disk writes, with incremental best-effort restart recovery.
+//! The fixed-capacity O_DIRECT file supports up to 64 active reads and 8 active writes through io_uring.
+//! The experimental cache reserves whole chunks, stores entry metadata separately, and verifies payload checksums.
+//! Opening recovers entries from metadata before making the cache available for reads and writes.
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("feuer-storage requires Linux with io_uring and O_DIRECT support");

@@ -25,12 +25,9 @@ impl RangeTrimPlan {
     }
 }
 
-/// Projects exact requested ranges onto one downloaded range without mutation.
-///
-/// Only requests fully covered by `source_range` can give it retention value.
-/// Overlapping and adjacent requests are grouped, but gaps remain unretained.
-/// Repetition stays available to eviction policy while naturally producing no
-/// duplicate copied interval here.
+/// Builds a trimming plan from requests fully contained in `source_range`.
+/// Merges overlapping and adjacent requests without retaining gaps.
+/// Returns no plan if no requests remain or the saved bytes fall below the minimum.
 pub(super) fn plan_range_trim(
     source_range: ByteRange,
     requested_ranges: impl IntoIterator<Item = ByteRange>,

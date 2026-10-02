@@ -26,7 +26,8 @@ struct DiskChunkAvailability {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
     free_chunk_count_by_start: BTreeMap<u64, u64>,
     available_chunks: u64,
-    // Sticky during recovery, including chunks freed after writes or recovery claimed them.
+    // First chunk number and recovery claim bits. Releasing chunks does not clear their bits,
+    // so recovery cannot reserve a previously claimed chunk again.
     recovery_claims: Option<(u64, Vec<u64>)>,
     metrics: Arc<DiskMetrics>,
 }
