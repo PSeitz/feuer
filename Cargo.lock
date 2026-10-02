@@ -379,7 +379,6 @@ dependencies = [
  "bytes",
  "bytesize",
  "feuer-types",
- "fnv",
  "mixtrics",
  "parking_lot",
  "prometheus",
@@ -411,6 +410,7 @@ dependencies = [
  "libc",
  "mixtrics",
  "prometheus",
+ "rustc-hash",
  "tempfile",
  "thiserror",
  "tracing",
@@ -432,7 +432,7 @@ version = "0.23.0-dev"
 dependencies = [
  "bytes",
  "bytesize",
- "fnv",
+ "rustc-hash",
  "thiserror",
  "xxhash-rust",
 ]

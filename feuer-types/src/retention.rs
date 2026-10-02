@@ -2,7 +2,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     hash::{Hash, Hasher},
     sync::{
         LazyLock, Mutex,
@@ -10,7 +10,7 @@ use std::{
     },
 };
 
-use fnv::{FnvHashMap, FnvHasher};
+use rustc_hash::{FxHashMap, FxHasher};
 
 use crate::{ByteRange, ObjectKeyHash, config::read_env_number};
 
@@ -41,7 +41,7 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 /// Every distinct key and requested-range counter is retained for this object's lifetime, even after
 /// cache eviction. Recent trimming events remain bounded. History is not persisted across restarts.
 pub struct ObjectAccessHistories {
-    shards: [Mutex<HashMap<ObjectKeyHash, RangeAccessHistory>>; ACCESS_HISTORY_SHARDS],
+    shards: [Mutex<FxHashMap<ObjectKeyHash, RangeAccessHistory>>; ACCESS_HISTORY_SHARDS],
     clock: AtomicU64,
 }
 
@@ -96,8 +96,8 @@ impl ObjectAccessHistories {
             .map_or_else(Vec::new, |history| history.active_ranges(self.clock()).collect())
     }
 
-    fn shard(&self, key: &ObjectKeyHash) -> &Mutex<HashMap<ObjectKeyHash, RangeAccessHistory>> {
-        let mut hasher = FnvHasher::default();
+    fn shard(&self, key: &ObjectKeyHash) -> &Mutex<FxHashMap<ObjectKeyHash, RangeAccessHistory>> {
+        let mut hasher = FxHasher::default();
         key.hash(&mut hasher);
         &self.shards[hasher.finish() as usize % self.shards.len()]
     }
@@ -170,7 +170,7 @@ impl DecayedAccessCount {
 #[derive(Default)]
 struct RangeAccessHistory {
     events: VecDeque<RangeAccess>,
-    access_count_indices: FnvHashMap<ByteRange, usize>,
+    access_count_indices: FxHashMap<ByteRange, usize>,
     // Each counter is stored once: indexed for exact matches, scanned for expanded ranges.
     access_counts: Vec<(ByteRange, DecayedAccessCount)>,
 }

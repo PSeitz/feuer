@@ -15,7 +15,7 @@ exclude.workspace = true
 [dependencies]
 bytes = { workspace = true }
 bytesize = "2.7"
-fnv = "1"
+rustc-hash = { workspace = true }
 thiserror = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 

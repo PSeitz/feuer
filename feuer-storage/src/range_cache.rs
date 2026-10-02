@@ -9,7 +9,7 @@ mod recovery;
 mod tests;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fmt,
     path::Path,
     sync::{Arc, Mutex, Weak},
@@ -22,6 +22,7 @@ use feuer_types::{
     ByteRange, Download, ObjectKeyHash,
     retention::{ObjectAccessHistories, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates},
 };
+use rustc_hash::FxHashMap;
 use tokio::sync::OnceCell;
 use twox_hash::XxHash64;
 
@@ -74,7 +75,7 @@ struct DiskCacheShard {
 
 /// Disk entries indexed by object key and range start, with dense rotating eviction candidates.
 struct DiskEntryIndex {
-    ranges_by_key: HashMap<ObjectKeyHash, BTreeMap<u64, DiskEntry>>,
+    ranges_by_key: FxHashMap<ObjectKeyHash, BTreeMap<u64, DiskEntry>>,
     eviction_candidates: Vec<(ObjectKeyHash, u64)>,
     next_candidate: usize,
     metrics: Arc<DiskMetrics>,
@@ -547,7 +548,7 @@ impl DiskCacheShard {
 impl DiskEntryIndex {
     fn new(metrics: Arc<DiskMetrics>) -> Self {
         Self {
-            ranges_by_key: HashMap::new(),
+            ranges_by_key: FxHashMap::default(),
             eviction_candidates: Vec::new(),
             next_candidate: 0,
             metrics,

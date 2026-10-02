@@ -11,8 +11,8 @@ use std::{
 
 use bytes::Bytes;
 use feuer_types::{ByteRange, Download, ObjectKeyHash, retention::ObjectAccessHistories};
-use fnv::FnvHasher;
 use parking_lot::Mutex;
+use rustc_hash::FxHasher;
 
 use self::shard::{InsertOrReclaimResult, MemoryCacheShard};
 use crate::{BufferPool, MemoryMetrics};
@@ -238,7 +238,7 @@ impl MemoryCache {
     ///
     /// The shard assignment is process-local and must never be persisted.
     fn shard_index(&self, object_key: &ObjectKeyHash) -> usize {
-        let mut hasher = FnvHasher::default();
+        let mut hasher = FxHasher::default();
         object_key.hash(&mut hasher);
         (hasher.finish() % self.shards.len() as u64) as usize
     }

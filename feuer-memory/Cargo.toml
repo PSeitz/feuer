@@ -19,7 +19,6 @@ benchmark = []
 bytes = { workspace = true }
 bytesize = "2.7"
 feuer-types = { workspace = true }
-fnv = "1"
 mixtrics = { workspace = true }
 parking_lot = { workspace = true }
 rustc-hash = { workspace = true }
