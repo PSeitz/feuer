@@ -66,10 +66,10 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 - Compaction merges only overlapping or adjacent observed intervals and copies them into independent `Bytes`.
   It preserves exact coverage, updates accounting and metrics, creates no access, and leaves caller-held
   slices valid.
-- Copying happens outside the shard lock. Exact-range and structural generation checks reject output
-  invalidated by same-object cached-range changes. Reinsertion of the same immutable range may accept an
-  earlier copy. New accesses do not invalidate a trimming snapshot.
-  Admission falls back to eviction when cached-range changes invalidate a copy.
+- Copying happens outside the shard lock. Publication requires the exact source range to still be cached.
+  Reinsertion of that immutable range, changes to neighboring ranges, and new accesses do not invalidate
+  a trimming snapshot. Retained ranges already covered by another entry are skipped.
+  Admission falls back to eviction if the source was removed or replaced by a different range.
 
 There is no periodic compaction, separate prefetch-promotion state, or public policy configuration.
 

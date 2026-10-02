@@ -722,8 +722,8 @@ fn new_accesses_do_not_invalidate_a_copied_range_trim() {
 }
 
 #[test]
-fn range_trim_revalidates_ranges_but_accepts_reinsertion() {
-    for change in 0..4 {
+fn range_trim_requires_only_the_exact_source_range() {
+    for change in 0..5 {
         let cache = cache(20);
         let key = ObjectKeyHash::from("source");
         let source = download(range(0, 10), Bytes::from_static(b"abcdefghij"));
@@ -758,9 +758,13 @@ fn range_trim_revalidates_ranges_but_accepts_reinsertion() {
             2 => {
                 cache.insert(key, download(range(12, 13), Bytes::from_static(b"x")));
             }
-            _ => {
+            3 => {
                 assert!(cache.remove(&key, range(0, 10)));
                 cache.insert(key, download(range(0, 11), Bytes::from_static(b"abcdefghijk")));
+            }
+            _ => {
+                // A partial overlap can cover the retained range without replacing the source.
+                cache.insert(key, download(range(2, 11), Bytes::from_static(b"cdefghijk")));
             }
         }
         let bytes_before = cache.used_bytes();
@@ -768,11 +772,22 @@ fn range_trim_revalidates_ranges_but_accepts_reinsertion() {
             cache.shards[0]
                 .lock()
                 .publish_range_trim(replacement, cache.access_histories.clock()),
-            change == 1
+            matches!(change, 1 | 2 | 4)
         );
-        if change == 1 {
-            assert_eq!(cache.used_bytes(), 2);
-            assert_eq!(cache.entry_count(), 1);
+        if matches!(change, 1 | 2 | 4) {
+            let (bytes, entries) = match change {
+                1 => (2, 1),
+                2 => (3, 2),
+                _ => (9, 1), // The neighbor already covers the retained bytes; do not insert them again.
+            };
+            assert_eq!(cache.used_bytes(), bytes);
+            assert_eq!(cache.entry_count(), entries);
+            assert_eq!(candidate_count(&cache), entries as usize);
+            if change == 2 {
+                assert_eq!(cache.get(&key, range(12, 13)).unwrap(), Bytes::from_static(b"x"));
+            } else if change == 4 {
+                assert_eq!(cache.get(&key, range(2, 11)).unwrap(), Bytes::from_static(b"cdefghijk"));
+            }
             assert_eq!(cache.get(&key, range(2, 4)).unwrap(), Bytes::from_static(b"cd"));
             assert!(cache.get(&key, range(0, 10)).is_none());
             continue;

@@ -220,8 +220,9 @@ create no access, and cannot affect lookup results or caller-held slices.
 
 Lookup and access recording must not scan every live shard entry. Victim selection samples a bounded number
 of entries. Scoring work depends on the distinct requested ranges each candidate covers.
-Copies made outside the metadata lock require exact-range and cached-range generation revalidation.
-Reinsertion of the same immutable range may accept an earlier copy.
+Copies made outside the metadata lock require the exact source range to still be cached at publication.
+Reinsertion of the same immutable range and changes to neighboring ranges do not invalidate a copy.
+Retained ranges already covered by another entry are skipped.
 Access history is only policy input: newer accesses do not invalidate a trimming snapshot.
 
 ## 7. Best-effort disk writes

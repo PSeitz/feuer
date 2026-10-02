@@ -211,15 +211,15 @@ impl MemoryCache {
                 InsertOrReclaimResult::Retry => continue,
                 InsertOrReclaimResult::Trim(source) => {
                     // Payload copying is deliberately outside the shard lock.
-                    // Publication revalidates the source and cached-range structure, not history.
+                    // Publication checks that the exact source range is still cached, not history.
                     let replacement = source.copy_retained_payloads();
                     let access_clock = self.access_histories.clock();
                     if !self.shards[shard_index]
                         .lock()
                         .publish_range_trim(replacement, access_clock)
                     {
-                        // Concurrent insertions/removals may invalidate copies. Fall back to
-                        // bounded eviction so this admission cannot starve.
+                        // The source was removed or replaced by a different range. Fall back to
+                        // eviction so this admission cannot starve.
                         allow_range_trim = false;
                     }
                 }

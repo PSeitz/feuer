@@ -47,8 +47,6 @@ impl CachedRange {
 struct ObjectCachedRanges {
     /// Entries ordered by exact start for predecessor-based covering lookup.
     by_start: BTreeMap<u64, CachedRange>,
-    /// Structural generation used by copy-outside-lock range trimming.
-    object_generation: u64,
 }
 
 impl ObjectCachedRanges {
@@ -133,8 +131,6 @@ struct ReclaimCandidate {
 /// Source payload and plan for trimming a cached range outside the shard lock.
 pub(super) struct RangeTrimSource {
     object_key: ObjectKeyHash,
-    start: u64,
-    object_generation: u64,
     plan: RangeTrimPlan,
     source_bytes: Bytes,
 }
@@ -156,19 +152,15 @@ impl RangeTrimSource {
             .collect();
         RangeTrimReplacement {
             object_key: self.object_key,
-            start: self.start,
-            object_generation: self.object_generation,
             plan: self.plan,
             retained_payloads,
         }
     }
 }
 
-/// Replacement payloads from trimming a cached range, awaiting range/generation checks.
+/// Replacement payloads from trimming a cached range, awaiting the source-range check.
 pub(super) struct RangeTrimReplacement {
     object_key: ObjectKeyHash,
-    start: u64,
-    object_generation: u64,
     plan: RangeTrimPlan,
     retained_payloads: Vec<(ByteRange, Bytes)>,
 }
@@ -299,7 +291,6 @@ impl MemoryCacheShard {
             admitted_at_access: access_clock,
         };
 
-        entries.object_generation += 1;
         let replaced = entries.by_start.insert(range.start(), entry);
         debug_assert!(replaced.is_none());
     }
@@ -327,7 +318,6 @@ impl MemoryCacheShard {
             candidate_slot,
             admitted_at_access: access_clock,
         };
-        entries.object_generation += 1;
         let replaced = entries.by_start.insert(range.start(), entry);
         debug_assert!(replaced.is_none());
     }
@@ -367,7 +357,6 @@ impl MemoryCacheShard {
                 .by_start
                 .remove(&range.start())
                 .expect("the exact entry was checked immediately before removal");
-            object_cached_ranges.object_generation += 1;
             let object_has_no_cached_ranges = object_cached_ranges.by_start.is_empty();
             (removed_range, object_has_no_cached_ranges)
         };
@@ -457,31 +446,18 @@ impl MemoryCacheShard {
         let plan = plan_range_trim(entry.range, access_histories.active_ranges(&candidate.object_key))?;
         Some(RangeTrimSource {
             object_key: candidate.object_key,
-            start: candidate.range.start(),
-            object_generation: entries.object_generation,
             plan,
             source_bytes: entry.bytes.clone(),
         })
     }
 
-    /// Publishes copied range trimming output only if source metadata is unchanged.
+    /// Publishes copied range trimming output only if the exact source range is still cached.
     pub(super) fn publish_range_trim(&mut self, replacement: RangeTrimReplacement, access_clock: u64) -> bool {
-        // Only cached-range changes invalidate the copy. New requests may change the desirability
-        // of the trimming plan, but not the correctness of the retained bytes.
-        let source_unchanged = self.ranges.get(&replacement.object_key).is_some_and(|entries| {
-            entries.object_generation == replacement.object_generation
-                && entries
-                    .by_start
-                    .get(&replacement.start)
-                    .is_some_and(|entry| entry.range == replacement.plan.source_range())
-        });
-        if !source_unchanged {
+        // Objects are immutable: reinsertion and neighboring-range changes do not invalidate the bytes.
+        // New requests may change the desirability of the plan, but do not invalidate it.
+        let Some(removed_bytes) = self.remove_entry(&replacement.object_key, replacement.plan.source_range()) else {
             return false;
-        }
-
-        let removed_bytes = self
-            .remove_entry(&replacement.object_key, replacement.plan.source_range())
-            .expect("the compaction source was revalidated immediately before removal");
+        };
         let mut retained_bytes = 0_u64;
         let mut retained_entries = 0_u64;
 
