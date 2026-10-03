@@ -36,13 +36,10 @@ pub(super) fn encode_page(page: &mut [u8], page_tag: &[u8; 8], entry_count: u64,
     page[..8].copy_from_slice(&checksum.to_le_bytes());
 }
 
-pub(super) fn validate_page<'a>(page: &'a [u8], page_tag: &[u8; 8], entry_count: u64) -> Option<&'a [u8]> {
-    if page.len() != METADATA_PAGE_BYTES
-        || page[8..16] != [0; 8]
-        || page[16..24] != entry_count.to_le_bytes()
-        || page[24..32] != *page_tag
-        || page[..8] != XxHash64::oneshot(0, &page[8..]).to_le_bytes()
-    {
+/// Validates one complete metadata page. The tag identifies the writer's format;
+/// an intact checksum lets readers rely on its field, padding, and alignment guarantees.
+pub(super) fn validate_page<'a>(page: &'a [u8], page_tag: &[u8; 8]) -> Option<&'a [u8]> {
+    if page[24..32] != *page_tag || page[..8] != XxHash64::oneshot(0, &page[8..]).to_le_bytes() {
         return None;
     }
     Some(&page[PAGE_HEADER_BYTES..])

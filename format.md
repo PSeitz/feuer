@@ -114,12 +114,21 @@ or persistence ordering after power loss; recovery is best-effort.
 
 Open waits for recovery, which runs on Tokio's blocking pool. Recovery follows metadata links with one 1-MiB read per
 metadata chunk; it never scans payload chunks. Zero-filled chunks, read failures,
-invalid addresses, cycles, or corrupt links terminate a chain. Corrupt record pages
-are discarded independently.
+links outside the current shard, cycles, or corrupt link pages terminate a chain.
+Corrupt record pages are discarded independently.
 
-Metadata chunks are reserved before validating entry records and reconstructing payload
-occupancy. Range arithmetic, alignment, and file bounds are checked; payloads cannot
-claim metadata chunks. Overlapping stale records can share payload reservations.
+A page's checksum and type/version tag establish the writer's format contract.
+Readers use fixed-size pages and records and do not recheck reserved fields, slot
+counts, padding, range arithmetic, or address alignment. `Download` guarantees a
+non-empty, representable object range; payload packing places its aligned bytes
+inside reserved consecutive chunks, and metadata links use reserved chunk addresses.
+An unused record has zero length.
+
+Metadata chunks are reserved before decoding entry records and reconstructing payload
+occupancy. Reservations enforce current shard bounds and prevent payloads from claiming
+metadata chunks; key routing is checked against the current shard count. These checks
+remain necessary because capacity changes and stale records can disagree with current
+ownership even when individual pages are intact. Overlapping stale records can share payload reservations.
 Duplicate starts and contained ranges are removed while rebuilding the index.
 Broken links are repaired by subsequent writes; discarded record pages are rewritten only when reused.
 Closing does not invalidate live records.

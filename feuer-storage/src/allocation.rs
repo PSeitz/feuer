@@ -155,6 +155,7 @@ impl DiskChunkAllocator {
     }
 
     /// Reserves a payload's chunks, sharing an existing reservation when it contains the payload.
+    /// Rejects conflicts and payloads outside this allocator's shard.
     pub(super) fn reserve_payload_chunks(&self, payload_range: &Range<u64>) -> Option<()> {
         let mut payload_chunks = self.payload_chunks.lock().unwrap();
         if let Some((_, (region, entry_count))) = payload_chunks.range_mut(..=payload_range.start).next_back()
@@ -282,23 +283,35 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_recovery_records_share_chunks_but_cannot_claim_metadata() {
-        let allocator = DiskChunkAllocator::new(2 * CHUNK_BYTES).unwrap();
-        let _metadata = allocator.reserve_for_recovery(0, 1).unwrap();
-        assert!(allocator.reserve_payload_chunks(&(0..4096)).is_none());
+    fn recovery_reservations_respect_shard_bounds_and_chunk_ownership() {
+        let allocator = DiskChunkAllocator::for_disk_range(CHUNK_BYTES..3 * CHUNK_BYTES).unwrap();
+        let _metadata = allocator.reserve_for_recovery(1, 1).unwrap();
+        for payload in [
+            0..4096,
+            CHUNK_BYTES..CHUNK_BYTES + 4096,
+            2 * CHUNK_BYTES..4 * CHUNK_BYTES,
+            3 * CHUNK_BYTES..3 * CHUNK_BYTES + 4096,
+        ] {
+            assert!(allocator.reserve_payload_chunks(&payload).is_none());
+        }
         assert!(
             allocator
-                .reserve_payload_chunks(&(CHUNK_BYTES..CHUNK_BYTES + 4096))
+                .reserve_payload_chunks(&(2 * CHUNK_BYTES..2 * CHUNK_BYTES + 4096))
                 .is_some()
         );
         assert!(
             allocator
-                .reserve_payload_chunks(&(CHUNK_BYTES..CHUNK_BYTES + 8192))
+                .reserve_payload_chunks(&(2 * CHUNK_BYTES..2 * CHUNK_BYTES + 8192))
                 .is_some()
         );
-        allocator.remove_payload(CHUNK_BYTES);
+        assert!(
+            allocator
+                .reserve_payload_chunks(&(2 * CHUNK_BYTES..4 * CHUNK_BYTES))
+                .is_none()
+        );
+        allocator.remove_payload(2 * CHUNK_BYTES);
         assert_eq!(allocator.available_bytes(), 0);
-        allocator.remove_payload(CHUNK_BYTES);
+        allocator.remove_payload(2 * CHUNK_BYTES);
         assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
     }
 

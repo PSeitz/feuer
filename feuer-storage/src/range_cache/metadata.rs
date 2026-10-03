@@ -63,11 +63,8 @@ impl MetadataChunk {
     /// Returns `None` if the link page is invalid.
     pub(super) fn next_chunk_address(&self) -> Option<u64> {
         let offset = RECORD_PAGES * METADATA_PAGE_BYTES;
-        let contents = validate_page(&self.bytes[offset..], NEXT_CHUNK_PAGE_TAG, 1)?;
-        if contents[8..].iter().any(|&byte| byte != 0) {
-            return None;
-        }
-        Some(u64::from_le_bytes(contents[..8].try_into().ok()?))
+        let contents = validate_page(&self.bytes[offset..], NEXT_CHUNK_PAGE_TAG)?;
+        Some(u64::from_le_bytes(contents[..8].try_into().unwrap()))
     }
 
     /// The 48 bytes describing one entry's key, object range, payload address, and checksum.

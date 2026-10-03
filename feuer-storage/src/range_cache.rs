@@ -671,6 +671,8 @@ impl DiskRangeCacheState {
 
 impl UnwrittenShardBatch {
     /// Packs one download's payload into reserved chunks without writing it.
+    /// Payloads are 4-KiB-aligned; those spanning chunks start at a chunk boundary.
+    /// Download and the reserved chunks guarantee representable object and disk ranges.
     /// Allocation failure leaves the batch unchanged and reports the required number of new chunks.
     fn pack_download(
         &mut self,
