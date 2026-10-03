@@ -187,6 +187,7 @@ async fn torn_record_page_does_not_reject_other_pages() {
     bytes[PAGE_HEADER_BYTES] ^= 1;
     cache.disk.file.write_at(address, &Bytes::from(bytes)).await.unwrap();
     let cache = reopen(directory.path(), cache).await;
+    assert!(cache.disk.shards[0].metadata.lock().unwrap().dirty_pages.is_empty());
     assert!(cache.get(&ObjectKeyHash(0), range(0, 1)).await.is_none());
     assert!(
         cache
@@ -207,14 +208,19 @@ async fn torn_record_page_does_not_reject_other_pages() {
 
 #[tokio::test]
 async fn corrupt_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
-    for cyclic in [false, true] {
+    for (next_chunk_address, corrupt_checksum) in [
+        (0, true),
+        (0, false),
+        (1, false),
+        (2 * CHUNK_BYTES, false),
+        (3 * CHUNK_BYTES, false),
+    ] {
         let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
         assert!(cache.insert(ObjectKeyHash(1), download(0, 1)).await.unwrap());
-        let address: u64 = 0;
-        let offset = address + (RECORD_PAGES * METADATA_PAGE_BYTES) as u64;
+        let offset = (RECORD_PAGES * METADATA_PAGE_BYTES) as u64;
         let mut page = vec![0; METADATA_PAGE_BYTES];
-        encode_page(&mut page, NEXT_CHUNK_PAGE_TAG, 1, &address.to_le_bytes());
-        if !cyclic {
+        encode_page(&mut page, NEXT_CHUNK_PAGE_TAG, 1, &next_chunk_address.to_le_bytes());
+        if corrupt_checksum {
             page[0] ^= 1;
         }
         cache.disk.file.write_at(offset, &Bytes::from(page)).await.unwrap();
@@ -225,6 +231,9 @@ async fn corrupt_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
             cache.disk.shards[0].metadata.lock().unwrap().chunks[0].next_chunk_address(),
             Some(NO_CHUNK)
         );
+        let cache = reopen(directory.path(), cache).await;
+        assert!(cache.get(&ObjectKeyHash(1), range(0, 1)).await.is_some());
+        assert!(cache.get(&ObjectKeyHash(2), range(0, 1)).await.is_some());
     }
 }
 

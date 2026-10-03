@@ -16,7 +16,7 @@ impl DiskRangeCacheState {
         let shard = &self.shards[shard_index];
         let shard_disk_range = shard_disk_range(self.file.capacity(), self.shards.len(), shard_index);
         // Reserve every metadata chunk before accepting any payload addresses from the records.
-        shard.load_metadata_chain(&self.file, shard_disk_range.clone()).await;
+        shard.load_metadata_chain(&self.file, shard_disk_range.start).await;
         let metadata = shard.metadata.lock().unwrap();
         let mut index = shard.entry_index.lock().unwrap();
         for chunk_index in 0..metadata.chunks.len() {
@@ -52,9 +52,8 @@ impl DiskRangeCacheState {
 
 impl DiskCacheShard {
     /// Reads the metadata chain and resets invalid record pages before reserving payload chunks.
-    async fn load_metadata_chain(&self, file: &DataFile, shard_disk_range: Range<u64>) {
+    async fn load_metadata_chain(&self, file: &DataFile, mut address: u64) {
         let mut metadata = metadata::MetadataPages::default();
-        let mut address = shard_disk_range.start;
         while address != NO_CHUNK {
             if !address.is_multiple_of(CHUNK_BYTES) {
                 break;
@@ -70,23 +69,20 @@ impl DiskCacheShard {
                 break;
             }
             region.mark_recovered();
-            let chunk = metadata::MetadataChunk {
+            let mut chunk = metadata::MetadataChunk {
                 region,
                 bytes: bytes.to_vec(),
             };
-            let next_chunk_address = chunk.next_chunk_address();
-            let chunk_index = metadata.chunks.len();
-            metadata.chunks.push(chunk);
             for page in 0..RECORD_PAGES {
-                let bytes =
-                    &metadata.chunks[chunk_index].bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES];
-                let valid = validate_page(bytes, ENTRY_METADATA_PAGE_TAG, RECORDS_PER_PAGE as u64)
-                    .is_some_and(|contents| contents[PAGE_CONTENT_BYTES..].iter().all(|&byte| byte == 0));
-                if !valid {
-                    metadata.chunks[chunk_index].reset_record_page(page);
-                    metadata.dirty_pages.insert((chunk_index, page));
+                let bytes = &chunk.bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES];
+                if validate_page(bytes, ENTRY_METADATA_PAGE_TAG, RECORDS_PER_PAGE as u64).is_none() {
+                    // Clear invalid records before a later insertion rechecksums the page.
+                    // Until then, the invalid page on disk is safe to leave untouched.
+                    chunk.reset_record_page(page);
                 }
             }
+            let next_chunk_address = chunk.next_chunk_address();
+            metadata.chunks.push(chunk);
             match next_chunk_address {
                 Some(next_chunk_address) => address = next_chunk_address,
                 None => break,

@@ -121,6 +121,7 @@ Metadata chunks are reserved before validating entry records and reconstructing 
 occupancy. Range arithmetic, alignment, and file bounds are checked; payloads cannot
 claim metadata chunks. Overlapping stale records can share payload reservations.
 Duplicate starts and contained ranges are removed while rebuilding the index.
-Repairs are flushed by subsequent writes. Closing does not invalidate live records.
+Broken links are repaired by subsequent writes; discarded record pages are rewritten only when reused.
+Closing does not invalidate live records.
 Stale records may survive reuse; missing or corrupt payloads become cache misses when read,
 subject to the usual checksum-collision limitation.
