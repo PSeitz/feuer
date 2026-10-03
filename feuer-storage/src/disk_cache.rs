@@ -113,7 +113,7 @@ struct PayloadRead {
 /// An error opening or writing the disk cache. Read uncertainty becomes a miss.
 #[derive(Debug, thiserror::Error)]
 pub enum DiskCacheError {
-    /// The prototype requires a positive whole number of 1-MiB chunks within Linux's file-offset limit.
+    /// The requested disk capacity is unsupported.
     #[error("disk cache capacity must be at least 1 MiB and at most i64::MAX")]
     InvalidCapacity,
     /// Raw storage failed.

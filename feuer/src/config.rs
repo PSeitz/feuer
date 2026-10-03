@@ -5,9 +5,8 @@ use thiserror::Error;
 
 /// Explicit capacities and location for one Feuer cache.
 ///
-/// `disk_capacity` is the fixed physical file size, including metadata and alignment.
-/// Opening requires a positive multiple of 1 MiB. `memory_capacity` is a
-/// soft eviction target divided among the in-memory shards; oversized entries
+/// `disk_capacity` includes metadata and alignment overhead.
+/// `memory_capacity` is a soft eviction target divided among the in-memory shards; oversized entries
 /// can make retained usage exceed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheConfig {
@@ -64,7 +63,7 @@ impl CacheConfig {
         &self.directory
     }
 
-    /// Returns the configured fixed physical data-file capacity in bytes.
+    /// Returns the configured disk capacity in bytes.
     pub const fn disk_capacity(&self) -> u64 {
         self.disk_capacity
     }

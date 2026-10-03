@@ -51,8 +51,7 @@ impl fmt::Debug for TieredMemoryDiskCache {
 
 impl TieredMemoryDiskCache {
     /// Opens an exclusively locked disk cache and starts its best-effort writer.
-    /// Disk capacity must be a positive multiple of 1 MiB. Requires a Tokio runtime,
-    /// usable io_uring and direct I/O; no memory-only or buffered fallback is used.
+    /// Requires a Tokio runtime, usable io_uring and direct I/O; no memory-only or buffered fallback is used.
     /// Waits for every shard's metadata recovery before returning the cache.
     #[cfg(target_os = "linux")]
     pub async fn open(config: CacheConfig) -> Result<Self, DiskCacheError> {

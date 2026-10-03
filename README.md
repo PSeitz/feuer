@@ -59,8 +59,8 @@ Entry targets remain split across shards; an oversized entry empties its shard a
 Active reads and caller-only results are outside the budget. Metadata and pending disk writes
 can also keep additional memory alive.
 
-Disk capacity is fixed and must be a positive multiple of 1 MiB, including metadata
-and alignment overhead. The backing file is exclusively locked while open. Disk
+Disk capacity includes metadata and alignment overhead.
+The backing file is exclusively locked while open. Disk
 hits verify the entry's checksum and promote the requested bytes to memory.
 Corrupt or uncertain reads count as misses.
 
