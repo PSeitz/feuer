@@ -79,20 +79,13 @@ struct DiskEntryIndex {
     metrics: Arc<DiskMetrics>,
 }
 
-/// One contiguous reserved disk region and retained payload slices, before writing.
-struct UnwrittenRegion {
-    region: ReservedChunks,
-    // Payload slices at 4-KiB-aligned offsets; metadata lives in separate chunks.
-    parts: Vec<(usize, Bytes)>,
-    // Offset where the next payload starts, including alignment padding.
-    next_payload_offset: u64,
-}
-
-/// Entries and their chunk contents prepared for one shard's batch write.
-#[derive(Default)]
-struct UnwrittenShardBatch {
-    regions: Vec<UnwrittenRegion>,
-    entries: Vec<(ObjectKeyHash, DiskEntry)>,
+/// An entry's payload, metadata, caller value, and metrics awaiting write and publication.
+struct PendingEntry<T> {
+    key: ObjectKeyHash,
+    entry: DiskEntry,
+    bytes: Bytes,
+    publication_value: T,
+    attempt: DiskWriteAttempt,
 }
 
 /// Verified bytes or failure shared by concurrent reads of one stored entry.
@@ -251,13 +244,14 @@ impl DiskCache {
 
     /// Packs an explicit batch into chunks, grouping smaller payloads first within each shard.
     /// Returns the number of entries published; contained entries and entries that do not fit are skipped.
-    /// Payload writes finish before publication; metadata is written every second, best-effort.
-    /// Publication rechecks containment and is not transactional across shards. Does not record accesses.
+    /// Each entry's payload writes finish before publication; metadata is written every second, best-effort.
+    /// Publication rechecks containment. Later entries may replace or evict earlier ones. Does not record accesses.
     ///
     /// Entries share a payload chunk only when their complete aligned payloads fit inside it.
     /// Multi-chunk entries own their chunks exclusively. Partially filled chunks are finalized too.
     /// Each shard batch allows at most 64 eviction attempts and charges at most 4,096 chunks to removed entries.
     /// Unavailable capacity causes admission to be skipped, not waited for.
+    /// Completed payload regions publish independently; a later failure does not undo earlier publication.
     /// Callers bound batch size and concurrency: payload slices are retained until writing completes.
     /// Dropping this future does not abort its detached writer.
     pub async fn insert_batch(&self, downloads: Vec<(ObjectKeyHash, Download)>) -> Result<usize, DiskCacheError> {
@@ -279,134 +273,30 @@ impl DiskCache {
     pub async fn insert_batch_with_publication_check<T, F>(
         &self,
         downloads: Vec<(ObjectKeyHash, Download, T)>,
-        publish_if_accepted: F,
+        mut publish_if_accepted: F,
     ) -> Result<usize, DiskCacheError>
     where
         T: Send + 'static,
         F: Fn(&T, &mut dyn FnMut()) + Send + 'static,
     {
         let disk = self.disk.clone();
-        let downloads: Vec<_> = downloads
-            .into_iter()
-            .map(|(key, download, publication_value)| {
-                (
-                    key,
-                    download,
-                    publication_value,
-                    DiskWriteAttempt::new(disk.metrics.clone()),
-                )
-            })
-            .collect();
+        let mut downloads_by_shard: Vec<Vec<_>> = (0..disk.shards.len()).map(|_| Vec::new()).collect();
+        for (key, download, publication_value) in downloads {
+            downloads_by_shard[disk.shard_index_for_key(&key)].push((
+                key,
+                download,
+                publication_value,
+                DiskWriteAttempt::new(disk.metrics.clone()),
+            ));
+        }
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
         runtime
             .spawn(async move {
-                let mut downloads_by_shard: Vec<Vec<_>> = (0..disk.shards.len()).map(|_| Vec::new()).collect();
-                for (key, download, publication_value, attempt) in downloads {
-                    downloads_by_shard[disk.shard_index_for_key(&key)].push((
-                        key,
-                        download,
-                        publication_value,
-                        attempt,
-                    ));
+                let mut published = 0;
+                for (shard, downloads) in disk.shards.iter().zip(downloads_by_shard) {
+                    published += disk.write_shard(shard, downloads, &mut publish_if_accepted).await?;
                 }
-                let mut published_entries = 0;
-                for (shard, mut downloads) in disk.shards.iter().zip(downloads_by_shard) {
-                    if downloads.is_empty() {
-                        continue;
-                    }
-                    downloads.sort_by_key(|(_, download, _, _)| download.bytes().len());
-                    let mut batch = UnwrittenShardBatch::default();
-                    let mut publication_values: Vec<(T, DiskWriteAttempt)> = Vec::new();
-                    let mut attempts_left = MAX_EVICTION_ATTEMPTS;
-                    let mut chunks_left = MAX_EVICTION_CHUNKS;
-                    for (key, download, publication_value, mut attempt) in downloads {
-                        if shard
-                            .entry_index
-                            .lock()
-                            .unwrap()
-                            .covering_entry(&key, download.downloaded_range())
-                            .is_none()
-                        {
-                            let previous_entry_count = batch.entries.len();
-                            let previous_chunks_left = chunks_left;
-                            loop {
-                                let metadata = shard.metadata_pages.lock().unwrap().reserve_metadata(&shard.allocator);
-                                let chunks_needed = if let Some(position) = metadata {
-                                    match batch.pack_download(&shard.allocator, &key, &download, position) {
-                                        Ok(()) => break,
-                                        Err(count) => {
-                                            shard.metadata_pages.lock().unwrap().free_entry_positions.push(position);
-                                            count
-                                        }
-                                    }
-                                } else {
-                                    1
-                                };
-                                let metadata_chunks = shard.metadata_pages.lock().unwrap().chunks.len() as u64;
-                                // Evicting cannot help an entry that exceeds the capacity left by this batch.
-                                if chunks_needed
-                                    > shard.allocator.chunk_capacity - batch.chunk_count() - metadata_chunks
-                                    || !shard.sample_and_evict_entry(
-                                        &disk.access_histories,
-                                        &mut attempts_left,
-                                        &mut chunks_left,
-                                    )
-                                {
-                                    break;
-                                }
-                            }
-                            // Only actual removals consume the chunk budget; sampling alone does not.
-                            attempt.evicted = chunks_left != previous_chunks_left;
-                            if batch.entries.len() != previous_entry_count {
-                                publication_values.push((publication_value, attempt));
-                            } else {
-                                attempt.set_outcome(DiskWriteOutcome::NoCapacity);
-                            }
-                        } else {
-                            attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
-                        }
-                    }
-                    let entries = match batch.write_payloads(&disk.file, &disk.metrics, shard).await {
-                        Ok(entries) => entries,
-                        Err(error) => {
-                            for (_, attempt) in &mut publication_values {
-                                attempt.set_outcome(DiskWriteOutcome::Failed);
-                            }
-                            return Err(error);
-                        }
-                    };
-                    {
-                        let mut index = shard.entry_index.lock().unwrap();
-                        // Publish larger entries first so contained batch members need not publish at all.
-                        for ((key, entry), (publication_value, mut attempt)) in
-                            entries.into_iter().zip(publication_values).rev()
-                        {
-                            let object_range = entry.object_range;
-                            // Another writer or an earlier entry in this batch may already cover this range.
-                            if index.covering_entry(&key, object_range).is_some() {
-                                attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
-                                shard.remove_payload_and_allow_metadata_overwrite(entry);
-                                continue;
-                            }
-                            attempt.set_outcome(DiskWriteOutcome::Stale);
-                            let mut unpublished_entry = Some((key, entry));
-                            publish_if_accepted(&publication_value, &mut || {
-                                if let Some((key, entry)) = unpublished_entry.take() {
-                                    shard.metadata_pages.lock().unwrap().set_entry_metadata(&key, &entry);
-                                    for removed in index.insert(key, entry) {
-                                        shard.remove_payload_and_allow_metadata_overwrite(removed);
-                                    }
-                                    published_entries += 1;
-                                    attempt.set_outcome(DiskWriteOutcome::Published);
-                                }
-                            });
-                            if let Some((_, entry)) = unpublished_entry {
-                                shard.remove_payload_and_allow_metadata_overwrite(entry);
-                            }
-                        }
-                    }
-                }
-                Ok(published_entries)
+                Ok(published)
             })
             .await
             .map_err(DiskCacheError::WriteTaskFailed)?
@@ -662,102 +552,209 @@ impl DiskCacheInner {
     fn shard_index_for_key(&self, key: &ObjectKeyHash) -> usize {
         (key.0 % self.shards.len() as u128) as usize
     }
-}
 
-impl UnwrittenShardBatch {
-    /// Packs one download's payload into reserved chunks without writing it.
-    /// Payloads are 4-KiB-aligned; those spanning chunks start at a chunk boundary.
-    /// Download and the reserved chunks guarantee representable object and disk ranges.
-    /// Allocation failure leaves the batch unchanged and reports the required number of new chunks.
-    fn pack_download(
-        &mut self,
-        allocator: &DiskChunkAllocator,
-        key: &ObjectKeyHash,
-        download: &Download,
-        metadata: (usize, usize),
-    ) -> Result<(), u64> {
-        let object_range = download.downloaded_range();
-        let bytes = download.bytes();
-        let aligned_payload_bytes = (bytes.len() as u64).next_multiple_of(BUFFER_ALIGNMENT as u64);
-        let shares_chunk = self.regions.last().is_some_and(|region| {
-            region.region.chunk_count() == 1 && region.next_payload_offset + aligned_payload_bytes <= CHUNK_BYTES
-        });
-        if !shares_chunk {
-            let count = aligned_payload_bytes.div_ceil(CHUNK_BYTES);
-            let region = allocator.reserve_chunks(count).ok_or(count)?;
-            self.regions.push(UnwrittenRegion {
-                region,
-                parts: Vec::new(),
-                next_payload_offset: 0,
+    /// Packs and writes one shared chunk or one multi-chunk payload at a time.
+    async fn write_shard<T, F>(
+        &self,
+        shard: &DiskCacheShard,
+        mut downloads: Vec<(ObjectKeyHash, Download, T, DiskWriteAttempt)>,
+        publish_if_accepted: &mut F,
+    ) -> Result<usize, DiskCacheError>
+    where
+        F: Fn(&T, &mut dyn FnMut()),
+    {
+        downloads.sort_by_key(|(_, download, _, _)| download.bytes().len());
+        let mut region: Option<ReservedChunks> = None;
+        let mut entries: Vec<PendingEntry<T>> = Vec::new();
+        let mut attempts_left = MAX_EVICTION_ATTEMPTS;
+        let mut chunks_left = MAX_EVICTION_CHUNKS;
+        let mut published = 0;
+        for (key, download, publication_value, mut attempt) in downloads {
+            if shard
+                .entry_index
+                .lock()
+                .unwrap()
+                .covering_entry(&key, download.downloaded_range())
+                .is_some()
+            {
+                attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
+                continue;
+            }
+            let length = download
+                .downloaded_range()
+                .len()
+                .next_multiple_of(BUFFER_ALIGNMENT as u64);
+            if region.as_ref().is_some_and(|region| {
+                region.chunk_count() != 1
+                    || entries.last().unwrap().entry.payload_range.end + length > region.range().end
+            }) {
+                published += self
+                    .write_and_publish(
+                        shard,
+                        region.take().unwrap(),
+                        std::mem::take(&mut entries),
+                        publish_if_accepted,
+                    )
+                    .await?;
+            }
+            let previous_chunks_left = chunks_left;
+            let entry = shard.reserve_entry(
+                &download,
+                &mut region,
+                entries.last().map(|pending| pending.entry.payload_range.end),
+                &self.access_histories,
+                &mut attempts_left,
+                &mut chunks_left,
+            );
+            // Sampling alone does not count as eviction.
+            attempt.evicted = chunks_left != previous_chunks_left;
+            let Some(entry) = entry else {
+                attempt.set_outcome(DiskWriteOutcome::NoCapacity);
+                continue;
+            };
+            entries.push(PendingEntry {
+                key,
+                entry,
+                bytes: download.bytes().clone(),
+                publication_value,
+                attempt,
             });
         }
-        let prepared = self.regions.last_mut().unwrap();
-        let base = prepared.region.range().start;
-        let payload_start = base + prepared.next_payload_offset;
-        let payload_range = payload_start..payload_start + aligned_payload_bytes;
-        let payload_checksum = XxHash64::oneshot(0, bytes);
-        prepared.parts.push(((payload_start - base) as usize, bytes.clone()));
-        prepared.next_payload_offset += aligned_payload_bytes;
-        self.entries.push((
-            *key,
-            DiskEntry {
-                in_flight_read: Weak::new(),
-                eviction_position: 0,
-                object_range,
-                payload_checksum,
-                payload_range,
-                metadata,
-            },
-        ));
-        Ok(())
+        if let Some(region) = region {
+            published += self
+                .write_and_publish(shard, region, entries, publish_if_accepted)
+                .await?;
+        }
+        Ok(published)
     }
 
-    fn chunk_count(&self) -> u64 {
-        self.regions.iter().map(|prepared| prepared.region.chunk_count()).sum()
-    }
-
-    /// Writes payload chunks and retains them for publication. Failure releases metadata positions and chunks.
-    async fn write_payloads(
-        self,
-        file: &DataFile,
-        metrics: &DiskMetrics,
+    /// Writes one reserved region, then publishes its entries under the caller's check.
+    /// Failure releases this region and its metadata positions without rolling back earlier publication.
+    async fn write_and_publish<T, F>(
+        &self,
         shard: &DiskCacheShard,
-    ) -> Result<Vec<(ObjectKeyHash, DiskEntry)>, DiskCacheError> {
-        for prepared in &self.regions {
-            let address = prepared.region.range().start;
-            for offset in (0..prepared.region.chunk_count() * CHUNK_BYTES).step_by(CHUNK_BYTES as usize) {
-                let end = offset as usize + CHUNK_BYTES as usize;
-                let mut parts = Vec::new();
-                for (start, bytes) in &prepared.parts {
-                    let from = (*start).max(offset as usize);
-                    let to = (*start + bytes.len()).min(end);
-                    if from < to {
-                        parts.push((from - offset as usize, bytes.slice(from - start..to - start)));
-                    }
-                }
-                if parts.first().is_none_or(|(start, _)| *start != 0) {
-                    parts.insert(0, (0, Bytes::new()));
-                }
-                let chunk = address + offset..address + offset + CHUNK_BYTES;
-                if let Err(error) = file.write_parts(chunk, &parts).await {
-                    tracing::warn!(target: "feuer::storage", %error, "batch write failed");
-                    let mut pages = shard.metadata_pages.lock().unwrap();
-                    pages
-                        .free_entry_positions
-                        .extend(self.entries.iter().map(|(_, entry)| entry.metadata));
-                    return Err(error.into());
+        region: ReservedChunks,
+        mut entries: Vec<PendingEntry<T>>,
+        publish_if_accepted: &mut F,
+    ) -> Result<usize, DiskCacheError>
+    where
+        F: Fn(&T, &mut dyn FnMut()),
+    {
+        for address in region.range().step_by(CHUNK_BYTES as usize) {
+            let end = address + CHUNK_BYTES;
+            let mut parts = Vec::new();
+            for pending in &entries {
+                let start = pending.entry.payload_range.start;
+                let from = start.max(address);
+                let to = (start + pending.bytes.len() as u64).min(end);
+                if from < to {
+                    parts.push((
+                        (from - address) as usize,
+                        pending.bytes.slice((from - start) as usize..(to - start) as usize),
+                    ));
                 }
             }
+            if let Err(error) = self.file.write_parts(address..end, &parts).await {
+                let mut pages = shard.metadata_pages.lock().unwrap();
+                for pending in &mut entries {
+                    pending.attempt.set_outcome(DiskWriteOutcome::Failed);
+                    pages.free_entry_positions.push(pending.entry.metadata);
+                }
+                return Err(error.into());
+            }
         }
-        metrics.written_entries.increase(self.entries.len() as u64);
-        metrics
+        self.metrics.written_entries.increase(entries.len() as u64);
+        self.metrics
             .packed_payload_bytes
-            .increase(self.entries.iter().map(|(_, entry)| entry.object_range.len()).sum());
-        metrics.packed_chunk_bytes.increase(self.chunk_count() * CHUNK_BYTES);
-        for prepared in self.regions {
-            shard.allocator.retain_payloads(prepared.region, prepared.parts.len());
+            .increase(entries.iter().map(|pending| pending.entry.object_range.len()).sum());
+        self.metrics
+            .packed_chunk_bytes
+            .increase(region.chunk_count() * CHUNK_BYTES);
+        shard.allocator.retain_payloads(region, entries.len());
+        let mut index = shard.entry_index.lock().unwrap();
+        let mut published = 0;
+        // Larger entries in this region can cover smaller neighbors before they publish.
+        for PendingEntry {
+            key,
+            entry,
+            publication_value,
+            mut attempt,
+            ..
+        } in entries.into_iter().rev()
+        {
+            if index.covering_entry(&key, entry.object_range).is_some() {
+                attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
+                shard.remove_payload_and_allow_metadata_overwrite(entry);
+                continue;
+            }
+            attempt.set_outcome(DiskWriteOutcome::Stale);
+            let mut unpublished = Some(entry);
+            publish_if_accepted(&publication_value, &mut || {
+                if let Some(entry) = unpublished.take() {
+                    shard.metadata_pages.lock().unwrap().set_entry_metadata(&key, &entry);
+                    for removed in index.insert(key, entry) {
+                        shard.remove_payload_and_allow_metadata_overwrite(removed);
+                    }
+                    published += 1;
+                    attempt.set_outcome(DiskWriteOutcome::Published);
+                }
+            });
+            if let Some(entry) = unpublished {
+                shard.remove_payload_and_allow_metadata_overwrite(entry);
+            }
         }
-        Ok(self.entries)
+        Ok(published)
+    }
+}
+
+impl DiskCacheShard {
+    /// Reserves entry metadata and payload space, evicting within the shard batch's remaining budget.
+    /// The caller supplies a region with room at `next_payload`, or `None` to reserve consecutive whole chunks.
+    fn reserve_entry(
+        &self,
+        download: &Download,
+        region: &mut Option<ReservedChunks>,
+        next_payload: Option<u64>,
+        access_histories: &ObjectAccessHistories,
+        attempts_left: &mut usize,
+        chunks_left: &mut usize,
+    ) -> Option<DiskEntry> {
+        let length = download
+            .downloaded_range()
+            .len()
+            .next_multiple_of(BUFFER_ALIGNMENT as u64);
+        let count = length.div_ceil(CHUNK_BYTES);
+        loop {
+            let metadata = self.metadata_pages.lock().unwrap().reserve_metadata(&self.allocator);
+            let chunks_needed = if let Some(metadata) = metadata {
+                if region.is_none() {
+                    *region = self.allocator.reserve_chunks(count);
+                }
+                if let Some(region) = region {
+                    let start = next_payload.unwrap_or(region.range().start);
+                    return Some(DiskEntry {
+                        in_flight_read: Weak::new(),
+                        eviction_position: 0,
+                        object_range: download.downloaded_range(),
+                        payload_checksum: XxHash64::oneshot(0, download.bytes()),
+                        payload_range: start..start + length,
+                        metadata,
+                    });
+                }
+                self.metadata_pages.lock().unwrap().free_entry_positions.push(metadata);
+                count
+            } else {
+                1
+            };
+            let metadata_chunks = self.metadata_pages.lock().unwrap().chunks.len() as u64;
+            let reserved_chunks = region.as_ref().map_or(0, ReservedChunks::chunk_count);
+            // Eviction cannot create more space than the shard has outside metadata and the pending write.
+            if chunks_needed > self.allocator.chunk_capacity - metadata_chunks - reserved_chunks
+                || !self.sample_and_evict_entry(access_histories, attempts_left, chunks_left)
+            {
+                return None;
+            }
+        }
     }
 }
 

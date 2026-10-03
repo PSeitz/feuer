@@ -25,7 +25,7 @@ Small payloads share chunks within an explicit batch. Each complete aligned payl
 its shared chunk. Larger entries reserve consecutive whole chunks exclusively, including unused
 tails. The allocator retains payload reservations; index entries and readers hold only addresses.
 Individual payload holes are never reused. `src/allocation.rs` tracks coalesced free chunk runs;
-each `ReservedChunks` has one owner: a batch, the allocator, or a metadata chunk. I/O requests carry
+each `ReservedChunks` has one owner: a pending write, the allocator, or a metadata chunk. I/O requests carry
 addresses and buffers, not reservations. Scattered chunks are never combined for one entry.
 The metadata component assigns entry positions, reserving whole chunks from the allocator as needed.
 
@@ -34,21 +34,23 @@ it and the range-index lock never span I/O. Page bytes consume 1 MiB per metadat
 
 ## Writes
 
-`insert_batch` sorts each shard's entries smallest first, reserves metadata positions and payload
-space, then writes payload chunks. Partially filled chunks are finalized too; later batches cannot
-append. Metadata growth never moves payload addresses. Payload writes have no batching delay.
+`insert_batch` sorts each shard's entries smallest first, then reserves, writes, and publishes one
+shared payload chunk or one multi-chunk entry at a time. Only the current region's entries await
+publication; no whole-shard write plan is retained. Partially filled chunks are finalized too; later
+batches cannot append. Metadata growth never moves payload addresses. Payload writes have no batching delay.
 
-After payload writes finish, accepted entries update metadata in memory and publish into the index.
+After a region's payload writes finish, accepted entries update metadata in memory and publish into the index.
 One periodic writer persists dirty metadata pages every second, best-effort; see the
 [write contract](../format.md#write-ordering-and-reuse). Sleeping does not keep the cache open.
 
-Publication rechecks containment, larger entries first: broader entries replace contained entries,
-while partial overlaps coexist. Contained entries and entries that cannot fit are skipped.
-Publication is not transactional across shards. `insert_batch_with_publication_check` retains caller tokens and
+Publication rechecks containment, larger entries first within each region: broader entries replace
+contained entries, while partial overlaps coexist. Contained entries and entries that cannot fit are skipped.
+Later writes may replace or evict entries published earlier in the same batch. A write failure releases
+that region without undoing earlier publication. `insert_batch_with_publication_check` retains caller tokens and
 invokes the synchronous publication check under the index lock. Rejected and superseded entries
 release their payload occupancy without invalidation writes.
 
-The detached writer retains its batch reservations during normal writes. Queued I/O retains buffers,
+The detached writer retains the current region's reservation during normal writes. Queued I/O retains buffers,
 not disk space: an abandoned write can overwrite a reused payload, producing a checksum miss.
 Failed metadata writes are not retried and neither reject published entries nor prevent payload reuse.
 An abnormal queue failure retains active I/O resources when completion cannot be established.

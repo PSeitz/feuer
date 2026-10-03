@@ -334,7 +334,7 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
 }
 
 #[tokio::test]
-async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_published() {
+async fn pressure_eviction_and_partial_write_failure_record_each_entry_outcome() {
     let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
     cache.insert_batch(vec![("first".into(), download(4))]).await.unwrap();
     cache.insert_batch(vec![("second".into(), download(4))]).await.unwrap();
@@ -364,13 +364,17 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
     );
     assert_eq!(
         value(&registry, "feuer_disk_write_entries_total", &[("outcome", "failed")]),
-        2.0
+        1.0
     );
-    assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 2.0);
-    assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
-    // The original allocator still owns metadata; the injected allocator's payload range is free.
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 4.0);
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 1.0);
+    assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 3.0);
+    assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
+    assert_eq!(
+        value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),
+        3.0
+    );
+    // Metadata and the successful small entry remain reserved; the failed entry's chunk is free.
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 3.0);
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 2.0);
 }
 
 #[test]

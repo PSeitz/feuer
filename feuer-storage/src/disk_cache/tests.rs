@@ -198,103 +198,113 @@ async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
     );
 }
 
-#[test]
-fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighbors() {
-    let allocator = DiskChunkAllocator::for_disk_range(0..8 * CHUNK_BYTES).unwrap();
-    let mut batch = UnwrittenShardBatch::default();
-    // Exercise boundaries in input order, including small entries after exclusive tails.
-    for (key, length) in [
-        (ObjectKeyHash::from("first"), 600_000),
-        (ObjectKeyHash::from("does not fit the tail"), 600_000),
-        (ObjectKeyHash::from("large"), CHUNK_BYTES as usize),
-        (ObjectKeyHash::from("small after large"), 1),
-        (ObjectKeyHash::from("k".repeat(CHUNK_BYTES as usize)), 1),
-        (ObjectKeyHash::from("small after long key"), 1),
-    ] {
-        batch
-            .pack_download(&allocator, &key, &download(0, length), (0, 0))
-            .unwrap();
-    }
-    let mut owners = BTreeMap::<u64, Vec<usize>>::new();
-    for (entry_number, (_, entry)) in batch.entries.iter().enumerate() {
-        let first_chunk = entry.payload_range.start / CHUNK_BYTES;
-        let end_chunk = entry.payload_range.end.div_ceil(CHUNK_BYTES);
-        assert_eq!(entry.single_chunk_start().is_some(), end_chunk - first_chunk == 1);
-        for chunk in first_chunk..end_chunk {
-            owners.entry(chunk).or_default().push(entry_number);
+#[tokio::test]
+async fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighbors() {
+    let (_directory, cache) = open_test_cache(8 * CHUNK_BYTES).await;
+    let inputs: Vec<_> = [600_000, 600_000, CHUNK_BYTES as usize, 1, CHUNK_BYTES as usize + 1, 1]
+        .into_iter()
+        .enumerate()
+        .map(|(i, length)| (ObjectKeyHash(i as u128), download(0, length)))
+        .collect();
+    assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
+    let index = cache.disk.shards[0].entry_index.lock().unwrap();
+    let mut owners = BTreeMap::<u64, Vec<&DiskEntry>>::new();
+    for entries in index.entries_by_key.values() {
+        for entry in entries.values() {
+            for chunk in entry.payload_range.start / CHUNK_BYTES..entry.payload_range.end.div_ceil(CHUNK_BYTES) {
+                owners.entry(chunk).or_default().push(entry);
+            }
         }
     }
     for entries in owners.values() {
         if entries.len() > 1 {
-            assert!(
-                entries
-                    .iter()
-                    .all(|&i| batch.entries[i].1.single_chunk_start().is_some())
-            );
+            assert!(entries.iter().all(|entry| entry.single_chunk_start().is_some()));
         }
     }
-    assert_eq!(batch.chunk_count(), 4);
+    assert_eq!(owners.len(), 5);
 }
 
-#[test]
-fn metadata_growth_does_not_consume_payload_chunk_space() {
-    let allocator = DiskChunkAllocator::for_disk_range(0..2 * CHUNK_BYTES).unwrap();
-    let mut batch = UnwrittenShardBatch::default();
+#[tokio::test]
+async fn metadata_growth_does_not_consume_payload_chunk_space() {
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let entries_per_page = PAGE_CONTENT_BYTES / page_format::ENTRY_METADATA_BYTES;
-    for i in 0..entries_per_page {
-        let length = if i == 0 {
-            CHUNK_BYTES as usize - (entries_per_page + 1) * METADATA_PAGE_BYTES
-        } else {
-            1
-        };
-        batch
-            .pack_download(&allocator, &ObjectKeyHash(i as u128), &download(0, length), (0, i))
-            .unwrap();
-    }
-    // The next entry needs another metadata page, but metadata does not consume payload space.
-    batch
-        .pack_download(&allocator, &ObjectKeyHash(999), &download(0, 1), (0, entries_per_page))
-        .unwrap();
-    assert_eq!(batch.entries[0].1.single_chunk_start(), Some(0));
-    assert_eq!(batch.entries[entries_per_page].1.single_chunk_start(), Some(0));
+    // Cross a metadata page boundary while still fitting all payloads in one chunk.
+    let inputs = (0..=entries_per_page)
+        .map(|i| {
+            let length = if i == 0 {
+                CHUNK_BYTES as usize - (entries_per_page + 1) * METADATA_PAGE_BYTES
+            } else {
+                1
+            };
+            (ObjectKeyHash(i as u128), download(0, length))
+        })
+        .collect();
+    assert_eq!(cache.insert_batch(inputs).await.unwrap(), entries_per_page + 1);
+    let index = cache.disk.shards[0].entry_index.lock().unwrap();
+    let entries: Vec<_> = index.entries_by_key.values().flat_map(BTreeMap::values).collect();
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.single_chunk_start() == Some(CHUNK_BYTES))
+    );
     assert_eq!(
-        batch.regions[0].next_payload_offset,
-        CHUNK_BYTES - METADATA_PAGE_BYTES as u64
+        entries.iter().map(|entry| entry.payload_range.end).max(),
+        Some(2 * CHUNK_BYTES - METADATA_PAGE_BYTES as u64)
     );
 }
 
-#[test]
-fn failed_payload_growth_leaves_addresses_unchanged() {
-    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
-    let mut batch = UnwrittenShardBatch::default();
-    batch
-        .pack_download(
-            &allocator,
-            &ObjectKeyHash::from("first"),
+#[tokio::test]
+async fn failed_reservation_releases_metadata_without_moving_pending_payloads() {
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let shard = &cache.disk.shards[0];
+    let mut region = None;
+    let mut attempts_left = 0;
+    let mut chunks_left = MAX_EVICTION_CHUNKS;
+    let first = shard
+        .reserve_entry(
             &download(0, CHUNK_BYTES as usize - METADATA_PAGE_BYTES),
-            (0, 0),
+            &mut region,
+            None,
+            &cache.disk.access_histories,
+            &mut attempts_left,
+            &mut chunks_left,
         )
         .unwrap();
-    let payload = batch.entries[0].1.payload_range.clone();
-    assert_eq!(
-        batch.pack_download(
-            &allocator,
-            &ObjectKeyHash::from("too large"),
-            &download(0, METADATA_PAGE_BYTES + 1),
-            (0, 1),
-        ),
-        Err(1)
+    let free_positions = shard.metadata_pages.lock().unwrap().free_entry_positions.len();
+    assert!(
+        shard
+            .reserve_entry(
+                &download(0, METADATA_PAGE_BYTES + 1),
+                &mut None,
+                None,
+                &cache.disk.access_histories,
+                &mut attempts_left,
+                &mut chunks_left,
+            )
+            .is_none()
     );
-    assert_eq!(batch.entries.len(), 1);
-    assert_eq!(batch.entries[0].1.payload_range, payload);
-    // A smaller payload can use the final aligned bytes without moving existing payloads.
-    batch
-        .pack_download(&allocator, &ObjectKeyHash::from("second"), &download(0, 1), (0, 1))
+    assert_eq!(
+        shard.metadata_pages.lock().unwrap().free_entry_positions.len(),
+        free_positions
+    );
+    let second = shard
+        .reserve_entry(
+            &download(0, 1),
+            &mut region,
+            Some(first.payload_range.end),
+            &cache.disk.access_histories,
+            &mut attempts_left,
+            &mut chunks_left,
+        )
         .unwrap();
-    assert_eq!(batch.entries[0].1.payload_range, payload);
-    assert_eq!(batch.entries[1].1.payload_range, payload.end..CHUNK_BYTES);
-    assert_eq!(batch.regions[0].next_payload_offset, CHUNK_BYTES);
-    assert_eq!(batch.chunk_count(), 1);
+    assert_eq!(
+        first.payload_range,
+        CHUNK_BYTES..2 * CHUNK_BYTES - METADATA_PAGE_BYTES as u64
+    );
+    assert_eq!(second.payload_range, first.payload_range.end..2 * CHUNK_BYTES);
+    assert_eq!(shard.allocator.available_bytes(), 0);
+    drop(region);
+    assert_eq!(shard.allocator.available_bytes(), CHUNK_BYTES);
 }
 
 #[tokio::test]
@@ -307,11 +317,13 @@ async fn pressure_reclaims_shared_and_exclusive_chunks_during_mixed_size_churn()
             .map(|(i, length)| (ObjectKeyHash::from(format!("{cycle}-{i}")), download(cycle * 7, length)))
             .collect();
         assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
+        // The final region remains published; admitting it may evict earlier entries in the same batch.
+        let (key, source) = inputs.last().unwrap();
+        assert_eq!(cache.get(key, source.downloaded_range()).await.unwrap(), source.bytes());
         for (key, source) in inputs {
-            assert_eq!(
-                cache.get(&key, source.downloaded_range()).await.unwrap(),
-                source.bytes()
-            );
+            if let Some(bytes) = cache.get(&key, source.downloaded_range()).await {
+                assert_eq!(bytes, source.bytes());
+            }
         }
         let index = cache.disk.shards[0].entry_index.lock().unwrap();
         assert_eq!(
@@ -752,23 +764,37 @@ async fn multi_chunk_payload_has_no_metadata_gaps() {
     );
 }
 
-#[test]
-fn batch_rejects_fragmented_space_without_consuming_it() {
-    let allocator = DiskChunkAllocator::for_disk_range(0..4 * CHUNK_BYTES).unwrap();
+#[tokio::test]
+async fn batch_rejects_fragmented_space_without_consuming_it() {
+    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
+    let shard = &cache.disk.shards[0];
+    // Reserve metadata first, leaving four payload chunks to fragment.
+    let position = shard
+        .metadata_pages
+        .lock()
+        .unwrap()
+        .reserve_metadata(&shard.allocator)
+        .unwrap();
+    shard.metadata_pages.lock().unwrap().free_entry_positions.push(position);
+    let allocator = &shard.allocator;
     let first = allocator.reserve_chunks(1).unwrap();
     let second = allocator.reserve_chunks(1).unwrap();
     let third = allocator.reserve_chunks(1).unwrap();
     let fourth = allocator.reserve_chunks(1).unwrap();
     drop((first, third));
-    let mut batch = UnwrittenShardBatch::default();
     let key = ObjectKeyHash::from("large");
     let source = download(0, CHUNK_BYTES as usize + 1);
-    assert_eq!(batch.pack_download(&allocator, &key, &source, (0, 0)), Err(2));
-    assert!(batch.entries.is_empty());
+    assert!(!cache.insert(key, source.clone()).await.unwrap());
     assert_eq!(allocator.available_bytes(), 2 * CHUNK_BYTES);
     drop(second);
-    assert!(batch.pack_download(&allocator, &key, &source, (0, 0)).is_ok());
-    drop((batch, fourth));
+    assert!(cache.insert(key, source.clone()).await.unwrap());
+    assert_eq!(
+        cache.get(&key, source.downloaded_range()).await.unwrap(),
+        source.bytes()
+    );
+    drop(fourth);
+    let entry = shard.entry_index.lock().unwrap().remove(&key, 0).unwrap();
+    shard.remove_payload_and_allow_metadata_overwrite(entry);
     assert_eq!(allocator.available_bytes(), 4 * CHUNK_BYTES);
 }
 
@@ -823,7 +849,7 @@ async fn batch_skips_oversized_and_contained_entries_without_losing_accepted_ent
         cache
             .insert_batch(vec![
                 (ObjectKeyHash::from("object"), download(5, 100)),
-                (ObjectKeyHash::from("too large"), download(0, CHUNK_BYTES as usize)),
+                (ObjectKeyHash::from("too large"), download(0, CHUNK_BYTES as usize + 1)),
                 (ObjectKeyHash::from("object"), download(0, 200)),
                 (ObjectKeyHash::from("object"), download(0, 200)),
             ])
@@ -944,6 +970,26 @@ async fn racing_equal_and_containing_writes_revalidate_publication() {
         .collect();
     assert_eq!(ranges, [range(0, 200), range(300, 350)]);
     assert_eq!(cache.get(&key, range(0, 200)).await.unwrap(), download(0, 200).bytes());
+}
+
+#[tokio::test]
+async fn publishes_each_region_before_reserving_the_next() {
+    let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+    let allocator = cache.disk.shards[0].allocator.clone();
+    let published = cache
+        .insert_batch_with_publication_check(
+            vec![
+                (ObjectKeyHash::from("small"), download(0, 1), 2 * CHUNK_BYTES),
+                (ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize + 1), 0),
+            ],
+            move |expected_free_bytes, publish| {
+                assert_eq!(allocator.available_bytes(), *expected_free_bytes);
+                publish();
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(published, 2);
 }
 
 #[tokio::test]
@@ -1123,45 +1169,32 @@ async fn a_short_read_is_a_miss_not_unverified_bytes() {
 }
 
 #[tokio::test]
-async fn failed_chunk_write_releases_the_batch_without_publication() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    // First chunk succeeds, second is outside the real file. Even the complete small entry
-    // in the first chunk must remain unpublished when its shard's batch fails.
+async fn failed_multi_chunk_write_keeps_earlier_entries_and_releases_its_storage() {
+    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    // The small entry and the large entry's first chunk succeed; its second chunk is outside the file.
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
-    disk.shards[0].allocator = DiskChunkAllocator::for_disk_range(0..3 * CHUNK_BYTES).unwrap();
+    disk.shards[0].allocator = DiskChunkAllocator::for_disk_range(0..4 * CHUNK_BYTES).unwrap();
     let cache = DiskCache { disk: Arc::new(disk) };
     assert!(matches!(
         cache
             .insert_batch(vec![
                 (ObjectKeyHash::from("small"), download(0, 1)),
-                (ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize)),
+                (ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize + 1)),
             ])
             .await,
         Err(DiskCacheError::DataFile(DataFileError::RangeExceedsCapacity { .. }))
     ));
-    assert!(cache.get(&ObjectKeyHash::from("small"), range(0, 1)).await.is_none());
+    assert_eq!(
+        cache.get(&ObjectKeyHash::from("small"), range(0, 1)).await.unwrap(),
+        download(0, 1).bytes()
+    );
     assert!(cache.get(&ObjectKeyHash::from("large"), range(0, 1)).await.is_none());
     let shard = &cache.disk.shards[0];
     assert_eq!(shard.allocator.available_bytes(), 2 * CHUNK_BYTES);
     assert_eq!(
         shard.metadata_pages.lock().unwrap().free_entry_positions.len(),
-        page_format::ENTRIES_PER_METADATA_CHUNK
+        page_format::ENTRIES_PER_METADATA_CHUNK - 1
     );
-}
-
-#[test]
-fn unwritten_batch_owns_its_chunks() {
-    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
-    let mut batch = UnwrittenShardBatch::default();
-    batch
-        .pack_download(&allocator, &ObjectKeyHash::from("a"), &download(0, 10), (0, 0))
-        .unwrap();
-    batch
-        .pack_download(&allocator, &ObjectKeyHash::from("b"), &download(0, 10), (0, 1))
-        .unwrap();
-    assert_eq!(allocator.available_bytes(), 0);
-    drop(batch);
-    assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
 }
 
 #[tokio::test]
