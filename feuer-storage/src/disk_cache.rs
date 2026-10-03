@@ -18,7 +18,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use feuer_memory::BufferPool;
+use feuer_memory::{BUFFER_ALIGNMENT, BufferPool};
 use feuer_types::{
     ByteRange, Download, ObjectKeyHash,
     retention::{ObjectAccessHistories, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates},
@@ -34,8 +34,6 @@ use crate::{
 };
 #[cfg(test)]
 use page_format::{METADATA_PAGE_BYTES, PAGE_CONTENT_BYTES};
-
-const PAYLOAD_ALIGNMENT_BYTES: u64 = crate::uring::DIRECT_IO_ALIGNMENT_BYTES as u64;
 
 // Per shard batch: bound sampled eviction decisions and removal work, including multi-chunk entries.
 const MAX_EVICTION_ATTEMPTS: usize = 64;
@@ -679,7 +677,7 @@ impl UnwrittenShardBatch {
     ) -> Result<(), u64> {
         let object_range = download.downloaded_range();
         let bytes = download.bytes();
-        let aligned_payload_bytes = (bytes.len() as u64).next_multiple_of(PAYLOAD_ALIGNMENT_BYTES);
+        let aligned_payload_bytes = (bytes.len() as u64).next_multiple_of(BUFFER_ALIGNMENT as u64);
         let shares_chunk = self.regions.last().is_some_and(|region| {
             region.region.chunk_count() == 1 && region.used_bytes + aligned_payload_bytes <= CHUNK_BYTES
         });

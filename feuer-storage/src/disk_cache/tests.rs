@@ -144,11 +144,11 @@ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers()
         assert_eq!(payload.len(), 1);
         let allocated = &payload[0];
         assert_eq!(allocated.start, previous_end);
-        assert!(allocated.start.is_multiple_of(PAYLOAD_ALIGNMENT_BYTES));
+        assert!(allocated.start.is_multiple_of(BUFFER_ALIGNMENT as u64));
         assert!(allocated.end <= 2 * CHUNK_BYTES);
         assert_eq!(
             allocated.end - allocated.start,
-            (length as u64).next_multiple_of(PAYLOAD_ALIGNMENT_BYTES)
+            (length as u64).next_multiple_of(BUFFER_ALIGNMENT as u64)
         );
         let stored = cache
             .disk
@@ -641,7 +641,7 @@ async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk_or_its_entry_met
         2
     );
     let (payload, _) = entry_disk_ranges(&cache, &key).await;
-    assert_eq!(payload[0].end - payload[0].start, PAYLOAD_ALIGNMENT_BYTES);
+    assert_eq!(payload[0].end - payload[0].start, BUFFER_ALIGNMENT as u64);
     // A read reaching beyond this entry's alignment boundary would now fail with short I/O.
     std::fs::OpenOptions::new()
         .write(true)
@@ -666,7 +666,7 @@ async fn alignment_padding_is_not_part_of_the_entry_checksum() {
     let mut bytes = cache
         .disk
         .file
-        .read_at(address, PAYLOAD_ALIGNMENT_BYTES as usize)
+        .read_at(address, BUFFER_ALIGNMENT)
         .await
         .unwrap()
         .to_vec();
@@ -1051,7 +1051,7 @@ async fn read_addresses_and_results_do_not_delay_replaced_payload_reuse() {
     let bytes = cache
         .disk
         .file
-        .read_at(guard.start, PAYLOAD_ALIGNMENT_BYTES as usize)
+        .read_at(guard.start, BUFFER_ALIGNMENT)
         .await
         .unwrap();
     assert_eq!(XxHash64::oneshot(0, &bytes[..100]), payload_checksum);
@@ -1071,7 +1071,7 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
         let mut bytes = cache
             .disk
             .file
-            .read_at(address, PAYLOAD_ALIGNMENT_BYTES as usize)
+            .read_at(address, BUFFER_ALIGNMENT)
             .await
             .unwrap()
             .to_vec();
@@ -1083,7 +1083,7 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
             bytes = cache
                 .disk
                 .file
-                .read_at(other_payload[0].start, PAYLOAD_ALIGNMENT_BYTES as usize)
+                .read_at(other_payload[0].start, BUFFER_ALIGNMENT)
                 .await
                 .unwrap()
                 .to_vec();
@@ -1197,13 +1197,13 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
         );
     }
     let (payload, _) = entry_disk_ranges(&cache, &key).await;
-    let last_aligned_offset = payload.last().unwrap().end - PAYLOAD_ALIGNMENT_BYTES;
+    let last_aligned_offset = payload.last().unwrap().end - BUFFER_ALIGNMENT as u64;
     cache
         .disk
         .file
         .write_at(
             last_aligned_offset,
-            &Bytes::from(vec![0; PAYLOAD_ALIGNMENT_BYTES as usize]),
+            &Bytes::from(vec![0; BUFFER_ALIGNMENT]),
         )
         .await
         .unwrap();
