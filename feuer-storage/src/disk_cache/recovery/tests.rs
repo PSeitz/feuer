@@ -1,10 +1,11 @@
 use super::*;
-use crate::disk_cache::tests::{download, open_test_cache, range};
+use crate::disk_cache::tests::{download, open_test_cache, range, with_manual_metadata_writes};
 
 async fn reopen(directory: &Path, cache: DiskCache) -> DiskCache {
+    cache.flush_metadata().await;
     let capacity = cache.disk.file.capacity();
     drop(cache);
-    DiskCache::open(directory, capacity, IoMetrics::noop()).await.unwrap()
+    with_manual_metadata_writes(DiskCache::open(directory, capacity, IoMetrics::noop()).await.unwrap())
 }
 
 #[tokio::test]
@@ -120,7 +121,7 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     let shard = &cache.disk.shards[0];
     let entry = shard.entry_index.lock().unwrap().remove(&key, 0).unwrap();
     let address = entry.payload_range.start;
-    let (chunk_index, entry_metadata_index) = entry.metadata.unwrap();
+    let (chunk_index, entry_metadata_index) = entry.metadata;
     let metadata = shard.metadata_pages.lock().unwrap();
     let entry_metadata_bytes = metadata.chunks[chunk_index]
         .entry_metadata_bytes(entry_metadata_index)
@@ -169,6 +170,7 @@ async fn torn_record_page_does_not_reject_other_pages() {
             .unwrap(),
         entries
     );
+    cache.flush_metadata().await;
     let address = 0;
     let mut bytes = cache
         .disk
@@ -210,6 +212,7 @@ async fn corrupt_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
     ] {
         let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
         assert!(cache.insert(ObjectKeyHash(1), download(0, 1)).await.unwrap());
+        cache.flush_metadata().await;
         let offset = (RECORD_PAGES * METADATA_PAGE_BYTES) as u64;
         let mut page = vec![0; METADATA_PAGE_BYTES];
         encode_page(&mut page, NEXT_CHUNK_PAGE_TAG, 1, &next_chunk_address.to_le_bytes());
@@ -248,58 +251,8 @@ async fn payload_corruption_remains_a_checksum_miss() {
     assert!(cache.get(&key, range(0, 1)).await.is_none());
 }
 
-// Payload writes and reads proceed while metadata writes are blocked, and survive their failure.
 #[tokio::test]
-async fn blocked_and_failed_metadata_writes_do_not_prevent_payload_use() {
-    let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
-    let shard = &cache.disk.shards[0];
-    let io = shard.metadata_io.lock().await;
-    let mut writes = tokio::task::JoinSet::new();
-    for key in [ObjectKeyHash(1), ObjectKeyHash(2)] {
-        let cache = cache.clone();
-        writes.spawn(async move { cache.insert(key, download(0, 1)).await });
-    }
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        for key in [ObjectKeyHash(1), ObjectKeyHash(2)] {
-            while !cache.contains(&key, range(0, 1)) {
-                tokio::task::yield_now().await;
-            }
-            assert_eq!(cache.get(&key, range(0, 1)).await.unwrap(), download(0, 1).bytes());
-        }
-    })
-    .await
-    .unwrap();
-    assert!(writes.try_join_next().is_none());
-
-    // Point metadata beyond the file without releasing its real chunk, so only metadata I/O fails.
-    let capacity = cache.disk.file.capacity();
-    let allocator = DiskChunkAllocator::for_disk_range(capacity..capacity + CHUNK_BYTES).unwrap();
-    let region = std::mem::replace(
-        &mut shard.metadata_pages.lock().unwrap().chunks[0].region,
-        allocator.reserve_chunks(1).unwrap(),
-    );
-    drop(io);
-    while let Some(result) = writes.join_next().await {
-        assert!(result.unwrap().unwrap());
-    }
-    {
-        let mut pages = shard.metadata_pages.lock().unwrap();
-        assert_eq!(pages.initialized_chunks, 0);
-        assert!(!pages.dirty_pages.is_empty());
-        pages.chunks[0].region = region;
-    }
-    for key in [ObjectKeyHash(1), ObjectKeyHash(2)] {
-        assert!(cache.get(&key, range(0, 1)).await.is_some());
-    }
-    shard.flush_metadata(&cache.disk.file).await.unwrap();
-    let cache = reopen(directory.path(), cache).await;
-    for key in [ObjectKeyHash(1), ObjectKeyHash(2)] {
-        assert_eq!(cache.get(&key, range(0, 1)).await.unwrap(), download(0, 1).bytes());
-    }
-}
-
-#[tokio::test]
-async fn failed_metadata_flush_does_not_delay_payload_reuse() {
+async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let entries = RECORDS_PER_PAGE + 1;
     assert_eq!(
@@ -314,6 +267,17 @@ async fn failed_metadata_flush_does_not_delay_payload_reuse() {
         entries
     );
     let shard = &cache.disk.shards[0];
+    let directory = tempfile::tempdir().unwrap();
+    let short_file = DataFile::open(directory.path(), METADATA_PAGE_BYTES as u64, IoMetrics::noop())
+        .await
+        .unwrap();
+    assert!(shard.flush_metadata(&short_file).await.is_err());
+    assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
+    shard.flush_metadata(&short_file).await.unwrap();
+    assert_eq!(
+        cache.get(&ObjectKeyHash(0), range(0, 1)).await.unwrap(),
+        download(0, 1).bytes()
+    );
     for i in 0..entries {
         let entry = shard
             .entry_index
@@ -323,16 +287,8 @@ async fn failed_metadata_flush_does_not_delay_payload_reuse() {
             .unwrap();
         shard.remove_payload_and_allow_metadata_overwrite(entry);
     }
-    let directory = tempfile::tempdir().unwrap();
-    let short_file = DataFile::open(directory.path(), METADATA_PAGE_BYTES as u64, IoMetrics::noop())
-        .await
-        .unwrap();
-    // Making entry metadata available for overwrite produces no writes, even across multiple pages.
-    shard.flush_metadata(&short_file).await.unwrap();
-    shard.metadata_pages.lock().unwrap().set_last_chunk_link(NO_CHUNK);
-    assert!(shard.flush_metadata(&short_file).await.is_err());
-    assert!(shard.allocator.reserve_chunks(1).is_some());
-    shard.flush_metadata(&cache.disk.file).await.unwrap();
+    // Returning slots across multiple pages needs no invalidation writes or metadata retry.
+    assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
     assert!(shard.allocator.reserve_chunks(1).is_some());
 }
 
@@ -341,11 +297,7 @@ async fn a_write_after_open_replaces_recovered_entries() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(10, 10)).await.unwrap());
-    let capacity = cache.disk.file.capacity();
-    drop(cache);
-    let cache = DiskCache::open(directory.path(), capacity, IoMetrics::noop())
-        .await
-        .unwrap();
+    let cache = reopen(directory.path(), cache).await;
     assert!(cache.insert(key, download(0, 100)).await.unwrap());
     let cache = reopen(directory.path(), cache).await;
     assert_eq!(cache.get(&key, range(0, 100)).await.unwrap(), download(0, 100).bytes());
@@ -368,6 +320,7 @@ async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
             .unwrap(),
         2
     );
+    cache.flush_metadata().await;
     let address = 0;
     let mut bytes = cache
         .disk
@@ -397,6 +350,7 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
             ])
             .await
             .unwrap();
+        cache.flush_metadata().await;
         // Give the second record the first record's key and start, keeping distinct payload addresses.
         let mut page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap().to_vec();
         let offset = PAGE_HEADER_BYTES + ENTRY_METADATA_BYTES;
@@ -451,9 +405,8 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
             recovered_chunks
         );
         assert!(cache.insert(ObjectKeyHash(3), download(0, 1)).await.unwrap());
-        let (_, entry_metadata_index) = shard.entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(3)][&0]
-            .metadata
-            .unwrap();
+        let (_, entry_metadata_index) =
+            shard.entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(3)][&0].metadata;
         assert_ne!(entry_metadata_index, if second_length == 100 { 0 } else { 1 });
         assert_eq!(shard.metadata_pages.lock().unwrap().chunks.len(), 1);
         drop(cache);

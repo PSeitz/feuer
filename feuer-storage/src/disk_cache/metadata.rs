@@ -1,7 +1,8 @@
-//! Mutable metadata pages and entry positions. The async I/O lock serializes metadata writes only.
-//! Writes are not synced to stable storage; recovery is best-effort after a crash.
+//! Inserts update pages under the metadata mutex; one periodic writer copies dirty pages,
+//! releases the mutex, then checksums and writes them sequentially. Changes during I/O remain dirty.
+//! Failed writes are not retried. No stable-storage sync or shutdown flush; recovery is best-effort.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use super::{page_format::*, *};
 
@@ -11,8 +12,6 @@ pub(super) struct MetadataPages {
     pub(super) chunks: Vec<MetadataChunk>,
     pub(super) dirty_pages: BTreeSet<(usize, usize)>,
     pub(super) free_entry_positions: Vec<(usize, usize)>,
-    /// Number of metadata chunks already initialized on disk.
-    pub(super) initialized_chunks: usize,
 }
 
 /// One reserved metadata chunk and its independently checksummed pages.
@@ -85,6 +84,7 @@ impl MetadataPages {
             self.set_last_chunk_link(chunk.region.range().start);
             let chunk_index = self.chunks.len();
             self.chunks.push(chunk);
+            self.dirty_pages.insert((chunk_index, RECORD_PAGES));
             self.free_entry_positions
                 .extend((0..RECORDS_PER_CHUNK).rev().map(|entry| (chunk_index, entry)));
         }
@@ -93,16 +93,17 @@ impl MetadataPages {
 
     /// Updates an entry's reserved metadata bytes and marks its page for writing.
     pub(super) fn set_entry_metadata(&mut self, key: &ObjectKeyHash, entry: &DiskEntry) {
-        let (chunk_index, entry_metadata_index) = entry.metadata.unwrap();
-        let entry_metadata =
-            encode_entry_metadata(key, entry.object_range, &entry.payload_range, entry.payload_checksum);
+        let (chunk_index, entry_metadata_index) = entry.metadata;
+        let entry_metadata = encode_entry_metadata(
+            key,
+            entry.object_range,
+            entry.payload_range.start,
+            entry.payload_checksum,
+        );
         let offset = entry_metadata_offset(entry_metadata_index);
         let bytes = &mut self.chunks[chunk_index].bytes;
         bytes[offset..offset + ENTRY_METADATA_BYTES].copy_from_slice(&entry_metadata);
         let page = entry_metadata_index / RECORDS_PER_PAGE;
-        let page_bytes = &mut bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES];
-        let checksum = XxHash64::oneshot(0, &page_bytes[8..]);
-        page_bytes[..8].copy_from_slice(&checksum.to_le_bytes());
         self.dirty_pages.insert((chunk_index, page));
     }
 
@@ -114,38 +115,45 @@ impl MetadataPages {
     }
 }
 
+impl DiskCacheInner {
+    /// Sole metadata writer. Keeps the cache alive only while a write round is running.
+    pub(super) async fn write_metadata_periodically(disk: Weak<Self>) {
+        const INTERVAL: Duration = Duration::from_secs(1);
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + INTERVAL, INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let Some(disk) = disk.upgrade() else { return };
+            for shard in &disk.shards {
+                if let Err(error) = shard.flush_metadata(&disk.file).await {
+                    tracing::warn!(target: "feuer::storage", %error, "metadata write failed; entries remain usable");
+                }
+            }
+        }
+    }
+}
+
 impl DiskCacheShard {
-    /// Writes new metadata chunks before changed pages. Concurrent changes remain dirty for the next flush.
+    /// Called only by the periodic writer. Never holds the metadata mutex while waiting for I/O.
     pub(super) async fn flush_metadata(&self, file: &DataFile) -> DataFileResult<()> {
-        let _io = self.metadata_io.lock().await;
-        let (dirty_pages, chunk_count, writes) = {
+        let writes: Vec<_> = {
             let mut pages = self.metadata_pages.lock().unwrap();
-            let dirty_pages = std::mem::take(&mut pages.dirty_pages);
-            let mut writes: Vec<_> = pages.chunks[pages.initialized_chunks..]
-                .iter()
-                .rev() // Initialize linked chunks before the chunks pointing to them.
-                .map(|chunk| (chunk.region.range(), Bytes::copy_from_slice(&chunk.bytes)))
-                .collect();
-            for &(chunk, page) in &dirty_pages {
-                if chunk < pages.initialized_chunks {
+            std::mem::take(&mut pages.dirty_pages)
+                .into_iter()
+                .rev() // Write later chunks before the links pointing to them.
+                .map(|(chunk, page)| {
                     let chunk = &pages.chunks[chunk];
                     let offset = page * METADATA_PAGE_BYTES;
                     let start = chunk.region.range().start + offset as u64;
-                    writes.push((
-                        start..start + METADATA_PAGE_BYTES as u64,
-                        Bytes::copy_from_slice(&chunk.bytes[offset..offset + METADATA_PAGE_BYTES]),
-                    ));
-                }
-            }
-            (dirty_pages, pages.chunks.len(), writes)
+                    (start, chunk.bytes[offset..offset + METADATA_PAGE_BYTES].to_vec())
+                })
+                .collect()
         };
-        for (region, bytes) in writes {
-            if let Err(error) = file.write_parts(region, &[(0, bytes)]).await {
-                self.metadata_pages.lock().unwrap().dirty_pages.extend(dirty_pages);
-                return Err(error);
-            }
+        for (address, mut bytes) in writes {
+            let checksum = XxHash64::oneshot(0, &bytes[8..]);
+            bytes[..8].copy_from_slice(&checksum.to_le_bytes());
+            file.write_at(address, &Bytes::from(bytes)).await?;
         }
-        self.metadata_pages.lock().unwrap().initialized_chunks = chunk_count;
         Ok(())
     }
 }

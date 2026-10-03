@@ -299,13 +299,26 @@ mod tests {
             assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", source)]), 2.0);
         }
         assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", "hit")]), 1.0);
+        // Metadata is written periodically, independently of payload publication.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while value(
+                &registry,
+                "feuer_disk_io_total",
+                &[("operation", "write"), ("outcome", "success")],
+            ) < 3.0
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(
             value(
                 &registry,
                 "feuer_disk_io_total",
                 &[("operation", "write"), ("outcome", "success")]
             ),
-            3.0 // Initialize metadata chunk, write payload chunk, update metadata page.
+            3.0 // One payload chunk, one metadata record page, and one next-chunk link.
         );
         assert_eq!(
             value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),

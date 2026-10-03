@@ -6,6 +6,12 @@ impl DiskCache {
     pub(super) async fn insert(&self, key: ObjectKeyHash, download: Download) -> Result<bool, DiskCacheError> {
         self.insert_batch(vec![(key, download)]).await.map(|count| count == 1)
     }
+
+    pub(super) async fn flush_metadata(&self) {
+        for shard in &self.disk.shards {
+            shard.flush_metadata(&self.disk.file).await.unwrap();
+        }
+    }
 }
 
 pub(super) fn range(start: u64, end: u64) -> ByteRange {
@@ -31,7 +37,14 @@ pub(super) async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskCa
     let cache = DiskCache::open(directory.path(), capacity + shards * CHUNK_BYTES, IoMetrics::noop())
         .await
         .unwrap();
-    (directory, cache)
+    (directory, with_manual_metadata_writes(cache))
+}
+
+/// Detach a freshly opened cache from the writer's weak reference so tests can drive writes themselves.
+pub(super) fn with_manual_metadata_writes(cache: DiskCache) -> DiskCache {
+    DiskCache {
+        disk: Arc::new(Arc::try_unwrap(cache.disk).ok().unwrap()),
+    }
 }
 
 impl DiskEntry {
@@ -47,12 +60,34 @@ pub(super) async fn entry_disk_ranges(
     let shard = &cache.disk.shards[cache.disk.shard_index_for_key(key)];
     let index = shard.entry_index.lock().unwrap();
     let entry = index.entries_by_key[key].first_key_value().unwrap().1;
-    let (chunk_index, entry_metadata_index) = entry.metadata.unwrap();
+    let (chunk_index, entry_metadata_index) = entry.metadata;
     let pages = shard.metadata_pages.lock().unwrap();
     let address = pages.chunks[chunk_index].region.range().start
         + (entry_metadata_index / page_format::RECORDS_PER_PAGE * METADATA_PAGE_BYTES) as u64;
     let metadata = address..address + METADATA_PAGE_BYTES as u64;
     (vec![entry.payload_range.clone()], vec![metadata])
+}
+
+#[tokio::test]
+async fn metadata_changes_after_copying_remain_dirty() {
+    let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+    let first = ObjectKeyHash(1);
+    let second = ObjectKeyHash(2);
+    cache.insert(first, download(0, 1)).await.unwrap();
+    let shard = &cache.disk.shards[0];
+    let mut writer = Box::pin(shard.flush_metadata(&cache.disk.file));
+    let completion = std::future::poll_fn(|cx| Poll::Ready(writer.as_mut().poll(cx))).await;
+    // The copy is taken on the first poll; the mutex is released even if I/O is still pending.
+    assert!(shard.metadata_pages.try_lock().unwrap().dirty_pages.is_empty());
+    cache.insert(second, download(0, 1)).await.unwrap();
+    assert!(cache.get(&second, range(0, 1)).await.is_some());
+    match completion {
+        Poll::Ready(result) => result.unwrap(),
+        Poll::Pending => writer.await.unwrap(),
+    }
+    let pages = shard.metadata_pages.lock().unwrap();
+    assert_eq!(pages.dirty_pages.len(), 1);
+    assert!(pages.dirty_pages.contains(&(0, 0)));
 }
 
 #[tokio::test]
@@ -176,7 +211,9 @@ fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighb
         (ObjectKeyHash::from("k".repeat(CHUNK_BYTES as usize)), 1),
         (ObjectKeyHash::from("small after long key"), 1),
     ] {
-        batch.pack_download(&allocator, &key, &download(0, length)).unwrap();
+        batch
+            .pack_download(&allocator, &key, &download(0, length), (0, 0))
+            .unwrap();
     }
     let mut owners = BTreeMap::<u64, Vec<usize>>::new();
     for (entry_number, (_, entry)) in batch.entries.iter().enumerate() {
@@ -211,12 +248,12 @@ fn metadata_growth_does_not_consume_payload_chunk_space() {
             1
         };
         batch
-            .pack_download(&allocator, &ObjectKeyHash(i as u128), &download(0, length))
+            .pack_download(&allocator, &ObjectKeyHash(i as u128), &download(0, length), (0, i))
             .unwrap();
     }
     // The next record needs another metadata page, but metadata does not consume payload space.
     batch
-        .pack_download(&allocator, &ObjectKeyHash(999), &download(0, 1))
+        .pack_download(&allocator, &ObjectKeyHash(999), &download(0, 1), (0, records_per_page))
         .unwrap();
     assert_eq!(batch.entries[0].1.single_chunk_start(), Some(0));
     assert_eq!(batch.entries[records_per_page].1.single_chunk_start(), Some(0));
@@ -232,6 +269,7 @@ fn failed_payload_growth_leaves_addresses_unchanged() {
             &allocator,
             &ObjectKeyHash::from("first"),
             &download(0, CHUNK_BYTES as usize - METADATA_PAGE_BYTES),
+            (0, 0),
         )
         .unwrap();
     let payload = batch.entries[0].1.payload_range.clone();
@@ -239,7 +277,8 @@ fn failed_payload_growth_leaves_addresses_unchanged() {
         batch.pack_download(
             &allocator,
             &ObjectKeyHash::from("too large"),
-            &download(0, METADATA_PAGE_BYTES + 1)
+            &download(0, METADATA_PAGE_BYTES + 1),
+            (0, 1),
         ),
         Err(1)
     );
@@ -247,7 +286,7 @@ fn failed_payload_growth_leaves_addresses_unchanged() {
     assert_eq!(batch.entries[0].1.payload_range, payload);
     // A smaller payload can use the final aligned bytes without moving existing payloads.
     batch
-        .pack_download(&allocator, &ObjectKeyHash::from("second"), &download(0, 1))
+        .pack_download(&allocator, &ObjectKeyHash::from("second"), &download(0, 1), (0, 1))
         .unwrap();
     assert_eq!(batch.entries[0].1.payload_range, payload);
     assert_eq!(batch.entries[1].1.payload_range, payload.end..CHUNK_BYTES);
@@ -721,11 +760,11 @@ fn batch_rejects_fragmented_space_without_consuming_it() {
     let mut batch = UnwrittenShardBatch::default();
     let key = ObjectKeyHash::from("large");
     let source = download(0, CHUNK_BYTES as usize + 1);
-    assert_eq!(batch.pack_download(&allocator, &key, &source), Err(2));
+    assert_eq!(batch.pack_download(&allocator, &key, &source, (0, 0)), Err(2));
     assert!(batch.entries.is_empty());
     assert_eq!(allocator.available_bytes(), 2 * CHUNK_BYTES);
     drop(second);
-    assert!(batch.pack_download(&allocator, &key, &source).is_ok());
+    assert!(batch.pack_download(&allocator, &key, &source, (0, 0)).is_ok());
     drop((batch, fourth));
     assert_eq!(allocator.available_bytes(), 4 * CHUNK_BYTES);
 }
@@ -758,6 +797,7 @@ async fn writes_key_hash_range_and_payload_address_in_fixed_size_metadata() {
     let (payload, entry_metadata) = entry_disk_ranges(&cache, &key).await;
     assert_eq!(entry_metadata[0], 0..METADATA_PAGE_BYTES as u64);
     assert_eq!(payload[0].start, CHUNK_BYTES);
+    cache.flush_metadata().await;
     let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
     let entry_metadata_bytes = page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG).unwrap();
     let read_u64 = |offset| u64::from_le_bytes(entry_metadata_bytes[offset..offset + 8].try_into().unwrap());
@@ -1111,10 +1151,10 @@ fn unwritten_batch_owns_its_chunks() {
     let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES).unwrap();
     let mut batch = UnwrittenShardBatch::default();
     batch
-        .pack_download(&allocator, &ObjectKeyHash::from("a"), &download(0, 10))
+        .pack_download(&allocator, &ObjectKeyHash::from("a"), &download(0, 10), (0, 0))
         .unwrap();
     batch
-        .pack_download(&allocator, &ObjectKeyHash::from("b"), &download(0, 10))
+        .pack_download(&allocator, &ObjectKeyHash::from("b"), &download(0, 10), (0, 1))
         .unwrap();
     assert_eq!(allocator.available_bytes(), 0);
     drop(batch);
@@ -1195,6 +1235,7 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
     assert!(first.last().unwrap().end <= 128 * CHUNK_BYTES);
     assert!(second[0].start >= 128 * CHUNK_BYTES);
     let returned = cache.get(&keys[0], range(0, 100)).await.unwrap();
+    cache.flush_metadata().await;
     let capacity = cache.disk.file.capacity();
     drop(cache);
     let reopened = DiskCache::open(directory.path(), capacity, IoMetrics::noop())
@@ -1225,7 +1266,7 @@ fn index_insertion_removes_covered_ranges_and_duplicate_starts() {
                 object_range,
                 payload_checksum: 0,
                 payload_range: 0..4096,
-                metadata: None,
+                metadata: (0, 0),
             },
         )
     });
@@ -1264,7 +1305,7 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
                 object_range: range(0, 3),
                 payload_checksum: XxHash64::oneshot(0, replacement),
                 payload_range: 8192..12288,
-                metadata: None,
+                metadata: (0, 0),
             },
         );
         index.remove_entry_matching_read(&ObjectKeyHash::from("object"), &read);

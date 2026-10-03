@@ -18,7 +18,34 @@ async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskCache, prometh
     )
     .await
     .unwrap();
-    (directory, cache, registry)
+    (directory, tests::with_manual_metadata_writes(cache), registry)
+}
+
+#[tokio::test]
+async fn periodic_writer_combines_updates_into_page_writes() {
+    let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
+    for key in [ObjectKeyHash(1), ObjectKeyHash(2)] {
+        cache.insert(key, download(1)).await.unwrap();
+    }
+    let written_bytes = || value(&registry, "feuer_disk_io_bytes_total", &[("operation", "write")]);
+    let payload_bytes = 2 * CHUNK_BYTES;
+    assert_eq!(written_bytes(), payload_bytes as f64);
+    let weak = Arc::downgrade(&cache.disk);
+    tokio::spawn(DiskCacheInner::write_metadata_periodically(weak.clone()));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // Wait for both the shared record page and the link page, not a whole-chunk write.
+        while written_bytes() < (payload_bytes + 2 * METADATA_PAGE_BYTES as u64) as f64 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(written_bytes(), (payload_bytes + 2 * METADATA_PAGE_BYTES as u64) as f64);
+    drop(cache);
+    assert!(
+        weak.upgrade().is_none(),
+        "the sleeping writer must not retain the cache"
+    );
 }
 
 #[tokio::test]
@@ -39,6 +66,7 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
         let source = download(payload_bytes);
         let inputs: Vec<_> = (0..entries).map(|key| (ObjectKeyHash(key), source.clone())).collect();
         assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), entries as usize);
+        cache.flush_metadata().await;
         let capacity = cache.disk.file.capacity();
         drop(cache);
 
@@ -57,6 +85,13 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
         assert_eq!(
             value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]),
             (chunks * CHUNK_BYTES) as f64
+        );
+        assert!(
+            cache
+                .disk
+                .shards
+                .iter()
+                .all(|shard| shard.metadata_pages.lock().unwrap().dirty_pages.is_empty())
         );
         for (key, source) in inputs {
             assert!(cache.contains(&key, source.downloaded_range()));
@@ -78,6 +113,7 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     let written_chunks = value(&registry, "feuer_disk_chunks", &[("state", "allocated")]);
     assert_eq!(written_chunks, 5.0); // Metadata, one shared payload chunk, and three large-entry chunks.
     let metrics = cache.disk.metrics.clone();
+    cache.flush_metadata().await;
     drop(cache);
 
     let cache = DiskCache::open_with_metrics(

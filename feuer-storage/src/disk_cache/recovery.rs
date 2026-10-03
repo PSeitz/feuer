@@ -36,12 +36,12 @@ impl DiskCacheInner {
                     eviction_position: 0,
                     object_range,
                     payload_checksum,
-                    metadata: Some((chunk_index, entry_metadata_index)),
+                    metadata: (chunk_index, entry_metadata_index),
                     payload_range,
                 };
                 for entry in index.insert(key, entry) {
                     shard.allocator.remove_payload(entry.payload_range.start);
-                    metadata.free_entry_positions.push(entry.metadata.unwrap());
+                    metadata.free_entry_positions.push(entry.metadata);
                 }
             }
         }
@@ -60,7 +60,7 @@ impl DiskCacheShard {
             let Ok(bytes) = file.read_recovery_chunk(address).await else {
                 break;
             };
-            // An unwritten chunk ends the chain; a new shard initializes its first chunk on insertion.
+            // An unwritten chunk ends the chain.
             if bytes.iter().all(|&byte| byte == 0) {
                 break;
             }
@@ -87,7 +87,6 @@ impl DiskCacheShard {
         if address != NO_CHUNK {
             metadata.set_last_chunk_link(NO_CHUNK);
         }
-        metadata.initialized_chunks = metadata.chunks.len();
         *self.metadata_pages.lock().unwrap() = metadata;
     }
 }

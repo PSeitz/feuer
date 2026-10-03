@@ -29,20 +29,18 @@ each `DiskRegion` has one owner: a batch, the allocator, or a metadata chunk. I/
 addresses and buffers, not reservations. Scattered chunks are never combined for one entry.
 The metadata component assigns entry positions, reserving whole chunks from the allocator as needed.
 
-A shard's async metadata I/O lock serializes metadata writes only, not payload writes or publication.
-Its short synchronous metadata lock protects entry positions, page bytes, and dirty-page tracking;
-that lock and the range-index lock never span I/O. Page bytes consume 1 MiB per metadata chunk.
+Each shard's metadata lock protects entry positions, page bytes, and dirty-page tracking;
+it and the range-index lock never span I/O. Page bytes consume 1 MiB per metadata chunk.
 
 ## Writes
 
 `insert_batch` sorts each shard's entries smallest first, reserves metadata positions and payload
 space, then writes payload chunks. Partially filled chunks are finalized too; later batches cannot
-append. Metadata growth never moves payload addresses. Storage adds no batching delay.
+append. Metadata growth never moves payload addresses. Payload writes have no batching delay.
 
 After payload writes finish, accepted entries update metadata in memory and publish into the index.
-Metadata flushing is best-effort and attempted before returning. New metadata chunks are written in
-full before writing links to them; subsequent changes use 4-KiB page writes. Each shard's first chunk
-is its fixed chain start. No `fsync` or `fdatasync` is issued; completion does not guarantee durability.
+One periodic writer persists dirty metadata pages every second, best-effort; see the
+[write contract](../format.md#write-ordering-and-reuse). Sleeping does not keep the cache open.
 
 Publication rechecks containment, larger entries first: broader entries replace contained entries,
 while partial overlaps coexist. Contained entries and entries that cannot fit are skipped.
@@ -52,11 +50,11 @@ release their payload occupancy without invalidation writes.
 
 The detached writer retains its batch reservations during normal writes. Queued I/O retains buffers,
 not disk space: an abandoned write can overwrite a reused payload, producing a checksum miss.
-Failed metadata writes leave pages dirty for retry without rejecting published entries or preventing payload reuse.
+Failed metadata writes are not retried and neither reject published entries nor prevent payload reuse.
 An abnormal queue failure retains active I/O resources when completion cannot be established.
 
 Callers bound batch size and concurrency. Payload buffers and cached metadata pages are outside the
-raw I/O queue's memory budget. Metadata writes add foreground write cost; this layout's write
+raw I/O queue's memory budget. Metadata writes share the payload write queue; this layout's write
 throughput has not yet been compared against v10.
 
 ## Reads and eviction
@@ -83,7 +81,7 @@ Closing the in-memory index does not invalidate live entries needed by the next 
 
 ## Format and recovery
 
-[format.md](format.md) documents experimental **v13**: shard boundaries, fixed chain starts,
+[format.md](../format.md) documents experimental **v13**: shard boundaries, fixed chain starts,
 page headers, entry records, checksums, and write ordering. Each metadata chain starts at the first
 chunk of its shard. There is no `recovery-heads` file or periodic address checkpoint.
 
@@ -96,7 +94,8 @@ Entries are indexed during opening, with duplicate starts and contained ranges r
 Each shard's recovery runs on Tokio's blocking pool, using io_uring for reads. Opening returns only
 after every shard has been scanned.
 
-Corrupt pages/links are repaired in the in-memory metadata image and flushed by subsequent writes. Recovery does not read payloads: their checksums are verified on every hit.
+Recovery leaves valid pages clean, marks repaired links dirty, and rewrites corrupt record pages only
+when reused. Payload checksums are verified on read, not during recovery.
 Missing or torn payloads become misses. This remains a best-effort cache, not a durable object store.
 Real device power-loss testing is required before claiming crash hardening.
 

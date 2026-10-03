@@ -65,13 +65,12 @@ struct DiskCacheInner {
     metrics: Arc<DiskMetrics>,
 }
 
-/// One disk-cache shard's chunk allocator, entry index, metadata pages, and metadata I/O lock.
+/// One disk-cache shard's chunk allocator, entry index, and metadata pages.
 struct DiskCacheShard {
     reclaim_sample_size: usize,
     allocator: DiskChunkAllocator,
     entry_index: Mutex<DiskEntryIndex>,
     metadata_pages: Mutex<metadata::MetadataPages>,
-    metadata_io: tokio::sync::Mutex<()>,
 }
 
 /// Disk entries indexed by object key and range start, with a list sampled in rotation for eviction.
@@ -110,7 +109,7 @@ struct DiskEntry {
     payload_checksum: u64,
     payload_range: Range<u64>,
     /// Metadata chunk and entry metadata indexes identifying this entry's 48-byte disk metadata.
-    metadata: Option<(usize, usize)>,
+    metadata: (usize, usize),
 }
 
 /// The disk address, object range, and expected checksum for one payload read.
@@ -219,7 +218,6 @@ impl DiskCache {
                     allocator,
                     entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
                     metadata_pages: Mutex::new(metadata::MetadataPages::default()),
-                    metadata_io: tokio::sync::Mutex::new(()),
                 }
             })
             .collect();
@@ -243,6 +241,7 @@ impl DiskCache {
             result.expect("shard recovery task failed");
         }
         tracing::info!(target: "feuer::storage", elapsed_seconds = started.elapsed().as_secs_f64(), "disk cache recovery finished");
+        tokio::spawn(DiskCacheInner::write_metadata_periodically(Arc::downgrade(&disk)));
         Ok(Self { disk })
     }
 
@@ -253,7 +252,7 @@ impl DiskCache {
 
     /// Packs an explicit batch into chunks, grouping smaller payloads first within each shard.
     /// Returns the number of entries published; contained entries and entries that do not fit are skipped.
-    /// Payload writes finish before publication; metadata flushes afterwards are best-effort.
+    /// Payload writes finish before publication; metadata is written every second, best-effort.
     /// Publication rechecks containment and is not transactional across shards. Does not record accesses.
     ///
     /// Entries share a payload chunk only when their complete aligned payloads fit inside it.
@@ -334,11 +333,8 @@ impl DiskCache {
                             loop {
                                 let metadata = shard.metadata_pages.lock().unwrap().reserve_metadata(&shard.allocator);
                                 let chunks_needed = if let Some(position) = metadata {
-                                    match batch.pack_download(&shard.allocator, &key, &download) {
-                                        Ok(()) => {
-                                            batch.entries.last_mut().unwrap().1.metadata = Some(position);
-                                            break;
-                                        }
+                                    match batch.pack_download(&shard.allocator, &key, &download, position) {
+                                        Ok(()) => break,
                                         Err(count) => {
                                             shard.metadata_pages.lock().unwrap().free_entry_positions.push(position);
                                             count
@@ -371,10 +367,7 @@ impl DiskCache {
                             attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
                         }
                     }
-                    let entries = match batch
-                        .write_payloads(&disk.file, &disk.metrics, shard)
-                        .await
-                    {
+                    let entries = match batch.write_payloads(&disk.file, &disk.metrics, shard).await {
                         Ok(entries) => entries,
                         Err(error) => {
                             for (_, attempt) in &mut publication_values {
@@ -412,9 +405,6 @@ impl DiskCache {
                                 shard.remove_payload_and_allow_metadata_overwrite(entry);
                             }
                         }
-                    }
-                    if let Err(error) = shard.flush_metadata(&disk.file).await {
-                        tracing::warn!(target: "feuer::storage", %error, "metadata write failed; entries remain usable");
                     }
                 }
                 Ok(published_entries)
@@ -566,9 +556,11 @@ impl DiskCacheShard {
     /// Neither index removal nor entry destruction has side effects on disk ownership or metadata.
     fn remove_payload_and_allow_metadata_overwrite(&self, entry: DiskEntry) {
         self.allocator.remove_payload(entry.payload_range.start);
-        if let Some(metadata) = entry.metadata {
-            self.metadata_pages.lock().unwrap().free_entry_positions.push(metadata);
-        }
+        self.metadata_pages
+            .lock()
+            .unwrap()
+            .free_entry_positions
+            .push(entry.metadata);
     }
 }
 
@@ -683,6 +675,7 @@ impl UnwrittenShardBatch {
         allocator: &DiskChunkAllocator,
         key: &ObjectKeyHash,
         download: &Download,
+        metadata: (usize, usize),
     ) -> Result<(), u64> {
         let object_range = download.downloaded_range();
         let bytes = download.bytes();
@@ -714,7 +707,7 @@ impl UnwrittenShardBatch {
                 object_range,
                 payload_checksum,
                 payload_range,
-                metadata: None,
+                metadata,
             },
         ));
         Ok(())
@@ -752,7 +745,7 @@ impl UnwrittenShardBatch {
                     let mut pages = shard.metadata_pages.lock().unwrap();
                     pages
                         .free_entry_positions
-                        .extend(self.entries.iter().filter_map(|(_, entry)| entry.metadata));
+                        .extend(self.entries.iter().map(|(_, entry)| entry.metadata));
                     return Err(error.into());
                 }
             }

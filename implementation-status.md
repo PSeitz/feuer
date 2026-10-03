@@ -124,17 +124,17 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
 
 ## In progress: disk-cache prototype
 
-[`feuer-storage/format.md`](feuer-storage/format.md) describes the experimental disk format;
+[`format.md`](format.md) describes the experimental disk format;
 [`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) covers runtime behavior and remaining crash testing. `DiskCache::insert_batch` groups smaller entries together within each
-shard, writes payload chunks, publishes after containment revalidation, and flushes metadata best-effort. Partial final chunks are finalized too. Later batches cannot fill them. Full keys and exact
+shard, writes payload chunks, and publishes after containment revalidation. A periodic writer persists metadata best-effort. Partial final chunks are finalized too. Later batches cannot fill them. Full keys and exact
 object ranges map to one contiguous physical range each. Payload bytes have no metadata gaps, including at chunk boundaries. Entry metadata stores
 one XXHash64 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
 entry while copying only requested bytes into the result. It does not read neighboring entries or metadata.
 
 Independent shards have their own allocator and range-index lock. The allocator tracks coalesced free
 whole-chunk runs; the metadata component reserves entry positions and grows metadata capacity internally.
-Only metadata writes share a per-shard async I/O lock. Detached writers retain payload reservations through
-completion despite caller cancellation. Failed payload writes release their chunk and metadata reservations.
+Detached payload writers retain reservations through completion despite caller cancellation.
+Failed payload writes release their chunk and metadata reservations.
 Publication is not transactional across shards. Callers bound batch memory and concurrency.
 
 Entries within a batch share 1-MiB payload chunks with 4-KiB-aligned storage. Multi-chunk entries own consecutive
@@ -142,9 +142,9 @@ chunks exclusively, including unused tails. Payload chunks contain no metadata. 
 The v13 format stores fixed 48-byte records with 128-bit key hashes in separate 1-MiB metadata chunks. The first 255
 pages hold up to 21,420 records; the final 4-KiB page stores the next metadata chunk address. Metadata chunks remain
 reserved, but removed entries' metadata positions are reused across batches. An active shard needs at least one
-metadata chunk in addition to its payload chunks. Metadata pages are retained in memory and flushed after publication;
-failed metadata writes do not reject entries or prevent payload reuse. Payload chunks sharing a metadata chunk remain
-independently reclaimable. New metadata chunks are written before linking. Each page and payload has its own XXHash64 checksum. Older formats are not migrated.
+metadata chunk in addition to its payload chunks. One periodic writer persists dirty 4-KiB pages every second;
+see the [write contract](format.md#write-ordering-and-reuse). Payload chunks remain independently reclaimable.
+Each page and payload has its own XXHash64 checksum. Older formats are not migrated.
 Read invalidation compares expected payload checksums. Discarding a newer identical copy is an allowed miss.
 Pressure eviction samples up to 64 live entries and selects the lowest recent retrieval value per payload
 byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.

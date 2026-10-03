@@ -2,11 +2,8 @@
 //! record pages and one checksummed next-chunk page. All-zero entry metadata is unused.
 //! Payloads live in separate chunks. Records never cross page boundaries.
 
-use bytes::Bytes;
 use feuer_types::{ByteRange, ObjectKeyHash};
 use twox_hash::XxHash64;
-
-use std::ops::Range;
 
 use crate::allocation::CHUNK_BYTES;
 
@@ -51,18 +48,14 @@ pub(super) fn validate_page<'a>(page: &'a [u8], page_tag: &[u8; 8]) -> Option<&'
 pub(super) fn encode_entry_metadata(
     key: &ObjectKeyHash,
     object_range: ByteRange,
-    payload_range: &Range<u64>,
+    payload_address: u64,
     payload_checksum: u64,
-) -> Bytes {
-    let mut bytes = Vec::with_capacity(ENTRY_METADATA_BYTES);
-    bytes.extend_from_slice(&key.0.to_le_bytes());
-    for value in [
-        object_range.start(),
-        object_range.len(),
-        payload_range.start,
-        payload_checksum,
-    ] {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    Bytes::from(bytes)
+) -> [u8; ENTRY_METADATA_BYTES] {
+    let mut bytes = [0; ENTRY_METADATA_BYTES];
+    bytes[..16].copy_from_slice(&key.0.to_le_bytes());
+    bytes[16..24].copy_from_slice(&object_range.start().to_le_bytes());
+    bytes[24..32].copy_from_slice(&object_range.len().to_le_bytes());
+    bytes[32..40].copy_from_slice(&payload_address.to_le_bytes());
+    bytes[40..48].copy_from_slice(&payload_checksum.to_le_bytes());
+    bytes
 }
