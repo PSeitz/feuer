@@ -2,7 +2,12 @@
 
 Added code is a liability. Less code is usually better. Every addition must justify its maintenance and complexity cost.
 
-Implement only what the stated requirements need. Do not add features, abstractions, guarantees, or configuration "for completeness" or hypothetical future use. Every addition must solve a concrete, current requirement. If its necessity is unclear, ask before implementing. Prefer the smallest correct solution.
+Implement only what the stated requirements need. Do not add features, abstractions, guarantees, or configuration 
+"for completeness" or hypothetical future use. Every addition must solve a concrete, current requirement. 
+If its necessity is unclear, ask before implementing. Prefer the smallest correct solution.
+
+Code has a contract, which is a set of guarantees and invariants. We should document and rely on the contract, not
+obscure it with additional checks, that contradict the contract.
 
 # Linux SSD testing
 
