@@ -100,8 +100,9 @@ chunks are not appended to; individual payload holes are not reused.
 ## Write ordering and reuse
 
 1. Complete metadata chunk initialization writes before linking to them.
-2. Complete payload writes before writing entry records, and metadata writes before
-   publishing entries in memory. Metadata updates require read/write synchronization.
+2. Reserve metadata positions before payload I/O. Complete payload writes before updating
+   metadata in memory and publishing entries. Flush metadata afterwards, best-effort;
+   only metadata writes share the per-shard async I/O lock.
 3. The allocator releases payload chunks when their last entry is removed. Neither reads
    nor queued writes reserve disk space. Removal does not invalidate the old metadata record.
    Readers validate owned buffers against the expected checksum after I/O; late writes to reused

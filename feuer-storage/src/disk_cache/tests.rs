@@ -48,7 +48,7 @@ pub(super) async fn entry_disk_ranges(
     let index = shard.entry_index.lock().unwrap();
     let entry = index.entries_by_key[key].first_key_value().unwrap().1;
     let (chunk_index, entry_metadata_index) = entry.metadata.unwrap();
-    let pages = shard.metadata.lock().unwrap();
+    let pages = shard.metadata_pages.lock().unwrap();
     let address = pages.chunks[chunk_index].region.range().start
         + (entry_metadata_index / page_format::RECORDS_PER_PAGE * METADATA_PAGE_BYTES) as u64;
     let metadata = address..address + METADATA_PAGE_BYTES as u64;
@@ -352,9 +352,7 @@ async fn eviction_budgets_and_active_reservations_bound_reclamation() {
     attempts_left = 1;
     chunks_left = MAX_EVICTION_CHUNKS;
     assert!(shard.sample_and_evict_entry(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
-    let _io = shard.metadata_io.lock().await;
     shard.flush_metadata(&cache.disk.file).await.unwrap();
-    drop(_io);
     let active = shard.allocator.reserve_chunks(2).unwrap();
     assert!(
         !cache
@@ -832,7 +830,6 @@ async fn long_keys_do_not_allocate_extra_metadata_chunks() {
         .unwrap();
     cache.disk.shards[0].remove_payload_and_allow_metadata_overwrite(entry);
     let shard = &cache.disk.shards[0];
-    let _io = shard.metadata_io.lock().await;
     shard.flush_metadata(&cache.disk.file).await.unwrap();
     assert_eq!(shard.allocator.available_bytes(), 2 * CHUNK_BYTES);
 }
@@ -1101,9 +1098,12 @@ async fn failed_chunk_write_releases_the_batch_without_publication() {
     ));
     assert!(cache.get(&ObjectKeyHash::from("small"), range(0, 1)).await.is_none());
     assert!(cache.get(&ObjectKeyHash::from("large"), range(0, 1)).await.is_none());
-    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
-    let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
-    assert_eq!(&page[24..32], page_format::ENTRY_METADATA_PAGE_TAG);
+    let shard = &cache.disk.shards[0];
+    assert_eq!(shard.allocator.available_bytes(), 2 * CHUNK_BYTES);
+    assert_eq!(
+        shard.metadata_pages.lock().unwrap().free_entry_positions.len(),
+        page_format::RECORDS_PER_CHUNK
+    );
 }
 
 #[test]

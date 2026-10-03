@@ -27,25 +27,22 @@ tails. The allocator retains payload reservations; index entries and readers hol
 Individual payload holes are never reused. `src/allocation.rs` tracks coalesced free chunk runs;
 each `DiskRegion` has one owner: a batch, the allocator, or a metadata chunk. I/O requests carry
 addresses and buffers, not reservations. Scattered chunks are never combined for one entry.
-The allocator also assigns metadata record positions; metadata pages only store and update bytes.
+The metadata component assigns entry positions, reserving whole chunks from the allocator as needed.
 
-Metadata pages are mutable. A shard's async metadata I/O lock serializes reads and updates, separately
-from allocator ownership. Its short synchronous metadata lock protects cached page bytes and dirty-page
-tracking; that lock and the range-index lock never span I/O. Cached metadata pages consume
-approximately 1 MiB of memory per metadata chunk.
+A shard's async metadata I/O lock serializes metadata writes only, not payload writes or publication.
+Its short synchronous metadata lock protects entry positions, page bytes, and dirty-page tracking;
+that lock and the range-index lock never span I/O. Page bytes consume 1 MiB per metadata chunk.
 
 ## Writes
 
-`insert_batch` sorts each shard's entries smallest first, packs aligned payloads into chunks, and
-writes those chunks once. Partially filled payload chunks are finalized too; later batches cannot
+`insert_batch` sorts each shard's entries smallest first, reserves metadata positions and payload
+space, then writes payload chunks. Partially filled chunks are finalized too; later batches cannot
 append. Metadata growth never moves payload addresses. Storage adds no batching delay.
 
-New metadata chunk initialization writes complete before linking them from the preceding chunk.
-Each shard's first chunk is its fixed chain start and needs no incoming link. Payload writes finish
-before their metadata records are written. Dirty metadata pages are written as 4-KiB updates, not
-full-chunk rewrites, and complete before publication. The last-page link has its own checksum.
-No `fsync` or `fdatasync` is issued; this completion order is not a persistence-ordering guarantee
-after power loss.
+After payload writes finish, accepted entries update metadata in memory and publish into the index.
+Metadata flushing is best-effort and attempted before returning. New metadata chunks are written in
+full before writing links to them; subsequent changes use 4-KiB page writes. Each shard's first chunk
+is its fixed chain start. No `fsync` or `fdatasync` is issued; completion does not guarantee durability.
 
 Publication rechecks containment, larger entries first: broader entries replace contained entries,
 while partial overlaps coexist. Contained entries and entries that cannot fit are skipped.
@@ -55,7 +52,7 @@ release their payload occupancy without invalidation writes.
 
 The detached writer retains its batch reservations during normal writes. Queued I/O retains buffers,
 not disk space: an abandoned write can overwrite a reused payload, producing a checksum miss.
-Failed metadata updates leave dirty pages available for retry without preventing payload reuse.
+Failed metadata writes leave pages dirty for retry without rejecting published entries or preventing payload reuse.
 An abnormal queue failure retains active I/O resources when completion cannot be established.
 
 Callers bound batch size and concurrency. Payload buffers and cached metadata pages are outside the
