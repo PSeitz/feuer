@@ -293,16 +293,16 @@
             </div>
           </details>
           <details class="branch">
-            <summary><code>DiskRegion</code> &amp; <code>ChunkGuard</code><small>Keep space unavailable until its users finish</small></summary>
+            <summary><code>ReservedChunks</code> &amp; <code>ChunkGuard</code><small>Keep space unavailable until its users finish</small></summary>
             <div class="content">
-              <p>The allocator keeps a free list in RAM. Writers call <code>reserve_chunks()</code> to take space from that list before writing. A <code>DiskRegion</code> represents a reserved byte range in the backing file; slices share ownership of the entire consecutive run of chunks.</p>
+              <p>The allocator keeps a free list in RAM. Writers call <code>reserve_chunks()</code> to take space from that list before writing. A <code>ReservedChunks</code> represents a reserved byte range in the backing file; slices share ownership of the entire consecutive run of chunks.</p>
               <p>A read creates a <code>ChunkGuard</code> from the indexed entry while holding the index lock. The guard keeps the whole reservation alive through reading and verification. Eviction can remove the entry, but reuse must wait for completed metadata invalidation and all remaining owners and guards.</p>
               <details class="deeper"><summary>Example: reading an entry in chunk 7</summary><div>
                 <ol><li>A reader finds the entry and creates a guard.</li><li>Eviction removes the entry and clears its metadata record in RAM. Pending invalidation and the guard both retain the payload reservation.</li><li>The I/O queue retains a guard through completion, even if the caller cancels.</li><li>The next write completes metadata invalidation before releasing pending payload ownership. After all owners and read guards are gone, <code>ChunkReservation::drop()</code> returns the chunks to the free list.</li><li>A later writer can reserve that space and overwrite it.</li></ol>
                 <p>No code scans for guards. Reference counting controls when space becomes free. This is not a read/write lock: raw file writes do not check guards. Payload writes use newly reserved regions; mutable metadata updates use separate per-shard read/write synchronization.</p>
                 <p>Multiple reads can run concurrently. Returned bytes live in RAM and retain no disk reservation.</p>
               </div></details>
-              <a class="source" href="feuer-storage/src/allocation.rs">feuer-storage/src/allocation.rs · DiskRegion / ChunkGuard</a>
+              <a class="source" href="feuer-storage/src/allocation.rs">feuer-storage/src/allocation.rs · ReservedChunks / ChunkGuard</a>
             </div>
           </details>
           <details class="branch">

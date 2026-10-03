@@ -36,7 +36,7 @@ fn history_recording_contention() {
                         history.record_access(&request.object_key, request.requested_range);
                     }
                 }
-                let initial_clock = history.clock();
+                let initial_request_count = history.request_count();
                 let barrier = Barrier::new(threads + 1);
                 let elapsed = thread::scope(|scope| {
                     for worker in 0..threads {
@@ -56,7 +56,7 @@ fn history_recording_contention() {
                     barrier.wait();
                     started.elapsed()
                 });
-                assert_eq!(history.clock() - initial_clock, requests.len() as u64);
+                assert_eq!(history.request_count() - initial_request_count, requests.len() as u64);
                 durations.push(elapsed);
             }
             durations.sort_unstable();

@@ -148,7 +148,7 @@ impl DataFile {
     }
 
     /// Reads one contiguous payload into a buffer, omitting final alignment padding.
-    pub(crate) async fn read_region(&self, range: Range<u64>, length: usize) -> DataFileResult<(Bytes, usize)> {
+    pub(crate) async fn read_payload(&self, range: Range<u64>, length: usize) -> DataFileResult<(Bytes, usize)> {
         self.measure_io(IoOperation::Read, range.start, length, async {
             let (bytes, capacity) = self.read_aligned_range(range).await?;
             assert_eq!(bytes.len(), length.next_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));

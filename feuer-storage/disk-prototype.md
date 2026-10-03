@@ -25,7 +25,7 @@ Small payloads share chunks within an explicit batch. Each complete aligned payl
 its shared chunk. Larger entries reserve consecutive whole chunks exclusively, including unused
 tails. The allocator retains payload reservations; index entries and readers hold only addresses.
 Individual payload holes are never reused. `src/allocation.rs` tracks coalesced free chunk runs;
-each `DiskRegion` has one owner: a batch, the allocator, or a metadata chunk. I/O requests carry
+each `ReservedChunks` has one owner: a batch, the allocator, or a metadata chunk. I/O requests carry
 addresses and buffers, not reservations. Scattered chunks are never combined for one entry.
 The metadata component assigns entry positions, reserving whole chunks from the allocator as needed.
 

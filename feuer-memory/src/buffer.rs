@@ -82,7 +82,7 @@ impl BufferPool {
             let buffer = state.by_size[index].pop();
             if buffer.is_some() {
                 state.idle_bytes -= capacity as u64;
-                self.remove_idle_usage(index, capacity as u64);
+                self.decrease_idle_buffer_metrics(index, capacity as u64);
             }
             buffer
         });
@@ -110,7 +110,8 @@ impl BufferPool {
         self.state.lock().idle_bytes
     }
 
-    pub(crate) fn add_cached(&self, bytes: u64) {
+    /// Adds entry-allocation bytes to the pool's accounting, freeing idle buffers if needed.
+    pub(crate) fn add_entry_bytes(&self, bytes: u64) {
         let mut state = self.state.lock();
         state.cached_bytes += bytes;
         let idle_limit = self.capacity.saturating_sub(state.cached_bytes);
@@ -122,18 +123,20 @@ impl BufferPool {
                 };
                 let capacity = buffer.capacity() as u64;
                 state.idle_bytes -= capacity;
-                self.remove_idle_usage(index, capacity);
+                self.decrease_idle_buffer_metrics(index, capacity);
                 // Idle buffers have no pool reference; dropping them frees their allocations.
                 drop(buffer);
             }
         }
     }
 
-    pub(crate) fn remove_cached(&self, bytes: u64) {
+    /// Subtracts entry-allocation bytes from the pool's accounting.
+    pub(crate) fn remove_entry_bytes(&self, bytes: u64) {
         self.state.lock().cached_bytes -= bytes;
     }
 
-    fn remove_idle_usage(&self, index: usize, bytes: u64) {
+    /// Decreases metrics for idle-buffer bytes.
+    fn decrease_idle_buffer_metrics(&self, index: usize, bytes: u64) {
         self.metrics.idle_buffer_bytes[index].decrease(bytes);
         self.metrics.decrease_usage(bytes, 0);
     }
@@ -143,7 +146,7 @@ impl Drop for BufferPool {
     fn drop(&mut self) {
         for (index, &size) in BUFFER_SIZES.iter().enumerate() {
             let bytes = self.state.get_mut().by_size[index].len() as u64 * size as u64;
-            self.remove_idle_usage(index, bytes);
+            self.decrease_idle_buffer_metrics(index, bytes);
         }
         self.metrics.capacity_bytes.decrease(self.capacity);
     }

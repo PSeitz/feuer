@@ -238,7 +238,7 @@ Disk writes are best-effort and may be skipped when the pending-write queue is f
 - If the exact key and range are no longer cached in memory when a queued write starts, that write is
   canceled or discarded. Reinsertion of the same immutable range allows an earlier write to proceed.
 - A write already issued to the operating system may finish after memory eviction or caller cancellation.
-  Its `DiskRegion` must remain reserved and protected against conflicting access until the submitted I/O
+  Its `ReservedChunks` must remain reserved and protected against conflicting access until the submitted I/O
   completes. Abandoning its result does not stop the write. The task owning the reservation must keep
   awaiting completion rather than being aborted. A region whose completion is unknown after queue failure
   must not be reused. A completed write may publish a disk entry only if its exact key and range are still

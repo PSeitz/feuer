@@ -7,9 +7,9 @@ impl DiskCache {
         self.insert_batch(vec![(key, download)]).await.map(|count| count == 1)
     }
 
-    pub(super) async fn flush_metadata(&self) {
+    pub(super) async fn write_dirty_metadata_pages(&self) {
         for shard in &self.disk.shards {
-            shard.flush_metadata(&self.disk.file).await.unwrap();
+            shard.write_dirty_metadata_pages(&self.disk.file).await.unwrap();
         }
     }
 }
@@ -63,7 +63,7 @@ pub(super) async fn entry_disk_ranges(
     let (chunk_index, entry_metadata_index) = entry.metadata;
     let pages = shard.metadata_pages.lock().unwrap();
     let address = pages.chunks[chunk_index].region.range().start
-        + (entry_metadata_index / page_format::RECORDS_PER_PAGE * METADATA_PAGE_BYTES) as u64;
+        + (entry_metadata_index / page_format::ENTRIES_PER_METADATA_PAGE * METADATA_PAGE_BYTES) as u64;
     let metadata = address..address + METADATA_PAGE_BYTES as u64;
     (vec![entry.payload_range.clone()], vec![metadata])
 }
@@ -75,7 +75,7 @@ async fn metadata_changes_after_copying_remain_dirty() {
     let second = ObjectKeyHash(2);
     cache.insert(first, download(0, 1)).await.unwrap();
     let shard = &cache.disk.shards[0];
-    let mut writer = Box::pin(shard.flush_metadata(&cache.disk.file));
+    let mut writer = Box::pin(shard.write_dirty_metadata_pages(&cache.disk.file));
     let completion = std::future::poll_fn(|cx| Poll::Ready(writer.as_mut().poll(cx))).await;
     // The copy is taken on the first poll; the mutex is released even if I/O is still pending.
     assert!(shard.metadata_pages.try_lock().unwrap().dirty_pages.is_empty());
@@ -240,10 +240,10 @@ fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighb
 fn metadata_growth_does_not_consume_payload_chunk_space() {
     let allocator = DiskChunkAllocator::for_disk_range(0..2 * CHUNK_BYTES).unwrap();
     let mut batch = UnwrittenShardBatch::default();
-    let records_per_page = PAGE_CONTENT_BYTES / page_format::ENTRY_METADATA_BYTES;
-    for i in 0..records_per_page {
+    let entries_per_page = PAGE_CONTENT_BYTES / page_format::ENTRY_METADATA_BYTES;
+    for i in 0..entries_per_page {
         let length = if i == 0 {
-            CHUNK_BYTES as usize - (records_per_page + 1) * METADATA_PAGE_BYTES
+            CHUNK_BYTES as usize - (entries_per_page + 1) * METADATA_PAGE_BYTES
         } else {
             1
         };
@@ -251,13 +251,16 @@ fn metadata_growth_does_not_consume_payload_chunk_space() {
             .pack_download(&allocator, &ObjectKeyHash(i as u128), &download(0, length), (0, i))
             .unwrap();
     }
-    // The next record needs another metadata page, but metadata does not consume payload space.
+    // The next entry needs another metadata page, but metadata does not consume payload space.
     batch
-        .pack_download(&allocator, &ObjectKeyHash(999), &download(0, 1), (0, records_per_page))
+        .pack_download(&allocator, &ObjectKeyHash(999), &download(0, 1), (0, entries_per_page))
         .unwrap();
     assert_eq!(batch.entries[0].1.single_chunk_start(), Some(0));
-    assert_eq!(batch.entries[records_per_page].1.single_chunk_start(), Some(0));
-    assert_eq!(batch.regions[0].used_bytes, CHUNK_BYTES - METADATA_PAGE_BYTES as u64);
+    assert_eq!(batch.entries[entries_per_page].1.single_chunk_start(), Some(0));
+    assert_eq!(
+        batch.regions[0].next_payload_offset,
+        CHUNK_BYTES - METADATA_PAGE_BYTES as u64
+    );
 }
 
 #[test]
@@ -290,7 +293,7 @@ fn failed_payload_growth_leaves_addresses_unchanged() {
         .unwrap();
     assert_eq!(batch.entries[0].1.payload_range, payload);
     assert_eq!(batch.entries[1].1.payload_range, payload.end..CHUNK_BYTES);
-    assert_eq!(batch.regions[0].used_bytes, CHUNK_BYTES);
+    assert_eq!(batch.regions[0].next_payload_offset, CHUNK_BYTES);
     assert_eq!(batch.chunk_count(), 1);
 }
 
@@ -391,7 +394,7 @@ async fn eviction_budgets_and_active_reservations_bound_reclamation() {
     attempts_left = 1;
     chunks_left = MAX_EVICTION_CHUNKS;
     assert!(shard.sample_and_evict_entry(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
-    shard.flush_metadata(&cache.disk.file).await.unwrap();
+    shard.write_dirty_metadata_pages(&cache.disk.file).await.unwrap();
     let active = shard.allocator.reserve_chunks(2).unwrap();
     assert!(
         !cache
@@ -513,7 +516,7 @@ async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
     assert_eq!(histories.decayed_retrieval_cost(&key, range(200, 300)), 0.0);
     // Successful lookups are recorded explicitly; raw storage reads/writes do not double-count.
     assert!(cache.get(&key, range(0, 1)).await.is_some());
-    assert_eq!(histories.clock(), 3);
+    assert_eq!(histories.request_count(), 3);
     for _ in 0..*ACCESS_COUNT_HALF_LIFE {
         histories.record_access(&key, range(200, 201));
     }
@@ -551,7 +554,7 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
         assert!(memory.get(&hot, range(0, 1)).is_some());
         history.record_access(&hot, range(0, 1));
     }
-    assert_eq!(history.clock(), 5);
+    assert_eq!(history.request_count(), 5);
     assert!(
         cache
             .insert(ObjectKeyHash::from("new"), download(0, 100))
@@ -562,9 +565,9 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     assert!(memory.remove(&hot, range(0, 100)));
     assert!(memory.get(&hot, range(0, 1)).is_none());
     assert!(cache.get(&hot, range(50, 51)).await.is_some());
-    assert_eq!(history.clock(), 5); // Raw storage reads do not record a second event.
+    assert_eq!(history.request_count(), 5); // Raw storage reads do not record a second event.
     history.record_access(&hot, range(50, 51));
-    assert_eq!(history.clock(), 6);
+    assert_eq!(history.request_count(), 6);
     let shard = &cache.disk.shards[0];
     let entry = shard.entry_index.lock().unwrap().remove(&hot, 0).unwrap();
     shard.remove_payload_and_allow_metadata_overwrite(entry);
@@ -797,7 +800,7 @@ async fn writes_key_hash_range_and_payload_address_in_fixed_size_metadata() {
     let (payload, entry_metadata) = entry_disk_ranges(&cache, &key).await;
     assert_eq!(entry_metadata[0], 0..METADATA_PAGE_BYTES as u64);
     assert_eq!(payload[0].start, CHUNK_BYTES);
-    cache.flush_metadata().await;
+    cache.write_dirty_metadata_pages().await;
     let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
     let entry_metadata_bytes = page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG).unwrap();
     let read_u64 = |offset| u64::from_le_bytes(entry_metadata_bytes[offset..offset + 8].try_into().unwrap());
@@ -870,7 +873,7 @@ async fn long_keys_do_not_allocate_extra_metadata_chunks() {
         .unwrap();
     cache.disk.shards[0].remove_payload_and_allow_metadata_overwrite(entry);
     let shard = &cache.disk.shards[0];
-    shard.flush_metadata(&cache.disk.file).await.unwrap();
+    shard.write_dirty_metadata_pages(&cache.disk.file).await.unwrap();
     assert_eq!(shard.allocator.available_bytes(), 2 * CHUNK_BYTES);
 }
 
@@ -1142,7 +1145,7 @@ async fn failed_chunk_write_releases_the_batch_without_publication() {
     assert_eq!(shard.allocator.available_bytes(), 2 * CHUNK_BYTES);
     assert_eq!(
         shard.metadata_pages.lock().unwrap().free_entry_positions.len(),
-        page_format::RECORDS_PER_CHUNK
+        page_format::ENTRIES_PER_METADATA_CHUNK
     );
 }
 
@@ -1235,7 +1238,7 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
     assert!(first.last().unwrap().end <= 128 * CHUNK_BYTES);
     assert!(second[0].start >= 128 * CHUNK_BYTES);
     let returned = cache.get(&keys[0], range(0, 100)).await.unwrap();
-    cache.flush_metadata().await;
+    cache.write_dirty_metadata_pages().await;
     let capacity = cache.disk.file.capacity();
     drop(cache);
     let reopened = DiskCache::open(directory.path(), capacity, IoMetrics::noop())
@@ -1322,7 +1325,7 @@ fn invalidation_preserves_different_contents_but_may_discard_an_identical_replac
 fn metadata_pages_use_writer_layout_and_validate_checksum_and_tag() {
     let mut page = vec![0xff; METADATA_PAGE_BYTES];
     let tag = page_format::ENTRY_METADATA_PAGE_TAG;
-    let count = page_format::RECORDS_PER_PAGE as u64;
+    let count = page_format::ENTRIES_PER_METADATA_PAGE as u64;
     let contents = b"entry metadata contents";
     page_format::encode_page(&mut page, tag, count, contents);
     let validate = |bytes: &[u8]| page_format::validate_page(bytes, tag).is_some();

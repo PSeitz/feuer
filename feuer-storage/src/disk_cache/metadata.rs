@@ -16,43 +16,43 @@ pub(super) struct MetadataPages {
 
 /// One reserved metadata chunk and its independently checksummed pages.
 pub(super) struct MetadataChunk {
-    pub(super) region: DiskRegion,
+    pub(super) region: ReservedChunks,
     pub(super) bytes: Vec<u8>,
 }
 
 /// Byte offset of one entry's metadata within a chunk, skipping metadata page headers.
 fn entry_metadata_offset(entry_metadata_index: usize) -> usize {
-    entry_metadata_index / RECORDS_PER_PAGE * METADATA_PAGE_BYTES
+    entry_metadata_index / ENTRIES_PER_METADATA_PAGE * METADATA_PAGE_BYTES
         + PAGE_HEADER_BYTES
-        + entry_metadata_index % RECORDS_PER_PAGE * ENTRY_METADATA_BYTES
+        + entry_metadata_index % ENTRIES_PER_METADATA_PAGE * ENTRY_METADATA_BYTES
 }
 
 impl MetadataChunk {
-    pub(super) fn empty(region: DiskRegion) -> Self {
+    pub(super) fn empty(region: ReservedChunks) -> Self {
         let mut chunk = Self {
             region,
             bytes: vec![0; CHUNK_BYTES as usize],
         };
-        for page in 0..RECORD_PAGES {
-            chunk.reset_record_page(page);
+        for page in 0..ENTRY_METADATA_PAGES_PER_CHUNK {
+            chunk.clear_entry_metadata_page(page);
         }
         chunk.set_next_chunk_address(NO_CHUNK);
         chunk
     }
 
-    /// Resets a record page to empty records.
-    pub(super) fn reset_record_page(&mut self, page: usize) {
+    /// Clears a page's entry metadata.
+    pub(super) fn clear_entry_metadata_page(&mut self, page: usize) {
         encode_page(
             &mut self.bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES],
             ENTRY_METADATA_PAGE_TAG,
-            RECORDS_PER_PAGE as u64,
+            ENTRIES_PER_METADATA_PAGE as u64,
             &[],
         );
     }
 
     /// Sets the next metadata chunk's disk address, or `NO_CHUNK` to end the chain.
     fn set_next_chunk_address(&mut self, address: u64) {
-        let offset = RECORD_PAGES * METADATA_PAGE_BYTES;
+        let offset = ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES;
         encode_page(
             &mut self.bytes[offset..],
             NEXT_CHUNK_PAGE_TAG,
@@ -64,7 +64,7 @@ impl MetadataChunk {
     /// Reads the next metadata chunk's disk address, or `NO_CHUNK` at the end of the chain.
     /// Returns `None` if the link page is invalid.
     pub(super) fn next_chunk_address(&self) -> Option<u64> {
-        let offset = RECORD_PAGES * METADATA_PAGE_BYTES;
+        let offset = ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES;
         let contents = validate_page(&self.bytes[offset..], NEXT_CHUNK_PAGE_TAG)?;
         Some(u64::from_le_bytes(contents[..8].try_into().unwrap()))
     }
@@ -84,9 +84,9 @@ impl MetadataPages {
             self.set_last_chunk_link(chunk.region.range().start);
             let chunk_index = self.chunks.len();
             self.chunks.push(chunk);
-            self.dirty_pages.insert((chunk_index, RECORD_PAGES));
+            self.dirty_pages.insert((chunk_index, ENTRY_METADATA_PAGES_PER_CHUNK));
             self.free_entry_positions
-                .extend((0..RECORDS_PER_CHUNK).rev().map(|entry| (chunk_index, entry)));
+                .extend((0..ENTRIES_PER_METADATA_CHUNK).rev().map(|entry| (chunk_index, entry)));
         }
         self.free_entry_positions.pop()
     }
@@ -103,14 +103,14 @@ impl MetadataPages {
         let offset = entry_metadata_offset(entry_metadata_index);
         let bytes = &mut self.chunks[chunk_index].bytes;
         bytes[offset..offset + ENTRY_METADATA_BYTES].copy_from_slice(&entry_metadata);
-        let page = entry_metadata_index / RECORDS_PER_PAGE;
+        let page = entry_metadata_index / ENTRIES_PER_METADATA_PAGE;
         self.dirty_pages.insert((chunk_index, page));
     }
 
     pub(super) fn set_last_chunk_link(&mut self, address: u64) {
         if let Some(last) = self.chunks.len().checked_sub(1) {
             self.chunks[last].set_next_chunk_address(address);
-            self.dirty_pages.insert((last, RECORD_PAGES));
+            self.dirty_pages.insert((last, ENTRY_METADATA_PAGES_PER_CHUNK));
         }
     }
 }
@@ -125,7 +125,7 @@ impl DiskCacheInner {
             interval.tick().await;
             let Some(disk) = disk.upgrade() else { return };
             for shard in &disk.shards {
-                if let Err(error) = shard.flush_metadata(&disk.file).await {
+                if let Err(error) = shard.write_dirty_metadata_pages(&disk.file).await {
                     tracing::warn!(target: "feuer::storage", %error, "metadata write failed; entries remain usable");
                 }
             }
@@ -134,8 +134,9 @@ impl DiskCacheInner {
 }
 
 impl DiskCacheShard {
+    /// Writes dirty metadata pages without syncing them to stable storage.
     /// Called only by the periodic writer. Never holds the metadata mutex while waiting for I/O.
-    pub(super) async fn flush_metadata(&self, file: &DataFile) -> DataFileResult<()> {
+    pub(super) async fn write_dirty_metadata_pages(&self, file: &DataFile) -> DataFileResult<()> {
         let writes: Vec<_> = {
             let mut pages = self.metadata_pages.lock().unwrap();
             std::mem::take(&mut pages.dirty_pages)

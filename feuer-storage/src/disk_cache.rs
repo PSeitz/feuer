@@ -29,7 +29,7 @@ use twox_hash::XxHash64;
 
 use crate::{
     DataFile, DataFileError, DataFileResult, DiskMetrics, IoMetrics,
-    allocation::{CHUNK_BYTES, DiskChunkAllocator, DiskRegion},
+    allocation::{CHUNK_BYTES, DiskChunkAllocator, ReservedChunks},
     disk_metrics::{DiskLookupOutcome, DiskWriteAttempt, DiskWriteOutcome},
 };
 #[cfg(test)]
@@ -81,10 +81,11 @@ struct DiskEntryIndex {
 
 /// One contiguous reserved disk region and retained payload slices, before writing.
 struct UnwrittenRegion {
-    region: DiskRegion,
+    region: ReservedChunks,
     // Payload slices at 4-KiB-aligned offsets; metadata lives in separate chunks.
     parts: Vec<(usize, Bytes)>,
-    used_bytes: u64,
+    // Offset where the next payload starts, including alignment padding.
+    next_payload_offset: u64,
 }
 
 /// Entries and their chunk contents prepared for one shard's batch write.
@@ -679,7 +680,7 @@ impl UnwrittenShardBatch {
         let bytes = download.bytes();
         let aligned_payload_bytes = (bytes.len() as u64).next_multiple_of(BUFFER_ALIGNMENT as u64);
         let shares_chunk = self.regions.last().is_some_and(|region| {
-            region.region.chunk_count() == 1 && region.used_bytes + aligned_payload_bytes <= CHUNK_BYTES
+            region.region.chunk_count() == 1 && region.next_payload_offset + aligned_payload_bytes <= CHUNK_BYTES
         });
         if !shares_chunk {
             let count = aligned_payload_bytes.div_ceil(CHUNK_BYTES);
@@ -687,16 +688,16 @@ impl UnwrittenShardBatch {
             self.regions.push(UnwrittenRegion {
                 region,
                 parts: Vec::new(),
-                used_bytes: 0,
+                next_payload_offset: 0,
             });
         }
         let prepared = self.regions.last_mut().unwrap();
         let base = prepared.region.range().start;
-        let payload_start = base + prepared.used_bytes;
+        let payload_start = base + prepared.next_payload_offset;
         let payload_range = payload_start..payload_start + aligned_payload_bytes;
         let payload_checksum = XxHash64::oneshot(0, bytes);
         prepared.parts.push(((payload_start - base) as usize, bytes.clone()));
-        prepared.used_bytes += aligned_payload_bytes;
+        prepared.next_payload_offset += aligned_payload_bytes;
         self.entries.push((
             *key,
             DiskEntry {
@@ -770,7 +771,7 @@ impl PayloadRead {
         let start = requested.start() - self.object_range.start();
         let end = requested.end() - self.object_range.start();
         let (bytes, capacity) = file
-            .read_region(self.payload_range.clone(), self.object_range.len() as usize)
+            .read_payload(self.payload_range.clone(), self.object_range.len() as usize)
             .await?;
         if XxHash64::oneshot(0, &bytes) != self.payload_checksum {
             return Ok(None);

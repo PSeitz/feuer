@@ -20,7 +20,7 @@ impl DiskCacheInner {
         let mut metadata = shard.metadata_pages.lock().unwrap();
         let mut index = shard.entry_index.lock().unwrap();
         for chunk_index in 0..metadata.chunks.len() {
-            for entry_metadata_index in 0..RECORDS_PER_CHUNK {
+            for entry_metadata_index in 0..ENTRIES_PER_METADATA_CHUNK {
                 let entry_metadata_bytes = metadata.chunks[chunk_index].entry_metadata_bytes(entry_metadata_index);
                 let entry_metadata =
                     decode_entry_metadata(entry_metadata_bytes).filter(|(key, _, _, payload_range)| {
@@ -69,12 +69,12 @@ impl DiskCacheShard {
                 region,
                 bytes: bytes.to_vec(),
             };
-            for page in 0..RECORD_PAGES {
+            for page in 0..ENTRY_METADATA_PAGES_PER_CHUNK {
                 let bytes = &chunk.bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES];
                 if validate_page(bytes, ENTRY_METADATA_PAGE_TAG).is_none() {
                     // Clear invalid records before a later insertion rechecksums the page.
                     // Until then, the invalid page on disk is safe to leave untouched.
-                    chunk.reset_record_page(page);
+                    chunk.clear_entry_metadata_page(page);
                 }
             }
             let next_chunk_address = chunk.next_chunk_address();

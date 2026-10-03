@@ -18,7 +18,7 @@ fn queue_metrics_cover_enqueue_pressure_dequeue_and_cancellation() {
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 4.0);
     assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 1.0);
     let mut active = receiver.try_recv().unwrap();
-    active.entry_and_metrics.record_dequeue();
+    active.entry_and_metrics.finish_queue_wait();
     assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 4.0);
     assert_eq!(value(&registry, "feuer_disk_write_queue_duration_seconds", &[]), 1.0);
@@ -97,7 +97,7 @@ async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
             Bytes::from_static(b"abcd")
         );
         assert_eq!(
-            disk.access_histories().clock(),
+            disk.access_histories().request_count(),
             0,
             "queue operations do not record requests"
         );

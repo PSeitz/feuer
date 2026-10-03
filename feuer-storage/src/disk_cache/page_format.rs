@@ -1,6 +1,6 @@
 //! Experimental v13 metadata-only chunks. Each chunk contains 255 independently checksummed
-//! record pages and one checksummed next-chunk page. All-zero entry metadata is unused.
-//! Payloads live in separate chunks. Records never cross page boundaries.
+//! entry-metadata pages and one checksummed next-chunk page. All-zero entry metadata is unused.
+//! Payloads live in separate chunks. An entry's metadata never crosses a page boundary.
 
 use feuer_types::{ByteRange, ObjectKeyHash};
 use twox_hash::XxHash64;
@@ -8,7 +8,7 @@ use twox_hash::XxHash64;
 use crate::allocation::CHUNK_BYTES;
 
 /// Size in bytes of a metadata page, including its header and padding.
-/// Each entry metadata page holds 84 complete 48-byte records and 32 padding bytes.
+/// Each page holds metadata for 84 entries (48 bytes each) and 32 padding bytes.
 pub(super) const METADATA_PAGE_BYTES: usize = 4096;
 pub(super) const PAGE_HEADER_BYTES: usize = 32;
 pub(super) const ENTRY_METADATA_BYTES: usize = 48;
@@ -16,9 +16,12 @@ pub(super) const PAGE_CONTENT_BYTES: usize =
     (METADATA_PAGE_BYTES - PAGE_HEADER_BYTES) / ENTRY_METADATA_BYTES * ENTRY_METADATA_BYTES;
 pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES13";
 pub(super) const NEXT_CHUNK_PAGE_TAG: &[u8; 8] = b"FEUNXT13";
-pub(super) const RECORDS_PER_PAGE: usize = PAGE_CONTENT_BYTES / ENTRY_METADATA_BYTES;
-pub(super) const RECORD_PAGES: usize = CHUNK_BYTES as usize / METADATA_PAGE_BYTES - 1;
-pub(super) const RECORDS_PER_CHUNK: usize = RECORD_PAGES * RECORDS_PER_PAGE;
+/// Number of entries whose metadata fits in one page.
+pub(super) const ENTRIES_PER_METADATA_PAGE: usize = PAGE_CONTENT_BYTES / ENTRY_METADATA_BYTES;
+/// Number of entry-metadata pages in one chunk.
+pub(super) const ENTRY_METADATA_PAGES_PER_CHUNK: usize = CHUNK_BYTES as usize / METADATA_PAGE_BYTES - 1;
+/// Number of entries whose metadata fits in one chunk.
+pub(super) const ENTRIES_PER_METADATA_CHUNK: usize = ENTRY_METADATA_PAGES_PER_CHUNK * ENTRIES_PER_METADATA_PAGE;
 pub(super) const NO_CHUNK: u64 = u64::MAX;
 
 /// The reserved content-checksum field is zero; each page is validated independently.

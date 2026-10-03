@@ -43,14 +43,14 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 /// History is not persisted across restarts.
 pub struct ObjectAccessHistories {
     shards: [Mutex<FxHashMap<ObjectKeyHash, RangeAccessHistory>>; ACCESS_HISTORY_SHARDS],
-    clock: AtomicU64,
+    request_count: AtomicU64,
 }
 
 impl Default for ObjectAccessHistories {
     fn default() -> Self {
         Self {
             shards: std::array::from_fn(|_| Mutex::default()),
-            clock: AtomicU64::new(0),
+            request_count: AtomicU64::new(0),
         }
     }
 }
@@ -69,14 +69,14 @@ impl ObjectAccessHistories {
         let mut objects = self.shard(key).lock().unwrap();
         // Assign the clock under the shard lock so this key's updates cannot arrive out of order.
         // The atomic only measures request age; the shard mutex protects the history itself.
-        let clock = self.clock.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+        let clock = self.request_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
         objects.entry(*key).or_default().record(requested, clock);
     }
 
     /// Number of requests recorded across all keys and cache tiers.
     /// Other shards may still be applying their counter updates.
-    pub fn clock(&self) -> u64 {
-        self.clock.load(AtomicOrdering::Relaxed)
+    pub fn request_count(&self) -> u64 {
+        self.request_count.load(AtomicOrdering::Relaxed)
     }
 
     /// Sums retrieval costs for contained requests, weighted by decayed access counts.
@@ -84,7 +84,7 @@ impl ObjectAccessHistories {
     pub fn decayed_retrieval_cost(&self, key: &ObjectKeyHash, cached_range: ByteRange) -> f64 {
         let objects = self.shard(key).lock().unwrap();
         objects.get(key).map_or(0.0, |history| {
-            history.decayed_retrieval_cost(cached_range, self.clock())
+            history.decayed_retrieval_cost(cached_range, self.request_count())
         })
     }
 
@@ -93,7 +93,7 @@ impl ObjectAccessHistories {
     pub fn recent_requested_ranges(&self, key: &ObjectKeyHash) -> Vec<ByteRange> {
         let objects = self.shard(key).lock().unwrap();
         objects.get(key).map_or_else(Vec::new, |history| {
-            history.recent_requested_ranges(self.clock()).collect()
+            history.recent_requested_ranges(self.request_count()).collect()
         })
     }
 
@@ -401,7 +401,7 @@ mod tests {
         for thread in threads {
             thread.join().unwrap();
         }
-        assert_eq!(histories.clock(), 8000);
+        assert_eq!(histories.request_count(), 8000);
         let objects = histories.shard(&ObjectKeyHash::from("object")).lock().unwrap();
         assert_eq!(objects.len(), 1);
         let actual = &objects[&ObjectKeyHash::from("object")];
@@ -434,7 +434,7 @@ mod tests {
                 done.send(()).unwrap();
             });
             received.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-            assert_eq!(histories.clock(), 1);
+            assert_eq!(histories.request_count(), 1);
         });
     }
 
@@ -454,7 +454,7 @@ mod tests {
                 });
             }
         });
-        assert_eq!(histories.clock(), 32 * 200);
+        assert_eq!(histories.request_count(), 32 * 200);
         for key in &keys {
             let objects = histories.shard(key).lock().unwrap();
             let history = &objects[key];

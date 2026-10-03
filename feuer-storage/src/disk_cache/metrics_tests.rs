@@ -59,14 +59,14 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
         (252, 1024, 1),
         (1, CHUNK_BYTES as usize - METADATA_PAGE_BYTES, 1),
         (1, 2 * CHUNK_BYTES as usize, 1),
-        (page_format::RECORDS_PER_CHUNK as u128 + 1, 1, 2),
+        (page_format::ENTRIES_PER_METADATA_CHUNK as u128 + 1, 1, 2),
     ] {
         let capacity = if chunks == 2 { 100 } else { 4 } * CHUNK_BYTES;
         let (directory, cache) = tests::open_test_cache(capacity).await;
         let source = download(payload_bytes);
         let inputs: Vec<_> = (0..entries).map(|key| (ObjectKeyHash(key), source.clone())).collect();
         assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), entries as usize);
-        cache.flush_metadata().await;
+        cache.write_dirty_metadata_pages().await;
         let capacity = cache.disk.file.capacity();
         drop(cache);
 
@@ -113,7 +113,7 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     let written_chunks = value(&registry, "feuer_disk_chunks", &[("state", "allocated")]);
     assert_eq!(written_chunks, 5.0); // Metadata, one shared payload chunk, and three large-entry chunks.
     let metrics = cache.disk.metrics.clone();
-    cache.flush_metadata().await;
+    cache.write_dirty_metadata_pages().await;
     drop(cache);
 
     let cache = DiskCache::open_with_metrics(

@@ -36,8 +36,8 @@ struct PendingDiskWrite {
 }
 
 impl DiskWriteEntryAndMetrics {
-    /// Records dequeue time and removes this write from the queued-entry accounting.
-    fn record_dequeue(&mut self) {
+    /// Finishes the queue wait, measuring its duration and decreasing the queued-entry count.
+    fn finish_queue_wait(&mut self) {
         let queued_at = self.queued_at.take().expect("queued write dequeued once");
         self.metrics.queued_entries.decrease(1);
         self.metrics.queue_duration.record(queued_at.elapsed().as_secs_f64());
@@ -136,7 +136,7 @@ impl DiskWriteQueue {
                          download,
                          mut entry_and_metrics,
                      }| {
-                        entry_and_metrics.record_dequeue();
+                        entry_and_metrics.finish_queue_wait();
                         // This is the transition from queued to active. Later eviction may
                         // discard publication, but cannot cancel issued I/O or release its regions.
                         if !memory.with_entry_locked(&entry_and_metrics.key, entry_and_metrics.range, || ()) {

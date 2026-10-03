@@ -269,7 +269,7 @@ fn canceled_submitted_write_retains_buffers_but_not_disk_space() {
     drop(sender);
     read_queue.process_requests_until_disconnected().unwrap();
     assert_eq!(
-        reply.try_recv().unwrap().unwrap().into_read().as_ref(),
+        reply.try_recv().unwrap().unwrap().into_read_buffer().as_ref(),
         &[0x99; DIRECT_IO_ALIGNMENT_BYTES]
     );
 }
@@ -416,7 +416,7 @@ fn finished_read_transfers_buffer_ownership() {
     assert!(!read.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
     read.send_result(Ok(()));
 
-    let bytes = reply.try_recv().unwrap().unwrap().into_read().into_bytes();
+    let bytes = reply.try_recv().unwrap().unwrap().into_read_buffer().into_bytes();
     assert_eq!(bytes.as_ptr(), ptr);
     assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
     let slice = bytes.slice(1..);
@@ -466,7 +466,7 @@ fn canceled_read_retains_destination_but_not_disk_reservation_until_completion()
     let buffer = pool.allocate(2 * DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     let address = buffer.as_ref().as_ptr();
     read.buffers = IoBuffers::Read(buffer);
-    read.destination = DIRECT_IO_ALIGNMENT_BYTES..2 * DIRECT_IO_ALIGNMENT_BYTES;
+    read.buffer_range = DIRECT_IO_ALIGNMENT_BYTES..2 * DIRECT_IO_ALIGNMENT_BYTES;
     drop(region);
     sender.try_send(read).unwrap();
     drop(sender);
@@ -547,7 +547,7 @@ fn completion_state_handles_short_io_and_errors() {
 }
 
 #[test]
-#[should_panic(expected = "destination.end <= buffer.as_ref().len()")]
+#[should_panic(expected = "buffer_range.end <= buffer.as_ref().len()")]
 fn rejects_read_into_spare_capacity() {
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     let buffer = buffer_pool().allocate(page).unwrap();

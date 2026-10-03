@@ -88,7 +88,7 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
   only nonempty aligned requests and returns complete aligned read buffers.
 - Multi-chunk operations are not atomic. Completion permits subsequent reads but does not guarantee crash
   durability. There are no global scheduling barriers.
-- Caller cancellation does not cancel submitted kernel writes. The task owning a write's `DiskRegion` must
+- Caller cancellation does not cancel submitted kernel writes. The task owning a write's `ReservedChunks` must
   keep awaiting completion and prevent conflicting access or reuse, even when the result is abandoned.
   `DiskCache` owns reservation lifetime. Public scheduling additionally revalidates the memory-entry
   identity under its shard lock throughout disk publication.

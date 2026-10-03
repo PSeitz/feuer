@@ -12,22 +12,22 @@ pub(super) const CHUNK_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub(super) struct DiskChunkAllocator {
-    free: Arc<Mutex<DiskAvailability>>,
+    free: Arc<Mutex<FreeChunks>>,
     pub(super) chunk_capacity: u64,
     /// First chunk address -> reserved region and number of entries using it.
-    payload_chunks: Arc<Mutex<BTreeMap<u64, (DiskRegion, usize)>>>,
+    payload_chunks: Arc<Mutex<BTreeMap<u64, (ReservedChunks, usize)>>>,
 }
 
-/// Free disk chunks, with chunk accounting.
+/// Free chunks and their count.
 #[derive(Debug)]
-struct DiskAvailability {
+struct FreeChunks {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
     free_chunk_count_by_start: BTreeMap<u64, u64>,
     available_chunks: u64,
     metrics: Arc<DiskMetrics>,
 }
 
-impl DiskAvailability {
+impl FreeChunks {
     /// Removes the specified chunks from the free-chunk map and decreases the available chunk count.
     /// If any are unavailable, leaves both unchanged.
     fn remove_free_chunks(&mut self, chunks: Range<u64>) -> Option<()> {
@@ -75,7 +75,7 @@ impl DiskAvailability {
     }
 }
 
-impl Drop for DiskAvailability {
+impl Drop for FreeChunks {
     fn drop(&mut self) {
         self.metrics.free_chunks.decrease(self.available_chunks);
     }
@@ -110,7 +110,7 @@ impl DiskChunkAllocator {
         Some(Self {
             chunk_capacity,
             payload_chunks: Arc::new(Mutex::new(BTreeMap::new())),
-            free: Arc::new(Mutex::new(DiskAvailability {
+            free: Arc::new(Mutex::new(FreeChunks {
                 free_chunk_count_by_start: BTreeMap::from([(disk_range.start / CHUNK_BYTES, chunk_capacity)]),
                 available_chunks: chunk_capacity,
                 metrics,
@@ -119,7 +119,7 @@ impl DiskChunkAllocator {
     }
 
     /// Reserves chunks at a known address during startup, before writes are allowed.
-    pub(super) fn reserve_for_recovery(&self, first: u64, count: u64) -> Option<DiskRegion> {
+    pub(super) fn reserve_for_recovery(&self, first: u64, count: u64) -> Option<ReservedChunks> {
         let chunks = first..first.checked_add(count)?;
         let mut free = self.free.lock().unwrap();
         free.remove_free_chunks(chunks.clone())?;
@@ -150,7 +150,7 @@ impl DiskChunkAllocator {
     }
 
     /// Reserves one contiguous run of whole chunks. Failure consumes no space.
-    pub(super) fn reserve_chunks(&self, count: u64) -> Option<DiskRegion> {
+    pub(super) fn reserve_chunks(&self, count: u64) -> Option<ReservedChunks> {
         let mut free = self.free.lock().unwrap();
         if count == 0 || count > free.available_chunks {
             return None;
@@ -165,7 +165,7 @@ impl DiskChunkAllocator {
     }
 
     /// Retains a written chunk run until all its entries are removed.
-    pub(super) fn retain_payloads(&self, region: DiskRegion, entries: usize) {
+    pub(super) fn retain_payloads(&self, region: ReservedChunks, entries: usize) {
         self.payload_chunks
             .lock()
             .unwrap()
@@ -185,8 +185,8 @@ impl DiskChunkAllocator {
         }
     }
 
-    fn region(&self, chunks: Range<u64>) -> DiskRegion {
-        DiskRegion {
+    fn region(&self, chunks: Range<u64>) -> ReservedChunks {
+        ReservedChunks {
             free: self.free.clone(),
             chunks,
             recovered: false,
@@ -194,15 +194,15 @@ impl DiskChunkAllocator {
     }
 }
 
-/// One owner's reservation of consecutive whole chunks in the backing file.
+/// Reserved consecutive chunks, returned to the allocator when dropped.
 #[derive(Debug)]
-pub(super) struct DiskRegion {
-    free: Arc<Mutex<DiskAvailability>>,
+pub(super) struct ReservedChunks {
+    free: Arc<Mutex<FreeChunks>>,
     chunks: Range<u64>,
     recovered: bool,
 }
 
-impl DiskRegion {
+impl ReservedChunks {
     pub(super) fn range(&self) -> Range<u64> {
         self.chunks.start * CHUNK_BYTES..self.chunks.end * CHUNK_BYTES
     }
@@ -225,7 +225,7 @@ impl DiskRegion {
     }
 }
 
-impl Drop for DiskRegion {
+impl Drop for ReservedChunks {
     fn drop(&mut self) {
         let mut free = self.free.lock().unwrap();
         if self.recovered {
@@ -435,7 +435,7 @@ mod tests {
         let capacity = 16 * CHUNK_BYTES;
         let allocator = DiskChunkAllocator::new(capacity).unwrap();
         let mut occupied = [false; 16];
-        let mut entries = Vec::<DiskRegion>::new();
+        let mut entries = Vec::<ReservedChunks>::new();
         let mut random = 0x4de3_8129_f307_4a65u64;
         for _ in 0..10_000 {
             random ^= random << 13;

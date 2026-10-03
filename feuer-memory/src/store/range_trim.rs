@@ -1,7 +1,7 @@
 use feuer_types::ByteRange;
 
-/// Minimum percentage of source payload bytes that payload compaction must save.
-const MIN_PAYLOAD_COMPACTION_SAVINGS_PERCENT: u64 = 25;
+/// Minimum percentage of source payload bytes that range trimming must save.
+const MIN_RANGE_TRIM_SAVINGS_PERCENT: u64 = 25;
 
 /// A plan to trim a cached range: its source, retained ranges, and retained byte count.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +56,7 @@ pub(super) fn plan_range_trim(
     let retained_bytes = merged_ranges.iter().map(|range| range.len()).sum();
     let reclaimed_bytes = source_range.len() - retained_bytes;
     let minimum_saved_bytes =
-        (u128::from(source_range.len()) * u128::from(MIN_PAYLOAD_COMPACTION_SAVINGS_PERCENT)).div_ceil(100);
+        (u128::from(source_range.len()) * u128::from(MIN_RANGE_TRIM_SAVINGS_PERCENT)).div_ceil(100);
     if u128::from(reclaimed_bytes) < minimum_saved_bytes {
         return None;
     }
@@ -104,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_compaction_savings_round_up_without_overflow() {
+    fn range_trim_savings_round_up_without_overflow() {
         for (source_bytes, minimum_saved_bytes) in [(9, 3), (u64::MAX, 1_u64 << 62)] {
             let source = range(0, source_bytes);
             let retained_end = source_bytes - minimum_saved_bytes;

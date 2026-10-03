@@ -84,16 +84,16 @@ fn idle_limit_does_not_reserve_memory_and_cache_pressure_frees_idle_buffers_firs
     for size in &BUFFER_SIZES[..3] {
         drop(pool.allocate(*size).unwrap());
     }
-    pool.add_cached(capacity - BUFFER_SIZES[0] as u64);
+    pool.add_entry_bytes(capacity - BUFFER_SIZES[0] as u64);
     assert_eq!(pool.used_bytes(), capacity);
     assert_eq!(pool.idle_bytes(), BUFFER_SIZES[0] as u64);
     assert_eq!(pool.state.lock().by_size[0].len(), 1);
-    pool.add_cached(BUFFER_SIZES[0] as u64);
+    pool.add_entry_bytes(BUFFER_SIZES[0] as u64);
     assert_eq!(pool.idle_bytes(), 0);
     assert_eq!(pool.used_bytes(), capacity);
     drop(pool.allocate(BUFFER_SIZES[2]).unwrap());
     assert_eq!(pool.idle_bytes(), 0);
-    pool.remove_cached(capacity);
+    pool.remove_entry_bytes(capacity);
     drop(pool.allocate(BUFFER_SIZES[2]).unwrap());
     assert_eq!(pool.idle_bytes(), BUFFER_SIZES[2] as u64);
 }
@@ -201,11 +201,11 @@ fn bucket_gauges_follow_pressure_reclamation_and_shutdown_independently() {
     for (index, &size) in BUFFER_SIZES.iter().enumerate() {
         assert_eq!(idle(size), if index < 3 { size as f64 } else { 0.0 });
     }
-    pool.add_cached(capacity - BUFFER_SIZES[0] as u64);
+    pool.add_entry_bytes(capacity - BUFFER_SIZES[0] as u64);
     for (index, &size) in BUFFER_SIZES.iter().enumerate() {
         assert_eq!(idle(size), if index == 0 { size as f64 } else { 0.0 });
     }
-    pool.remove_cached(capacity - BUFFER_SIZES[0] as u64);
+    pool.remove_entry_bytes(capacity - BUFFER_SIZES[0] as u64);
     drop(pool);
     for size in BUFFER_SIZES {
         assert_eq!(idle(size), 0.0);
@@ -234,10 +234,10 @@ fn concurrent_returns_and_cache_charges_share_one_limit() {
         }
         scope.spawn(|| {
             for _ in 0..100 {
-                pool.add_cached(capacity);
+                pool.add_entry_bytes(capacity);
                 assert_eq!(pool.used_bytes(), capacity);
                 assert_eq!(pool.idle_bytes(), 0);
-                pool.remove_cached(capacity);
+                pool.remove_entry_bytes(capacity);
             }
         });
     });

@@ -2,7 +2,7 @@ use super::*;
 use crate::disk_cache::tests::{download, open_test_cache, range, with_manual_metadata_writes};
 
 async fn reopen(directory: &Path, cache: DiskCache) -> DiskCache {
-    cache.flush_metadata().await;
+    cache.write_dirty_metadata_pages().await;
     let capacity = cache.disk.file.capacity();
     drop(cache);
     with_manual_metadata_writes(DiskCache::open(directory, capacity, IoMetrics::noop()).await.unwrap())
@@ -60,7 +60,7 @@ async fn recovers_separate_metadata_and_contiguous_multi_chunk_payloads() {
 #[tokio::test]
 async fn concurrent_batches_grow_metadata_chain_and_recover_every_entry() {
     let (directory, cache) = open_test_cache(100 * CHUNK_BYTES).await;
-    let entries = RECORDS_PER_CHUNK + 17;
+    let entries = ENTRIES_PER_METADATA_CHUNK + 17;
     let inputs = |keys: Range<usize>| keys.map(|i| (ObjectKeyHash(i as u128), download(0, 1))).collect();
     let (first, second) = tokio::join!(
         cache.insert_batch(inputs(0..entries / 2)),
@@ -156,9 +156,9 @@ async fn eviction_does_not_recover_an_old_record_for_reused_payload_chunks() {
 }
 
 #[tokio::test]
-async fn torn_record_page_does_not_reject_other_pages() {
+async fn torn_entry_metadata_page_does_not_reject_other_pages() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
-    let entries = RECORDS_PER_PAGE + 1;
+    let entries = ENTRIES_PER_METADATA_PAGE + 1;
     assert_eq!(
         cache
             .insert_batch(
@@ -170,7 +170,7 @@ async fn torn_record_page_does_not_reject_other_pages() {
             .unwrap(),
         entries
     );
-    cache.flush_metadata().await;
+    cache.write_dirty_metadata_pages().await;
     let address = 0;
     let mut bytes = cache
         .disk
@@ -187,7 +187,7 @@ async fn torn_record_page_does_not_reject_other_pages() {
     assert!(cache.get(&ObjectKeyHash(0), range(0, 1)).await.is_none());
     assert!(
         cache
-            .get(&ObjectKeyHash(RECORDS_PER_PAGE as u128), range(0, 1))
+            .get(&ObjectKeyHash(ENTRIES_PER_METADATA_PAGE as u128), range(0, 1))
             .await
             .is_some()
     );
@@ -196,7 +196,7 @@ async fn torn_record_page_does_not_reject_other_pages() {
     assert!(cache.get(&ObjectKeyHash(999), range(0, 1)).await.is_some());
     assert!(
         cache
-            .get(&ObjectKeyHash(RECORDS_PER_PAGE as u128), range(0, 1))
+            .get(&ObjectKeyHash(ENTRIES_PER_METADATA_PAGE as u128), range(0, 1))
             .await
             .is_some()
     );
@@ -212,8 +212,8 @@ async fn corrupt_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
     ] {
         let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
         assert!(cache.insert(ObjectKeyHash(1), download(0, 1)).await.unwrap());
-        cache.flush_metadata().await;
-        let offset = (RECORD_PAGES * METADATA_PAGE_BYTES) as u64;
+        cache.write_dirty_metadata_pages().await;
+        let offset = (ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES) as u64;
         let mut page = vec![0; METADATA_PAGE_BYTES];
         encode_page(&mut page, NEXT_CHUNK_PAGE_TAG, 1, &next_chunk_address.to_le_bytes());
         if corrupt_checksum {
@@ -254,7 +254,7 @@ async fn payload_corruption_remains_a_checksum_miss() {
 #[tokio::test]
 async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    let entries = RECORDS_PER_PAGE + 1;
+    let entries = ENTRIES_PER_METADATA_PAGE + 1;
     assert_eq!(
         cache
             .insert_batch(
@@ -271,9 +271,9 @@ async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
     let short_file = DataFile::open(directory.path(), METADATA_PAGE_BYTES as u64, IoMetrics::noop())
         .await
         .unwrap();
-    assert!(shard.flush_metadata(&short_file).await.is_err());
+    assert!(shard.write_dirty_metadata_pages(&short_file).await.is_err());
     assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
-    shard.flush_metadata(&short_file).await.unwrap();
+    shard.write_dirty_metadata_pages(&short_file).await.unwrap();
     assert_eq!(
         cache.get(&ObjectKeyHash(0), range(0, 1)).await.unwrap(),
         download(0, 1).bytes()
@@ -320,7 +320,7 @@ async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
             .unwrap(),
         2
     );
-    cache.flush_metadata().await;
+    cache.write_dirty_metadata_pages().await;
     let address = 0;
     let mut bytes = cache
         .disk
@@ -350,7 +350,7 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
             ])
             .await
             .unwrap();
-        cache.flush_metadata().await;
+        cache.write_dirty_metadata_pages().await;
         // Give the second record the first record's key and start, keeping distinct payload addresses.
         let mut page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap().to_vec();
         let offset = PAGE_HEADER_BYTES + ENTRY_METADATA_BYTES;
@@ -380,7 +380,7 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
         }
         assert_eq!(
             shard.metadata_pages.lock().unwrap().free_entry_positions.len(),
-            RECORDS_PER_CHUNK - 1
+            ENTRIES_PER_METADATA_CHUNK - 1
         );
         assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 1.0);
         assert_eq!(

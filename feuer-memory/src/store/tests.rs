@@ -8,7 +8,7 @@ use feuer_types::{
 
 use super::{
     MemoryCache,
-    shard::{InsertOrReclaimResult, MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION},
+    shard::{InsertOrReclaimResult, MIN_REQUESTS_BEFORE_RANGE_TRIM},
     shard_capacity_for,
 };
 use crate::MemoryMetrics;
@@ -114,7 +114,7 @@ fn trimming_replaces_allocation_capacity_with_copied_payload_capacity() {
         Download::new(0, buffer.into_bytes().slice(..100)).unwrap(),
         capacity,
     );
-    for _ in 0..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+    for _ in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM {
         cache.access_histories.record_access(&key, range(10, 20));
     }
     cache.insert("incoming".into(), Download::new(0, Bytes::from_static(b"x")).unwrap());
@@ -589,7 +589,7 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
     let returned = cache.get(&key, range(2, 4)).unwrap();
     assert_eq!(returned, Bytes::from_static(b"cd"));
     assert_eq!(returned.as_ptr(), original.slice(2..).as_ptr());
-    for _ in 0..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+    for _ in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM {
         cache.access_histories.record_access(&key, range(2, 4));
     }
     insert(&cache, incoming, download(range(0, 2), Bytes::from_static(b"xy")));
@@ -607,7 +607,7 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
     assert!(cache.get(&key, range(0, 1)).is_none());
     assert_eq!(
         access_history_len(&cache, &key),
-        (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION as usize)
+        (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_REQUESTS_BEFORE_RANGE_TRIM as usize)
     );
     assert!(accessed_ranges(&cache, &key).iter().all(|seen| *seen == range(2, 4)));
 }
@@ -619,7 +619,7 @@ fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
     insert(&cache, key, download(range(0, 10), Bytes::from_static(b"abcdefghij")));
     cache.access_histories.record_access(&key, range(1, 3));
     cache.access_histories.record_access(&key, range(7, 9));
-    for _ in 2..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+    for _ in 2..MIN_REQUESTS_BEFORE_RANGE_TRIM {
         cache.access_histories.record_access(&key, range(1, 3));
     }
 
@@ -643,12 +643,12 @@ fn range_trim_waits_for_pressure_and_adds_no_access() {
     insert(&cache, key, download(range(0, 16), original.clone()));
 
     let returned = cache.get(&key, range(4, 8)).unwrap();
-    for _ in 0..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+    for _ in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM {
         cache.access_histories.record_access(&key, range(4, 8));
     }
 
     assert_eq!(cache.used_bytes(), 16);
-    let history_len = (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION as usize);
+    let history_len = (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_REQUESTS_BEFORE_RANGE_TRIM as usize);
     assert_eq!(access_history_len(&cache, &key), history_len);
     insert(
         &cache,
@@ -683,7 +683,7 @@ fn new_accesses_do_not_invalidate_a_copied_range_trim() {
     let cache = cache(10);
     let key = ObjectKeyHash::from("download");
     cache.insert(key, download(range(0, 10), Bytes::from_static(b"abcdefghij")));
-    for _ in 0..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+    for _ in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM {
         cache.access_histories.record_access(&key, range(2, 4));
     }
 
@@ -708,7 +708,7 @@ fn new_accesses_do_not_invalidate_a_copied_range_trim() {
     // Recording needs no memory shard lock, even while the shard is held here.
     let mut shard = cache.shards[0].lock();
     cache.access_histories.record_access(&key, range(6, 8));
-    assert!(shard.publish_range_trim(replacement, cache.access_histories.clock()));
+    assert!(shard.publish_range_trim(replacement, cache.access_histories.request_count()));
     drop(shard);
     assert_eq!(cache.used_bytes(), 2);
     assert_eq!(cache.get(&key, range(2, 4)).unwrap(), Bytes::from_static(b"cd"));
@@ -723,7 +723,7 @@ fn range_trim_requires_only_the_exact_source_range() {
         let key = ObjectKeyHash::from("source");
         let source = download(range(0, 10), Bytes::from_static(b"abcdefghij"));
         cache.insert(key, source.clone());
-        for _ in 0..MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+        for _ in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM {
             cache.access_histories.record_access(&key, range(2, 4));
         }
         let trim_source = {
@@ -766,7 +766,7 @@ fn range_trim_requires_only_the_exact_source_range() {
         assert_eq!(
             cache.shards[0]
                 .lock()
-                .publish_range_trim(replacement, cache.access_histories.clock()),
+                .publish_range_trim(replacement, cache.access_histories.request_count()),
             matches!(change, 1 | 2 | 4)
         );
         if matches!(change, 1 | 2 | 4) {
@@ -821,11 +821,11 @@ fn shared_evidence_survives_memory_eviction_and_records_disk_only_requests() {
     history.record_access(&key, range(0, 1));
     assert!(cache.remove(&key, range(0, 1)));
     history.record_access(&key, range(10, 11));
-    assert_eq!(history.clock(), 2);
+    assert_eq!(history.request_count(), 2);
     insert(&cache, key, download(range(0, 1), Bytes::from_static(b"a")));
     assert_eq!(accessed_ranges(&cache, &key), vec![range(0, 1), range(10, 11)]);
     assert!(cache.get(&key, range(0, 1)).is_some());
-    assert_eq!(history.clock(), 2, "raw lookups do not record requests");
+    assert_eq!(history.request_count(), 2, "raw lookups do not record requests");
 }
 
 #[test]

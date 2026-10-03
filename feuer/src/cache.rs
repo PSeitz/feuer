@@ -325,7 +325,7 @@ mod tests {
             1.0
         );
         assert_eq!(
-            cache.state.access_histories.clock(),
+            cache.state.access_histories.request_count(),
             5,
             "every request is recorded, including errors and invalid downloads"
         );
@@ -380,7 +380,7 @@ mod tests {
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"defg"));
         wait_for_disk(&cache, &key, source.downloaded_range()).await;
-        assert_eq!(history.clock(), 1);
+        assert_eq!(history.request_count(), 1);
 
         // The same key selects the same memory shard; an oversized disjoint range
         // forces the original download out without contributing an access.
@@ -403,7 +403,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(hit, result);
-            assert_eq!(history.clock(), accesses);
+            assert_eq!(history.request_count(), accesses);
         }
         assert_eq!(cache.state.memory.used_bytes(), 32 * 1024);
     }
@@ -470,7 +470,7 @@ mod tests {
             .unwrap();
         assert_eq!(bytes, Bytes::from_static(b"cd"));
         assert_eq!(cache.state.memory.used_bytes(), 0);
-        assert_eq!(history.clock(), 1);
+        assert_eq!(history.request_count(), 1);
     }
 
     #[tokio::test]
@@ -493,7 +493,7 @@ mod tests {
             })
         };
         entered.notified().await;
-        assert_eq!(history.clock(), 1, "recorded before the callback completes");
+        assert_eq!(history.request_count(), 1, "recorded before the callback completes");
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(
@@ -509,7 +509,7 @@ mod tests {
                 .disk
                 .contains(&ObjectKeyHash::from(key.as_str()), range(0, 1))
         );
-        assert_eq!(history.clock(), 1);
+        assert_eq!(history.request_count(), 1);
     }
 
     #[tokio::test]

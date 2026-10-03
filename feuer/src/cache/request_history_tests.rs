@@ -24,7 +24,7 @@ async fn records_each_started_request_before_any_result() {
     let requested = ByteRange::new(0, 1).unwrap();
     let result = cache
         .get_or_fetch(key.clone(), requested, || async {
-            assert_eq!(history.clock(), 1);
+            assert_eq!(history.request_count(), 1);
             Err::<Download, _>("source failed")
         })
         .await;
@@ -32,7 +32,7 @@ async fn records_each_started_request_before_any_result() {
 
     let result = cache
         .get_or_fetch(key.clone(), requested, || async {
-            assert_eq!(history.clock(), 2);
+            assert_eq!(history.request_count(), 2);
             Ok::<_, &str>(Download::new(10, Bytes::from_static(b"x")).unwrap())
         })
         .await;
@@ -41,19 +41,27 @@ async fn records_each_started_request_before_any_result() {
     let mut pending = Box::pin(cache.get_or_fetch(key.clone(), requested, || {
         std::future::pending::<Result<Download, &str>>()
     }));
-    assert_eq!(history.clock(), 2, "an unpolled future has not started a request");
+    assert_eq!(
+        history.request_count(),
+        2,
+        "an unpolled future has not started a request"
+    );
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx)))
             .await
             .is_pending()
     );
-    assert_eq!(history.clock(), 3, "recorded while the request is still pending");
+    assert_eq!(
+        history.request_count(),
+        3,
+        "recorded while the request is still pending"
+    );
     drop(pending);
-    assert_eq!(history.clock(), 3, "cancellation does not erase demand");
+    assert_eq!(history.request_count(), 3, "cancellation does not erase demand");
 
     cache
         .get_or_fetch(key.clone(), requested, || async {
-            assert_eq!(history.clock(), 4);
+            assert_eq!(history.request_count(), 4);
             Ok::<_, &str>(Download::new(0, Bytes::from_static(b"x")).unwrap())
         })
         .await
@@ -64,7 +72,7 @@ async fn records_each_started_request_before_any_result() {
         })
         .await
         .unwrap();
-    assert_eq!(history.clock(), 5, "success paths do not double-count");
+    assert_eq!(history.request_count(), 5, "success paths do not double-count");
     assert_eq!(
         history.recent_requested_ranges(&ObjectKeyHash::from(key)),
         vec![requested; 5]

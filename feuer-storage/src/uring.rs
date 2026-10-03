@@ -93,11 +93,11 @@ impl IoQueueHandle {
         &self,
         offset: u64,
         buffers: IoBuffers,
-        destination: Range<usize>,
+        buffer_range: Range<usize>,
         permit: mpsc::Permit<'_, IoRequest>,
     ) -> io::Result<IoBuffers> {
         let (result_sender, result_receiver) = oneshot::channel();
-        permit.send(IoRequest::new(offset, buffers, destination, result_sender));
+        permit.send(IoRequest::new(offset, buffers, buffer_range, result_sender));
         wake_queue(&self.wake_fd);
         result_receiver.await.map_err(|_| queue_stopped_error())?
     }
@@ -139,7 +139,7 @@ impl ReadQueue {
             .handle
             .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
             .await?
-            .into_read()
+            .into_read_buffer()
             .into_bytes())
     }
 
@@ -157,7 +157,7 @@ impl ReadQueue {
             self.handle
                 .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
                 .await?
-                .into_read()
+                .into_read_buffer()
                 .into_bytes(),
         ))
     }
@@ -174,7 +174,7 @@ impl ReadQueue {
             .handle
             .submit_and_wait(offset, IoBuffers::Read(buffer), destination, permit)
             .await?
-            .into_read())
+            .into_read_buffer())
     }
 }
 
@@ -277,7 +277,8 @@ impl IoBuffers {
         }
     }
 
-    fn into_read(self) -> AlignedBuffer {
+    /// Takes the read buffer from completed I/O buffers.
+    fn into_read_buffer(self) -> AlignedBuffer {
         match self {
             Self::Read(buffer) => buffer,
             Self::Write { .. } => unreachable!("write result cannot be used as a read buffer"),
@@ -295,8 +296,8 @@ struct IoRequest {
     offset: u64,
     // Aligned memory for disk reads/writes; kept alive until I/O completes.
     buffers: IoBuffers,
-    // Read destination slice, or the complete logical range of a vectored write.
-    destination: Range<usize>,
+    // Byte range within the I/O buffers to read into or write from.
+    buffer_range: Range<usize>,
     // Bytes completed, allowing aligned short-I/O continuations.
     completed_bytes: usize,
     // Caller result channel; taken on finish/failure, also detects cancellation.
@@ -307,22 +308,22 @@ impl IoRequest {
     fn new(
         offset: u64,
         buffers: IoBuffers,
-        destination: Range<usize>,
+        buffer_range: Range<usize>,
         reply: oneshot::Sender<io::Result<IoBuffers>>,
     ) -> Self {
         assert!(offset.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES as u64));
-        assert!(destination.start.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
-        let length = destination.len();
+        assert!(buffer_range.start.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
+        let length = buffer_range.len();
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         match &buffers {
-            IoBuffers::Read(buffer) => assert!(destination.end <= buffer.as_ref().len()),
-            IoBuffers::Write { bytes, .. } => assert_eq!(destination, 0..bytes.iter().map(Bytes::len).sum()),
+            IoBuffers::Read(buffer) => assert!(buffer_range.end <= buffer.as_ref().len()),
+            IoBuffers::Write { bytes, .. } => assert_eq!(buffer_range, 0..bytes.iter().map(Bytes::len).sum()),
         }
         assert!(length > 0 && length <= MAX_IO_REQUEST_BYTES);
         Self {
             offset,
             buffers,
-            destination,
+            buffer_range,
             completed_bytes: 0,
             reply: Some(reply),
         }
@@ -333,7 +334,7 @@ impl IoRequest {
             .submission_entry(
                 types::Fd(fd),
                 self.offset + self.completed_bytes as u64,
-                self.destination.start + self.completed_bytes..self.destination.end,
+                self.buffer_range.start + self.completed_bytes..self.buffer_range.end,
             )
             .user_data(request_index as u64)
     }
@@ -348,11 +349,11 @@ impl IoRequest {
             return Err(io::Error::from_raw_os_error(-result));
         }
         let completion_bytes = result as usize;
-        if completion_bytes == 0 || completion_bytes > self.destination.len() - self.completed_bytes {
+        if completion_bytes == 0 || completion_bytes > self.buffer_range.len() - self.completed_bytes {
             return Err(self.incomplete_io_error());
         }
         self.completed_bytes += completion_bytes;
-        if self.completed_bytes != self.destination.len() {
+        if self.completed_bytes != self.buffer_range.len() {
             // An unaligned remainder cannot be resubmitted with O_DIRECT.
             if !self.completed_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
                 return Err(self.incomplete_io_error());

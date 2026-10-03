@@ -208,7 +208,7 @@ impl MemoryCache {
                     // Payload copying is deliberately outside the shard lock.
                     // Publication checks that the exact source range is still cached, not history.
                     let replacement = source.copy_retained_payloads();
-                    let access_clock = self.access_histories.clock();
+                    let access_clock = self.access_histories.request_count();
                     if !self.shards[shard_index]
                         .lock()
                         .publish_range_trim(replacement, access_clock)

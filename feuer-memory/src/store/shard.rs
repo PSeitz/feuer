@@ -10,8 +10,8 @@ use rustc_hash::FxHashMap;
 use super::range_trim::{RangeTrimPlan, plan_range_trim};
 use crate::{BufferPool, MemoryMetrics};
 
-/// Minimum requests across all keys since admission before payload compaction is allowed.
-pub(super) const MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION: u64 = 64;
+/// Minimum requests across all keys since admission before trimming a range.
+pub(super) const MIN_REQUESTS_BEFORE_RANGE_TRIM: u64 = 64;
 
 /// An entry's payload bytes, object range, allocation capacity, candidate index, and admission clock.
 struct MemoryEntry {
@@ -240,7 +240,13 @@ impl MemoryCacheShard {
         if used_bytes_without_contained_entries <= max_existing_bytes {
             let removal = self.remove_contained_entries(object_key, &contained_ranges.ranges);
             debug_assert_eq!(removal.allocation_bytes, contained_ranges.allocation_bytes);
-            self.insert_download_entry(*object_key, range, bytes.clone(), capacity, access_histories.clock());
+            self.insert_download_entry(
+                *object_key,
+                range,
+                bytes.clone(),
+                capacity,
+                access_histories.request_count(),
+            );
 
             if removal.entry_count != 0 {
                 self.metrics
@@ -277,7 +283,7 @@ impl MemoryCacheShard {
         access_clock: u64,
     ) {
         self.used_bytes += capacity;
-        self.buffer_pool.add_cached(capacity);
+        self.buffer_pool.add_entry_bytes(capacity);
         let candidate_index = self.candidates.register(ObjectKeyAndRangeStart {
             object_key,
             start: range.start(),
@@ -305,7 +311,7 @@ impl MemoryCacheShard {
     /// Inserts an entry holding bytes retained by trimming; the caller accounts for its bytes.
     fn insert_trimmed_entry(&mut self, object_key: &ObjectKeyHash, range: ByteRange, bytes: Bytes, access_clock: u64) {
         let capacity = bytes.len() as u64;
-        self.buffer_pool.add_cached(capacity);
+        self.buffer_pool.add_entry_bytes(capacity);
         let candidate_index = self.candidates.register(ObjectKeyAndRangeStart {
             object_key: *object_key,
             start: range.start(),
@@ -367,7 +373,7 @@ impl MemoryCacheShard {
         }
         let removed_bytes = removed_entry.capacity;
         self.used_bytes -= removed_bytes;
-        self.buffer_pool.remove_cached(removed_bytes);
+        self.buffer_pool.remove_entry_bytes(removed_bytes);
         Some(removed_bytes)
     }
 
@@ -439,8 +445,8 @@ impl MemoryCacheShard {
             .by_start
             .get(&candidate.range.start())
             .expect("an entry selected for trimming must still be indexed");
-        let access_clock = access_histories.clock();
-        if access_clock.saturating_sub(entry.admitted_at_access) < MIN_ACCESSES_BEFORE_PAYLOAD_COMPACTION {
+        let access_clock = access_histories.request_count();
+        if access_clock.saturating_sub(entry.admitted_at_access) < MIN_REQUESTS_BEFORE_RANGE_TRIM {
             return None;
         }
         let plan = plan_range_trim(
@@ -504,7 +510,7 @@ impl Drop for MemoryCacheShard {
         let entry_count = self.entry_count() as u64;
         if entry_count != 0 {
             self.metrics.decrease_usage(self.used_bytes, entry_count);
-            self.buffer_pool.remove_cached(self.used_bytes);
+            self.buffer_pool.remove_entry_bytes(self.used_bytes);
         }
     }
 }
