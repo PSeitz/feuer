@@ -587,14 +587,16 @@ impl DiskEntryIndex {
             return vec![entry];
         }
         let mut removed = Vec::new();
-        if let Some(entries) = self.entries_by_key.get(&key) {
-            let replaced_range_starts: Vec<_> = entries
-                .range(object_range.start()..object_range.end())
-                .filter_map(|(&start, entry)| object_range.contains(entry.object_range).then_some(start))
-                .collect();
-            for start in replaced_range_starts {
-                removed.push(self.remove(&key, start).unwrap());
+        while let Some((&start, existing)) = self
+            .entries_by_key
+            .get(&key)
+            .and_then(|entries| entries.range(object_range.start()..).next())
+        {
+            // Retained ranges have increasing ends, so no later range can be contained either.
+            if !object_range.contains(existing.object_range) {
+                break;
             }
+            removed.push(self.remove(&key, start).unwrap());
         }
         entry.eviction_position = self.eviction_candidates.len();
         self.metrics.entries.increase(1);
