@@ -130,17 +130,14 @@ fn entry_presence_check_accepts_reinsertion_but_rejects_removal_and_replacement(
     let payload = Download::new(10, Bytes::from_static(b"abcd")).unwrap();
     let range = payload.downloaded_range();
     assert!(cache.insert(key, payload.clone()));
-    let mut calls = 0;
-    assert!(cache.with_entry_locked(&key, range, || calls += 1));
-    assert_eq!(calls, 1);
+    assert!(cache.contains_entry(&key, range));
     assert!(!cache.insert(key, payload.clone()));
     assert!(cache.remove(&key, range));
-    assert!(!cache.with_entry_locked(&key, range, || panic!("removed entry")));
+    assert!(!cache.contains_entry(&key, range));
     assert!(cache.insert(key, payload));
-    assert!(cache.with_entry_locked(&key, range, || calls += 1));
-    assert_eq!(calls, 2);
+    assert!(cache.contains_entry(&key, range));
     cache.insert(key, Download::new(9, Bytes::from_static(b"xabcdy")).unwrap());
-    assert!(!cache.with_entry_locked(&key, range, || panic!("entry replaced by a containing download")));
+    assert!(!cache.contains_entry(&key, range));
 }
 
 fn range(start: u64, end: u64) -> ByteRange {

@@ -46,9 +46,8 @@ One periodic writer persists dirty metadata pages every second, best-effort; see
 Publication rechecks containment, larger entries first within each region: broader entries replace
 contained entries, while partial overlaps coexist. Contained entries and entries that cannot fit are skipped.
 Later writes may replace or evict entries published earlier in the same batch. A write failure releases
-that region without undoing earlier publication. `insert_batch_with_publication_check` retains caller tokens and
-invokes the synchronous publication check under the index lock. Rejected and superseded entries
-release their payload occupancy without invalidation writes.
+that region without undoing earlier publication. Publication does not check memory residency: the writer
+owns immutable downloaded bytes. Superseded entries release their payload occupancy without invalidation writes.
 
 The detached writer retains the current region's reservation during normal writes. Queued I/O retains buffers,
 not disk space: an abandoned write can overwrite a reused payload, producing a checksum miss.
@@ -90,7 +89,8 @@ chunk of its shard. There is no `recovery-heads` file or periodic address checkp
 Recovery follows links using **one 1-MiB read per metadata chunk**. It never scans payload chunks to
 find metadata. The read channel holds at most 64 waiting requests and processes them in arrival order.
 All metadata chunks in a shard are reserved before records can claim payload addresses. Record
-decoding checks range arithmetic, alignment, and shard identity. The allocator reserves payload
+decoding relies on the checksummed page's writer contract for range arithmetic and alignment, while
+checking current shard identity. The allocator reserves payload
 chunks and counts records sharing them; overlapping stale records are allowed and validated on read.
 Entries are indexed during opening, with duplicate starts and contained ranges removed before publication.
 Each shard's recovery runs on Tokio's blocking pool, using io_uring for reads. Opening returns only

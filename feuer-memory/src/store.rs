@@ -168,12 +168,11 @@ impl MemoryCache {
         self.admit_download(object_key, downloaded_range, bytes, capacity as u64)
     }
 
-    /// Runs the callback while the shard lock prevents an entry from being removed, replaced, or trimmed.
-    /// Returns whether the callback ran; skips it if no entry has this exact key and range.
-    /// The callback must not reenter this memory cache or perform I/O.
-    pub fn with_entry_locked(&self, object_key: &ObjectKeyHash, range: ByteRange, callback: impl FnOnce()) -> bool {
-        let shard = self.shards[self.shard_index(object_key)].lock();
-        shard.contains_entry(object_key, range).then(callback).is_some()
+    /// Checks whether the exact key and range are cached, without retaining bytes or recording an access.
+    pub fn contains_entry(&self, object_key: &ObjectKeyHash, range: ByteRange) -> bool {
+        self.shards[self.shard_index(object_key)]
+            .lock()
+            .contains_entry(object_key, range)
     }
 
     fn admit_download(

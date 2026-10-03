@@ -39,16 +39,16 @@ operations. Use the public lookup counters to measure caller-visible behavior.
 Disk read errors and checksum failures still behave as cache misses. Metrics
 make those distinct from absent entries. `contains()` does not count as a lookup.
 
-Chunk states are disjoint. Reserved chunks remain reserved until **all entry
-owners and read guards release them**. Eviction does not necessarily free a
-chunk. Quarantined chunks cannot be reused during that allocator's lifetime.
+Chunk states are disjoint. Payload reservations are released after their last indexed
+entry is removed, without waiting for readers. Metadata chunks remain reserved while
+open; active writers retain their current reservation while awaiting I/O.
+Eviction does not necessarily free a shared chunk.
 Gauges are removed when their owners disappear, including on cache shutdown.
 Detached writes can outlive the last public cache handle.
 
-`reserved * 1 MiB - indexed payload bytes` measures capacity unavailable for
-indexed payload, including metadata, padding, partially dead chunks, active
-writes and read-guard retention. It is not a pure fragmentation measurement.
-Quarantined capacity is reported separately. Indexed payload bytes count retained
+`allocated * 1 MiB - indexed payload bytes` measures capacity unavailable for
+indexed payload, including metadata, padding, partially dead chunks, and active
+writes. It is not a pure fragmentation measurement. Indexed payload bytes count retained
 entry payloads, not a deduplicated union of overlapping object ranges.
 
 For byte-weighted packing efficiency, divide the rate of batch `payload` bytes
@@ -67,11 +67,11 @@ individual kernel submissions.
 Recovered chunks are a subset of `feuer_disk_chunks{state="allocated"}`, not
 additional capacity. Each chunk counts once, including shared chunks and every
 chunk of a multi-chunk entry. Temporary scan reservations and normal writes do
-not increase this gauge. A chunk stops counting only after all entry owners and
-read guards release it; reuse by a new write does not count as recovered.
+not increase this gauge. A recovered payload chunk stops counting after its last
+entry is removed; reuse by a new write does not count as recovered.
 
 Recovery validates metadata; payload checksums are verified on read. A positive
-value shows that recovery restored chunks still held by owners or read guards,
+value shows that recovery restored chunks still reserved by metadata or payload entries,
 not that their payloads have been verified. Zero can mean recovery has not yet
 restored anything, or that all recovered chunks have since been released.
 
@@ -79,20 +79,12 @@ restored anything, or that all recovered chunks have since been released.
 
 Enable `feuer::storage=info` in the application's tracing filter:
 
-- `starting disk cache recovery`: backing recovery file, shard count, and total
-  capacity in bytes.
+- `starting disk cache recovery`: recovery has begun.
 - `disk cache recovery finished`: scan completed, with elapsed seconds. This
   does not guarantee any chunks were restored.
-- `discarding entire disk cache: incompatible recovery layout` (warning):
-  `reason="shard count changed"` or `reason="capacity changed"`, with previous
-  and current shard counts and capacities. All old entries are invalidated by a
-  new cache generation; recovery does not salvage individual shards.
-- `resetting disk cache: recovery ends missing, invalid, or incompatible`:
-  starts a new cache generation when the saved layout cannot be read or validated.
 
-Enable `feuer::storage=debug` for per-shard scan details (shard index, capacity,
-scan start/end byte offsets, and chunk count) and skipped-recovery messages.
 Recovery follows each shard's metadata-chunk links without scanning payload chunks.
+Invalid or unsupported pages are discarded without a global reset or generation change.
 
 ## Insertions that trigger eviction
 
@@ -199,9 +191,9 @@ retains no idle buffers.
 |---|---|---|
 | `feuer_disk_write_queue_total` | Counter | `outcome`: `queued`, `queue_full`, `queue_closed`, `stale`, `canceled`, `already_covered`, `redundant` |
 | `feuer_disk_write_queued_entries` | Gauge | Entries waiting to begin disk writes |
-| `feuer_disk_write_pending_bytes` | Gauge | Queued plus active payload bytes, not limited or charged to the memory-cache capacity |
+| `feuer_disk_write_pending_bytes` | Gauge | Queued payload bytes plus batches awaited by the disk-write worker, not limited or charged to the memory-cache capacity |
 | `feuer_disk_write_queue_duration_seconds` | Histogram | Queue admission to dequeue, including entries found stale. Excludes entries canceled before dequeue |
-| `feuer_disk_write_entries_total` | Counter | Terminal per-entry batch-insertion outcome: `published`, `already_covered`, `no_capacity`, `stale`, `failed`, `canceled` |
+| `feuer_disk_write_entries_total` | Counter | Terminal per-entry batch-insertion outcome: `published`, `already_covered`, `no_capacity`, `failed`, `canceled` |
 | `feuer_disk_written_entries_total` | Counter | Entries in successfully written shard batches, before publication checks |
 
 Queue and storage counters describe different stages: do not sum all their
@@ -209,8 +201,8 @@ values as a total number of disk-write attempts. `queued` is admission, not a
 terminal outcome. Queue `already_covered` means disk already covers the callback
 download. `redundant` means memory declined a contained download. Queue `stale`
 means the exact key and range are no longer cached in memory before writing.
-Storage `stale` means they are no longer cached before publication, after writing.
-Reinsertion of the same immutable range does not make a write stale.
+Reinsertion of the same immutable range does not make a queued write stale.
+Active writes may publish after memory eviction; storage has no `stale` outcome.
 
 A storage `failed` outcome means its shard batch write failed. Entries abandoned
 before a terminal decision, including later shards skipped after a batch error,
@@ -218,9 +210,9 @@ count as `canceled`. Canceling the caller does not cancel a detached storage
 writer: that writer continues to report its actual terminal outcome.
 
 Written entries are not necessarily published entries. Successful writes can be
-discarded because another disk entry already covers them or their exact key and
-range are no longer cached in memory. Gauges follow ownership so rejection, cancellation, errors and normal
-completion release their counts along with the associated payload budget.
+discarded because another disk entry already covers them. Pending-byte accounting lasts
+until the worker's batch await ends; detached storage writes can continue after worker
+cancellation. Gauges are released on rejection, cancellation, errors, and normal completion.
 
 ## Existing metrics
 

@@ -465,25 +465,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disk_reads_reuse_released_buffers_and_overwrite_old_contents() {
+    async fn disk_reads_preserve_held_bytes_across_overwrites() {
         let temp = tempdir().unwrap();
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
         let length = 2 * uring::DIRECT_IO_ALIGNMENT_BYTES;
         file.write_at(0, &Bytes::from(vec![0x55; length])).await.unwrap();
         let bytes = file.read_at(0, length).await.unwrap();
-        let address = bytes.as_ptr();
         let slice = bytes.slice(1..);
         drop(bytes);
         file.write_at(0, &Bytes::from(vec![0x99; length])).await.unwrap();
         let other = file.read_at(0, length).await.unwrap();
-        assert_ne!(other.as_ptr(), address);
         assert_eq!(&slice[..], &vec![0x55; length - 1]);
         drop(slice);
-        let reused = file.read_at(0, length).await.unwrap();
-        assert_eq!(reused.as_ptr(), address);
-        assert_eq!(&reused[..], &vec![0x99; length]);
+        let latest = file.read_at(0, length).await.unwrap();
+        assert_eq!(&latest[..], &vec![0x99; length]);
         drop(file);
-        assert_eq!(reused, other);
+        assert_eq!(latest, other);
     }
 
     #[tokio::test]

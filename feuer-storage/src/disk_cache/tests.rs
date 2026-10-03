@@ -974,89 +974,22 @@ async fn racing_equal_and_containing_writes_revalidate_publication() {
 
 #[tokio::test]
 async fn publishes_each_region_before_reserving_the_next() {
-    let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
-    let allocator = cache.disk.shards[0].allocator.clone();
+    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    let small = ObjectKeyHash::from("small");
+    let large = ObjectKeyHash::from("large");
     let published = cache
-        .insert_batch_with_publication_check(
-            vec![
-                (ObjectKeyHash::from("small"), download(0, 1), 2 * CHUNK_BYTES),
-                (ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize + 1), 0),
-            ],
-            move |expected_free_bytes, publish| {
-                assert_eq!(allocator.available_bytes(), *expected_free_bytes);
-                publish();
-            },
-        )
+        .insert_batch(vec![
+            (small, download(0, 1)),
+            (large, download(0, CHUNK_BYTES as usize + 1)),
+        ])
         .await
         .unwrap();
+    // The small entry must publish first so the larger entry can evict it and reuse its chunk.
     assert_eq!(published, 2);
-}
-
-#[tokio::test]
-async fn completed_write_revalidates_cached_ranges_but_accepts_reinsertions() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    let memory = Arc::new(feuer_memory::MemoryCache::new(1 << 20));
-    let mut entries = Vec::new();
-    // Different lengths verify that sorting keeps each entry with its publication value.
-    for (key, length) in [("evicted", 300), ("readmitted", 200), ("current", 100)] {
-        let key = ObjectKeyHash::from(key);
-        let source = download(0, length);
-        let range = source.downloaded_range();
-        assert!(memory.insert(key, source.clone()));
-        entries.push((key, source, (key, range)));
-    }
-    let published = cache
-        .insert_batch_with_publication_check(entries, move |(key, range), publish| {
-            // Called only after complete I/O: the exact range must still be cached,
-            // but reinsertion is valid because the object is immutable.
-            if key == &ObjectKeyHash::from("evicted") || key == &ObjectKeyHash::from("readmitted") {
-                assert!(memory.remove(key, *range));
-            }
-            if key == &ObjectKeyHash::from("readmitted") {
-                assert!(memory.insert(*key, download(range.start(), range.len() as usize)));
-            }
-            memory.with_entry_locked(key, *range, publish);
-        })
-        .await
-        .unwrap();
-    assert_eq!(published, 2);
-    assert!(!cache.contains(&ObjectKeyHash::from("evicted"), range(0, 300)));
-    for (key, length) in [("readmitted", 200), ("current", 100)] {
-        assert_eq!(
-            cache.get(&ObjectKeyHash::from(key), range(0, length)).await.unwrap(),
-            download(0, length as usize).bytes()
-        );
-    }
-}
-
-#[tokio::test]
-async fn canceled_checked_writer_still_finishes_and_releases_rejected_storage() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    let (finished, completion) = tokio::sync::oneshot::channel();
-    let finished = Mutex::new(Some(finished));
-    let mut requester = Box::pin(cache.insert_batch_with_publication_check(
-        vec![(ObjectKeyHash::from("rejected"), download(0, 100), ())],
-        move |(), _publish| {
-            finished.lock().unwrap().take().unwrap().send(()).unwrap();
-        },
-    ));
-    assert!(
-        std::future::poll_fn(|cx| Poll::Ready(requester.as_mut().poll(cx)))
-            .await
-            .is_pending()
-    );
-    drop(requester);
-    tokio::time::timeout(Duration::from_secs(5), completion)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!cache.contains(&ObjectKeyHash::from("rejected"), range(0, 100)));
-    // The sole chunk is safely reusable once the detached owner rejects publication.
-    assert!(
-        cache
-            .insert(ObjectKeyHash::from("next"), download(0, 100))
-            .await
-            .unwrap()
+    assert!(!cache.contains(&small, range(0, 1)));
+    assert_eq!(
+        cache.get(&large, range(0, 100)).await.unwrap(),
+        download(0, 100).bytes()
     );
 }
 
@@ -1097,12 +1030,7 @@ async fn read_addresses_and_results_do_not_delay_replaced_payload_reuse() {
     };
     let result = cache.get(&key, range(6, 7)).await.unwrap();
     cache.insert(key, download(0, 200)).await.unwrap();
-    let bytes = cache
-        .disk
-        .file
-        .read_at(guard.start, BUFFER_ALIGNMENT)
-        .await
-        .unwrap();
+    let bytes = cache.disk.file.read_at(guard.start, BUFFER_ALIGNMENT).await.unwrap();
     assert_eq!(XxHash64::oneshot(0, &bytes[..100]), payload_checksum);
     let reused = cache.disk.shards[0].allocator.reserve_chunks(1).unwrap();
     assert_eq!(reused.range(), CHUNK_BYTES..2 * CHUNK_BYTES);
@@ -1237,10 +1165,7 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
     cache
         .disk
         .file
-        .write_at(
-            last_aligned_offset,
-            &Bytes::from(vec![0; BUFFER_ALIGNMENT]),
-        )
+        .write_at(last_aligned_offset, &Bytes::from(vec![0; BUFFER_ALIGNMENT]))
         .await
         .unwrap();
     // Even a request at the beginning must detect corruption at the end of this entry.

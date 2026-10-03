@@ -79,12 +79,11 @@ struct DiskEntryIndex {
     metrics: Arc<DiskMetrics>,
 }
 
-/// An entry's payload, metadata, caller value, and metrics awaiting write and publication.
-struct PendingEntry<T> {
+/// An entry's payload, metadata, and metrics awaiting write and publication.
+struct PendingEntry {
     key: ObjectKeyHash,
     entry: DiskEntry,
     bytes: Bytes,
-    publication_value: T,
     attempt: DiskWriteAttempt,
 }
 
@@ -255,37 +254,12 @@ impl DiskCache {
     /// Callers bound batch size and concurrency: payload slices are retained until writing completes.
     /// Dropping this future does not abort its detached writer.
     pub async fn insert_batch(&self, downloads: Vec<(ObjectKeyHash, Download)>) -> Result<usize, DiskCacheError> {
-        self.insert_batch_with_publication_check(
-            downloads
-                .into_iter()
-                .map(|(key, download)| (key, download, ()))
-                .collect(),
-            |(), publish| publish(),
-        )
-        .await
-    }
-
-    /// Writes a batch and passes each entry's caller-supplied value to `publish_if_accepted` to decide whether to publish.
-    /// The callback must synchronously invoke `publish` once to accept the entry, or not invoke it to discard it.
-    /// Any condition the callback checks to accept the entry must remain true until `publish` returns.
-    /// The callback runs under the disk index lock and must not reenter disk storage or perform I/O.
-    /// The detached writer retains caller-supplied values and disk reservations even if this future is canceled.
-    pub async fn insert_batch_with_publication_check<T, F>(
-        &self,
-        downloads: Vec<(ObjectKeyHash, Download, T)>,
-        mut publish_if_accepted: F,
-    ) -> Result<usize, DiskCacheError>
-    where
-        T: Send + 'static,
-        F: Fn(&T, &mut dyn FnMut()) + Send + 'static,
-    {
         let disk = self.disk.clone();
         let mut downloads_by_shard: Vec<Vec<_>> = (0..disk.shards.len()).map(|_| Vec::new()).collect();
-        for (key, download, publication_value) in downloads {
+        for (key, download) in downloads {
             downloads_by_shard[disk.shard_index_for_key(&key)].push((
                 key,
                 download,
-                publication_value,
                 DiskWriteAttempt::new(disk.metrics.clone()),
             ));
         }
@@ -294,7 +268,7 @@ impl DiskCache {
             .spawn(async move {
                 let mut published = 0;
                 for (shard, downloads) in disk.shards.iter().zip(downloads_by_shard) {
-                    published += disk.write_shard(shard, downloads, &mut publish_if_accepted).await?;
+                    published += disk.write_shard(shard, downloads).await?;
                 }
                 Ok(published)
             })
@@ -554,22 +528,18 @@ impl DiskCacheInner {
     }
 
     /// Packs and writes one shared chunk or one multi-chunk payload at a time.
-    async fn write_shard<T, F>(
+    async fn write_shard(
         &self,
         shard: &DiskCacheShard,
-        mut downloads: Vec<(ObjectKeyHash, Download, T, DiskWriteAttempt)>,
-        publish_if_accepted: &mut F,
-    ) -> Result<usize, DiskCacheError>
-    where
-        F: Fn(&T, &mut dyn FnMut()),
-    {
-        downloads.sort_by_key(|(_, download, _, _)| download.bytes().len());
+        mut downloads: Vec<(ObjectKeyHash, Download, DiskWriteAttempt)>,
+    ) -> Result<usize, DiskCacheError> {
+        downloads.sort_by_key(|(_, download, _)| download.bytes().len());
         let mut region: Option<ReservedChunks> = None;
-        let mut entries: Vec<PendingEntry<T>> = Vec::new();
+        let mut entries: Vec<PendingEntry> = Vec::new();
         let mut attempts_left = MAX_EVICTION_ATTEMPTS;
         let mut chunks_left = MAX_EVICTION_CHUNKS;
         let mut published = 0;
-        for (key, download, publication_value, mut attempt) in downloads {
+        for (key, download, mut attempt) in downloads {
             if shard
                 .entry_index
                 .lock()
@@ -589,12 +559,7 @@ impl DiskCacheInner {
                     || entries.last().unwrap().entry.payload_range.end + length > region.range().end
             }) {
                 published += self
-                    .write_and_publish(
-                        shard,
-                        region.take().unwrap(),
-                        std::mem::take(&mut entries),
-                        publish_if_accepted,
-                    )
+                    .write_and_publish(shard, region.take().unwrap(), std::mem::take(&mut entries))
                     .await?;
             }
             let previous_chunks_left = chunks_left;
@@ -616,30 +581,23 @@ impl DiskCacheInner {
                 key,
                 entry,
                 bytes: download.bytes().clone(),
-                publication_value,
                 attempt,
             });
         }
         if let Some(region) = region {
-            published += self
-                .write_and_publish(shard, region, entries, publish_if_accepted)
-                .await?;
+            published += self.write_and_publish(shard, region, entries).await?;
         }
         Ok(published)
     }
 
-    /// Writes one reserved region, then publishes its entries under the caller's check.
+    /// Writes one reserved region, then publishes entries not already covered in the disk index.
     /// Failure releases this region and its metadata positions without rolling back earlier publication.
-    async fn write_and_publish<T, F>(
+    async fn write_and_publish(
         &self,
         shard: &DiskCacheShard,
         region: ReservedChunks,
-        mut entries: Vec<PendingEntry<T>>,
-        publish_if_accepted: &mut F,
-    ) -> Result<usize, DiskCacheError>
-    where
-        F: Fn(&T, &mut dyn FnMut()),
-    {
+        mut entries: Vec<PendingEntry>,
+    ) -> Result<usize, DiskCacheError> {
         for address in region.range().step_by(CHUNK_BYTES as usize) {
             let end = address + CHUNK_BYTES;
             let mut parts = Vec::new();
@@ -677,7 +635,6 @@ impl DiskCacheInner {
         for PendingEntry {
             key,
             entry,
-            publication_value,
             mut attempt,
             ..
         } in entries.into_iter().rev()
@@ -687,21 +644,12 @@ impl DiskCacheInner {
                 shard.remove_payload_and_allow_metadata_overwrite(entry);
                 continue;
             }
-            attempt.set_outcome(DiskWriteOutcome::Stale);
-            let mut unpublished = Some(entry);
-            publish_if_accepted(&publication_value, &mut || {
-                if let Some(entry) = unpublished.take() {
-                    shard.metadata_pages.lock().unwrap().set_entry_metadata(&key, &entry);
-                    for removed in index.insert(key, entry) {
-                        shard.remove_payload_and_allow_metadata_overwrite(removed);
-                    }
-                    published += 1;
-                    attempt.set_outcome(DiskWriteOutcome::Published);
-                }
-            });
-            if let Some(entry) = unpublished {
-                shard.remove_payload_and_allow_metadata_overwrite(entry);
+            shard.metadata_pages.lock().unwrap().set_entry_metadata(&key, &entry);
+            for removed in index.insert(key, entry) {
+                shard.remove_payload_and_allow_metadata_overwrite(removed);
             }
+            published += 1;
+            attempt.set_outcome(DiskWriteOutcome::Published);
         }
         Ok(published)
     }

@@ -230,15 +230,7 @@ async fn records_write_outcomes_packing_and_index_usage() {
     );
     assert_eq!(cache.insert_batch(vec![(key, download(4))]).await.unwrap(), 0);
     assert_eq!(outcome("already_covered"), 1.0);
-    assert_eq!(
-        cache
-            .insert_batch_with_publication_check(vec![("stale".into(), download(4), ())], |_, _| {})
-            .await
-            .unwrap(),
-        0
-    );
-    assert_eq!(outcome("stale"), 1.0);
-    assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 3.0);
+    assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 2.0);
     assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 2.0);
     assert_eq!(
         cache

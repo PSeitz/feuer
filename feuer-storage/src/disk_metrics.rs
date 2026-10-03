@@ -15,7 +15,6 @@ pub(crate) enum DiskWriteOutcome {
     Published,
     AlreadyCovered,
     NoCapacity,
-    Stale,
     Failed,
     Canceled,
 }
@@ -26,7 +25,7 @@ pub(crate) enum DiskWriteOutcome {
 pub struct DiskMetrics {
     lookup_count: [BoxedCounter; 4],
     hit_duration: BoxedHistogram,
-    write_entries: [BoxedCounter; 6],
+    write_entries: [BoxedCounter; 5],
     eviction_triggering_insertions: BoxedCounter,
     pub(crate) written_entries: BoxedCounter,
     pub(crate) recovered_chunks: BoxedGauge,
@@ -94,15 +93,8 @@ impl DiskMetrics {
         Arc::new(Self {
             lookup_count: outcomes.map(|label| lookups.counter(&[label.into()])),
             hit_duration: duration.histogram(&["hit".into()]),
-            write_entries: [
-                "published",
-                "already_covered",
-                "no_capacity",
-                "stale",
-                "failed",
-                "canceled",
-            ]
-            .map(|label| write_entries.counter(&[label.into()])),
+            write_entries: ["published", "already_covered", "no_capacity", "failed", "canceled"]
+                .map(|label| write_entries.counter(&[label.into()])),
             eviction_triggering_insertions: eviction_triggering_insertions.counter(&[]),
             written_entries: written.counter(&[]),
             recovered_chunks: recovered.gauge(&[]),

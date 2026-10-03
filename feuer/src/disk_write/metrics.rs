@@ -36,7 +36,7 @@ impl DiskWriteQueueMetrics {
         );
         let bytes = registry.register_gauge_vec(
             "feuer_disk_write_pending_bytes".into(),
-            "Queued plus active disk-write payload bytes".into(),
+            "Queued payload bytes plus batches awaited by the disk-write worker".into(),
             &[],
         );
         let duration = registry.register_histogram_vec_with_buckets(

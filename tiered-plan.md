@@ -24,13 +24,16 @@ Its central result contract is:
 
 > Every successful lookup returns one contiguous `bytes::Bytes` containing exactly the requested object bytes.
 
-Feuer may produce false misses, skip or lose disk writes, and lose recently cached data after a crash. It
-must never return bytes whose object identity or integrity is uncertain.
+Cache admission, retention, disk writes, and recovery are best-effort. Feuer may produce false misses,
+skip or lose writes, and recover nothing after a restart. Neither tier's residency requires residency in
+the other tier. Best-effort does not relax the result contract: disk bytes must pass their expected checksum
+before use, subject to the probabilistic key identity and checksum-collision limitations below.
 
 ## 2. Object and range contract
 
-- `ObjectKey` is a `String` containing the complete identity of an immutable object. Feuer treats it as opaque.
-  Hashes may locate candidates, but equality compares the complete key.
+- `ObjectKey` is a `String` identifying immutable content. At the public lookup boundary, Feuer hashes its
+  UTF-8 bytes once with seed-zero XXH3-128. Both tiers, access history, and recovery compare only that
+  128-bit identity; full keys are not retained or checked for collisions. Keys must not be adversarial.
 - Callers are responsible for making the key distinguish every object version that can have different bytes,
   including across process restarts and application upgrades.
 - A requested range is an exact, valid, non-empty half-open object byte range supplied to a lookup.
@@ -232,17 +235,17 @@ Access history is only policy input: newer accesses do not invalidate a trimming
 Disk writes are best-effort and may be skipped when the pending-write queue is full.
 
 - A retained download may be scheduled for a disk write.
-- The pending-write queue must have limits on both payload bytes and entry count.
+- The pending-write queue holds at most 256 entries. Queued and active payload bytes have no byte limit
+  and are outside the memory-cache capacity.
 - Under queue pressure, the internal policy may skip or replace a disk-write candidate. This never fails
   an otherwise successful lookup.
 - If the exact key and range are no longer cached in memory when a queued write starts, that write is
   canceled or discarded. Reinsertion of the same immutable range allows an earlier write to proceed.
-- A write already issued to the operating system may finish after memory eviction or caller cancellation.
-  Its `ReservedChunks` must remain reserved and protected against conflicting access until the submitted I/O
-  completes. Abandoning its result does not stop the write. The task owning the reservation must keep
-  awaiting completion rather than being aborted. A region whose completion is unknown after queue failure
-  must not be reused. A completed write may publish a disk entry only if its exact key and range are still
-  cached in memory and the disk policy still admits it.
+- Once started, a write owns its immutable download and may publish after memory eviction or caller
+  cancellation. Publication rechecks disk containment, not memory residency. The detached writer retains
+  its current payload reservation while awaiting I/O. An abandoned or failed write may leave late I/O
+  that overwrites a reused payload; checksum mismatches become misses. Kernel I/O buffers must still
+  remain alive until completion, including after cancellation or abnormal queue failure.
 - A failed write is logged and never becomes disk-lookup-visible. Its memory entry, if still present, remains
   subject to ordinary memory policy.
 
@@ -256,29 +259,25 @@ partial retention, rewriting, checksums, metadata persistence, and submission en
 details. Any bytes made lookup-visible on disk must still be attributable to an exact object identity and
 known downloaded object bytes.
 
-The upper storage layer, not the I/O queue, prevents conflicting reads and writes across physical byte
-ranges rounded outward to the I/O alignment. A `ChunkGuard` prevents overwriting or reusing a disk
-region while a read depends on its contents. Multiple reads may hold guards concurrently. A canceled read
-whose result is discarded no longer needs unchanged disk contents, but its submitted I/O buffer must still
-survive until completion. The I/O layer owns that buffer lifetime.
+Readers copy the payload address and expected checksum under the disk index lock, then read into owned
+buffers and validate them before use. Readers hold no disk reservation and do not delay reuse. Concurrent
+overwrite may cause a miss; no global read/write serialization or read guard is required. The I/O layer
+owns submitted buffer lifetime.
 
-The current disk design packs explicit batches of variable-length entries into immutable 1-MiB chunks,
-grouping smaller entries together. Each chunk's payload, entry metadata and chunk metadata are finalized before
-its only write. Later batches cannot append to it or reuse holes left by removed entries. A chunk becomes
-reusable only after all entry owners and read guards release it. Partially filled final chunks consume their
-full capacity. Payload starts and allocated lengths are rounded to 4 KiB. Small entries consume at least
-4 KiB of payload storage plus metadata within their batch's chunks. Large entries span consecutive chunks.
-Each entry's payload is one contiguous disk byte range with no metadata gaps. The allocation header and
-entry metadata precede its payload; continuation chunks have no headers. Entry metadata stores one payload
-address and length plus its checksum. One read guard retains the entire contiguous allocation.
-Multiple entries may share a chunk only when each entry's complete payload and metadata fit inside that chunk.
-An entry spanning multiple chunks owns those chunks exclusively. Its unused tail cannot hold another entry.
+Explicit batches pack smaller payloads together into 1-MiB chunks. Later batches cannot append to written
+payload chunks or reuse individual holes. A payload chunk becomes reusable when its last indexed entry is
+removed, without waiting for readers or metadata writes. Partially filled chunks consume their full capacity.
+Payload addresses and storage lengths are rounded to 4 KiB. Each payload is one contiguous disk byte range
+with no metadata gaps. Multi-chunk entries reserve consecutive whole chunks exclusively; their unused tails
+cannot hold another entry. Metadata is separate: mutable 1-MiB chunks contain checksummed 4-KiB pages,
+with one payload address, object range length, and checksum per entry. The last page links to the next
+metadata chunk. Metadata chunks remain reserved while open.
 Disk pressure selects individual entries by sampled retrieval value per payload byte, not all owners of a
 shared chunk together. Removing an entry may free no whole chunk. If eviction exhausts its attempt or chunk
 budget before reclaiming enough contiguous capacity, the write is skipped rather than scattered across free chunks.
 Still-retained neighbors are not removed merely to empty the chunk.
-The allocator must handle the full size distribution, reclaim fragmented capacity with limits on chunks inspected
-and payload bytes rewritten, remain practical at 1-TiB-plus capacities, and avoid a cache-wide hot lock. Free-space structures, relocation, and cleaning remain private mechanisms.
+Fragmentation may cause a write to be skipped despite sufficient total free space. Relocation and cleaning
+are not required for admission; free-space structures remain private mechanisms.
 
 ## 8. Payload I/O modes
 
@@ -296,9 +295,10 @@ results. Direct mode does not imply synchronization or durability.
 
 ## 9. Integrity
 
-Feuer validates disk-backed bytes before returning them. Corrupt payload, malformed metadata, stale write
-completion, key mismatch, hash collision ambiguity, impossible ranges, or any other uncertainty becomes a
-cache miss and invalidates as much affected cache state as necessary.
+Feuer verifies the whole covering payload against its expected checksum before returning disk-backed bytes.
+Read failures and checksum mismatches become misses. Recovery validates each metadata page's checksum and
+format tag, then relies on the writer's range and alignment contract; it still enforces current shard routing,
+bounds, and metadata/payload ownership. Hash collisions and checksum collisions are not detected separately.
 
 The checksum algorithm, validation granularity, metadata representation, and corruption-repair strategy are
 versioned implementation details.
@@ -308,13 +308,13 @@ returned by its download callback.
 
 ## 10. Recovery and compatibility
 
-After an ordinary process or machine crash, Feuer recovers any safe subset of previously completed disk
-writes. Incomplete, torn, corrupt, or structurally uncertain state is ignored. Recently returned downloads
-and skipped, canceled, or unfinished disk writes may disappear.
+Recovery may retain a subset of previously written entries, including none. Invalid record pages are
+ignored independently; invalid links terminate a metadata chain. Payloads are verified only when read, so
+stale records may recover into the index and subsequently miss. Recently returned downloads and skipped,
+canceled, or unfinished writes may disappear.
 
-The persistence and recovery mechanism is an implementation choice. Feuer does not promise stable on-disk
-compatibility across arbitrary releases. When opening an unsupported on-disk format, Feuer resets the
-non-authoritative cache state and logs the reset instead of failing application startup.
+There is no sync, shutdown flush, minimum recovered hit rate, or stable on-disk compatibility guarantee.
+Unsupported metadata page tags are discarded like corrupt pages; older formats are not migrated.
 
 Filesystem or device loss, authoritative-storage durability, and recovery of every acknowledged lookup are
 out of scope. The MVP may require exclusive ownership of the cache directory.
@@ -324,7 +324,7 @@ out of scope. The MVP may require exclusive ownership of the cache directory.
 - Lookup, memory retention, disk indexing, write scheduling, and policy operations must avoid a cache-wide hot lock.
 - Application callbacks run without Feuer metadata locks held.
 - Concurrent callbacks may return identical, containing, or overlapping downloads.
-- Same-object publication must prevent duplicate or stale callback/write results from creating ambiguous lookup state.
+- Containment rules suppress redundant ranges within each tier; publication need not be transactional across tiers.
 - Eviction cannot invalidate an already returned `Bytes`.
 
 Specific sharding, allocator, guard, and transaction designs are implementation details.
@@ -346,7 +346,7 @@ Actual source GETs and transferred bytes remain application-owned and are instru
 benchmark harness. Callback counts are not assumed to equal source GETs when application coordination shares
 work. Normal labels and spans must not include object-key contents or other values whose distinct count grows
 with the workload. Exact metric and span inventories are implementation checklists, not product API commitments. An
-incompatible-format reset must be logged. It does not require a dedicated metric in the MVP.
+incompatible-format page is treated as discarded cache state, not an application error.
 
 ## 13. MVP acceptance criteria
 
@@ -370,13 +370,15 @@ The MVP is complete when tests demonstrate that:
 - shard pressure evicts toward each shard's assigned target, while an oversized download empties its shard and remains cached even when aggregate retained payload exceeds the configured target.
 - pressure-driven in-memory compaction can release unrequested cached payload without changing results, and
   normal access and victim selection avoid full scans of all live shard entries.
-- disk-write queues enforce their payload-byte and entry-count limits; queue pressure does not block or fail
-  successful lookups.
-- evicted queued writes cannot later publish stale state, while already-active current writes can complete safely.
-- failed or uncertain disk writes never become disk hits.
+- the disk-write queue enforces its entry-count limit; queue pressure does not block or fail successful lookups.
+- queued writes may be skipped after memory eviction; active immutable downloads may publish independently
+  of memory residency.
+- failed payload writes do not publish live entries; recovered payloads must pass checksum verification.
 - explicit batches group small entries in immutable 1-MiB chunks with 4-KiB-aligned payload storage.
-- shared chunks contain each entry's complete payload and metadata, while multi-chunk entries own their chunks exclusively.
-- written chunks are neither modified nor reused until all entry owners and read guards release them.
+- shared payload chunks contain each entry's complete aligned payload; multi-chunk entries own consecutive
+  chunks exclusively, with metadata stored separately.
+- payload chunks are reused after their last entry is removed; concurrent reads validate checksums instead
+  of delaying reuse.
 - allocator stress tests report useful utilization, fragmentation, allocation latency, and rewrite traffic
   across the target size distribution.
 - buffered and direct modes return identical requested bytes, and requested direct mode never silently falls back.
@@ -384,8 +386,8 @@ The MVP is complete when tests demonstrate that:
   that enforce waiting-request and active-request limits.
 - disk hits verify the whole covering entry, return only requested bytes, and do not read neighboring entries.
 - corrupted or uncertain disk bytes always miss and are never returned.
-- restart recovers a safe useful subset after injected crashes.
-- unsupported persistent formats are reset and logged safely.
+- restart may recover any subset, including none; corrupt recovered payloads become misses.
+- unsupported metadata page tags are discarded without requiring migration or a global cache reset.
 - disk capacities of at least 1 TiB are representable with limits on memory used by free-space accounting and entry indexes.
 - the memory-only gate runs exact and expanded downloader controls with 1, 4, 16, and 64 shards through
   32 GiB, compares actual retained payload, and reports policy throughput.

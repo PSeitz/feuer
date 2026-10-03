@@ -6,8 +6,9 @@ Feuer is a Rust cache for S3. It checks memory, then disk, and calls your async
 download function on a miss. Requests can cover any non-empty byte range without
 alignment requirements.
 
-The disk tier requires Linux, io_uring, and direct I/O. Recovery is not implemented.
-Each open starts with an empty disk index.
+The disk tier requires Linux, io_uring, and direct I/O. Opening waits for best-effort
+metadata recovery; entries are checksum-verified when read. No persistence or recovery
+hit rate is guaranteed.
 
 ## Usage
 
@@ -46,7 +47,7 @@ Feuer leaves request coalescing, scheduling, and retries to your downloader.
 At the public lookup boundary, Feuer hashes the key's UTF-8 bytes once with XXH3-128
 (seed zero). Both tiers, access history, and disk recovery use only this 128-bit identity;
 full keys are not retained or checked for collisions. Keys must not be adversarial.
-[Disk format v13](feuer-storage/format.md) stores the hash in little-endian form in fixed
+[Disk format v13](format.md) stores the hash in little-endian form in fixed
 48-byte entry metadata. Older disk formats are not migrated.
 
 ## Capacity and disk writes
@@ -67,8 +68,9 @@ Writes run in the background. The queue holds up to 256 entries and batches up t
 64. Queued and active payload bytes have no byte limit. Queue pressure or memory
 eviction can skip a disk write without failing the lookup.
 
-Batches pack entries into immutable 1-MiB chunks. A chunk can be reused only after
-all entry owners and read guards release it. Reads and writes use separate I/O
+Batches pack payloads into 1-MiB chunks with metadata stored separately. A payload chunk
+can be reused after its last entry is removed; readers verify checksums rather than delay
+reuse. Active writes may publish after memory eviction. Reads and writes use separate I/O
 queues. See the [disk layout](feuer-storage/disk-prototype.md) for details.
 
 ## Eviction

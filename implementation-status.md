@@ -15,9 +15,9 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 | Area | Implemented | Remaining |
 | --- | --- | --- |
 | `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, disk writes through a 256-entry queue in batches of at most 64, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
-| `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range, internal shared access evidence and value comparison | None for the current public type boundary |
+| `feuer-types` | XXH3-128 object identity, exact non-empty `ByteRange`, keyless `Download` with a derived range, internal shared access evidence and value comparison | None for the current public type boundary |
 | `feuer-memory` | Sharded covering-range index, exact access counts shared with disk, per-object trimming-event limits, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
-| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, guarded whole-chunk reuse and per-batch eviction attempt/chunk limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
+| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, whole-chunk reuse after the last entry is removed and per-batch eviction attempt/chunk limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
 
 ## Implemented behavior
@@ -83,15 +83,13 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
   These limits do not bound caller inputs or full read-result allocations; there is no buffer-memory semaphore.
 - Reads accept arbitrary byte ranges. Write offsets and lengths must be multiples of 4 KiB, enforced by
   assertions. The driver performs no read-modify-write or overlap checks: the upper layer must supply
-  complete aligned blocks and prevent conflicting access across physical byte ranges rounded outward
-  to 4 KiB. `DataFile` rounds read requests outward and slices the results. The io_uring driver accepts
+  complete aligned bytes and either serialize conflicting access or validate read checksums. `DataFile` rounds read requests outward and slices the results. The io_uring driver accepts
   only nonempty aligned requests and returns complete aligned read buffers.
 - Multi-chunk operations are not atomic. Completion permits subsequent reads but does not guarantee crash
   durability. There are no global scheduling barriers.
-- Caller cancellation does not cancel submitted kernel writes. The task owning a write's `ReservedChunks` must
-  keep awaiting completion and prevent conflicting access or reuse, even when the result is abandoned.
-  `DiskCache` owns reservation lifetime. Public scheduling additionally revalidates the memory-entry
-  identity under its shard lock throughout disk publication.
+- Caller cancellation does not cancel submitted kernel writes. `DiskCache`'s detached writer owns the
+  current payload reservation while awaiting I/O. Late writes after failure or abandonment can cause
+  checksum misses on reused payloads. Publication rechecks disk containment, not memory residency.
 - Submitted buffers survive caller cancellation. Last-handle drop drains and joins the driver. Abnormal
   driver failure retains uncertain active buffers and the directory lock until process exit.
 - Raw capacity must be positive, 4-KiB-aligned, and representable as a Linux signed file offset. Opening
@@ -126,7 +124,7 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
 
 [`format.md`](format.md) describes the experimental disk format;
 [`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) covers runtime behavior and remaining crash testing. `DiskCache::insert_batch` groups smaller entries together within each
-shard, writes payload chunks, and publishes after containment revalidation. A periodic writer persists metadata best-effort. Partial final chunks are finalized too. Later batches cannot fill them. Full keys and exact
+shard, writes payload chunks, and publishes after containment revalidation. A periodic writer persists metadata best-effort. Partial final chunks are finalized too. Later batches cannot fill them. Key hashes and exact
 object ranges map to one contiguous physical range each. Payload bytes have no metadata gaps, including at chunk boundaries. Entry metadata stores
 one XXHash64 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
 entry while copying only requested bytes into the result. It does not read neighboring entries or metadata.
@@ -159,7 +157,7 @@ all shards to recover before reads and writes become available. Corrupt record p
 invalid or cyclic links terminate the chain. See the format document for write ordering and recovery details.
 No comparative layout/performance claim is established.
 
-The disk-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
+The disk-cache tests cover persisted key-hash entry metadata and payload checksums, containment races, caller
 cancellation, corruption/reused payload, partial batch failure, metadata-only chunks, disjoint shards,
 mixed-size packing, exclusive multi-chunk ownership, finalized entry metadata, whole-chunk ownership/reuse,
 per-batch eviction attempt and chunk limits, shared evidence across tiers, payload-only scoring, mixed-size churn,
@@ -179,9 +177,9 @@ checks passed for the changed files.
   Queue saturation skips candidates without blocking or failing successful lookups.
 - Queued writes are discarded if their exact key and range are no longer cached in memory. Reinsertion of
   the same immutable range allows an earlier write to proceed.
-- Active writes retain reservations through completion despite cancellation. Publication checks the exact
-  cached key and range under the memory shard lock, within the disk index lock. No memory operation takes
-  a disk lock. Stale writes are discarded, and disk containment/allocation policy can still skip entries.
+- Active writes own immutable downloads and may publish after memory eviction. The detached storage writer
+  retains its current reservation while awaiting I/O; publication rechecks only disk containment.
+  Neither publication nor disk eviction takes a memory shard lock.
 - Failed writes are logged and remain invisible. Shared evidence survives queued and active disk writes.
 - Requests record exactly once before lookup, including requests that fail or are later canceled. Callback results already
   covered by disk are discarded without memory admission or another write.
@@ -189,7 +187,7 @@ checks passed for the changed files.
 On `m8g-32cpu-local-ssd`, all 145 workspace tests passed with real direct I/O and io_uring after integration.
 New tests cover disk hits after memory pressure, requested-range promotion, exactly-once evidence, directory
 ownership, byte/count saturation, oversized candidates, queued eviction/readmission, batching, callback and
-writer cancellation, stale publication, and disk-contained callback suppression. No new corruption tests were
+writer cancellation, memory eviction after write admission, and disk-contained callback suppression. No new corruption tests were
 added in this slice. Workspace Clippy passed with warnings denied. Formatting checks passed for changed Rust
 files, and whitespace checks passed.
 The isolated validation checkout is `/mnt/local-ssd/feuer-tiered.iB2JNA`.
@@ -201,8 +199,8 @@ The isolated validation checkout is `/mnt/local-ssd/feuer-tiered.iB2JNA`.
 - Added lookup latency/outcomes and served bytes, callback counts/latency/download bytes, disk read-error
   and integrity outcomes, disk-write admission/skip/terminal outcomes, queue pressure/wait time,
   chunk capacity states, indexed payload/entries, pressure eviction and byte-weighted batch packing.
-- Queue and capacity gauges follow ownership, including canceled work, detached writes, read guards,
-  write failure and cache shutdown. See [`metrics.md`](metrics.md) for exact accounting semantics.
+- Queue gauges track queued entries and batches awaited by the writer; capacity gauges track metadata
+  and payload reservations, including detached storage writes, write failure, and cache shutdown. See [`metrics.md`](metrics.md) for exact accounting semantics.
 - Validation on macOS: portable Feuer/memory/types tests pass. Linux workspace all-target checks and Clippy
   pass. New Linux metric integration tests are compile-checked but have not been executed on this host.
 
@@ -228,7 +226,6 @@ permanently excluded by the design.
 
 ### Integrity and recovery
 
-- Extend current cached-range publication checks when tier-aware retention policy is implemented.
 - Validate the versioned metadata format and whole-entry XXHash64 checksums against injected crash and reuse cases.
 - Exercise incremental recovery and scan-end resets on real Linux direct I/O and io_uring.
 - Validate recovery after process and machine crashes, beyond metadata corruption and reuse tests.

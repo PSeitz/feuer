@@ -109,3 +109,38 @@ async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 0.0);
     assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);
 }
+
+#[tokio::test]
+async fn active_writes_publish_after_memory_eviction() {
+    use std::{future::Future, task::Poll};
+
+    let directory = tempfile::tempdir().unwrap();
+    let memory = Arc::new(MemoryCache::new(4096));
+    let disk = DiskCache::open(directory.path(), 2 << 20, IoMetrics::noop())
+        .await
+        .unwrap();
+    let (registry, backend) = registry();
+    let (queue, receiver) = DiskWriteQueue::channel_with_metrics(1, DiskWriteQueueMetrics::new(&backend));
+    let key = ObjectKeyHash::from("object");
+    let range = ByteRange::new(3, 7).unwrap();
+    enqueue(&queue, &memory, "object");
+    drop(queue);
+    let mut writer = Box::pin(DiskWriteQueue::write_queued_batches(
+        receiver,
+        memory.clone(),
+        disk.clone(),
+    ));
+    // The current-thread runtime cannot run storage's detached writer during this poll.
+    // The entry has passed the pre-write check, but no payload has been published.
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(writer.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);
+    assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 4.0);
+    assert!(memory.remove(&key, range));
+    writer.await;
+    assert_eq!(disk.get(&key, range).await.unwrap(), Bytes::from_static(b"abcd"));
+    assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 0.0);
+}

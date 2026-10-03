@@ -117,7 +117,7 @@ impl DiskWriteQueue {
         });
     }
 
-    /// Writes queued downloads in batches, checking that their memory entries are present before publication.
+    /// Skips evicted queued downloads, then writes admitted batches independently of memory retention.
     async fn write_queued_batches(
         mut receiver: mpsc::Receiver<PendingDiskWrite>,
         memory: Arc<MemoryCache>,
@@ -129,7 +129,7 @@ impl DiskWriteQueue {
                 let Ok(next_write) = receiver.try_recv() else { break };
                 pending_writes.push(next_write);
             }
-            let downloads = pending_writes
+            let (downloads, active_entries): (Vec<_>, Vec<_>) = pending_writes
                 .into_iter()
                 .filter_map(
                     |PendingDiskWrite {
@@ -137,30 +137,23 @@ impl DiskWriteQueue {
                          mut entry_and_metrics,
                      }| {
                         entry_and_metrics.finish_queue_wait();
-                        // This is the transition from queued to active. Later eviction may
-                        // discard publication, but cannot cancel issued I/O or release its regions.
-                        if !memory.with_entry_locked(&entry_and_metrics.key, entry_and_metrics.range, || ()) {
+                        // Avoid starting work already evicted from memory. Once started,
+                        // the owned immutable download remains valid after eviction.
+                        if !memory.contains_entry(&entry_and_metrics.key, entry_and_metrics.range) {
                             entry_and_metrics.metrics.record(DiskWriteQueueOutcome::Stale);
                             return None;
                         }
-                        Some((entry_and_metrics.key, download, entry_and_metrics))
+                        Some(((entry_and_metrics.key, download), entry_and_metrics))
                     },
                 )
-                .collect::<Vec<_>>();
+                .unzip();
             if downloads.is_empty() {
                 continue;
             }
-            let memory = memory.clone();
-            if let Err(error) = disk
-                .insert_batch_with_publication_check(downloads, move |entry_and_metrics, publish| {
-                    // Lock order is disk index -> memory shard. No memory operation
-                    // acquires a disk lock; eviction cannot race this publication.
-                    memory.with_entry_locked(&entry_and_metrics.key, entry_and_metrics.range, publish);
-                })
-                .await
-            {
+            if let Err(error) = disk.insert_batch(downloads).await {
                 tracing::warn!(target: "feuer::storage", %error, "disk write failed");
             }
+            drop(active_entries);
         }
     }
 }
