@@ -2,8 +2,8 @@ use super::*;
 use std::{future::Future, task::Poll, time::Duration};
 
 // Keep single-entry scenarios concise while exercising the explicit batch API.
-impl DiskRangeCache {
-    pub(super) async fn insert(&self, key: ObjectKeyHash, download: Download) -> Result<bool, DiskRangeCacheError> {
+impl DiskCache {
+    pub(super) async fn insert(&self, key: ObjectKeyHash, download: Download) -> Result<bool, DiskCacheError> {
         self.insert_batch(vec![(key, download)]).await.map(|count| count == 1)
     }
 }
@@ -24,11 +24,11 @@ pub(super) fn download(start: u64, length: usize) -> Download {
     .unwrap()
 }
 
-pub(super) async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache) {
+pub(super) async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskCache) {
     let directory = tempfile::tempdir().unwrap();
     // Keep the requested payload capacity, plus one metadata chunk per shard.
     let shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
-    let cache = DiskRangeCache::open(directory.path(), capacity + shards * CHUNK_BYTES, IoMetrics::noop())
+    let cache = DiskCache::open(directory.path(), capacity + shards * CHUNK_BYTES, IoMetrics::noop())
         .await
         .unwrap();
     (directory, cache)
@@ -41,7 +41,7 @@ impl DiskEntry {
 }
 
 pub(super) async fn entry_disk_ranges(
-    cache: &DiskRangeCache,
+    cache: &DiskCache,
     key: &ObjectKeyHash,
 ) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
     let shard = &cache.disk.shards[cache.disk.shard_index_for_key(key)];
@@ -499,14 +499,10 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
         history.clone(),
     );
     let directory = tempfile::tempdir().unwrap();
-    let cache = DiskRangeCache::open_with_access_histories(
-        directory.path(),
-        3 * CHUNK_BYTES,
-        IoMetrics::noop(),
-        history.clone(),
-    )
-    .await
-    .unwrap();
+    let cache =
+        DiskCache::open_with_access_histories(directory.path(), 3 * CHUNK_BYTES, IoMetrics::noop(), history.clone())
+            .await
+            .unwrap();
     let hot = ObjectKeyHash::from("hot");
     let cold = ObjectKeyHash::from("cold");
     memory.insert(hot, download(0, 100));
@@ -534,7 +530,7 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     assert_eq!(history.clock(), 6);
     let shard = &cache.disk.shards[0];
     let entry = shard.entry_index.lock().unwrap().remove(&hot, 0).unwrap();
-    shard.remove_payload(entry);
+    shard.remove_payload_and_allow_metadata_overwrite(entry);
     drop(memory);
     drop(cache);
     assert_eq!(history.recent_requested_ranges(&hot).len(), 5);
@@ -665,7 +661,7 @@ async fn removing_one_shared_payload_does_not_free_its_neighbors_chunks() {
         .unwrap();
     let shard = &cache.disk.shards[0];
     let entry = shard.entry_index.lock().unwrap().remove(&first, 3).unwrap();
-    shard.remove_payload(entry);
+    shard.remove_payload_and_allow_metadata_overwrite(entry);
     assert!(shard.allocator.reserve_chunks(1).is_none());
     assert_eq!(
         cache
@@ -834,7 +830,7 @@ async fn long_keys_do_not_allocate_extra_metadata_chunks() {
         .unwrap()
         .remove(&key, 0)
         .unwrap();
-    cache.disk.shards[0].remove_payload(entry);
+    cache.disk.shards[0].remove_payload_and_allow_metadata_overwrite(entry);
     let shard = &cache.disk.shards[0];
     let _io = shard.metadata_io.lock().await;
     shard.flush_metadata(&cache.disk.file).await.unwrap();
@@ -924,7 +920,7 @@ async fn completed_write_revalidates_cached_ranges_but_accepts_reinsertions() {
         entries.push((key, source, (key, range)));
     }
     let published = cache
-        .insert_batch_checked(entries, move |(key, range), publish| {
+        .insert_batch_with_publication_check(entries, move |(key, range), publish| {
             // Called only after complete I/O: the exact range must still be cached,
             // but reinsertion is valid because the object is immutable.
             if key == &ObjectKeyHash::from("evicted") || key == &ObjectKeyHash::from("readmitted") {
@@ -952,7 +948,7 @@ async fn canceled_checked_writer_still_finishes_and_releases_rejected_storage() 
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let (finished, completion) = tokio::sync::oneshot::channel();
     let finished = Mutex::new(Some(finished));
-    let mut requester = Box::pin(cache.insert_batch_checked(
+    let mut requester = Box::pin(cache.insert_batch_with_publication_check(
         vec![(ObjectKeyHash::from("rejected"), download(0, 100), ())],
         move |(), _publish| {
             finished.lock().unwrap().take().unwrap().send(()).unwrap();
@@ -1093,7 +1089,7 @@ async fn failed_chunk_write_releases_the_batch_without_publication() {
     // in the first chunk must remain unpublished when its shard's batch fails.
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
     disk.shards[0].allocator = DiskChunkAllocator::for_disk_range(0..3 * CHUNK_BYTES).unwrap();
-    let cache = DiskRangeCache { disk: Arc::new(disk) };
+    let cache = DiskCache { disk: Arc::new(disk) };
     assert!(matches!(
         cache
             .insert_batch(vec![
@@ -1101,9 +1097,7 @@ async fn failed_chunk_write_releases_the_batch_without_publication() {
                 (ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize)),
             ])
             .await,
-        Err(DiskRangeCacheError::DataFile(
-            DataFileError::RangeExceedsCapacity { .. }
-        ))
+        Err(DiskCacheError::DataFile(DataFileError::RangeExceedsCapacity { .. }))
     ));
     assert!(cache.get(&ObjectKeyHash::from("small"), range(0, 1)).await.is_none());
     assert!(cache.get(&ObjectKeyHash::from("large"), range(0, 1)).await.is_none());
@@ -1203,7 +1197,7 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
     let returned = cache.get(&keys[0], range(0, 100)).await.unwrap();
     let capacity = cache.disk.file.capacity();
     drop(cache);
-    let reopened = DiskRangeCache::open(directory.path(), capacity, IoMetrics::noop())
+    let reopened = DiskCache::open(directory.path(), capacity, IoMetrics::noop())
         .await
         .unwrap();
     assert!(keys.iter().all(|key| reopened.contains(key, range(0, 100))));

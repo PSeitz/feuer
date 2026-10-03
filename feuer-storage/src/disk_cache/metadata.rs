@@ -119,7 +119,8 @@ impl DiskCacheShard {
         Ok(true)
     }
 
-    pub(super) fn record_entry(&self, key: &ObjectKeyHash, entry: &mut DiskEntry) {
+    /// Sets an entry's metadata in memory and marks its page for writing.
+    pub(super) fn set_entry_metadata(&self, key: &ObjectKeyHash, entry: &mut DiskEntry) {
         let entry_metadata =
             encode_entry_metadata(key, entry.object_range, &entry.payload_range, entry.payload_checksum);
         let (chunk_index, entry_metadata_index) = self

@@ -10,7 +10,7 @@ pub(super) fn shard_disk_range(capacity: u64, count: usize, index: usize) -> Ran
     chunks * index as u64 / count as u64 * CHUNK_BYTES..chunks * (index + 1) as u64 / count as u64 * CHUNK_BYTES
 }
 
-impl DiskRangeCacheState {
+impl DiskCacheInner {
     /// Recovers a shard's entries from metadata records before the cache becomes available.
     pub(super) async fn recover_shard(&self, shard_index: usize) {
         let shard = &self.shards[shard_index];
@@ -42,7 +42,7 @@ impl DiskRangeCacheState {
                     payload_range,
                 };
                 for entry in index.insert(key, entry) {
-                    shard.remove_payload(entry);
+                    shard.remove_payload_and_allow_metadata_overwrite(entry);
                 }
             }
         }

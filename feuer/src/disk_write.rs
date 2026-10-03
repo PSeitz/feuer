@@ -9,7 +9,7 @@ use mixtrics::metrics::BoxedRegistry;
 use std::{sync::Arc, time::Instant};
 
 use feuer_memory::MemoryCache;
-use feuer_storage::DiskRangeCache;
+use feuer_storage::DiskCache;
 use feuer_types::{ByteRange, Download, ObjectKeyHash};
 use tokio::sync::mpsc;
 
@@ -55,7 +55,7 @@ impl Drop for DiskWriteEntryAndMetrics {
 }
 
 impl DiskWriteQueue {
-    pub(crate) fn with_metrics(memory: Arc<MemoryCache>, disk: DiskRangeCache, registry: &BoxedRegistry) -> Self {
+    pub(crate) fn with_metrics(memory: Arc<MemoryCache>, disk: DiskCache, registry: &BoxedRegistry) -> Self {
         let (disk_write_queue, receiver) =
             Self::channel_with_metrics(MAX_QUEUED_ENTRIES, DiskWriteQueueMetrics::new(registry));
         // The worker owns no sender. Dropping the last cache handle closes the queue;
@@ -121,7 +121,7 @@ impl DiskWriteQueue {
     async fn write_queued_batches(
         mut receiver: mpsc::Receiver<PendingDiskWrite>,
         memory: Arc<MemoryCache>,
-        disk: DiskRangeCache,
+        disk: DiskCache,
     ) {
         while let Some(first_write) = receiver.recv().await {
             let mut pending_writes = vec![first_write];
@@ -152,7 +152,7 @@ impl DiskWriteQueue {
             }
             let memory = memory.clone();
             if let Err(error) = disk
-                .insert_batch_checked(downloads, move |entry_and_metrics, publish| {
+                .insert_batch_with_publication_check(downloads, move |entry_and_metrics, publish| {
                     // Lock order is disk index -> memory shard. No memory operation
                     // acquires a disk lock; eviction cannot race this publication.
                     memory.with_entry_locked(&entry_and_metrics.key, entry_and_metrics.range, publish);

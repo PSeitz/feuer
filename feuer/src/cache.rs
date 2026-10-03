@@ -7,7 +7,7 @@ use feuer_memory::MemoryCache;
 #[cfg(target_os = "linux")]
 use feuer_memory::MemoryMetrics;
 #[cfg(target_os = "linux")]
-use feuer_storage::{DiskRangeCache, DiskRangeCacheError, IoMetrics};
+use feuer_storage::{DiskCache, DiskCacheError, IoMetrics};
 use feuer_types::{ByteRange, Download, ObjectKeyHash, retention::ObjectAccessHistories};
 #[cfg(target_os = "linux")]
 use mixtrics::metrics::BoxedRegistry;
@@ -25,7 +25,7 @@ struct CacheState {
     access_histories: Arc<ObjectAccessHistories>,
     metrics: LookupMetrics,
     #[cfg(target_os = "linux")]
-    disk: DiskRangeCache,
+    disk: DiskCache,
     #[cfg(target_os = "linux")]
     disk_write_queue: DiskWriteQueue,
 }
@@ -55,7 +55,7 @@ impl TieredMemoryDiskCache {
     /// usable io_uring and direct I/O; no memory-only or buffered fallback is used.
     /// Waits for every shard's metadata recovery before returning the cache.
     #[cfg(target_os = "linux")]
-    pub async fn open(config: CacheConfig) -> Result<Self, DiskRangeCacheError> {
+    pub async fn open(config: CacheConfig) -> Result<Self, DiskCacheError> {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         Self::open_with_metrics(config, &registry).await
     }
@@ -64,7 +64,7 @@ impl TieredMemoryDiskCache {
     /// Label values are defined by Feuer and contain no object identities or cache names. Caches
     /// sharing a registry contribute to the same counters and aggregate gauges.
     #[cfg(target_os = "linux")]
-    pub async fn open_with_metrics(config: CacheConfig, registry: &BoxedRegistry) -> Result<Self, DiskRangeCacheError> {
+    pub async fn open_with_metrics(config: CacheConfig, registry: &BoxedRegistry) -> Result<Self, DiskCacheError> {
         let access_histories = Arc::new(ObjectAccessHistories::new());
         let memory = Arc::new(
             MemoryCache::with_access_histories(
@@ -74,7 +74,7 @@ impl TieredMemoryDiskCache {
             )
             .with_reclaim_sample_size(config.reclaim_sample_size()),
         );
-        let disk = DiskRangeCache::open_with_buffer_pool(
+        let disk = DiskCache::open_with_buffer_pool(
             config.directory(),
             config.disk_capacity(),
             IoMetrics::new(registry),
@@ -136,7 +136,12 @@ impl TieredMemoryDiskCache {
         }
 
         #[cfg(target_os = "linux")]
-        if let Some((bytes, capacity)) = self.state.disk.get_with_capacity(&object_key, requested_range).await {
+        if let Some((bytes, capacity)) = self
+            .state
+            .disk
+            .get_with_buffer_capacity(&object_key, requested_range)
+            .await
+        {
             self.state.memory.insert_with_capacity(
                 object_key,
                 Download::new(requested_range.start(), bytes.clone()).expect("disk result covers the request"),
@@ -501,7 +506,7 @@ mod tests {
         let invalid = CacheConfig::new(directory.path(), 1024, 32).unwrap();
         assert!(matches!(
             TieredMemoryDiskCache::open(invalid).await,
-            Err(DiskRangeCacheError::InvalidCapacity)
+            Err(DiskCacheError::InvalidCapacity)
         ));
     }
 

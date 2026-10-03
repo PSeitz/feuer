@@ -39,7 +39,7 @@ pub struct DiskMetrics {
 }
 
 impl DiskMetrics {
-    /// Registers range-cache metrics independently of raw file I/O metrics.
+    /// Registers disk-cache metrics independently of raw file I/O metrics.
     pub fn new(registry: &BoxedRegistry) -> Arc<Self> {
         let lookups = registry.register_counter_vec(
             "feuer_disk_lookup_total".into(),
@@ -115,7 +115,7 @@ impl DiskMetrics {
         })
     }
 
-    /// Creates unregistered range-cache metrics.
+    /// Creates unregistered disk-cache metrics.
     pub fn noop() -> Arc<Self> {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         Self::new(&registry)

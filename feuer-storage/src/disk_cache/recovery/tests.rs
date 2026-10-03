@@ -1,12 +1,10 @@
 use super::*;
-use crate::range_cache::tests::{download, open_test_cache, range};
+use crate::disk_cache::tests::{download, open_test_cache, range};
 
-async fn reopen(directory: &Path, cache: DiskRangeCache) -> DiskRangeCache {
+async fn reopen(directory: &Path, cache: DiskCache) -> DiskCache {
     let capacity = cache.disk.file.capacity();
     drop(cache);
-    DiskRangeCache::open(directory, capacity, IoMetrics::noop())
-        .await
-        .unwrap()
+    DiskCache::open(directory, capacity, IoMetrics::noop()).await.unwrap()
 }
 
 #[tokio::test]
@@ -277,7 +275,7 @@ async fn failed_metadata_flush_does_not_delay_payload_reuse() {
             .unwrap()
             .remove(&ObjectKeyHash(i as u128), 0)
             .unwrap();
-        shard.remove_payload(entry);
+        shard.remove_payload_and_allow_metadata_overwrite(entry);
     }
     let directory = tempfile::tempdir().unwrap();
     let short_file = DataFile::open(directory.path(), METADATA_PAGE_BYTES as u64, IoMetrics::noop())
@@ -300,7 +298,7 @@ async fn a_write_after_open_replaces_recovered_entries() {
     assert!(cache.insert(key, download(10, 10)).await.unwrap());
     let capacity = cache.disk.file.capacity();
     drop(cache);
-    let cache = DiskRangeCache::open(directory.path(), capacity, IoMetrics::noop())
+    let cache = DiskCache::open(directory.path(), capacity, IoMetrics::noop())
         .await
         .unwrap();
     assert!(cache.insert(key, download(0, 100)).await.unwrap());
@@ -364,7 +362,7 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
         let capacity = cache.disk.file.capacity();
         drop(cache);
         let (registry, backend) = crate::test_metrics::registry();
-        let cache = DiskRangeCache::open_with_metrics(
+        let cache = DiskCache::open_with_metrics(
             directory.path(),
             capacity,
             IoMetrics::noop(),

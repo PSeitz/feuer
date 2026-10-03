@@ -72,7 +72,7 @@ fn full_queue_skips_writes_without_waiting_or_rejecting_memory_admission() {
 async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
     let directory = tempfile::tempdir().unwrap();
     let memory = Arc::new(MemoryCache::new(4096));
-    let disk = DiskRangeCache::open(directory.path(), 2 << 20, IoMetrics::noop())
+    let disk = DiskCache::open(directory.path(), 2 << 20, IoMetrics::noop())
         .await
         .unwrap();
     let (registry, backend) = registry();

@@ -2,7 +2,7 @@
 
 On Linux, use `TieredMemoryDiskCache::open_with_metrics(config, &registry).await`
 with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup,
-memory, disk I/O, range-cache and disk-write metrics in that registry.
+memory, disk I/O, disk-cache and disk-write metrics in that registry.
 Feuer does not install an exporter, the application owns the registry and its export endpoint.
 
 All labels below have fixed values. Object keys, paths and caller-defined cache

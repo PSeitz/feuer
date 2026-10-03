@@ -1,6 +1,6 @@
-# Disk range-cache prototype
+# Disk-cache prototype
 
-Experimental `DiskRangeCache`, connected to public tiered lookup and background disk writes through a
+Experimental `DiskCache`, connected to public tiered lookup and background disk writes through a
 256-entry queue.
 [tiered-plan.md](../tiered-plan.md) remains authoritative.
 
@@ -49,7 +49,7 @@ after power loss.
 
 Publication rechecks containment, larger entries first: broader entries replace contained entries,
 while partial overlaps coexist. Contained entries and entries that cannot fit are skipped.
-Publication is not transactional across shards. `insert_batch_checked` retains caller tokens and
+Publication is not transactional across shards. `insert_batch_with_publication_check` retains caller tokens and
 invokes the synchronous publication check under the index lock. Rejected and superseded entries
 release their payload occupancy without invalidation writes.
 

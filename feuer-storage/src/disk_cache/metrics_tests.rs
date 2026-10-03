@@ -5,10 +5,10 @@ fn download(length: usize) -> Download {
     Download::new(0, Bytes::from(vec![7; length])).unwrap()
 }
 
-async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskRangeCache, prometheus::Registry) {
+async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskCache, prometheus::Registry) {
     let directory = tempfile::tempdir().unwrap();
     let (registry, backend) = registry();
-    let cache = DiskRangeCache::open_with_metrics(
+    let cache = DiskCache::open_with_metrics(
         directory.path(),
         capacity,
         IoMetrics::new(&backend),
@@ -43,7 +43,7 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
         drop(cache);
 
         let (registry, backend) = registry();
-        let cache = DiskRangeCache::open(directory.path(), capacity, IoMetrics::new(&backend))
+        let cache = DiskCache::open(directory.path(), capacity, IoMetrics::new(&backend))
             .await
             .unwrap();
         assert_eq!(
@@ -80,7 +80,7 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     let metrics = cache.disk.metrics.clone();
     drop(cache);
 
-    let cache = DiskRangeCache::open_with_metrics(
+    let cache = DiskCache::open_with_metrics(
         directory.path(),
         capacity,
         IoMetrics::noop(),
@@ -196,7 +196,7 @@ async fn records_write_outcomes_packing_and_index_usage() {
     assert_eq!(outcome("already_covered"), 1.0);
     assert_eq!(
         cache
-            .insert_batch_checked(vec![("stale".into(), download(4), ())], |_, _| {})
+            .insert_batch_with_publication_check(vec![("stale".into(), download(4), ())], |_, _| {})
             .await
             .unwrap(),
         0
@@ -320,7 +320,7 @@ async fn pressure_eviction_is_not_replacement_and_failed_writes_are_not_publishe
     disk.shards[0]
         .allocator
         .add_metadata_chunk(0, page_format::RECORDS_PER_CHUNK);
-    let cache = DiskRangeCache { disk: Arc::new(disk) };
+    let cache = DiskCache { disk: Arc::new(disk) };
     assert!(
         cache
             .insert_batch(vec![

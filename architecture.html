@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Feuer · Architecture explorer</title>
+  <style>
+    :root { --bg: #101315; --panel: #181d20; --raised: #20272b; --border: #354047; --text: #edf0ef; --muted: #a5b2b8; --accent: #ffad78; --mint: #99d7bc; --blue: #9ec8ef; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 28px; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.65 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    a { color: var(--blue); text-underline-offset: 4px; }
+    a:hover { color: var(--text); }
+    button, summary, a { -webkit-tap-highlight-color: transparent; }
+    button { font: inherit; cursor: pointer; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; border-radius: 3px; }
+    .layout { display: grid; grid-template-columns: 224px minmax(0, 1fr); max-width: 1600px; margin: auto; }
+    aside { position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto; border-right: 1px solid var(--border); padding: 35px 24px; display: flex; flex-direction: column; gap: 42px; }
+    .brand { display: flex; align-items: center; gap: 12px; color: var(--text); text-decoration: none; font-size: 23px; font-weight: 750; letter-spacing: -.8px; }
+    .brand-mark { display: grid; place-items: center; width: 34px; height: 38px; color: var(--bg); background: var(--accent); border-radius: 10px 10px 10px 2px; font-size: 23px; }
+    .eyebrow { color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: 1.7px; text-transform: uppercase; }
+    nav { display: grid; gap: 6px; margin-top: 14px; }
+    nav a { color: var(--muted); text-decoration: none; padding: 9px 10px; border-radius: 6px; font-size: 13px; }
+    nav a:hover { background: var(--raised); }
+    nav span { color: var(--accent); font: 11px ui-monospace, monospace; margin-right: 12px; }
+    .aside-note { margin-top: auto; color: var(--muted); font-size: 12px; }
+    .status { display: inline-flex; align-items: center; gap: 8px; }
+    .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--mint); }
+    main { min-width: 0; padding: 46px clamp(22px, 4vw, 64px) 30px; }
+    .header-line { display: flex; justify-content: space-between; gap: 16px; align-items: center; }
+    .tag { border: 1px solid var(--border); padding: 3px 10px; border-radius: 20px; color: var(--muted); font: 11px/1.6 ui-monospace, monospace; }
+    h1 { font-size: clamp(34px, 4.5vw, 56px); line-height: 1.12; letter-spacing: -2px; margin: 25px 0 18px; font-weight: 650; }
+    h1 span { color: var(--accent); }
+    .intro { color: var(--muted); max-width: 640px; font-size: 16px; margin: 0; }
+    .flow { border: 1px solid var(--border); border-radius: 12px; padding: 22px 26px; margin: 32px 0; background: linear-gradient(110deg, #202421, var(--panel)); }
+    .flow-header { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .flow-header small { color: var(--muted); font-size: 12px; }
+    .flow-path { display: flex; align-items: center; gap: 18px; margin-top: 18px; }
+    .flow-path a { flex: 1; text-decoration: none; color: var(--text); border: 1px solid var(--border); background: var(--bg); padding: 13px 18px; border-radius: 8px; transition: border-color .15s; }
+    .flow-path a:hover { border-color: var(--accent); }
+    .flow-path strong { display: block; font-size: 15px; font-weight: 600; }
+    .flow-path small { display: block; color: var(--muted); font-size: 12px; }
+    .arrow { color: var(--muted); font: 11px/1.6 ui-monospace, monospace; text-align: center; }
+    .arrow b { display: block; color: var(--accent); font-size: 20px; font-weight: 400; }
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 34px 0 18px; }
+    h2 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -.3px; }
+    .hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+    #collapse { color: var(--muted); background: transparent; border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 12px; white-space: nowrap; }
+    #collapse:hover { color: var(--text); border-color: var(--muted); }
+    .components { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+    details { min-width: 0; }
+    details.component { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    details.component[open] { border-color: #65716f; }
+    summary { list-style: none; cursor: pointer; position: relative; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: "+"; color: var(--muted); position: absolute; right: 20px; top: 18px; font: 22px/1 ui-monospace, monospace; }
+    details[open] > summary::after { content: "−"; color: var(--accent); }
+    summary:hover { background: #ffffff04; }
+    .component > summary { padding: 22px 46px 22px 22px; }
+    .component > summary::after { top: 24px; }
+    .component-label { display: flex; align-items: center; gap: 10px; margin-bottom: 15px; }
+    .number { color: var(--accent); font: 12px ui-monospace, monospace; }
+    .crate { color: var(--muted); font: 11px ui-monospace, monospace; }
+    h3 { font-size: 21px; font-weight: 600; line-height: 1.35; letter-spacing: -.5px; margin: 0 0 9px; }
+    .description { display: block; color: var(--muted); font-size: 13px; line-height: 1.65; }
+    .child-count { display: block; color: var(--mint); font-size: 11px; margin-top: 17px; }
+    .component-body { padding: 0 16px 16px; }
+    .branch { border-top: 1px solid var(--border); }
+    .branch > summary { padding: 15px 36px 15px 6px; font-size: 14px; font-weight: 550; }
+    .branch > summary::after { right: 8px; top: 18px; font-size: 16px; }
+    .branch > summary small { display: block; font-size: 12px; color: var(--muted); font-weight: 400; margin-top: 3px; }
+    .content { padding: 0 6px 18px; font-size: 13px; color: #c2cdd1; }
+    .content p { margin: 0 0 12px; }
+    .content p:last-child { margin-bottom: 0; }
+    .content strong { color: var(--text); font-weight: 600; }
+    ul, ol { padding-left: 20px; margin: 10px 0 14px; }
+    li { padding-left: 3px; margin-bottom: 7px; }
+    code { color: #d8e4ea; font: .9em/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+    .source { display: block; border-top: 1px dashed var(--border); margin-top: 15px; padding-top: 10px; font: 11px/1.8 ui-monospace, monospace; overflow-wrap: anywhere; }
+    .source::before { content: "↗ "; color: var(--accent); }
+    .deeper { border-left: 2px solid #52615a; background: #10131580; margin-top: 12px; }
+    .deeper > summary { padding: 10px 32px 10px 12px; font-size: 12px; color: var(--mint); }
+    .deeper > summary::after { font-size: 14px; top: 14px; right: 12px; }
+    .deeper > div { padding: 0 12px 12px; font-size: 12px; }
+    .callout { border-left: 2px solid var(--accent); padding: 4px 0 4px 12px; color: #dec3ae; }
+    .formula { display: block; padding: 12px; background: var(--bg); border-radius: 5px; margin: 12px 0; }
+    dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; margin: 12px 0; }
+    dt { color: var(--muted); }
+    dd { margin: 0; color: var(--text); text-align: right; }
+    footer { border-top: 1px solid var(--border); margin-top: 32px; padding-top: 18px; color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+    footer a { color: var(--muted); }
+    @media (min-width: 1200px) { .component > summary { min-height: 215px; } }
+    @media (max-width: 950px) {
+      .layout { grid-template-columns: 180px minmax(0, 1fr); }
+      aside { padding: 28px 16px; }
+      .components { grid-template-columns: 1fr; }
+      .flow { padding: 20px; }
+      .flow-path { gap: 10px; }
+      .flow-path a { padding: 10px; }
+    }
+    @media (max-width: 650px) {
+      .layout { display: block; }
+      aside { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border); padding: 18px 22px; }
+      aside nav, aside .nav-group, .aside-note { display: none; }
+      main { padding-top: 26px; }
+      h1 { letter-spacing: -1.4px; }
+      .header-line .tag { display: none; }
+      .flow-path { flex-direction: column; gap: 6px; align-items: stretch; }
+      .arrow { display: flex; justify-content: center; align-items: center; gap: 8px; }
+      .arrow b { transform: rotate(90deg); }
+      .flow-path a { padding: 10px 16px; }
+      .flow-header small { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; } }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside aria-label="Architecture navigation">
+    <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true">f</span> feuer<span style="color:var(--accent)">.</span></a>
+    <div class="nav-group">
+      <div class="eyebrow">System map</div>
+      <nav aria-label="Components">
+        <a href="#requests"><span>01</span>Request lifecycle</a>
+        <a href="#memory"><span>02</span>Memory cache</a>
+        <a href="#disk"><span>03</span>Disk storage</a>
+        <a href="#io"><span>04</span>I/O &amp; buffers</a>
+        <a href="#retention"><span>05</span>Retention policy</a>
+        <a href="#foundations"><span>06</span>Foundations</a>
+      </nav>
+    </div>
+    <div class="aside-note">
+      <div class="status">Implementation map</div>
+      <p>Explore the current code, one layer at a time.</p>
+      <a href="README.md">Project README ↗</a>
+    </div>
+  </aside>
+  <main id="top">
+    <header>
+      <div class="header-line"><span class="eyebrow">Under the hood / Feuer</span><span class="tag">Rust · memory + disk</span></div>
+      <h1>A cache, <span>layer by layer.</span></h1>
+      <p class="intro">From a requested byte range to the bytes on disk. Explore how Feuer looks up, retains, allocates, and moves your data.</p>
+    </header>
+
+    <section class="flow" aria-label="Lookup order">
+      <div class="flow-header"><span class="eyebrow">The read path</span><small>First covering hit wins. Every success returns the exact requested range.</small></div>
+      <div class="flow-path">
+        <a href="#memory"><strong>Memory</strong><small>Retained byte ranges</small></a>
+        <span class="arrow">miss<b aria-hidden="true">→</b></span>
+        <a href="#disk"><strong>Disk</strong><small>Verified stored ranges</small></a>
+        <span class="arrow">miss<b aria-hidden="true">→</b></span>
+        <a href="#download"><strong>Your source</strong><small>Async download callback</small></a>
+      </div>
+    </section>
+
+    <div class="section-head">
+      <div><h2>Explore the components</h2><p class="hint">Click a card to open it. Keep expanding to see implementation details.</p></div>
+      <button id="collapse" type="button" hidden>Collapse all</button>
+    </div>
+
+    <div class="components">
+      <details class="component" id="requests">
+        <summary>
+          <span class="component-label"><span class="number">01</span><span class="crate">feuer</span></span>
+          <h3>Request lifecycle</h3>
+          <span class="description">Checks memory, then disk, then your download callback; queues disk writes in the background.</span>
+          <span class="child-count">3 components · expand to explore</span>
+        </summary>
+        <div class="component-body">
+          <details class="branch">
+            <summary><code>TieredMemoryDiskCache</code><small>Checks memory, then disk, then your download callback</small></summary>
+            <div class="content">
+              <p>Call <code>get_or_fetch</code> with an object key, a byte range, and a function that downloads missing data. It returns the requested bytes. Each request is counted before looking in the cache, even if it later fails or is canceled.</p>
+              <p>The public boundary hashes the key's UTF-8 bytes once with seed-zero XXH3-128. Both tiers and request history use only that 128-bit identity; full keys are not retained or checked for collisions.</p>
+              <ol><li>Check memory for one range covering the request.</li><li>On a miss, read and verify a covering disk entry. Promote only the requested bytes to memory.</li><li>On another miss, invoke this call's download callback and validate its coverage.</li></ol>
+              <details class="deeper"><summary>What happens after a successful download?</summary><div>
+                <p>The cache keeps the download in memory and queues it for writing to disk. This does not count as another request.</p>
+                <p>If disk already has the downloaded range, the cache returns the requested bytes without storing another copy. If memory already has the range, it also skips the disk write.</p>
+              </div></details>
+              <a class="source" href="feuer/src/cache.rs">feuer/src/cache.rs · TieredMemoryDiskCache</a>
+            </div>
+          </details>
+          <details class="branch" id="download">
+            <summary>Download callback<small>Your source implementation, not a built-in S3 client</small></summary>
+            <div class="content">
+              <p>The async callback returns a <code>Download</code>: a starting offset and non-empty <code>Bytes</code> covering at least the requested range. Feuer returns an exact slice.</p>
+              <p>If several requests miss the cache at once, each calls its own download function. Feuer does not combine downloads or retry failures; your function must do that if needed.</p>
+              <details class="deeper"><summary>Input and error contract</summary><div>
+                <ul><li>Keys identify immutable content and must not be adversarial; hash collisions are not checked.</li><li>Distinct requested ranges for a key must not overlap; exact repeats are allowed. A download can cover several requests.</li><li>Callback errors and downloads that do not cover the request are returned as typed errors.</li><li>Disk read uncertainty becomes a miss, allowing the callback to serve the request.</li></ul>
+              </div></details>
+              <a class="source" href="feuer/src/cache.rs">feuer/src/cache.rs · get_or_fetch</a>
+            </div>
+          </details>
+          <details class="branch">
+            <summary><code>DiskWriteQueue</code><small>Writes downloads to disk in the background</small></summary>
+            <div class="content">
+              <p><code>DiskWriteQueue</code> accepts entries without waiting for queue space. A full or closed queue skips the write, not the successful lookup.</p>
+              <dl><dt>Pending entry limit</dt><dd>256</dd><dt>Entries per batch</dt><dd>Up to 64</dd><dt>Workers</dt><dd>1</dd><dt>Queued + active payload byte cap</dt><dd>None</dd></dl>
+              <details class="deeper"><summary>Stale entries, publication, and cancellation</summary><div>
+                <p>Each queued write carries its download, key hash, and exact range. The worker checks that this key and range remain cached before starting; publication rechecks them under the memory shard lock while holding the disk index lock. No memory operation acquires a disk lock.</p>
+                <p>Eviction, replacement by a different range, or trimming can make a candidate stale. Reinserting the same immutable range allows an earlier write to proceed. Issued writes retain disk reservations through completion; abandoning the result cannot make their chunks reusable early.</p>
+                <p>Batches drain immediately available work: no batching timer or public flush API. Failed writes are logged and are not published.</p>
+              </div></details>
+              <a class="source" href="feuer/src/disk_write.rs">feuer/src/disk_write.rs · DiskWriteQueue</a>
+            </div>
+          </details>
+        </div>
+      </details>
+
+      <details class="component" id="memory">
+        <summary>
+          <span class="component-label"><span class="number">02</span><span class="crate">feuer-memory</span></span>
+          <h3>Memory cache</h3>
+          <span class="description">Keeps downloaded bytes in RAM and removes or shrinks entries when it needs space.</span>
+          <span class="child-count">3 components · expand to explore</span>
+        </summary>
+        <div class="component-body">
+          <details class="branch">
+            <summary><code>MemoryCacheShard</code><small>Maps object keys to cached byte ranges</small></summary>
+            <div class="content">
+              <p><code>MemoryCache</code> splits keys among shards so requests for different shards can run without sharing one lock. Each shard stores an object's cached ranges in a <code>BTreeMap</code>, sorted by starting byte offset.</p>
+              <p>A lookup needs <strong>one entry covering the entire request</strong>; it does not assemble several cached ranges.</p>
+              <details class="deeper"><summary>Index structure and admission rules</summary><div>
+                <p><code>ObjectEntries</code> owns the ordered ranges. Each <code>MemoryEntry</code> holds its byte range, <code>Bytes</code>, allocation charge, candidate slot, and admission request clock. Entries are identified by key hash and exact range, not an entry ID or generation. Request history is stored separately and shared by both tiers.</p>
+                <p>If the bytes are already cached, the new copy is skipped. A larger range replaces smaller entries it fully contains. Ranges that overlap only partly can both stay cached.</p>
+                <p>Default shard count: four times available parallelism, capped at 64, with a minimum of one.</p>
+              </div></details>
+              <a class="source" href="feuer-memory/src/store/shard.rs">feuer-memory/src/store/shard.rs</a>
+            </div>
+          </details>
+          <details class="branch">
+            <summary>Memory usage<small>Cached bytes and reusable read buffers share the memory target</small></summary>
+            <div class="content">
+              <p>The cache retains reference-counted <code>Bytes</code>. Hits return slices sharing their allocations; there is <strong>no dedicated slab or arena allocator</strong> for cached payloads.</p>
+              <p>The memory target covers cached data and unused read buffers kept for reuse. For data read from disk, the cache counts the whole buffer, even if it keeps only a small slice. For downloads, it counts the returned byte length. Each shard gets a share of the target, but can exceed it to keep one oversized entry.</p>
+              <details class="deeper"><summary>Why the target is not an RSS limit</summary><div>
+                <ul><li>Caller-held slices survive eviction and may keep a larger allocation alive.</li><li>Metadata and access histories add memory beyond payload accounting.</li><li>Pending disk writes and I/O buffers have separate ownership and accounting.</li><li>The memory cache owns one aligned buffer pool, charged to the same capacity.</li></ul>
+                <a href="#io-buffers">Explore aligned I/O buffers →</a>
+              </div></details>
+              <a class="source" href="feuer-memory/src/store.rs">feuer-memory/src/store.rs · MemoryCache</a>
+            </div>
+          </details>
+          <details class="branch">
+            <summary>Range trimming<small>Keep useful subranges rather than the whole download</small></summary>
+            <div class="content">
+              <p>When memory is full, the cache chooses an entry to remove. If only parts of it have been requested, it can copy those parts into smaller buffers and discard the rest. Otherwise, it removes the whole entry.</p>
+              <dl><dt>Trimming grace</dt><dd>64 requests across all keys</dd><dt>Minimum payload saving</dt><dd>25%</dd></dl>
+              <details class="deeper"><summary>Copy outside the lock, validate before publishing</summary><div>
+                <p>Overlapping or adjacent observed intervals are merged and copied into independent <code>Bytes</code>. Copying occurs outside the shard lock.</p>
+                <p>Publication requires the exact source key and range to remain cached. Reinsertion of that immutable range, changes to neighboring ranges, and new requests do not invalidate the copy. Retained ranges already covered by another entry are skipped. If the source disappeared or was replaced by a different range, admission falls back to eviction.</p>
+                <p>There is no periodic compaction. Caller-held slices remain valid.</p>
+              </div></details>
+              <a class="source" href="feuer-memory/src/store/range_trim.rs">feuer-memory/src/store/range_trim.rs · RangeTrimPlan</a>
+            </div>
+          </details>
+        </div>
+      </details>
+
+      <details class="component" id="disk">
+        <summary>
+          <span class="component-label"><span class="number">03</span><span class="crate">feuer-storage</span></span>
+          <h3>Disk storage</h3>
+          <span class="description">Stores bytes on disk, tracks where they are, and checks their checksums when reading.</span>
+          <span class="child-count">5 components · expand to explore</span>
+        </summary>
+        <div class="component-body">
+          <details class="branch">
+            <summary><code>DiskCache</code><small>Finds stored byte ranges and verifies their checksums</small></summary>
+            <div class="content">
+              <p><code>DiskCache</code> keeps a lookup table in RAM: object key hash and byte range → payload region, checksum, and metadata slot. Each <code>DiskCacheShard</code> has its own table (<code>DiskEntryIndex</code>), chunk allocator, cached metadata pages, and async metadata I/O lock.</p>
+              <p>A hit verifies the <strong>whole covering entry</strong>, then returns the requested slice. It does not load neighboring entries or metadata.</p>
+              <details class="deeper"><summary>Concurrent reads and integrity failures</summary><div>
+                <p>Concurrent readers of the same stored entry share a <code>OnceCell</code> result containing verified bytes or failure. The index holds only a weak reference, so it is not a persistent payload cache.</p>
+                <p>I/O errors or checksum failures invalidate matching disk state and return a miss. Read guards protect the physical regions during reads; returned bytes retain no disk ownership.</p>
+                <p>Whole-entry verification means small subrange requests may read much more than the requested bytes.</p>
+                <p>Disk shard count is capacity divided by 128 MiB, clamped to 1–64. Each shard owns a fixed consecutive disk byte range; its count is independent of memory and history shards.</p>
+              </div></details>
+              <a class="source" href="feuer-storage/src/disk_cache.rs">feuer-storage/src/disk_cache.rs · DiskCache</a>
+            </div>
+          </details>
+          <details class="branch" id="disk-allocator">
+            <summary><code>DiskChunkAllocator</code><small>Reserves and frees consecutive 1-MiB chunks</small></summary>
+            <div class="content">
+              <p><code>DiskChunkAllocator</code> tracks free consecutive chunk runs in a <code>BTreeMap</code>. It reserves chunks in disk-address order and merges adjacent runs when chunks are released.</p>
+              <p>Each reservation is one consecutive run of whole chunks. An entry is never assembled from scattered free chunks. A failed reservation consumes no space.</p>
+              <details class="deeper"><summary>Fragmentation and pressure eviction</summary><div>
+                <p>Written payload chunks stay unchanged until all owners and read guards release them. Removing an entry leaves holes that cannot be reused individually; live neighbors can keep a mostly empty chunk unavailable. Metadata chunks remain reserved, with reusable record slots.</p>
+                <p>Pressure eviction samples entries using the shared retention score. Per shard batch, work is limited to 64 sampling attempts and a chunk budget of 4,096. Each removed entry charges its reserved region's whole chunk count, even if pending metadata invalidation, neighbors, or readers prevent those chunks from becoming free. Exhausting a budget skips further reclamation for that batch.</p>
+                <p>Shards allocate independently: space elsewhere does not guarantee admission in this shard. There is no background cleaner relocating neighbors.</p>
+              </div></details>
+              <a class="source" href="feuer-storage/src/allocation.rs">feuer-storage/src/allocation.rs · DiskChunkAllocator</a>
+            </div>
+          </details>
+          <details class="branch">
+            <summary><code>DiskRegion</code> &amp; <code>ChunkGuard</code><small>Keep space unavailable until its users finish</small></summary>
+            <div class="content">
+              <p>The allocator keeps a free list in RAM. Writers call <code>reserve_chunks()</code> to take space from that list before writing. A <code>DiskRegion</code> represents a reserved byte range in the backing file; slices share ownership of the entire consecutive run of chunks.</p>
+              <p>A read creates a <code>ChunkGuard</code> from the indexed entry while holding the index lock. The guard keeps the whole reservation alive through reading and verification. Eviction can remove the entry, but reuse must wait for completed metadata invalidation and all remaining owners and guards.</p>
+              <details class="deeper"><summary>Example: reading an entry in chunk 7</summary><div>
+                <ol><li>A reader finds the entry and creates a guard.</li><li>Eviction removes the entry and clears its metadata record in RAM. Pending invalidation and the guard both retain the payload reservation.</li><li>The I/O queue retains a guard through completion, even if the caller cancels.</li><li>The next write completes metadata invalidation before releasing pending payload ownership. After all owners and read guards are gone, <code>ChunkReservation::drop()</code> returns the chunks to the free list.</li><li>A later writer can reserve that space and overwrite it.</li></ol>
+                <p>No code scans for guards. Reference counting controls when space becomes free. This is not a read/write lock: raw file writes do not check guards. Payload writes use newly reserved regions; mutable metadata updates use separate per-shard read/write synchronization.</p>
+                <p>Multiple reads can run concurrently. Returned bytes live in RAM and retain no disk reservation.</p>
+              </div></details>
+              <a class="source" href="feuer-storage/src/allocation.rs">feuer-storage/src/allocation.rs · DiskRegion / ChunkGuard</a>
+            </div>
+          </details>
+          <details class="branch">
+            <summary>Batch packing &amp; disk format<small>Immutable payload chunks, separate mutable metadata</small></summary>
+            <div class="content">
+              <p>Explicit batches group small entries into immutable <strong>1-MiB payload chunks</strong>, with 4-KiB-aligned addresses and storage lengths. Each entry occupies one contiguous byte range with no metadata gaps, even across chunk boundaries.</p>
+              <p>Separate <strong>1-MiB metadata chunks</strong> contain checksummed 4-KiB pages. Their records are updated in place under the shard's metadata I/O lock. Payload writes complete before metadata records are written; metadata writes complete before publication.</p>
+              <details class="deeper"><summary>Packing constraints and persistent metadata</summary><div>
+                <ul><li>Batches sort payloads smallest first within each shard. Small entries share a chunk only when their complete aligned payloads fit inside it.</li><li>Multi-chunk entries own consecutive whole chunks exclusively, including unused tails. Partially filled payload chunks are finalized; later batches cannot append.</li><li>The v11 format stores fixed 48-byte records: 128-bit key hash, object range start and length, payload address, and seed-zero XXHash64 payload checksum. Payload length equals the object range length; storage length rounds up to 4 KiB.</li><li>The first 255 metadata pages hold 84 records each: 21,420 entries per metadata chunk. The final 4-KiB page stores the next metadata chunk address. Every page has its own seed-zero XXHash64 checksum.</li><li>Metadata chunks stay reserved while open; cleared slots are reused across batches. An active shard needs at least one metadata chunk in addition to payload chunks. A one-chunk cache has no room for payloads.</li><li>Cached metadata pages and free-slot bookkeeping consume RAM outside the retained-memory target. Sharing a metadata chunk does not couple payload-chunk lifetimes.</li></ul>
+                <p class="callout">New metadata chunks are initialized before linking. Record invalidation writes complete before payload ownership is released for reuse. No fsync or fdatasync is issued; completion is not a crash-durability or power-loss ordering guarantee. Older formats are not migrated.</p>
+              </div></details>
+              <a class="source" href="feuer-storage/format.md">feuer-storage/format.md · disk format v11</a>
+              <a class="source" href="feuer-storage/src/disk_cache/metadata.rs">feuer-storage/src/disk_cache/metadata.rs · metadata updates and invalidation</a>
+              <a class="source" href="feuer-storage/src/disk_cache.rs">feuer-storage/src/disk_cache.rs · pack_download / write_payloads_and_metadata</a>
+            </div>
+          </details>
+          <details class="branch">
+            <summary>Restart recovery during open<small>Follow metadata links before serving requests</small></summary>
+            <div class="content">
+              <p>Opening waits for every shard's metadata recovery before returning the cache. Each shard runs recovery on Tokio's blocking pool, using io_uring reads to rebuild its in-memory index and payload ownership.</p>
+              <details class="deeper"><summary>Metadata-only reads, validation, and repair</summary><div>
+                <p>Each chain starts at its shard's first chunk and follows last-page links, with one 1-MiB read per metadata chunk. Recovery never scans payload chunks. There is no inventory file, periodic address checkpoint, or persistent free-space map.</p>
+                <p>All metadata chunks in a shard are reserved before entry records can claim payload chunks. Record decoding checks range arithmetic, alignment, file bounds, key-hash shard identity, and conflicting payload byte ranges. Entries sharing a payload chunk share its reservation.</p>
+                <p>Zero-filled chunks, read failures, invalid addresses, cycles, or corrupt links end the chain. Corrupt record pages are discarded independently. Repairs remain in the cached metadata image and are flushed before subsequent writes can reuse space; temporary allocator claim bits are released after recovery.</p>
+                <p>Payload checksums are verified on hits, not during recovery. Missing or torn payloads become misses. Closing preserves live metadata records for the next open. Recovery remains best-effort, not durable storage.</p>
+              </div></details>
+              <a class="source" href="feuer-storage/src/disk_cache/recovery.rs">feuer-storage/src/disk_cache/recovery.rs</a>
+            </div>
+          </details>
+        </div>
+      </details>
+
+      <details class="component" id="io">
+        <summary>
+          <span class="component-label"><span class="number">04</span><span class="crate">feuer-storage</span></span>
+          <h3>I/O &amp; buffer memory</h3>
+          <span class="description">Sends reads and writes to Linux and provides the memory buffers they use.</span>
+          <span class="child-count">3 components · expand to explore</span>
+        </summary>
+        <div class="component-body">
+          <details class="branch">
+            <summary><code>DataFile</code><small>Reads and writes the backing file using Linux direct I/O</small></summary>
+            <div class="content">
+              <p><code>DataFile</code> opens the backing file with <code>O_DIRECT</code> and exclusively locks the cache directory. Linux, usable io_uring, and compatible alignment support are required; there is no buffered fallback.</p>
+              <details class="deeper"><summary>Alignment, splitting, and caller responsibilities</summary><div>
+                <ul><li>Reads accept arbitrary ranges; physical reads round outward to 4 KiB and results are sliced.</li><li>Write offsets and lengths must be multiples of 4 KiB.</li><li>Large operations are split into requests of at most 1 MiB of physical I/O.</li><li>The upper layer prevents conflicting physical reads/writes and owns disk-region reuse protection.</li><li>Multi-request operations are not atomic. Completion is not a crash-durability guarantee.</li></ul>
+              </div></details>
+              <a class="source" href="feuer-storage/src/file.rs">feuer-storage/src/file.rs · DataFile</a>
+            </div>
+          </details>
+          <details class="branch">
+            <summary><code>ReadQueue</code> &amp; <code>WriteQueue</code><small>Send reads and writes to separate io_uring workers</small></summary>
+            <div class="content">
+              <p>Reads and writes each have a bounded waiting channel, active request slots, an io_uring ring, and a worker thread. Arrival order determines scheduling, not completion order. Neither queue checks for overlapping disk ranges.</p>
+              <dl><dt>Active read slots / waiting channel</dt><dd>64 / 64 requests</dd><dt>Active write slots / waiting channel</dt><dd>8 / 8 requests</dd><dt>Maximum bytes per I/O request</dt><dd>1 MiB</dd><dt>Separate I/O-byte budget</dt><dd>None</dd></dl>
+              <details class="deeper"><summary>Admission and completion lifetime</summary><div>
+                <p>Normal submissions reserve channel capacity before preparing request buffers. Startup recovery tries to reserve a read-channel slot and retries later if full. A payload read allocates its whole-entry buffer before submitting 1-MiB slices sequentially, so queue slot limits do not cap total read-buffer memory.</p>
+                <p>An eventfd wakes workers for new requests or shutdown; no busy polling or registered buffers are used. Submitted buffers survive caller cancellation. Last-handle drop drains and joins the workers.</p>
+                <p>Abnormal driver failure retains uncertain active buffers and the directory lock until process exit rather than risk unsafe reuse.</p>
+              </div></details>
+              <a class="source" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · IoQueueHandle / IoQueue</a>
+            </div>
+          </details>
+          <details class="branch" id="io-buffers">
+            <summary><code>AlignedBuffer</code> &amp; <code>BufferPool</code><small>Allocate and reuse aligned memory for direct I/O</small></summary>
+            <div class="content">
+              <p>Direct I/O needs memory addresses aligned to 4 KiB. <code>AlignedBuffer</code> allocates that memory. <code>BufferPool</code> keeps unused buffers in six sizes so later reads can reuse them. A read returns only the requested bytes, but caching them counts the whole buffer toward memory usage.</p>
+              <dl><dt>Allocation capacities</dt><dd>32 KiB, 256 KiB, 4 MiB, 16 MiB, 32 MiB, 64 MiB</dd><dt>Shared budget</dt><dd>Memory-cache capacity, including cached entries</dd><dt>Total idle cap</dt><dd>7% of memory capacity by default, shared by all six buckets; no per-bucket caps or reservations</dd><dt>Above 64 MiB</dt><dd>Exact-size, unpooled allocations</dd></dl>
+              <details class="deeper"><summary>Allocation lifetime and configuration</summary><div>
+                <p>Fresh aligned buffers use <code>alloc_zeroed</code> and matching <code>dealloc</code>. After the last owner releases a buffer, it returns to its cache's pool only if both the idle pool and the shared memory budget have room; otherwise it is freed.</p>
+                <p>The I/O buffer holds the disk read guard through completion, then drops it before returning <code>Bytes</code>. Returned results retain only RAM, not disk reservations, and do not keep the pool alive.</p>
+                <p><code>FEUER_IDLE_BUFFER_POOL_PERCENT</code> sets the idle ceiling (0–100; default 7). Zero disables idle retention. Cached entries take priority: admission frees idle buffers as needed, and returns never evict entries.</p>
+                <p class="callout">Writes reuse aligned input slices or allocate unpooled scratch buffers. Active reads and caller-only results remain outside the retention budget. Standalone storage without a memory cache retains no idle buffers.</p>
+              </div></details>
+              <a class="source" href="feuer-memory/src/buffer.rs">feuer-memory/src/buffer.rs · AlignedBuffer / BufferPool</a>
+            </div>
+          </details>
+        </div>
+      </details>
+
+      <details class="component" id="retention">
+        <summary>
+          <span class="component-label"><span class="number">05</span><span class="crate">feuer-types · both tiers</span></span>
+          <h3>Shared retention policy</h3>
+          <span class="description">Uses request history to choose which entries to keep and which to remove.</span>
+          <span class="child-count">2 components · expand to explore</span>
+        </summary>
+        <div class="component-body">
+          <details class="branch">
+            <summary><code>ObjectAccessHistories</code><small>Tracks requested byte ranges independently of cached entries</small></summary>
+            <div class="content">
+              <p><code>ObjectAccessHistories</code> remembers which byte ranges people request and how often. Memory and disk use the same history when choosing entries to remove. <code>get_or_fetch</code> records each request before lookup, including failures and cancellations. Adding or removing cached data does not change that history.</p>
+              <details class="deeper"><summary>Two histories with different purposes</summary><div>
+                <p><strong>Scoring counters:</strong> decayed counts per exact requested range. Default half-life is 8,192 requests across all keys. Distinct keys and range counters are never removed or capped during the history object's lifetime, even after both tiers evict the data.</p>
+                <p><strong>Trimming history:</strong> a separate bounded event history. Defaults retain up to 64 events per object, aged out after 262,144 requests across all keys.</p>
+                <p>History uses 64 independently locked maps and one global request clock, separate from memory and disk shard counts. It is not persisted; aging is request-based, not wall-clock-based.</p>
+              </div></details>
+              <a class="source" href="feuer-types/src/retention.rs">feuer-types/src/retention.rs · ObjectAccessHistories</a>
+            </div>
+          </details>
+          <details class="branch">
+            <summary>Value scoring &amp; sampled eviction<small>Prefer more avoided retrieval cost per retained byte</small></summary>
+            <div class="content">
+              <p>Only requests fully contained in an entry contribute to its value:</p>
+              <code class="formula">Σ decayed_count × (fixed_request_cost + requested_bytes)<br>──────────────────────────────────────<br>retained_bytes</code>
+              <p>Both tiers sample candidates and choose the lowest value per byte. Memory divides by the entry's charged allocation capacity; disk divides by payload length. Memory may trim that victim; disk removes selected entries.</p>
+              <details class="deeper"><summary>Defaults and what the score excludes</summary><div>
+                <ul><li>Sample size: 64 live candidates per decision, configurable.</li><li>Fixed request cost: 10,000,000 equivalent bytes by default; zero scores bytes only.</li><li>Both tiers maintain dense candidate lists sampled in rotation; removal leaves no stale-candidate backlog.</li><li>Disk alignment, metadata, and chunk overhead do not enter the payload-only score.</li><li>Tier-aware memory valuation based on disk residency is not implemented.</li></ul>
+                <p>Settings include <code>FEUER_RECLAIM_SAMPLE_SIZE</code>, <code>FEUER_ACCESS_COUNT_HALF_LIFE</code>, and <code>FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES</code>.</p>
+              </div></details>
+              <a class="source" href="feuer-types/src/retention.rs">feuer-types/src/retention.rs · shared scoring</a>
+            </div>
+          </details>
+        </div>
+      </details>
+
+      <details class="component" id="foundations">
+        <summary>
+          <span class="component-label"><span class="number">06</span><span class="crate">cross-cutting</span></span>
+          <h3>Types, runtime &amp; visibility</h3>
+          <span class="description">The types and settings you use, the metrics you can collect, and the current limitations.</span>
+          <span class="child-count">3 components · expand to explore</span>
+        </summary>
+        <div class="component-body">
+          <details class="branch">
+            <summary>Types &amp; configuration<small>Keys, byte ranges, downloads, and cache settings</small></summary>
+            <div class="content">
+              <ul><li><code>ObjectKey</code>: public UTF-8 string identifying immutable content.</li><li><code>ObjectKeyHash</code>: internal seed-zero XXH3-128 identity shared by both tiers, history, and recovery; full-key collision checks are not performed.</li><li><code>ByteRange</code>: an exact, non-empty byte interval.</li><li><code>Download</code>: starting offset plus non-empty bytes, with a derived range.</li><li><code>CacheConfig</code>: cache directory, fixed disk capacity, memory target, and reclaim sample size.</li></ul>
+              <details class="deeper"><summary>Opening a cache and selecting a runtime</summary><div>
+                <p>Public opening is asynchronous, requires a Tokio runtime, and waits for all disk shards to recover. Disk capacity must be a positive multiple of 1 MiB, including alignment and metadata overhead.</p>
+                <p><code>feuer-tokio</code> lets the code use either Tokio or madsim's Tokio replacement for deterministic tests. Enable one runtime feature, not both.</p>
+                <a href="feuer-tokio/src/lib.rs">feuer-tokio/src/lib.rs</a>
+              </div></details>
+              <a class="source" href="feuer/src/lib.rs">feuer/src/lib.rs · public types</a>
+              <a class="source" href="feuer-types/src/lib.rs">feuer-types/src/lib.rs · ObjectKeyHash</a>
+              <a class="source" href="feuer/src/config.rs">feuer/src/config.rs · CacheConfig</a>
+            </div>
+          </details>
+          <details class="branch">
+            <summary>Metrics<small>Observe tier outcomes, pressure, capacity, and I/O</small></summary>
+            <div class="content">
+              <p><code>open_with_metrics</code> wires a <code>mixtrics</code> registry through all layers. Plain <code>open</code> uses no-op metrics; your application handles export.</p>
+              <details class="deeper"><summary>What is instrumented?</summary><div>
+                <ul><li>Lookup outcomes, latency, and served bytes.</li><li>Memory payload accounting, eviction, and trimming.</li><li>Disk-write admission, skips, queue pressure, and terminal outcomes.</li><li>Disk capacity states, indexed payload, packing, and integrity failures.</li><li>Data-file I/O outcomes, bytes, latency, read sizes, and aligned-buffer pool accounting.</li></ul>
+                <p>Labels are bounded and do not contain object identities or cache names. Gauges follow ownership, including outstanding writes and read guards.</p>
+              </div></details>
+              <a class="source" href="metrics.md">metrics.md · metric reference and accounting rules</a>
+            </div>
+          </details>
+          <details class="branch">
+            <summary>Current boundaries<small>What this implementation does not provide yet</small></summary>
+            <div class="content">
+              <ul><li><strong>No crash-durability guarantee.</strong> Open waits for best-effort recovery; writes are not synchronized to stable storage.</li><li><strong>No buffered I/O mode.</strong> The disk tier requires Linux direct I/O and io_uring.</li><li><strong>No built-in source client, download coalescing, or retry scheduler.</strong> Those belong to your callback.</li><li><strong>No hard total-memory cap.</strong> Active reads, caller-held buffers, queued writes, cached metadata pages, and uncapped request-history counters sit outside the retained-memory target.</li><li><strong>No multi-entry range assembly.</strong> One cached entry must cover a request.</li></ul>
+              <p>The disk layout and allocator remain experimental; this explorer describes the current implementation, not a stable on-disk interface.</p>
+              <a class="source" href="implementation-status.md">implementation-status.md · implemented and remaining work</a>
+            </div>
+          </details>
+        </div>
+      </details>
+    </div>
+    <footer><span>Feuer architecture explorer · source-linked implementation snapshot</span><span><a href="README.md">README</a> &nbsp; / &nbsp; <a href="#top">Back to overview ↑</a></span></footer>
+  </main>
+</div>
+<script>
+  // Native details provide keyboard-accessible drill-down even without JavaScript.
+  const collapse = document.getElementById('collapse');
+  collapse.hidden = false;
+  collapse.addEventListener('click', () => {
+    document.querySelectorAll('details[open]').forEach(detail => { detail.open = false; });
+    history.replaceState(null, '', location.pathname + location.search);
+  });
+
+  // Source links stay ordinary links; in-page links reveal their target and ancestors.
+  function reveal(hash) {
+    const target = document.getElementById(hash.slice(1));
+    if (!target) return;
+    for (let node = target; node; node = node.parentElement) {
+      if (node.tagName === 'DETAILS') node.open = true;
+    }
+    target.scrollIntoView({ block: 'start' });
+    if (target.tagName === 'DETAILS') target.querySelector('summary').focus({ preventScroll: true });
+  }
+  document.addEventListener('click', event => {
+    const link = event.target.closest('a[href^="#"]');
+    if (!link || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    if (location.hash !== link.hash) history.pushState(null, '', link.hash);
+    reveal(link.hash);
+  });
+  window.addEventListener('hashchange', () => reveal(location.hash));
+  if (location.hash) reveal(location.hash);
+</script>
+</body>
+</html>

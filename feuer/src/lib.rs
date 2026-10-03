@@ -17,7 +17,7 @@ mod test_metrics;
 pub use cache::{GetOrFetchError, TieredMemoryDiskCache};
 pub use config::{CacheConfig, CacheConfigError};
 #[cfg(target_os = "linux")]
-pub use feuer_storage::DiskRangeCacheError;
+pub use feuer_storage::DiskCacheError;
 pub use feuer_types::{ByteRange, Download, DownloadError, InvalidByteRange};
 
 /// The complete UTF-8 identity supplied at the public cache boundary.

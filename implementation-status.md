@@ -8,7 +8,7 @@ contract. This document records what exists and what remains to build.
 The public cache now connects **memory → integrity-checked disk → callback**. The fallible asynchronous
 `TieredMemoryDiskCache::open` opens the configured directory using Linux direct I/O and io_uring, with no
 silent fallback. One worker drains a 256-entry queue in batches of at most 64 retained downloads into the
-experimental `DiskRangeCache`. Reopening reads one 1-MiB metadata chunk at a time per shard and waits for
+experimental `DiskCache`. Reopening reads one 1-MiB metadata chunk at a time per shard and waits for
 all shards to recover before returning.
 The recovery additions cross-compile for Linux; real io_uring execution and device-crash testing remain outstanding.
 
@@ -17,7 +17,7 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 | `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, disk writes through a 256-entry queue in batches of at most 64, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
 | `feuer-types` | String-backed fully compared `ObjectKey`, exact non-empty `ByteRange`, keyless `Download` with a derived range, internal shared access evidence and value comparison | None for the current public type boundary |
 | `feuer-memory` | Sharded covering-range index, exact access counts shared with disk, per-object trimming-event limits, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
-| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskRangeCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, guarded whole-chunk reuse and per-batch eviction attempt/chunk limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
+| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, guarded whole-chunk reuse and per-batch eviction attempt/chunk limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
 
 ## Implemented behavior
@@ -90,7 +90,7 @@ There is no periodic compaction, separate prefetch-promotion state, or public po
   durability. There are no global scheduling barriers.
 - Caller cancellation does not cancel submitted kernel writes. The task owning a write's `DiskRegion` must
   keep awaiting completion and prevent conflicting access or reuse, even when the result is abandoned.
-  `DiskRangeCache` owns reservation lifetime. Public scheduling additionally revalidates the memory-entry
+  `DiskCache` owns reservation lifetime. Public scheduling additionally revalidates the memory-entry
   identity under its shard lock throughout disk publication.
 - Submitted buffers survive caller cancellation. Last-handle drop drains and joins the driver. Abnormal
   driver failure retains uncertain active buffers and the directory lock until process exit.
@@ -122,10 +122,10 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
   an end-to-end cache or matched backend comparison. Separate [SSD measurements](benchmarks/ssd/ssd-concurrent-read-write.md)
   explore mixed reads and writes. Small-read-heavy workloads may still warrant write throttling.
 
-## In progress: disk range-cache prototype
+## In progress: disk-cache prototype
 
 [`feuer-storage/format.md`](feuer-storage/format.md) describes the experimental disk format;
-[`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) covers runtime behavior and remaining crash testing. `DiskRangeCache::insert_batch` groups smaller entries together within each
+[`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) covers runtime behavior and remaining crash testing. `DiskCache::insert_batch` groups smaller entries together within each
 shard, assembles whole chunks including entry metadata, writes each chunk once, and then
 publishes after containment revalidation. Partial final chunks are finalized too. Later batches cannot fill them. Full keys and exact
 object ranges map to one contiguous physical range each. Payload bytes have no metadata gaps, including at chunk boundaries. Entry metadata stores
@@ -162,7 +162,7 @@ all shards to recover before reads and writes become available. Corrupt record p
 invalid or cyclic links terminate the chain. See the format document for write ordering and recovery details.
 No comparative layout/performance claim is established.
 
-The range-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
+The disk-cache tests cover persisted full-key entry metadata and payload checksums, containment races, caller
 cancellation, corruption/reused payload, partial batch failure, metadata-only chunks, disjoint shards,
 mixed-size packing, exclusive multi-chunk ownership, finalized entry metadata, whole-chunk ownership/reuse,
 per-batch eviction attempt and chunk limits, shared evidence across tiers, payload-only scoring, mixed-size churn,

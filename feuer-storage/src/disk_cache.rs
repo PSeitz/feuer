@@ -1,4 +1,4 @@
-//! Allocator-controlled payload reuse, mutable metadata chunks, and whole-entry validation.
+//! Cache object bytes on disk, looked up by object key and byte range.
 
 mod metadata;
 #[cfg(test)]
@@ -41,7 +41,7 @@ const PAYLOAD_ALIGNMENT_BYTES: u64 = crate::uring::DIRECT_IO_ALIGNMENT_BYTES as 
 const MAX_EVICTION_ATTEMPTS: usize = 64;
 const MAX_EVICTION_CHUNKS: usize = 4096;
 
-/// An experimental disk range cache used by the public tiered cache.
+/// Caches object bytes on disk, looked up by object key and byte range.
 ///
 /// Explicit batches pack payloads into 1-MiB chunks. Separate mutable metadata chunks
 /// hold entry records and links between metadata chunks. Each shard's chain starts at its first chunk.
@@ -53,12 +53,12 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 /// Opening waits for all shards to recover before making the cache available.
 /// The experimental format is neither a persistence guarantee nor a stable on-disk interface.
 #[derive(Clone)]
-pub struct DiskRangeCache {
-    disk: Arc<DiskRangeCacheState>,
+pub struct DiskCache {
+    disk: Arc<DiskCacheInner>,
 }
 
-/// Shared state of the disk range cache: its file and independently allocated shards.
-struct DiskRangeCacheState {
+/// Shared disk-cache internals: file, shards, access histories, and metrics.
+struct DiskCacheInner {
     file: DataFile,
     shards: Box<[DiskCacheShard]>,
     access_histories: Arc<ObjectAccessHistories>,
@@ -120,11 +120,11 @@ struct PayloadRead {
     payload_range: Range<u64>,
 }
 
-/// Failure opening or writing to the experimental disk range cache. Read uncertainty becomes a miss.
+/// An error opening or writing the disk cache. Read uncertainty becomes a miss.
 #[derive(Debug, thiserror::Error)]
-pub enum DiskRangeCacheError {
+pub enum DiskCacheError {
     /// The prototype requires a positive whole number of 1-MiB chunks within Linux's file-offset limit.
-    #[error("disk range cache capacity must be at least 1 MiB and at most i64::MAX")]
+    #[error("disk cache capacity must be at least 1 MiB and at most i64::MAX")]
     InvalidCapacity,
     /// Raw storage failed.
     #[error(transparent)]
@@ -134,22 +134,22 @@ pub enum DiskRangeCacheError {
     WriteTaskFailed(#[source] tokio::task::JoinError),
 }
 
-impl fmt::Debug for DiskRangeCache {
+impl fmt::Debug for DiskCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DiskRangeCache")
+        f.debug_struct("DiskCache")
             .field("capacity", &self.disk.file.capacity())
             .field("shards", &self.disk.shards.len())
             .finish_non_exhaustive()
     }
 }
 
-impl DiskRangeCache {
+impl DiskCache {
     /// Opens an exclusively locked, fixed-capacity file after scanning every shard's metadata.
     pub async fn open(
         directory: impl AsRef<Path>,
         capacity: u64,
         metrics: Arc<IoMetrics>,
-    ) -> Result<Self, DiskRangeCacheError> {
+    ) -> Result<Self, DiskCacheError> {
         Self::open_with_access_histories(directory, capacity, metrics, Arc::new(ObjectAccessHistories::new())).await
     }
 
@@ -160,7 +160,7 @@ impl DiskRangeCache {
         capacity: u64,
         metrics: Arc<IoMetrics>,
         access_histories: Arc<ObjectAccessHistories>,
-    ) -> Result<Self, DiskRangeCacheError> {
+    ) -> Result<Self, DiskCacheError> {
         Self::open_with_metrics(
             directory,
             capacity,
@@ -172,7 +172,7 @@ impl DiskRangeCache {
         .await
     }
 
-    /// Opens a disk tier with registered file-I/O and range-cache metrics.
+    /// Opens a disk tier with registered file-I/O and disk-cache metrics.
     pub async fn open_with_metrics(
         directory: impl AsRef<Path>,
         capacity: u64,
@@ -180,7 +180,7 @@ impl DiskRangeCache {
         access_histories: Arc<ObjectAccessHistories>,
         metrics: Arc<DiskMetrics>,
         reclaim_sample_size: usize,
-    ) -> Result<Self, DiskRangeCacheError> {
+    ) -> Result<Self, DiskCacheError> {
         Self::open_with_buffer_pool(
             directory,
             capacity,
@@ -202,10 +202,10 @@ impl DiskRangeCache {
         metrics: Arc<DiskMetrics>,
         reclaim_sample_size: usize,
         buffer_pool: Arc<BufferPool>,
-    ) -> Result<Self, DiskRangeCacheError> {
+    ) -> Result<Self, DiskCacheError> {
         assert!(reclaim_sample_size > 0, "reclaim sample size must be greater than zero");
         if capacity < CHUNK_BYTES || capacity > i64::MAX as u64 {
-            return Err(DiskRangeCacheError::InvalidCapacity);
+            return Err(DiskCacheError::InvalidCapacity);
         }
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
         let file = DataFile::open_with_buffer_pool(directory, capacity, io_metrics, buffer_pool).await?;
@@ -223,7 +223,7 @@ impl DiskRangeCache {
                 }
             })
             .collect();
-        let disk = Arc::new(DiskRangeCacheState {
+        let disk = Arc::new(DiskCacheInner {
             file,
             shards,
             access_histories,
@@ -262,8 +262,8 @@ impl DiskRangeCache {
     /// Unavailable capacity causes admission to be skipped, not waited for.
     /// Callers bound batch size and concurrency: payload slices are retained until writing completes.
     /// Dropping this future does not abort its detached writer.
-    pub async fn insert_batch(&self, downloads: Vec<(ObjectKeyHash, Download)>) -> Result<usize, DiskRangeCacheError> {
-        self.insert_batch_checked(
+    pub async fn insert_batch(&self, downloads: Vec<(ObjectKeyHash, Download)>) -> Result<usize, DiskCacheError> {
+        self.insert_batch_with_publication_check(
             downloads
                 .into_iter()
                 .map(|(key, download)| (key, download, ()))
@@ -278,11 +278,11 @@ impl DiskRangeCache {
     /// Any condition the callback checks to accept the entry must remain true until `publish` returns.
     /// The callback runs under the disk index lock and must not reenter disk storage or perform I/O.
     /// The detached writer retains caller-supplied values and disk reservations even if this future is canceled.
-    pub async fn insert_batch_checked<T, F>(
+    pub async fn insert_batch_with_publication_check<T, F>(
         &self,
         downloads: Vec<(ObjectKeyHash, Download, T)>,
         publish_if_accepted: F,
-    ) -> Result<usize, DiskRangeCacheError>
+    ) -> Result<usize, DiskCacheError>
     where
         T: Send + 'static,
         F: Fn(&T, &mut dyn FnMut()) + Send + 'static,
@@ -333,11 +333,11 @@ impl DiskRangeCache {
                             let previous_entry_count = batch.entries.len();
                             let previous_chunks_left = chunks_left;
                             loop {
-                                let ready = match shard
+                                let has_metadata_capacity = match shard
                                     .ensure_metadata_capacity(&disk.file, batch.entries.len() + 1)
                                     .await
                                 {
-                                    Ok(ready) => ready,
+                                    Ok(has_metadata_capacity) => has_metadata_capacity,
                                     Err(error) => {
                                         attempt.set_outcome(DiskWriteOutcome::Failed);
                                         for (_, pending) in &mut publication_values {
@@ -346,7 +346,7 @@ impl DiskRangeCache {
                                         return Err(error.into());
                                     }
                                 };
-                                let chunks_needed = if ready {
+                                let chunks_needed = if has_metadata_capacity {
                                     match batch.pack_download(&shard.allocator, &key, &download) {
                                         Ok(()) => break,
                                         Err(count) => count,
@@ -378,7 +378,10 @@ impl DiskRangeCache {
                             attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
                         }
                     }
-                    let entries = match batch.write_chunks(&disk.file, &disk.metrics, shard).await {
+                    let entries = match batch
+                        .write_payloads_and_metadata(&disk.file, &disk.metrics, shard)
+                        .await
+                    {
                         Ok(entries) => entries,
                         Err(error) => {
                             for (_, attempt) in &mut publication_values {
@@ -397,7 +400,7 @@ impl DiskRangeCache {
                             // Another writer or an earlier entry in this batch may already cover this range.
                             if index.covering_entry(&key, object_range).is_some() {
                                 attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
-                                shard.remove_payload(entry);
+                                shard.remove_payload_and_allow_metadata_overwrite(entry);
                                 continue;
                             }
                             attempt.set_outcome(DiskWriteOutcome::Stale);
@@ -405,14 +408,14 @@ impl DiskRangeCache {
                             publish_if_accepted(&publication_value, &mut || {
                                 if let Some((key, entry)) = unpublished_entry.take() {
                                     for removed in index.insert(key, entry) {
-                                        shard.remove_payload(removed);
+                                        shard.remove_payload_and_allow_metadata_overwrite(removed);
                                     }
                                     published_entries += 1;
                                     attempt.set_outcome(DiskWriteOutcome::Published);
                                 }
                             });
                             if let Some((_, entry)) = unpublished_entry {
-                                shard.remove_payload(entry);
+                                shard.remove_payload_and_allow_metadata_overwrite(entry);
                             }
                         }
                     }
@@ -420,7 +423,7 @@ impl DiskRangeCache {
                 Ok(published_entries)
             })
             .await
-            .map_err(DiskRangeCacheError::WriteTaskFailed)?
+            .map_err(DiskCacheError::WriteTaskFailed)?
     }
 
     /// Checks indexed coverage without reading payload or recording an access.
@@ -437,11 +440,13 @@ impl DiskRangeCache {
     /// Concurrent reads of one stored entry share whole-entry I/O and checksum verification.
     /// Reads no neighboring entries or metadata. Results retain no disk ownership.
     pub async fn get(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<Bytes> {
-        self.get_with_capacity(key, requested).await.map(|(bytes, _)| bytes)
+        self.get_with_buffer_capacity(key, requested)
+            .await
+            .map(|(bytes, _)| bytes)
     }
 
-    /// Returns the requested slice and its whole backing allocation capacity for memory admission.
-    pub async fn get_with_capacity(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<(Bytes, usize)> {
+    /// Returns the requested bytes and their backing buffer's capacity for memory admission.
+    pub async fn get_with_buffer_capacity(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<(Bytes, usize)> {
         let started = Instant::now();
         let metrics = &self.disk.metrics;
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
@@ -485,7 +490,7 @@ impl DiskRangeCache {
                         };
                         let mut index = shard.entry_index.lock().unwrap();
                         if let Some(entry) = index.remove_entry_matching_read(key, &read) {
-                            shard.remove_payload(entry);
+                            shard.remove_payload_and_allow_metadata_overwrite(entry);
                         }
                         Err(outcome)
                     }
@@ -547,7 +552,7 @@ impl DiskCacheShard {
         if let Some((position, ..)) = selected_candidate {
             let (key, start) = index.eviction_candidates[position];
             *chunks_left -= index.entries_by_key[&key][&start].chunk_count() as usize;
-            self.remove_payload(index.remove(&key, start).unwrap());
+            self.remove_payload_and_allow_metadata_overwrite(index.remove(&key, start).unwrap());
         }
         true
     }
@@ -560,9 +565,9 @@ impl DiskEntry {
 }
 
 impl DiskCacheShard {
-    /// Removes an entry's use of payload chunks and makes its entry metadata available for overwrite.
+    /// Removes the payload's use of its chunks and allows its metadata to be overwritten.
     /// Neither index removal nor entry destruction has side effects on disk ownership or metadata.
-    fn remove_payload(&self, entry: DiskEntry) {
+    fn remove_payload_and_allow_metadata_overwrite(&self, entry: DiskEntry) {
         self.allocator.remove_payload(entry.payload_range.start);
         if let Some(metadata) = entry.metadata {
             self.allocator.allow_metadata_overwrite(metadata);
@@ -665,7 +670,7 @@ impl Drop for DiskEntryIndex {
     }
 }
 
-impl DiskRangeCacheState {
+impl DiskCacheInner {
     fn shard_index_for_key(&self, key: &ObjectKeyHash) -> usize {
         (key.0 % self.shards.len() as u128) as usize
     }
@@ -723,12 +728,12 @@ impl UnwrittenShardBatch {
     }
 
     /// Writes payload chunks, then updates metadata pages before returning entries for publication.
-    async fn write_chunks(
+    async fn write_payloads_and_metadata(
         mut self,
         file: &DataFile,
         metrics: &DiskMetrics,
         shard: &DiskCacheShard,
-    ) -> Result<Vec<(ObjectKeyHash, DiskEntry)>, DiskRangeCacheError> {
+    ) -> Result<Vec<(ObjectKeyHash, DiskEntry)>, DiskCacheError> {
         for prepared in &mut self.regions {
             let address = prepared.region.range().start;
             for offset in (0..prepared.region.chunk_count() * CHUNK_BYTES).step_by(CHUNK_BYTES as usize) {
@@ -752,11 +757,11 @@ impl UnwrittenShardBatch {
             }
         }
         for (key, entry) in &mut self.entries {
-            shard.record_entry(key, entry);
+            shard.set_entry_metadata(key, entry);
         }
         if let Err(error) = shard.flush_metadata(file).await {
             for (_, entry) in self.entries.drain(..) {
-                shard.remove_payload(entry);
+                shard.remove_payload_and_allow_metadata_overwrite(entry);
             }
             return Err(error.into());
         }
