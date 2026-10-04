@@ -73,6 +73,19 @@ can be reused after its last entry is removed; readers verify checksums rather t
 reuse. Active writes may publish after memory eviction. Reads and writes use separate I/O
 queues. See the [disk layout](feuer-storage/disk-prototype.md) for details.
 
+## Download buffers and allocator retention
+
+Your downloader allocates the `Bytes` returned by the callback; Feuer does not choose
+those buffers' alignment, backing size, or reuse policy. No alignment is required.
+Page-aligned buffers can avoid some disk-write scratch copies, though partial writes
+and padding can still require scratch buffers.
+
+In SSD replays, glibc retained substantial freed memory, making RSS much larger than
+live cache memory. Jemalloc avoided that retention in the tested workload. Aligning
+and bucketing synthetic download buffers also reduced RSS, but alignment alone was
+not isolated or proven sufficient. These are application allocation choices, not a
+requirement imposed by Feuer; the configured memory target is not an RSS limit.
+
 ## Eviction
 
 Both tiers sample entries and evict the lowest retention score per retained byte:
