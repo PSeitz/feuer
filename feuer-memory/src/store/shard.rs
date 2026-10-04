@@ -76,13 +76,6 @@ struct ContainedEntryRanges {
     allocation_bytes: u64,
 }
 
-/// Allocation bytes and entry count removed from the shard.
-#[derive(Default)]
-struct RemovedEntryUsage {
-    allocation_bytes: u64,
-    entry_count: u64,
-}
-
 /// Object key and range start of a cached entry.
 #[derive(Clone)]
 struct ObjectKeyAndRangeStart {
@@ -106,9 +99,8 @@ impl ReclaimCandidateList {
 
     /// Removes the candidate at this index and returns the candidate moved there, if any.
     fn remove(&mut self, candidate_index: usize) -> Option<ObjectKeyAndRangeStart> {
-        let last_index = self.entries.len() - 1;
         self.entries.swap_remove(candidate_index);
-        let moved_candidate = (candidate_index != last_index).then(|| self.entries[candidate_index].clone());
+        let moved_candidate = self.entries.get(candidate_index).cloned();
         if self.entries.is_empty() {
             self.cursor = 0;
         } else {
@@ -238,9 +230,12 @@ impl MemoryCacheShard {
         let max_existing_bytes = self.capacity.saturating_sub(added_bytes);
 
         if used_bytes_without_contained_entries <= max_existing_bytes {
-            let removal = self.remove_contained_entries(object_key, &contained_ranges.ranges);
-            debug_assert_eq!(removal.allocation_bytes, contained_ranges.allocation_bytes);
-            self.insert_download_entry(
+            let removed_entry_count = contained_ranges.ranges.len() as u64;
+            for &range in &contained_ranges.ranges {
+                self.remove_entry(object_key, range)
+                    .expect("the contained entry was just found");
+            }
+            self.insert_entry(
                 *object_key,
                 range,
                 bytes.clone(),
@@ -248,12 +243,12 @@ impl MemoryCacheShard {
                 access_histories.request_count(),
             );
 
-            if removal.entry_count != 0 {
+            if removed_entry_count != 0 {
                 self.metrics
-                    .decrease_usage(removal.allocation_bytes, removal.entry_count);
+                    .decrease_usage(contained_ranges.allocation_bytes, removed_entry_count);
             }
             self.metrics.increase_usage(added_bytes, 1);
-            self.metrics.record_insert(removal.entry_count != 0);
+            self.metrics.record_insert(removed_entry_count != 0);
             return InsertOrReclaimResult::Complete(true);
         }
 
@@ -273,8 +268,8 @@ impl MemoryCacheShard {
         InsertOrReclaimResult::Evicted
     }
 
-    /// Inserts an entry holding downloaded bytes with the supplied allocation charge.
-    fn insert_download_entry(
+    /// Inserts an entry and charges its allocation bytes to the shard and buffer pool.
+    fn insert_entry(
         &mut self,
         object_key: ObjectKeyHash,
         range: ByteRange,
@@ -306,39 +301,6 @@ impl MemoryCacheShard {
             .get(key)
             .and_then(|entries| entries.by_start.get(&range.start()))
             .is_some_and(|entry| entry.range == range)
-    }
-
-    /// Inserts an entry holding a copied subrange payload; the caller accounts for its bytes.
-    fn insert_trimmed_entry(&mut self, object_key: &ObjectKeyHash, range: ByteRange, bytes: Bytes, request_count: u64) {
-        let allocation_charge = bytes.len() as u64;
-        self.buffer_pool.add_entry_bytes(allocation_charge);
-        let candidate_index = self.candidates.register(ObjectKeyAndRangeStart {
-            object_key: *object_key,
-            start: range.start(),
-        });
-        let entries = self.entries_by_key.entry(*object_key).or_default();
-        let entry = MemoryEntry {
-            range,
-            bytes,
-            allocation_charge,
-            candidate_index,
-            request_count_at_insertion: request_count,
-        };
-        let replaced = entries.by_start.insert(range.start(), entry);
-        debug_assert!(replaced.is_none());
-    }
-
-    /// Removes entries whose byte ranges were found contained in the incoming download.
-    fn remove_contained_entries(&mut self, object_key: &ObjectKeyHash, ranges: &[ByteRange]) -> RemovedEntryUsage {
-        let mut removal = RemovedEntryUsage::default();
-        for &range in ranges {
-            let removed_bytes = self
-                .remove_entry(object_key, range)
-                .expect("the contained entry was just found");
-            removal.allocation_bytes += removed_bytes;
-            removal.entry_count += 1;
-        }
-        removal
     }
 
     pub(super) fn remove(&mut self, object_key: &ObjectKeyHash, range: ByteRange) -> bool {
@@ -484,10 +446,10 @@ impl MemoryCacheShard {
             {
                 continue;
             }
-            inserted_payload_bytes += bytes.len() as u64;
+            let allocation_charge = bytes.len() as u64;
+            inserted_payload_bytes += allocation_charge;
             inserted_entry_count += 1;
-            self.used_bytes += bytes.len() as u64;
-            self.insert_trimmed_entry(&replacement.object_key, range, bytes, request_count);
+            self.insert_entry(replacement.object_key, range, bytes, allocation_charge, request_count);
         }
 
         let reclaimed_bytes = removed_bytes - inserted_payload_bytes;

@@ -90,19 +90,15 @@ impl BufferPool {
         assert!(length > 0);
         let capacity = Self::allocation_capacity(length);
         let bucket = BUFFER_SIZES.iter().position(|&size| size == capacity);
-        let reused = bucket.and_then(|index| {
-            let mut state = self.state.lock();
-            let buffer = state.by_size[index].pop();
-            if buffer.is_some() {
+        let mut buffer = bucket
+            .and_then(|index| {
+                let mut state = self.state.lock();
+                let buffer = state.by_size[index].pop()?;
                 state.idle_bytes -= capacity as u64;
                 self.decrease_idle_buffer_metrics(index, capacity as u64);
-            }
-            buffer
-        });
-        let mut buffer = match reused {
-            Some(buffer) => buffer,
-            None => AlignedBuffer::allocate_zeroed(capacity)?,
-        };
+                Some(buffer)
+            })
+            .map_or_else(|| AlignedBuffer::allocate_zeroed(capacity), Ok)?;
         buffer.length = length;
         if let Some(index) = bucket {
             buffer.pool = Arc::downgrade(self);
