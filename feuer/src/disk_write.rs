@@ -22,20 +22,21 @@ pub(crate) struct DiskWriteQueue {
     metrics: Arc<DiskWriteQueueMetrics>,
 }
 
-/// A disk write's memory-entry key and range, queue time, and metrics.
-struct DiskWriteEntryAndMetrics {
+/// Measures a disk-write queue entry's wait and keeps its payload bytes counted as pending until dropped.
+/// The object key and range also identify the source entry for memory-presence checks.
+struct DiskWriteQueueEntryMetrics {
     key: ObjectKeyHash,
-    range: ByteRange,
+    object_range: ByteRange,
     queued_at: Option<Instant>,
     metrics: Arc<DiskWriteQueueMetrics>,
 }
 
 struct PendingDiskWrite {
     download: Download,
-    entry_and_metrics: DiskWriteEntryAndMetrics,
+    entry_metrics: DiskWriteQueueEntryMetrics,
 }
 
-impl DiskWriteEntryAndMetrics {
+impl DiskWriteQueueEntryMetrics {
     /// Finishes the queue wait, measuring its duration and decreasing the queued-entry count.
     fn finish_queue_wait(&mut self) {
         let queued_at = self.queued_at.take().expect("queued write dequeued once");
@@ -44,9 +45,9 @@ impl DiskWriteEntryAndMetrics {
     }
 }
 
-impl Drop for DiskWriteEntryAndMetrics {
+impl Drop for DiskWriteQueueEntryMetrics {
     fn drop(&mut self) {
-        self.metrics.pending_bytes.decrease(self.range.len());
+        self.metrics.pending_bytes.decrease(self.object_range.len());
         if self.queued_at.is_some() {
             self.metrics.queued_entries.decrease(1);
             self.metrics.record(DiskWriteQueueOutcome::Canceled);
@@ -88,9 +89,9 @@ impl DiskWriteQueue {
         self.metrics.record(DiskWriteQueueOutcome::Redundant);
     }
 
-    /// Enqueues a disk write if the queue has capacity, without waiting for space.
+    /// Enqueues a disk write if queue space is available, without waiting.
     /// Full or closed queues discard the download and record the corresponding outcome.
-    pub(crate) fn enqueue_if_capacity(&self, key: ObjectKeyHash, download: Download) {
+    pub(crate) fn enqueue_if_space_available(&self, key: ObjectKeyHash, download: Download) {
         let permit = match self.sender.try_reserve() {
             Ok(permit) => permit,
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -105,15 +106,15 @@ impl DiskWriteQueue {
         self.metrics.record(DiskWriteQueueOutcome::Queued);
         self.metrics.queued_entries.increase(1);
         self.metrics.pending_bytes.increase(download.downloaded_range().len());
-        let entry_and_metrics = DiskWriteEntryAndMetrics {
+        let entry_metrics = DiskWriteQueueEntryMetrics {
             key,
-            range: download.downloaded_range(),
+            object_range: download.downloaded_range(),
             queued_at: Some(Instant::now()),
             metrics: self.metrics.clone(),
         };
         permit.send(PendingDiskWrite {
             download,
-            entry_and_metrics,
+            entry_metrics,
         });
     }
 
@@ -129,21 +130,21 @@ impl DiskWriteQueue {
                 let Ok(next_write) = receiver.try_recv() else { break };
                 pending_writes.push(next_write);
             }
-            let (downloads, active_entries): (Vec<_>, Vec<_>) = pending_writes
+            let (downloads, batch_entry_metrics): (Vec<_>, Vec<_>) = pending_writes
                 .into_iter()
                 .filter_map(
                     |PendingDiskWrite {
                          download,
-                         mut entry_and_metrics,
+                         mut entry_metrics,
                      }| {
-                        entry_and_metrics.finish_queue_wait();
+                        entry_metrics.finish_queue_wait();
                         // Avoid starting work already evicted from memory. Once started,
                         // the owned immutable download remains valid after eviction.
-                        if !memory.contains_entry(&entry_and_metrics.key, entry_and_metrics.range) {
-                            entry_and_metrics.metrics.record(DiskWriteQueueOutcome::Stale);
+                        if !memory.contains_entry(&entry_metrics.key, entry_metrics.object_range) {
+                            entry_metrics.metrics.record(DiskWriteQueueOutcome::Stale);
                             return None;
                         }
-                        Some(((entry_and_metrics.key, download), entry_and_metrics))
+                        Some(((entry_metrics.key, download), entry_metrics))
                     },
                 )
                 .unzip();
@@ -153,7 +154,7 @@ impl DiskWriteQueue {
             if let Err(error) = disk.insert_batch(downloads).await {
                 tracing::warn!(target: "feuer::storage", %error, "disk write failed");
             }
-            drop(active_entries);
+            drop(batch_entry_metrics);
         }
     }
 }

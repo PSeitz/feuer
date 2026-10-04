@@ -37,7 +37,7 @@ operations. Use the public lookup counters to measure caller-visible behavior.
 | `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`. Payload and payload-chunk bytes of successfully written shard batches, before publication. Metadata writes are included in the raw I/O counters, not this packing counter |
 
 Disk read errors and checksum failures still behave as cache misses. Metrics
-make those distinct from absent entries. `contains()` does not count as a lookup.
+make those distinct from absent entries. `covers_range()` does not count as a lookup.
 
 Chunk states are disjoint. Payload reservations are released after their last indexed
 entry is removed, without waiting for readers. Metadata chunks remain reserved while

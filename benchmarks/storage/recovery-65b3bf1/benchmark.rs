@@ -74,7 +74,7 @@ async fn benchmark_recovery() {
         .map(|shard| shard.allocator.chunk_capacity - shard.allocator.available_bytes() / CHUNK_BYTES)
         .sum();
     for i in 0..entries {
-        assert!(cache.contains(&format!("{i:064x}").into(), source.downloaded_range()));
+        assert!(cache.covers_range(&format!("{i:064x}").into(), source.downloaded_range()));
     }
     File::options()
         .write(true)
@@ -129,7 +129,7 @@ async fn benchmark_recovery() {
         );
         // Verification is outside the timing and I/O measurements.
         for i in 0..entries {
-            assert!(cache.contains(&format!("{i:064x}").into(), source.downloaded_range()));
+            assert!(cache.covers_range(&format!("{i:064x}").into(), source.downloaded_range()));
         }
         for i in [0, entries / 2, entries - 1] {
             assert_eq!(

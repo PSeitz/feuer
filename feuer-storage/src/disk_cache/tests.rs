@@ -62,7 +62,7 @@ pub(super) async fn entry_disk_ranges(
     let entry = index.entries_by_key[key].first_key_value().unwrap().1;
     let (chunk_index, entry_metadata_index) = entry.metadata;
     let pages = shard.metadata_pages.lock().unwrap();
-    let address = pages.chunks[chunk_index].region.range().start
+    let address = pages.chunks[chunk_index].reserved_chunk.disk_byte_range().start
         + (entry_metadata_index / page_format::ENTRIES_PER_METADATA_PAGE * METADATA_PAGE_BYTES) as u64;
     let metadata = address..address + METADATA_PAGE_BYTES as u64;
     (vec![entry.payload_range.clone()], vec![metadata])
@@ -257,29 +257,29 @@ async fn metadata_growth_does_not_consume_payload_chunk_space() {
 async fn failed_reservation_releases_metadata_without_moving_pending_payloads() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let shard = &cache.disk.shards[0];
-    let mut region = None;
-    let mut attempts_left = 0;
-    let mut chunks_left = MAX_EVICTION_CHUNKS;
+    let mut reserved_chunks = None;
+    let mut remaining_eviction_attempts = 0;
+    let mut remaining_eviction_chunk_budget = MAX_EVICTION_CHUNKS;
     let first = shard
-        .reserve_entry(
+        .reserve_entry_space(
             &download(0, CHUNK_BYTES as usize - METADATA_PAGE_BYTES),
-            &mut region,
+            &mut reserved_chunks,
             None,
             &cache.disk.access_histories,
-            &mut attempts_left,
-            &mut chunks_left,
+            &mut remaining_eviction_attempts,
+            &mut remaining_eviction_chunk_budget,
         )
         .unwrap();
     let free_positions = shard.metadata_pages.lock().unwrap().free_entry_positions.len();
     assert!(
         shard
-            .reserve_entry(
+            .reserve_entry_space(
                 &download(0, METADATA_PAGE_BYTES + 1),
                 &mut None,
                 None,
                 &cache.disk.access_histories,
-                &mut attempts_left,
-                &mut chunks_left,
+                &mut remaining_eviction_attempts,
+                &mut remaining_eviction_chunk_budget,
             )
             .is_none()
     );
@@ -288,13 +288,13 @@ async fn failed_reservation_releases_metadata_without_moving_pending_payloads() 
         free_positions
     );
     let second = shard
-        .reserve_entry(
+        .reserve_entry_space(
             &download(0, 1),
-            &mut region,
+            &mut reserved_chunks,
             Some(first.payload_range.end),
             &cache.disk.access_histories,
-            &mut attempts_left,
-            &mut chunks_left,
+            &mut remaining_eviction_attempts,
+            &mut remaining_eviction_chunk_budget,
         )
         .unwrap();
     assert_eq!(
@@ -303,7 +303,7 @@ async fn failed_reservation_releases_metadata_without_moving_pending_payloads() 
     );
     assert_eq!(second.payload_range, first.payload_range.end..2 * CHUNK_BYTES);
     assert_eq!(shard.allocator.available_bytes(), 0);
-    drop(region);
+    drop(reserved_chunks);
     assert_eq!(shard.allocator.available_bytes(), CHUNK_BYTES);
 }
 
@@ -382,7 +382,7 @@ async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
     );
     assert!(cache.get(&key, range(3, 4)).await.is_none());
     assert!(
-        read.read_verified_range(&cache.disk.file, range(3, 20))
+        read.read_and_verify_range(&cache.disk.file, range(3, 20))
             .await
             .unwrap()
             .is_none()
@@ -395,17 +395,29 @@ async fn eviction_budgets_and_active_reservations_bound_reclamation() {
     let key = ObjectKeyHash::from("large");
     cache.insert(key, download(0, CHUNK_BYTES as usize + 1)).await.unwrap();
     let shard = &cache.disk.shards[0];
-    let mut attempts_left = 0;
-    let mut chunks_left = MAX_EVICTION_CHUNKS;
-    assert!(!shard.sample_and_evict_entry(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
-    attempts_left = 1;
-    chunks_left = 1;
-    assert!(shard.sample_and_evict_entry(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
-    assert_eq!(attempts_left, 0);
+    let mut remaining_eviction_attempts = 0;
+    let mut remaining_eviction_chunk_budget = MAX_EVICTION_CHUNKS;
+    assert!(!shard.sample_and_evict_entry(
+        &cache.disk.access_histories,
+        &mut remaining_eviction_attempts,
+        &mut remaining_eviction_chunk_budget
+    ));
+    remaining_eviction_attempts = 1;
+    remaining_eviction_chunk_budget = 1;
+    assert!(shard.sample_and_evict_entry(
+        &cache.disk.access_histories,
+        &mut remaining_eviction_attempts,
+        &mut remaining_eviction_chunk_budget
+    ));
+    assert_eq!(remaining_eviction_attempts, 0);
     assert!(cache.get(&key, range(0, 1)).await.is_some());
-    attempts_left = 1;
-    chunks_left = MAX_EVICTION_CHUNKS;
-    assert!(shard.sample_and_evict_entry(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
+    remaining_eviction_attempts = 1;
+    remaining_eviction_chunk_budget = MAX_EVICTION_CHUNKS;
+    assert!(shard.sample_and_evict_entry(
+        &cache.disk.access_histories,
+        &mut remaining_eviction_attempts,
+        &mut remaining_eviction_chunk_budget
+    ));
     shard.write_dirty_metadata_pages(&cache.disk.file).await.unwrap();
     let active = shard.allocator.reserve_chunks(2).unwrap();
     assert!(
@@ -448,9 +460,13 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
         .await
         .unwrap();
     let shard = &cache.disk.shards[0];
-    let mut attempts_left = 1;
-    let mut chunks_left = MAX_EVICTION_CHUNKS;
-    assert!(shard.sample_and_evict_entry(&cache.disk.access_histories, &mut attempts_left, &mut chunks_left));
+    let mut remaining_eviction_attempts = 1;
+    let mut remaining_eviction_chunk_budget = MAX_EVICTION_CHUNKS;
+    assert!(shard.sample_and_evict_entry(
+        &cache.disk.access_histories,
+        &mut remaining_eviction_attempts,
+        &mut remaining_eviction_chunk_budget
+    ));
     assert!(cache.get(&cold, range(0, 1)).await.is_none());
     assert!(cache.get(&hot, range(0, 1)).await.is_some());
     assert_eq!(shard.allocator.available_bytes(), 0); // Hot neighbor still owns the chunk.
@@ -487,7 +503,7 @@ async fn payload_value_ignores_original_key_length_and_keeps_first_sampled_on_ti
     cache.insert(older, download(0, 100)).await.unwrap();
     cache.insert(newer, download(0, 100)).await.unwrap();
     // Without access history both scores are zero; sample the newer entry first.
-    cache.disk.shards[0].entry_index.lock().unwrap().next_candidate = 1;
+    cache.disk.shards[0].entry_index.lock().unwrap().next_sample_start = 1;
     assert!(
         cache
             .insert(ObjectKeyHash::from("incoming"), download(0, 1))
@@ -581,8 +597,8 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     history.record_access(&hot, range(50, 51));
     assert_eq!(history.request_count(), 6);
     let shard = &cache.disk.shards[0];
-    let entry = shard.entry_index.lock().unwrap().remove(&hot, 0).unwrap();
-    shard.remove_payload_and_allow_metadata_overwrite(entry);
+    let entry = shard.entry_index.lock().unwrap().remove_entry(&hot, 0).unwrap();
+    shard.release_payload_and_allow_metadata_overwrite(entry);
     drop(memory);
     drop(cache);
     assert_eq!(history.recent_requested_ranges(&hot).len(), 5);
@@ -712,8 +728,8 @@ async fn removing_one_shared_payload_does_not_free_its_neighbors_chunks() {
         .await
         .unwrap();
     let shard = &cache.disk.shards[0];
-    let entry = shard.entry_index.lock().unwrap().remove(&first, 3).unwrap();
-    shard.remove_payload_and_allow_metadata_overwrite(entry);
+    let entry = shard.entry_index.lock().unwrap().remove_entry(&first, 3).unwrap();
+    shard.release_payload_and_allow_metadata_overwrite(entry);
     assert!(shard.allocator.reserve_chunks(1).is_none());
     assert_eq!(
         cache
@@ -793,8 +809,8 @@ async fn batch_rejects_fragmented_space_without_consuming_it() {
         source.bytes()
     );
     drop(fourth);
-    let entry = shard.entry_index.lock().unwrap().remove(&key, 0).unwrap();
-    shard.remove_payload_and_allow_metadata_overwrite(entry);
+    let entry = shard.entry_index.lock().unwrap().remove_entry(&key, 0).unwrap();
+    shard.release_payload_and_allow_metadata_overwrite(entry);
     assert_eq!(allocator.available_bytes(), 4 * CHUNK_BYTES);
 }
 
@@ -895,9 +911,9 @@ async fn long_keys_do_not_allocate_extra_metadata_chunks() {
         .entry_index
         .lock()
         .unwrap()
-        .remove(&key, 0)
+        .remove_entry(&key, 0)
         .unwrap();
-    cache.disk.shards[0].remove_payload_and_allow_metadata_overwrite(entry);
+    cache.disk.shards[0].release_payload_and_allow_metadata_overwrite(entry);
     let shard = &cache.disk.shards[0];
     shard.write_dirty_metadata_pages(&cache.disk.file).await.unwrap();
     assert_eq!(shard.allocator.available_bytes(), 2 * CHUNK_BYTES);
@@ -986,7 +1002,7 @@ async fn publishes_each_region_before_reserving_the_next() {
         .unwrap();
     // The small entry must publish first so the larger entry can evict it and reuse its chunk.
     assert_eq!(published, 2);
-    assert!(!cache.contains(&small, range(0, 1)));
+    assert!(!cache.covers_range(&small, range(0, 1)));
     assert_eq!(
         cache.get(&large, range(0, 100)).await.unwrap(),
         download(0, 100).bytes()
@@ -1033,7 +1049,7 @@ async fn read_addresses_and_results_do_not_delay_replaced_payload_reuse() {
     let bytes = cache.disk.file.read_at(guard.start, BUFFER_ALIGNMENT).await.unwrap();
     assert_eq!(XxHash64::oneshot(0, &bytes[..100]), payload_checksum);
     let reused = cache.disk.shards[0].allocator.reserve_chunks(1).unwrap();
-    assert_eq!(reused.range(), CHUNK_BYTES..2 * CHUNK_BYTES);
+    assert_eq!(reused.disk_byte_range(), CHUNK_BYTES..2 * CHUNK_BYTES);
     assert_eq!(result, download(6, 1).bytes());
 }
 
@@ -1202,7 +1218,7 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
     let reopened = DiskCache::open(directory.path(), capacity, IoMetrics::noop())
         .await
         .unwrap();
-    assert!(keys.iter().all(|key| reopened.contains(key, range(0, 100))));
+    assert!(keys.iter().all(|key| reopened.covers_range(key, range(0, 100))));
     for key in &keys {
         assert_eq!(
             reopened.get(key, range(0, 100)).await.unwrap(),

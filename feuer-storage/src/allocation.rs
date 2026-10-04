@@ -14,7 +14,7 @@ pub(super) const CHUNK_BYTES: u64 = 1024 * 1024;
 pub(super) struct DiskChunkAllocator {
     free: Arc<Mutex<FreeChunks>>,
     pub(super) chunk_capacity: u64,
-    /// First chunk address -> reserved region and number of entries using it.
+    /// First chunk address -> reserved chunks and number of payloads using them.
     payload_chunks: Arc<Mutex<BTreeMap<u64, (ReservedChunks, usize)>>>,
 }
 
@@ -118,33 +118,35 @@ impl DiskChunkAllocator {
         })
     }
 
-    /// Reserves chunks at a known address during startup, before writes are allowed.
-    pub(super) fn reserve_for_recovery(&self, first: u64, count: u64) -> Option<ReservedChunks> {
-        let chunks = first..first.checked_add(count)?;
+    /// Reserves consecutive chunks starting at the specified chunk number.
+    pub(super) fn reserve_chunks_at(&self, first_chunk_number: u64, count: u64) -> Option<ReservedChunks> {
+        let chunk_numbers = first_chunk_number..first_chunk_number.checked_add(count)?;
         let mut free = self.free.lock().unwrap();
-        free.remove_free_chunks(chunks.clone())?;
-        Some(self.region(chunks))
+        free.remove_free_chunks(chunk_numbers.clone())?;
+        Some(self.own_reserved_chunks(chunk_numbers))
     }
 
-    /// Reserves a payload's chunks, sharing an existing reservation when it contains the payload.
+    /// Keeps a recovered payload's chunks reserved until that payload is released.
+    /// Shares an existing reservation when it contains the payload.
     /// Rejects conflicts and payloads outside this allocator's shard.
-    pub(super) fn reserve_payload_chunks(&self, payload_range: &Range<u64>) -> Option<()> {
+    pub(super) fn hold_chunks_for_recovered_payload(&self, payload_range: &Range<u64>) -> Option<()> {
         let mut payload_chunks = self.payload_chunks.lock().unwrap();
-        if let Some((_, (region, entry_count))) = payload_chunks.range_mut(..=payload_range.start).next_back()
-            && region.range().contains(&payload_range.start)
+        if let Some((_, (reserved_chunks, payload_count))) =
+            payload_chunks.range_mut(..=payload_range.start).next_back()
+            && reserved_chunks.disk_byte_range().contains(&payload_range.start)
         {
-            if payload_range.end > region.range().end {
+            if payload_range.end > reserved_chunks.disk_byte_range().end {
                 return None;
             }
-            *entry_count += 1;
+            *payload_count += 1;
         } else {
             let first_chunk_number = payload_range.start / CHUNK_BYTES;
-            let mut region = self.reserve_for_recovery(
+            let mut reserved_chunks = self.reserve_chunks_at(
                 first_chunk_number,
                 payload_range.end.div_ceil(CHUNK_BYTES) - first_chunk_number,
             )?;
-            region.mark_recovered();
-            payload_chunks.insert(region.range().start, (region, 1));
+            reserved_chunks.mark_recovered();
+            payload_chunks.insert(reserved_chunks.disk_byte_range().start, (reserved_chunks, 1));
         }
         Some(())
     }
@@ -159,36 +161,38 @@ impl DiskChunkAllocator {
             .free_chunk_count_by_start
             .iter()
             .find(|(_, length)| **length >= count)?;
-        let chunks = start..start + count;
-        free.remove_free_chunks(chunks.clone())?;
-        Some(self.region(chunks))
+        let chunk_numbers = start..start + count;
+        free.remove_free_chunks(chunk_numbers.clone())?;
+        Some(self.own_reserved_chunks(chunk_numbers))
     }
 
-    /// Retains a written chunk run until all its entries are removed.
-    pub(super) fn retain_payloads(&self, region: ReservedChunks, entries: usize) {
-        self.payload_chunks
-            .lock()
-            .unwrap()
-            .insert(region.range().start, (region, entries));
+    /// Keeps these chunks reserved until all their payloads have been released.
+    pub(super) fn hold_chunks_until_payloads_released(&self, reserved_chunks: ReservedChunks, payload_count: usize) {
+        self.payload_chunks.lock().unwrap().insert(
+            reserved_chunks.disk_byte_range().start,
+            (reserved_chunks, payload_count),
+        );
     }
 
-    /// Removes one entry's use of its chunks, releasing the run after its last entry.
-    pub(super) fn remove_payload(&self, address: u64) {
-        let mut chunks = self.payload_chunks.lock().unwrap();
-        if let Some((&start, (region, entries))) = chunks.range_mut(..=address).next_back()
-            && region.range().contains(&address)
+    /// Releases one payload's use of its chunks, freeing them after their last payload.
+    pub(super) fn release_payload(&self, payload_address: u64) {
+        let mut payload_chunks = self.payload_chunks.lock().unwrap();
+        if let Some((&start, (reserved_chunks, payload_count))) =
+            payload_chunks.range_mut(..=payload_address).next_back()
+            && reserved_chunks.disk_byte_range().contains(&payload_address)
         {
-            *entries -= 1;
-            if *entries == 0 {
-                chunks.remove(&start);
+            *payload_count -= 1;
+            if *payload_count == 0 {
+                payload_chunks.remove(&start);
             }
         }
     }
 
-    fn region(&self, chunks: Range<u64>) -> ReservedChunks {
+    /// Creates an owner that returns already-reserved chunks to the free map when dropped.
+    fn own_reserved_chunks(&self, chunk_numbers: Range<u64>) -> ReservedChunks {
         ReservedChunks {
             free: self.free.clone(),
-            chunks,
+            chunk_numbers,
             recovered: false,
         }
     }
@@ -198,17 +202,19 @@ impl DiskChunkAllocator {
 #[derive(Debug)]
 pub(super) struct ReservedChunks {
     free: Arc<Mutex<FreeChunks>>,
-    chunks: Range<u64>,
+    /// Numbers of the reserved chunks, not disk byte offsets.
+    chunk_numbers: Range<u64>,
     recovered: bool,
 }
 
 impl ReservedChunks {
-    pub(super) fn range(&self) -> Range<u64> {
-        self.chunks.start * CHUNK_BYTES..self.chunks.end * CHUNK_BYTES
+    /// Disk byte range occupied by the reserved chunks.
+    pub(super) fn disk_byte_range(&self) -> Range<u64> {
+        self.chunk_numbers.start * CHUNK_BYTES..self.chunk_numbers.end * CHUNK_BYTES
     }
 
     pub(super) fn chunk_count(&self) -> u64 {
-        self.chunks.end - self.chunks.start
+        self.chunk_numbers.end - self.chunk_numbers.start
     }
 
     /// Counts recovered chunks until their reservation is released.
@@ -231,9 +237,9 @@ impl Drop for ReservedChunks {
         if self.recovered {
             free.metrics
                 .recovered_chunks
-                .decrease(self.chunks.end - self.chunks.start);
+                .decrease(self.chunk_numbers.end - self.chunk_numbers.start);
         }
-        free.release(self.chunks.clone());
+        free.release(self.chunk_numbers.clone());
     }
 }
 
@@ -244,46 +250,46 @@ mod tests {
     use std::sync::Barrier;
 
     #[test]
-    fn allocator_releases_shared_chunks_after_the_last_entry() {
+    fn allocator_releases_shared_chunks_after_the_last_payload() {
         let allocator = DiskChunkAllocator::new(CHUNK_BYTES).unwrap();
-        let region = allocator.reserve_chunks(1).unwrap();
-        allocator.retain_payloads(region, 2);
-        allocator.remove_payload(0);
+        let reserved_chunks = allocator.reserve_chunks(1).unwrap();
+        allocator.hold_chunks_until_payloads_released(reserved_chunks, 2);
+        allocator.release_payload(0);
         assert_eq!(allocator.available_bytes(), 0);
-        allocator.remove_payload(4096);
+        allocator.release_payload(4096);
         assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
     }
 
     #[test]
     fn recovery_reservations_respect_shard_bounds_and_chunk_ownership() {
         let allocator = DiskChunkAllocator::for_disk_range(CHUNK_BYTES..3 * CHUNK_BYTES).unwrap();
-        let _metadata = allocator.reserve_for_recovery(1, 1).unwrap();
+        let _metadata = allocator.reserve_chunks_at(1, 1).unwrap();
         for payload in [
             0..4096,
             CHUNK_BYTES..CHUNK_BYTES + 4096,
             2 * CHUNK_BYTES..4 * CHUNK_BYTES,
             3 * CHUNK_BYTES..3 * CHUNK_BYTES + 4096,
         ] {
-            assert!(allocator.reserve_payload_chunks(&payload).is_none());
+            assert!(allocator.hold_chunks_for_recovered_payload(&payload).is_none());
         }
         assert!(
             allocator
-                .reserve_payload_chunks(&(2 * CHUNK_BYTES..2 * CHUNK_BYTES + 4096))
+                .hold_chunks_for_recovered_payload(&(2 * CHUNK_BYTES..2 * CHUNK_BYTES + 4096))
                 .is_some()
         );
         assert!(
             allocator
-                .reserve_payload_chunks(&(2 * CHUNK_BYTES..2 * CHUNK_BYTES + 8192))
+                .hold_chunks_for_recovered_payload(&(2 * CHUNK_BYTES..2 * CHUNK_BYTES + 8192))
                 .is_some()
         );
         assert!(
             allocator
-                .reserve_payload_chunks(&(2 * CHUNK_BYTES..4 * CHUNK_BYTES))
+                .hold_chunks_for_recovered_payload(&(2 * CHUNK_BYTES..4 * CHUNK_BYTES))
                 .is_none()
         );
-        allocator.remove_payload(2 * CHUNK_BYTES);
+        allocator.release_payload(2 * CHUNK_BYTES);
         assert_eq!(allocator.available_bytes(), 0);
-        allocator.remove_payload(2 * CHUNK_BYTES);
+        allocator.release_payload(2 * CHUNK_BYTES);
         assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
     }
 
@@ -299,7 +305,7 @@ mod tests {
                 writer.reserve_chunks(2)
             });
             barrier.wait();
-            let recovered = allocator.reserve_for_recovery(0, 2);
+            let recovered = allocator.reserve_chunks_at(0, 2);
             let written = task.join().unwrap();
             assert_ne!(recovered.is_some(), written.is_some());
         }
@@ -310,16 +316,16 @@ mod tests {
         let (registry, backend) = registry();
         let allocator = DiskChunkAllocator::with_metrics(0..3 * CHUNK_BYTES, DiskMetrics::new(&backend)).unwrap();
         let recovered_chunks = || value(&registry, "feuer_disk_recovered_chunks", &[]);
-        let inspected = allocator.reserve_for_recovery(0, 3).unwrap();
+        let inspected = allocator.reserve_chunks_at(0, 3).unwrap();
         assert_eq!(recovered_chunks(), 0.0);
         drop(inspected);
-        let mut recovered = allocator.reserve_for_recovery(0, 3).unwrap();
+        let mut recovered = allocator.reserve_chunks_at(0, 3).unwrap();
         recovered.mark_recovered();
         recovered.mark_recovered();
         assert_eq!(recovered_chunks(), 3.0);
-        allocator.retain_payloads(recovered, 1);
+        allocator.hold_chunks_until_payloads_released(recovered, 1);
         assert_eq!(recovered_chunks(), 3.0);
-        allocator.remove_payload(4096);
+        allocator.release_payload(4096);
         assert_eq!(recovered_chunks(), 0.0);
         let written = allocator.reserve_chunks(3).unwrap();
         assert_eq!(recovered_chunks(), 0.0);
@@ -335,11 +341,11 @@ mod tests {
         let other = DiskChunkAllocator::with_metrics(2 * CHUNK_BYTES..3 * CHUNK_BYTES, metrics).unwrap();
         let chunks = |state| value(&registry, "feuer_disk_chunks", &[("state", state)]);
         assert_eq!(chunks("free"), 3.0);
-        let region = allocator.reserve_chunks(2).unwrap();
+        let reserved_chunks = allocator.reserve_chunks(2).unwrap();
         assert_eq!(chunks("allocated"), 2.0);
-        allocator.retain_payloads(region, 1);
+        allocator.hold_chunks_until_payloads_released(reserved_chunks, 1);
         assert_eq!(chunks("free"), 1.0);
-        allocator.remove_payload(4096);
+        allocator.release_payload(4096);
         assert_eq!(chunks("free"), 3.0);
         assert_eq!(chunks("allocated"), 0.0);
         drop(allocator);
@@ -362,10 +368,10 @@ mod tests {
         let capacity = 102 * CHUNK_BYTES;
         let allocator = DiskChunkAllocator::new(capacity).unwrap();
         for count in [1, 2, 40, 100, 102] {
-            let region = allocator.reserve_chunks(count).unwrap();
-            assert_eq!(region.range(), 0..count * CHUNK_BYTES);
-            assert_eq!(region.chunk_count(), count);
-            drop(region);
+            let reserved_chunks = allocator.reserve_chunks(count).unwrap();
+            assert_eq!(reserved_chunks.disk_byte_range(), 0..count * CHUNK_BYTES);
+            assert_eq!(reserved_chunks.chunk_count(), count);
+            drop(reserved_chunks);
             assert_all_chunks_free(&allocator, capacity);
         }
     }
@@ -373,13 +379,13 @@ mod tests {
     #[test]
     fn free_chunk_counts_are_independent_of_start() {
         let allocator = DiskChunkAllocator::for_disk_range(7 * CHUNK_BYTES..12 * CHUNK_BYTES).unwrap();
-        let region = allocator.reserve_chunks(2).unwrap();
-        assert_eq!(region.range(), 7 * CHUNK_BYTES..9 * CHUNK_BYTES);
+        let reserved_chunks = allocator.reserve_chunks(2).unwrap();
+        assert_eq!(reserved_chunks.disk_byte_range(), 7 * CHUNK_BYTES..9 * CHUNK_BYTES);
         assert_eq!(
             allocator.free.lock().unwrap().free_chunk_count_by_start,
             BTreeMap::from([(9, 3)])
         );
-        drop(region);
+        drop(reserved_chunks);
         assert_eq!(
             allocator.free.lock().unwrap().free_chunk_count_by_start,
             BTreeMap::from([(7, 5)])
@@ -417,17 +423,20 @@ mod tests {
     #[test]
     fn fragmented_space_is_not_combined_and_coalesces_after_release() {
         let allocator = DiskChunkAllocator::new(5 * CHUNK_BYTES).unwrap();
-        let mut regions: Vec<_> = (0..5).map(|_| allocator.reserve_chunks(1).unwrap()).collect();
-        drop(regions.remove(4));
-        drop(regions.remove(2));
-        drop(regions.remove(0));
+        let mut reservations: Vec<_> = (0..5).map(|_| allocator.reserve_chunks(1).unwrap()).collect();
+        drop(reservations.remove(4));
+        drop(reservations.remove(2));
+        drop(reservations.remove(0));
         assert_eq!(allocator.available_bytes(), 3 * CHUNK_BYTES);
         assert!(allocator.reserve_chunks(2).is_none());
         assert!(allocator.reserve_chunks(3).is_none());
         assert_eq!(allocator.available_bytes(), 3 * CHUNK_BYTES);
-        drop(regions);
+        drop(reservations);
         assert_all_chunks_free(&allocator, 5 * CHUNK_BYTES);
-        assert_eq!(allocator.reserve_chunks(5).unwrap().range(), 0..5 * CHUNK_BYTES);
+        assert_eq!(
+            allocator.reserve_chunks(5).unwrap().disk_byte_range(),
+            0..5 * CHUNK_BYTES
+        );
     }
 
     #[test]
@@ -435,27 +444,31 @@ mod tests {
         let capacity = 16 * CHUNK_BYTES;
         let allocator = DiskChunkAllocator::new(capacity).unwrap();
         let mut occupied = [false; 16];
-        let mut entries = Vec::<ReservedChunks>::new();
+        let mut reservations = Vec::<ReservedChunks>::new();
         let mut random = 0x4de3_8129_f307_4a65u64;
         for _ in 0..10_000 {
             random ^= random << 13;
             random ^= random >> 7;
             random ^= random << 17;
-            if !entries.is_empty() && random.is_multiple_of(3) {
-                let region = entries.swap_remove(random as usize % entries.len());
-                for chunk in region.range().start / CHUNK_BYTES..region.range().end / CHUNK_BYTES {
+            if !reservations.is_empty() && random.is_multiple_of(3) {
+                let reserved_chunks = reservations.swap_remove(random as usize % reservations.len());
+                for chunk in reserved_chunks.disk_byte_range().start / CHUNK_BYTES
+                    ..reserved_chunks.disk_byte_range().end / CHUNK_BYTES
+                {
                     assert!(occupied[chunk as usize]);
                     occupied[chunk as usize] = false;
                 }
             } else {
                 let count = random % 5 + 1;
                 match allocator.reserve_chunks(count) {
-                    Some(region) => {
-                        for chunk in region.range().start / CHUNK_BYTES..region.range().end / CHUNK_BYTES {
+                    Some(reserved_chunks) => {
+                        for chunk in reserved_chunks.disk_byte_range().start / CHUNK_BYTES
+                            ..reserved_chunks.disk_byte_range().end / CHUNK_BYTES
+                        {
                             assert!(!occupied[chunk as usize]);
                             occupied[chunk as usize] = true;
                         }
-                        entries.push(region);
+                        reservations.push(reserved_chunks);
                     }
                     None => assert!(!occupied.windows(count as usize).any(|run| run.iter().all(|used| !used))),
                 }
@@ -465,7 +478,7 @@ mod tests {
                 occupied.iter().filter(|&&used| !used).count() as u64 * CHUNK_BYTES
             );
         }
-        drop(entries);
+        drop(reservations);
         assert_all_chunks_free(&allocator, capacity);
     }
 
@@ -478,8 +491,8 @@ mod tests {
                 let allocator = &allocator;
                 scope.spawn(move || {
                     for _ in 0..1000 {
-                        let region = allocator.reserve_chunks(2).unwrap();
-                        drop(region);
+                        let reserved_chunks = allocator.reserve_chunks(2).unwrap();
+                        drop(reserved_chunks);
                     }
                 });
             }

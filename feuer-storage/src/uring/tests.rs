@@ -251,7 +251,7 @@ fn canceled_submitted_write_retains_buffers_but_not_disk_space() {
     drop(region);
     queue.receive_requests();
     let reused = allocator.reserve_chunks(1).unwrap();
-    assert_eq!(reused.range().start, 0);
+    assert_eq!(reused.disk_byte_range().start, 0);
     assert!(queue.active[0].is_some());
     let other = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(other.as_ref().as_ptr(), address);
@@ -318,7 +318,7 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
         .await
         .unwrap();
     assert_eq!(pool.idle_bytes(), 0);
-    let read = handle.try_read_recovery_chunk(chunk.range().start);
+    let read = handle.try_read_recovery_chunk(chunk.disk_byte_range().start);
     let result = tokio::time::timeout(std::time::Duration::from_secs(1), read)
         .await
         .unwrap()
@@ -344,7 +344,7 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
     assert_eq!(handle.handle.sender.as_ref().unwrap().capacity(), MAX_IN_FLIGHT_READS);
     assert!(
         handle
-            .try_read_recovery_chunk(chunk.range().start)
+            .try_read_recovery_chunk(chunk.disk_byte_range().start)
             .await
             .unwrap()
             .is_some()
@@ -384,7 +384,7 @@ async fn queue_exit_releases_admission_waiters_and_queued_requests() {
     let chunk = allocator.reserve_chunks(1).unwrap();
     assert_eq!(
         handle
-            .try_read_recovery_chunk(chunk.range().start)
+            .try_read_recovery_chunk(chunk.disk_byte_range().start)
             .await
             .unwrap_err()
             .kind(),

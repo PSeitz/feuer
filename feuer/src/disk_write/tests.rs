@@ -18,7 +18,7 @@ fn queue_metrics_cover_enqueue_pressure_dequeue_and_cancellation() {
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 4.0);
     assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 1.0);
     let mut active = receiver.try_recv().unwrap();
-    active.entry_and_metrics.finish_queue_wait();
+    active.entry_metrics.finish_queue_wait();
     assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 4.0);
     assert_eq!(value(&registry, "feuer_disk_write_queue_duration_seconds", &[]), 1.0);
@@ -47,7 +47,7 @@ fn enqueue(disk_write_queue: &DiskWriteQueue, memory: &MemoryCache, key: &str) {
     let key = ObjectKeyHash::from(key);
     let download = Download::new(3, Bytes::from_static(b"abcd")).unwrap();
     assert!(memory.insert(key, download.clone()));
-    disk_write_queue.enqueue_if_capacity(key, download);
+    disk_write_queue.enqueue_if_space_available(key, download);
 }
 
 #[test]
@@ -89,7 +89,7 @@ async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
     );
     drop(disk_write_queue);
     DiskWriteQueue::write_queued_batches(receiver, memory.clone(), disk.clone()).await;
-    assert!(!disk.contains(&ObjectKeyHash::from("evicted"), range));
+    assert!(!disk.covers_range(&ObjectKeyHash::from("evicted"), range));
     // One metadata chunk leaves one payload chunk; the drained batch must share it.
     for key in ["live-a", "readmitted", "live-b"] {
         assert_eq!(

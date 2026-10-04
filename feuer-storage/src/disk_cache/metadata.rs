@@ -16,7 +16,7 @@ pub(super) struct MetadataPages {
 
 /// One reserved metadata chunk and its independently checksummed pages.
 pub(super) struct MetadataChunk {
-    pub(super) region: ReservedChunks,
+    pub(super) reserved_chunk: ReservedChunks,
     pub(super) bytes: Vec<u8>,
 }
 
@@ -28,9 +28,9 @@ fn entry_metadata_offset(entry_metadata_index: usize) -> usize {
 }
 
 impl MetadataChunk {
-    pub(super) fn empty(region: ReservedChunks) -> Self {
+    pub(super) fn empty(reserved_chunk: ReservedChunks) -> Self {
         let mut chunk = Self {
-            region,
+            reserved_chunk,
             bytes: vec![0; CHUNK_BYTES as usize],
         };
         for page in 0..ENTRY_METADATA_PAGES_PER_CHUNK {
@@ -81,7 +81,7 @@ impl MetadataPages {
     pub(super) fn reserve_metadata(&mut self, allocator: &DiskChunkAllocator) -> Option<(usize, usize)> {
         if self.free_entry_positions.is_empty() {
             let chunk = MetadataChunk::empty(allocator.reserve_chunks(1)?);
-            self.set_last_chunk_link(chunk.region.range().start);
+            self.set_last_chunk_link(chunk.reserved_chunk.disk_byte_range().start);
             let chunk_index = self.chunks.len();
             self.chunks.push(chunk);
             self.dirty_pages.insert((chunk_index, ENTRY_METADATA_PAGES_PER_CHUNK));
@@ -145,7 +145,7 @@ impl DiskCacheShard {
                 .map(|(chunk, page)| {
                     let chunk = &pages.chunks[chunk];
                     let offset = page * METADATA_PAGE_BYTES;
-                    let start = chunk.region.range().start + offset as u64;
+                    let start = chunk.reserved_chunk.disk_byte_range().start + offset as u64;
                     (start, chunk.bytes[offset..offset + METADATA_PAGE_BYTES].to_vec())
                 })
                 .collect()

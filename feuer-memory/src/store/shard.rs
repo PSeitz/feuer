@@ -13,18 +13,18 @@ use crate::{BufferPool, MemoryMetrics};
 /// Minimum requests across all keys since admission before trimming a range.
 pub(super) const MIN_REQUESTS_BEFORE_RANGE_TRIM: u64 = 64;
 
-/// An entry's payload bytes, object range, allocation capacity, candidate index, and admission clock.
+/// An entry's payload bytes, object range, allocation charge, candidate index, and request count at insertion.
 struct MemoryEntry {
     /// Exact object interval represented by `bytes`.
     range: ByteRange,
     /// Retained payload; lookup results share slices of this allocation.
     bytes: Bytes,
-    /// Capacity of the backing allocation, possibly larger than the visible payload.
-    capacity: u64,
+    /// Allocation bytes charged to this entry, possibly larger than the visible payload.
+    allocation_charge: u64,
     /// Index of this entry's candidate in the list sampled for trimming or eviction.
     candidate_index: usize,
-    /// Request clock at admission.
-    admitted_at_access: u64,
+    /// Total request count when this entry was inserted.
+    request_count_at_insertion: u64,
 }
 
 impl MemoryEntry {
@@ -62,7 +62,7 @@ impl ObjectEntries {
         for (_, entry) in self.by_start.range(range.start()..range.end()) {
             if range.contains(entry.range) {
                 contained_ranges.ranges.push(entry.range);
-                contained_ranges.allocation_bytes += entry.capacity;
+                contained_ranges.allocation_bytes += entry.allocation_charge;
             }
         }
         contained_ranges
@@ -221,7 +221,7 @@ impl MemoryCacheShard {
         object_key: &ObjectKeyHash,
         range: ByteRange,
         bytes: &Bytes,
-        capacity: u64,
+        allocation_charge: u64,
         access_histories: &ObjectAccessHistories,
         allow_range_trim: bool,
     ) -> InsertOrReclaimResult {
@@ -233,7 +233,7 @@ impl MemoryCacheShard {
             Some(entries) => entries.contained_entry_ranges(range),
             None => ContainedEntryRanges::default(),
         };
-        let added_bytes = capacity;
+        let added_bytes = allocation_charge;
         let used_bytes_without_contained_entries = self.used_bytes - contained_ranges.allocation_bytes;
         let max_existing_bytes = self.capacity.saturating_sub(added_bytes);
 
@@ -244,7 +244,7 @@ impl MemoryCacheShard {
                 *object_key,
                 range,
                 bytes.clone(),
-                capacity,
+                allocation_charge,
                 access_histories.request_count(),
             );
 
@@ -273,17 +273,17 @@ impl MemoryCacheShard {
         InsertOrReclaimResult::Evicted
     }
 
-    /// Inserts an entry holding downloaded bytes, charging its backing allocation capacity.
+    /// Inserts an entry holding downloaded bytes with the supplied allocation charge.
     fn insert_download_entry(
         &mut self,
         object_key: ObjectKeyHash,
         range: ByteRange,
         bytes: Bytes,
-        capacity: u64,
-        access_clock: u64,
+        allocation_charge: u64,
+        request_count: u64,
     ) {
-        self.used_bytes += capacity;
-        self.buffer_pool.add_entry_bytes(capacity);
+        self.used_bytes += allocation_charge;
+        self.buffer_pool.add_entry_bytes(allocation_charge);
         let candidate_index = self.candidates.register(ObjectKeyAndRangeStart {
             object_key,
             start: range.start(),
@@ -292,9 +292,9 @@ impl MemoryCacheShard {
         let entry = MemoryEntry {
             range,
             bytes,
-            capacity,
+            allocation_charge,
             candidate_index,
-            admitted_at_access: access_clock,
+            request_count_at_insertion: request_count,
         };
 
         let replaced = entries.by_start.insert(range.start(), entry);
@@ -309,9 +309,9 @@ impl MemoryCacheShard {
     }
 
     /// Inserts an entry holding bytes retained by trimming; the caller accounts for its bytes.
-    fn insert_trimmed_entry(&mut self, object_key: &ObjectKeyHash, range: ByteRange, bytes: Bytes, access_clock: u64) {
-        let capacity = bytes.len() as u64;
-        self.buffer_pool.add_entry_bytes(capacity);
+    fn insert_trimmed_entry(&mut self, object_key: &ObjectKeyHash, range: ByteRange, bytes: Bytes, request_count: u64) {
+        let allocation_charge = bytes.len() as u64;
+        self.buffer_pool.add_entry_bytes(allocation_charge);
         let candidate_index = self.candidates.register(ObjectKeyAndRangeStart {
             object_key: *object_key,
             start: range.start(),
@@ -320,9 +320,9 @@ impl MemoryCacheShard {
         let entry = MemoryEntry {
             range,
             bytes,
-            capacity,
+            allocation_charge,
             candidate_index,
-            admitted_at_access: access_clock,
+            request_count_at_insertion: request_count,
         };
         let replaced = entries.by_start.insert(range.start(), entry);
         debug_assert!(replaced.is_none());
@@ -371,7 +371,7 @@ impl MemoryCacheShard {
         if object_has_no_entries {
             self.entries_by_key.remove(object_key);
         }
-        let removed_bytes = removed_entry.capacity;
+        let removed_bytes = removed_entry.allocation_charge;
         self.used_bytes -= removed_bytes;
         self.buffer_pool.remove_entry_bytes(removed_bytes);
         Some(removed_bytes)
@@ -417,10 +417,15 @@ impl MemoryCacheShard {
 
             let retrieval_cost = access_histories.decayed_retrieval_cost(&candidate.object_key, entry.range);
             if selected_candidate.is_none_or(|(selected_key, selected_entry, selected_cost)| {
-                compare_cost_per_byte(retrieval_cost, entry.capacity, selected_cost, selected_entry.capacity)
-                    .then_with(|| candidate.object_key.cmp(selected_key))
-                    .then_with(|| entry.range.cmp(&selected_entry.range))
-                    .is_lt()
+                compare_cost_per_byte(
+                    retrieval_cost,
+                    entry.allocation_charge,
+                    selected_cost,
+                    selected_entry.allocation_charge,
+                )
+                .then_with(|| candidate.object_key.cmp(selected_key))
+                .then_with(|| entry.range.cmp(&selected_entry.range))
+                .is_lt()
             }) {
                 selected_candidate = Some((&candidate.object_key, entry, retrieval_cost));
             }
@@ -445,8 +450,8 @@ impl MemoryCacheShard {
             .by_start
             .get(&candidate.range.start())
             .expect("an entry selected for trimming must still be indexed");
-        let access_clock = access_histories.request_count();
-        if access_clock.saturating_sub(entry.admitted_at_access) < MIN_REQUESTS_BEFORE_RANGE_TRIM {
+        let request_count = access_histories.request_count();
+        if request_count.saturating_sub(entry.request_count_at_insertion) < MIN_REQUESTS_BEFORE_RANGE_TRIM {
             return None;
         }
         let plan = plan_range_trim(
@@ -461,7 +466,7 @@ impl MemoryCacheShard {
     }
 
     /// Publishes copied range trimming output only if the exact source range is still cached.
-    pub(super) fn publish_range_trim(&mut self, replacement: RangeTrimReplacement, access_clock: u64) -> bool {
+    pub(super) fn publish_range_trim(&mut self, replacement: RangeTrimReplacement, request_count: u64) -> bool {
         // Objects are immutable: reinsertion and neighboring-range changes do not invalidate the bytes.
         // New requests may change the desirability of the plan, but do not invalidate it.
         let Some(removed_bytes) = self.remove_entry(&replacement.object_key, replacement.plan.source_range()) else {
@@ -482,7 +487,7 @@ impl MemoryCacheShard {
             retained_bytes += bytes.len() as u64;
             retained_entries += 1;
             self.used_bytes += bytes.len() as u64;
-            self.insert_trimmed_entry(&replacement.object_key, retained_range, bytes, access_clock);
+            self.insert_trimmed_entry(&replacement.object_key, retained_range, bytes, request_count);
         }
 
         let reclaimed_bytes = removed_bytes - retained_bytes;

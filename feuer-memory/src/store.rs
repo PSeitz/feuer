@@ -149,23 +149,28 @@ impl MemoryCache {
     }
 
     /// Caches one downloaded range without creating an access, charging its payload length.
-    /// Use `insert_with_capacity` when the backing allocation capacity is known.
+    /// Use [`Self::insert_with_allocation_charge`] when the backing allocation capacity is known.
     ///
     /// If an existing entry contains the download, the supplied payload is
     /// discarded. A larger download replaces entries it fully contains, while
     /// partial overlaps coexist.
     /// Returns whether the download was inserted rather than already covered.
     pub fn insert(&self, object_key: ObjectKeyHash, download: Download) -> bool {
-        let capacity = download.bytes().len();
-        self.insert_with_capacity(object_key, download, capacity)
+        let allocation_charge = download.bytes().len();
+        self.insert_with_allocation_charge(object_key, download, allocation_charge)
     }
 
-    /// Caches bytes while charging their backing allocation, even if they are a smaller slice.
+    /// Inserts downloaded bytes using the supplied allocation-byte charge, even if they are a smaller slice.
     /// Shared allocations are conservatively charged once per cached entry.
-    pub fn insert_with_capacity(&self, object_key: ObjectKeyHash, download: Download, capacity: usize) -> bool {
+    pub fn insert_with_allocation_charge(
+        &self,
+        object_key: ObjectKeyHash,
+        download: Download,
+        allocation_charge: usize,
+    ) -> bool {
         let (downloaded_range, bytes) = download.into_parts();
-        assert!(capacity >= bytes.len());
-        self.admit_download(object_key, downloaded_range, bytes, capacity as u64)
+        assert!(allocation_charge >= bytes.len());
+        self.admit_download(object_key, downloaded_range, bytes, allocation_charge as u64)
     }
 
     /// Checks whether the exact key and range are cached, without retaining bytes or recording an access.
@@ -180,7 +185,7 @@ impl MemoryCache {
         object_key: ObjectKeyHash,
         downloaded_range: ByteRange,
         bytes: Bytes,
-        capacity: u64,
+        allocation_charge: u64,
     ) -> bool {
         let shard_index = self.shard_index(&object_key);
         let mut allow_range_trim = true;
@@ -190,7 +195,7 @@ impl MemoryCache {
                 &object_key,
                 downloaded_range,
                 &bytes,
-                capacity,
+                allocation_charge,
                 &self.access_histories,
                 allow_range_trim,
             );
@@ -207,10 +212,10 @@ impl MemoryCache {
                     // Payload copying is deliberately outside the shard lock.
                     // Publication checks that the exact source range is still cached, not history.
                     let replacement = source.copy_retained_payloads();
-                    let access_clock = self.access_histories.request_count();
+                    let request_count = self.access_histories.request_count();
                     if !self.shards[shard_index]
                         .lock()
-                        .publish_range_trim(replacement, access_clock)
+                        .publish_range_trim(replacement, request_count)
                     {
                         // The source was removed or replaced by a different range. Fall back to
                         // eviction so this admission cannot starve.

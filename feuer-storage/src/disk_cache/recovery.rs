@@ -5,9 +5,10 @@ use std::ops::Range;
 use super::{page_format::*, *};
 
 /// The disk byte range assigned to one shard.
-pub(super) fn shard_disk_range(capacity: u64, count: usize, index: usize) -> Range<u64> {
+pub(super) fn shard_disk_range(capacity: u64, num_shards: usize, shard_index: usize) -> Range<u64> {
     let chunks = capacity / CHUNK_BYTES;
-    chunks * index as u64 / count as u64 * CHUNK_BYTES..chunks * (index + 1) as u64 / count as u64 * CHUNK_BYTES
+    chunks * shard_index as u64 / num_shards as u64 * CHUNK_BYTES
+        ..chunks * (shard_index + 1) as u64 / num_shards as u64 * CHUNK_BYTES
 }
 
 impl DiskCacheInner {
@@ -25,7 +26,10 @@ impl DiskCacheInner {
                 let entry_metadata =
                     decode_entry_metadata(entry_metadata_bytes).filter(|(key, _, _, payload_range)| {
                         self.shard_index_for_key(key) == shard_index
-                            && shard.allocator.reserve_payload_chunks(payload_range).is_some()
+                            && shard
+                                .allocator
+                                .hold_chunks_for_recovered_payload(payload_range)
+                                .is_some()
                     });
                 let Some((key, object_range, payload_checksum, payload_range)) = entry_metadata else {
                     metadata.free_entry_positions.push((chunk_index, entry_metadata_index));
@@ -40,7 +44,7 @@ impl DiskCacheInner {
                     payload_range,
                 };
                 for entry in index.insert(key, entry) {
-                    shard.allocator.remove_payload(entry.payload_range.start);
+                    shard.allocator.release_payload(entry.payload_range.start);
                     metadata.free_entry_positions.push(entry.metadata);
                 }
             }
@@ -54,7 +58,7 @@ impl DiskCacheShard {
         let mut metadata = metadata::MetadataPages::default();
         while address != NO_CHUNK {
             // The writer aligns links; reservations enforce current shard bounds and stop cycles.
-            let Some(mut region) = self.allocator.reserve_for_recovery(address / CHUNK_BYTES, 1) else {
+            let Some(mut reserved_chunk) = self.allocator.reserve_chunks_at(address / CHUNK_BYTES, 1) else {
                 break;
             };
             let Ok(bytes) = file.read_recovery_chunk(address).await else {
@@ -64,9 +68,9 @@ impl DiskCacheShard {
             if bytes.iter().all(|&byte| byte == 0) {
                 break;
             }
-            region.mark_recovered();
+            reserved_chunk.mark_recovered();
             let mut chunk = metadata::MetadataChunk {
-                region,
+                reserved_chunk,
                 bytes: bytes.to_vec(),
             };
             for page in 0..ENTRY_METADATA_PAGES_PER_CHUNK {

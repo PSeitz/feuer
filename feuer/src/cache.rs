@@ -135,16 +135,11 @@ impl TieredMemoryDiskCache {
         }
 
         #[cfg(target_os = "linux")]
-        if let Some((bytes, capacity)) = self
-            .state
-            .disk
-            .get_with_buffer_capacity(&object_key, requested_range)
-            .await
-        {
-            self.state.memory.insert_with_capacity(
+        if let Some((bytes, buffer_capacity)) = self.state.disk.fetch_from_disk(&object_key, requested_range).await {
+            self.state.memory.insert_with_allocation_charge(
                 object_key,
                 Download::new(requested_range.start(), bytes.clone()).expect("disk result covers the request"),
-                capacity,
+                buffer_capacity,
             );
             metrics.record(LookupOutcome::DiskHit, started.elapsed(), requested_range.len());
             return Ok(bytes);
@@ -168,7 +163,7 @@ impl TieredMemoryDiskCache {
 
         let requested_bytes = requested_slice(download.bytes(), downloaded_range, requested_range);
         #[cfg(target_os = "linux")]
-        if self.state.disk.contains(&object_key, downloaded_range) {
+        if self.state.disk.covers_range(&object_key, downloaded_range) {
             self.state.disk_write_queue.record_already_covered();
             metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
             return Ok(requested_bytes);
@@ -176,7 +171,9 @@ impl TieredMemoryDiskCache {
         let inserted = self.state.memory.insert(object_key, download.clone());
         #[cfg(target_os = "linux")]
         if inserted {
-            self.state.disk_write_queue.enqueue_if_capacity(object_key, download);
+            self.state
+                .disk_write_queue
+                .enqueue_if_space_available(object_key, download);
         } else {
             self.state.disk_write_queue.record_already_in_memory();
         }
@@ -357,7 +354,7 @@ mod tests {
 
     async fn wait_for_disk(cache: &TieredMemoryDiskCache, key: &str, range: ByteRange) {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !cache.state.disk.contains(&ObjectKeyHash::from(key), range) {
+            while !cache.state.disk.covers_range(&ObjectKeyHash::from(key), range) {
                 tokio::task::yield_now().await;
             }
         })
@@ -506,7 +503,7 @@ mod tests {
             !cache
                 .state
                 .disk
-                .contains(&ObjectKeyHash::from(key.as_str()), range(0, 1))
+                .covers_range(&ObjectKeyHash::from(key.as_str()), range(0, 1))
         );
         assert_eq!(history.request_count(), 1);
     }

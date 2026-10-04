@@ -22,7 +22,10 @@ async fn metadata_chains_start_at_each_shards_first_chunk_without_a_sidecar() {
         );
         let shard_disk_range = shard_disk_range(cache.disk.file.capacity(), cache.disk.shards.len(), index);
         let pages = cache.disk.shards[index].metadata_pages.lock().unwrap();
-        assert_eq!(pages.chunks[0].region.range().start, shard_disk_range.start);
+        assert_eq!(
+            pages.chunks[0].reserved_chunk.disk_byte_range().start,
+            shard_disk_range.start
+        );
     }
     assert!(!directory.path().join("recovery-heads").exists());
     let cache = reopen(directory.path(), cache).await;
@@ -72,7 +75,7 @@ async fn concurrent_batches_grow_metadata_chain_and_recover_every_entry() {
         assert_eq!(pages.chunks.len(), 2);
         assert_eq!(
             pages.chunks[0].next_chunk_address(),
-            Some(pages.chunks[1].region.range().start)
+            Some(pages.chunks[1].reserved_chunk.disk_byte_range().start)
         );
         assert_eq!(pages.chunks[1].next_chunk_address(), Some(NO_CHUNK));
     }
@@ -119,7 +122,7 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 1)).await.unwrap());
     let shard = &cache.disk.shards[0];
-    let entry = shard.entry_index.lock().unwrap().remove(&key, 0).unwrap();
+    let entry = shard.entry_index.lock().unwrap().remove_entry(&key, 0).unwrap();
     let address = entry.payload_range.start;
     let (chunk_index, entry_metadata_index) = entry.metadata;
     let metadata = shard.metadata_pages.lock().unwrap();
@@ -132,7 +135,7 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
         entry_metadata_bytes
     );
     assert!(shard.allocator.reserve_chunks(1).is_none());
-    shard.allocator.remove_payload(address);
+    shard.allocator.release_payload(address);
     assert!(shard.allocator.reserve_chunks(1).is_some());
     assert_eq!(
         metadata.chunks[chunk_index].entry_metadata_bytes(entry_metadata_index),
@@ -283,9 +286,9 @@ async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
             .entry_index
             .lock()
             .unwrap()
-            .remove(&ObjectKeyHash(i as u128), 0)
+            .remove_entry(&ObjectKeyHash(i as u128), 0)
             .unwrap();
-        shard.remove_payload_and_allow_metadata_overwrite(entry);
+        shard.release_payload_and_allow_metadata_overwrite(entry);
     }
     // Returning slots across multiple pages needs no invalidation writes or metadata retry.
     assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
@@ -428,17 +431,20 @@ async fn stale_metadata_after_payload_reuse_recovers_as_a_checksum_miss() {
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 100)).await.unwrap());
     let shard = &cache.disk.shards[0];
-    let entry = shard.entry_index.lock().unwrap().remove(&key, 0).unwrap();
-    shard.allocator.remove_payload(entry.payload_range.start);
+    let entry = shard.entry_index.lock().unwrap().remove_entry(&key, 0).unwrap();
+    shard.allocator.release_payload(entry.payload_range.start);
     let reused = shard.allocator.reserve_chunks(1).unwrap();
     cache
         .disk
         .file
-        .write_parts(reused.range(), &[(0, Bytes::from(vec![99; CHUNK_BYTES as usize]))])
+        .write_parts(
+            reused.disk_byte_range(),
+            &[(0, Bytes::from(vec![99; CHUNK_BYTES as usize]))],
+        )
         .await
         .unwrap();
     drop(reused);
     let cache = reopen(directory.path(), cache).await;
-    assert!(cache.contains(&key, range(0, 100)));
+    assert!(cache.covers_range(&key, range(0, 100)));
     assert!(cache.get(&key, range(0, 100)).await.is_none());
 }

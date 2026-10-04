@@ -94,7 +94,7 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
                 .all(|shard| shard.metadata_pages.lock().unwrap().dirty_pages.is_empty())
         );
         for (key, source) in inputs {
-            assert!(cache.contains(&key, source.downloaded_range()));
+            assert!(cache.covers_range(&key, source.downloaded_range()));
         }
     }
 }
@@ -272,8 +272,8 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
         .await
         .unwrap();
     // The first incoming entry evicts both old chunk owners. Its batch neighbor evicts nothing.
-    assert!(!cache.contains(&"first".into(), ByteRange::new(0, 1).unwrap()));
-    assert!(!cache.contains(&"second".into(), ByteRange::new(0, 1).unwrap()));
+    assert!(!cache.covers_range(&"first".into(), ByteRange::new(0, 1).unwrap()));
+    assert!(!cache.covers_range(&"second".into(), ByteRange::new(0, 1).unwrap()));
     assert_eq!(triggering(), 1.0);
     assert_eq!(
         value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),
@@ -341,7 +341,7 @@ async fn pressure_eviction_and_partial_write_failure_record_each_entry_outcome()
         .entry_index
         .lock()
         .unwrap()
-        .remove(&ObjectKeyHash::from("second"), 0);
+        .remove_entry(&ObjectKeyHash::from("second"), 0);
     disk.shards[0].allocator =
         DiskChunkAllocator::with_metrics(CHUNK_BYTES..4 * CHUNK_BYTES, disk.metrics.clone()).unwrap();
     let cache = DiskCache { disk: Arc::new(disk) };

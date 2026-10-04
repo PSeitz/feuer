@@ -32,13 +32,13 @@ fn cached_slices_and_idle_buffers_share_allocation_accounting() {
     let buffer = pool.allocate(capacity).unwrap();
     let bytes = buffer.into_bytes().slice(17..18);
     let key = ObjectKeyHash::from("slice");
-    cache.insert_with_capacity(key, Download::new(0, bytes.clone()).unwrap(), capacity);
+    cache.insert_with_allocation_charge(key, Download::new(0, bytes.clone()).unwrap(), capacity);
     assert_eq!(cache.used_bytes(), capacity as u64);
     assert_eq!(pool.idle_bytes(), 0);
     assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), capacity as f64);
     assert_eq!(cache.get(&key, range(0, 1)).unwrap().as_ptr(), bytes.as_ptr());
     // A redundant insertion does not charge the shared allocation again.
-    assert!(!cache.insert_with_capacity(key, Download::new(0, bytes.clone()).unwrap(), capacity));
+    assert!(!cache.insert_with_allocation_charge(key, Download::new(0, bytes.clone()).unwrap(), capacity));
     assert_eq!(cache.used_bytes(), capacity as u64);
     cache.remove(&key, range(0, 1));
     assert_eq!(cache.used_bytes(), 0); // caller-only results are outside the budget
@@ -58,7 +58,7 @@ fn cached_capacity_drives_eviction_not_slice_length() {
     for key in ["first", "second"] {
         let buffer = cache.buffer_pool().allocate(1).unwrap();
         let capacity = buffer.capacity();
-        cache.insert_with_capacity(key.into(), Download::new(0, buffer.into_bytes()).unwrap(), capacity);
+        cache.insert_with_allocation_charge(key.into(), Download::new(0, buffer.into_bytes()).unwrap(), capacity);
     }
     assert!(cache.get(&"first".into(), range(0, 1)).is_none());
     assert!(cache.get(&"second".into(), range(0, 1)).is_some());
@@ -94,7 +94,7 @@ fn replacement_releases_the_old_allocation_charge() {
     let cache = cache(100 * capacity as u64);
     let key = ObjectKeyHash::from("replace");
     let buffer = cache.buffer_pool().allocate(capacity).unwrap();
-    cache.insert_with_capacity(key, Download::new(1, buffer.into_bytes().slice(..1)).unwrap(), capacity);
+    cache.insert_with_allocation_charge(key, Download::new(1, buffer.into_bytes().slice(..1)).unwrap(), capacity);
     cache.insert(key, Download::new(0, Bytes::from_static(b"abc")).unwrap());
     assert_eq!(cache.shards[0].lock().used_bytes(), 3);
     assert_eq!(cache.buffer_pool().idle_bytes(), capacity as u64);
@@ -109,7 +109,7 @@ fn trimming_replaces_allocation_capacity_with_copied_payload_capacity() {
     let cache = cache(capacity as u64);
     let key = ObjectKeyHash::from("trim");
     let buffer = cache.buffer_pool().allocate(capacity).unwrap();
-    cache.insert_with_capacity(
+    cache.insert_with_allocation_charge(
         key,
         Download::new(0, buffer.into_bytes().slice(..100)).unwrap(),
         capacity,
@@ -745,7 +745,7 @@ fn range_trim_requires_only_the_exact_source_range() {
             1 => {
                 assert!(cache.remove(&key, range(0, 10)));
                 // The replacement may have a different allocation charge for the same bytes.
-                cache.insert_with_capacity(key, source, 16);
+                cache.insert_with_allocation_charge(key, source, 16);
             }
             2 => {
                 cache.insert(key, download(range(12, 13), Bytes::from_static(b"x")));
