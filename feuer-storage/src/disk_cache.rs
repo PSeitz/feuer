@@ -2,7 +2,7 @@
 
 mod metadata;
 mod writer;
-pub use writer::DiskWriter;
+use writer::BufferedSmallEntryChunk;
 #[cfg(test)]
 mod metrics_tests;
 mod page_format;
@@ -65,12 +65,13 @@ struct DiskCacheInner {
     metrics: Arc<DiskMetrics>,
 }
 
-/// One disk-cache shard's chunk allocator, entry index, and metadata pages.
+/// One shard's small-entry buffer, allocator, published entry index, and metadata pages.
 struct DiskCacheShard {
     reclaim_sample_size: usize,
     allocator: DiskChunkAllocator,
     entry_index: Mutex<DiskEntryIndex>,
     metadata_pages: Mutex<metadata::MetadataPages>,
+    buffered_small_entry_chunk: tokio::sync::Mutex<BufferedSmallEntryChunk>,
 }
 
 /// Disk entries indexed by object key and range start, with a list sampled in rotation for eviction.
@@ -199,14 +200,15 @@ impl DiskCache {
             .map(|shard_index| {
                 let range = recovery::shard_disk_range(capacity, num_shards, shard_index);
                 let allocator = DiskChunkAllocator::with_metrics(range, metrics.clone()).unwrap();
-                DiskCacheShard {
+                Ok(DiskCacheShard {
                     reclaim_sample_size,
                     allocator,
                     entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
+                    buffered_small_entry_chunk: tokio::sync::Mutex::new(BufferedSmallEntryChunk::new()?),
                     metadata_pages: Mutex::new(metadata::MetadataPages::default()),
-                }
+                })
             })
-            .collect();
+            .collect::<Result<_, DataFileError>>()?;
         let disk = Arc::new(DiskCacheInner {
             file,
             shards,
@@ -236,14 +238,14 @@ impl DiskCache {
         self.disk.access_histories.clone()
     }
 
-    /// Checks whether one entry covers the requested range, without reading payload or recording an access.
+    /// Checks for one covering buffered or disk entry, without reading payload or recording an access.
     pub fn covers_range(&self, key: &ObjectKeyHash, range: ByteRange) -> bool {
-        self.disk.shards[self.disk.shard_index_for_key(key)]
-            .entry_index
-            .lock()
-            .unwrap()
-            .covering_entry(key, range)
-            .is_some()
+        let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
+        shard
+            .buffered_small_entry_chunk
+            .try_lock()
+            .is_ok_and(|pending| pending.covering_entry(key, range).is_some())
+            || shard.entry_index.lock().unwrap().covering_entry(key, range).is_some()
     }
 
     /// Returns exactly requested bytes from one covering entry, or a miss on any I/O/integrity uncertainty.
@@ -253,13 +255,20 @@ impl DiskCache {
         self.fetch_from_disk(key, requested).await.map(|(bytes, _)| bytes)
     }
 
-    /// Fetches requested bytes from disk after verifying the whole covering entry's checksum.
-    /// Returns the backing buffer's capacity too: retaining the slice retains that whole buffer.
+    /// Copies buffered bytes, or reads disk after verifying the whole covering entry's checksum.
+    /// Returns the backing buffer's capacity too: retaining a disk slice retains that whole buffer.
     /// Concurrent callers share the entry read. Missing entries and read or checksum failures are misses.
     pub async fn fetch_from_disk(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<(Bytes, usize)> {
         let started = Instant::now();
         let metrics = &self.disk.metrics;
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
+        // Do not wait on a busy buffer; flushing chunks may miss until disk publication.
+        if let Ok(pending) = shard.buffered_small_entry_chunk.try_lock()
+            && let Some(bytes) = pending.get(key, requested)
+        {
+            metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
+            return Some((bytes, requested.len() as usize));
+        }
         let (read, in_flight_read) = {
             let mut index = shard.entry_index.lock().unwrap();
             let Some(entry) = index.covering_entry(key, requested) else {

@@ -97,7 +97,7 @@ A returned `Bytes` may share a larger heap allocation. Feuer does not require a 
 subrange result. Caller-held results are outside cache-capacity accounting and may keep shared backing memory
 alive after cache eviction.
 
-A disk hit reads and verifies the whole covering entry using its expected checksum, then returns only the
+A hit on an entry already written to disk reads and verifies the whole covering entry, then returns only the
 requested bytes. A subrange lookup may therefore read a complete larger download. Packing independent entries
 in one allocation chunk does not require reading the neighboring entries. Returned disk results do not retain
 disk storage, allocation guards, or file mappings.
@@ -264,8 +264,12 @@ buffers and validate them before use. Readers hold no disk reservation and do no
 overwrite may cause a miss; no global read/write serialization or read guard is required. The I/O layer
 owns submitted buffer lifetime.
 
-The writer packs entries with aligned size below 128 KiB into per-shard 1-MiB chunks, flushing on full/no-fit
-or every 60 seconds. Larger entries write separately. Written chunks and individual holes cannot be appended to. A payload chunk becomes reusable when its last indexed entry is
+Each shard always owns an initialized 1-MiB buffer for entries with aligned size below 128 KiB, flushing on
+full/no-fit or every 60 seconds. Buffering consumes no disk capacity. A flush reserves payload chunks with one
+eviction budget; metadata positions are taken only during publication after successful I/O. If metadata capacity
+is then insufficient for the whole flush, discard the written payload. Queued writes and explicit batches share that buffer. After a memory miss, lookups may
+copy requested bytes from a covering buffered entry without disk I/O. Busy buffers and chunks detached for
+flushing may miss until disk publication; no in-flight lookup state is retained. Larger entries write separately. Written chunks and individual holes cannot be appended to. A payload chunk becomes reusable when its last indexed entry is
 removed, without waiting for readers or metadata writes. Partially filled chunks consume their full capacity.
 Payload addresses and storage lengths are rounded to 4 KiB. Each payload is one contiguous disk byte range
 with no metadata gaps. Multi-chunk entries reserve consecutive whole chunks exclusively; their unused tails

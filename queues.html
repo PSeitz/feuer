@@ -220,8 +220,8 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
               <details class="node">
                 <summary><span class="node-name">One worker, small-entry chunks</span><span class="node-meta">60-second partial flush</span></summary>
                 <div class="node-body">
-                  <p>The worker copies entries with aligned size below 128 KiB into one unfinished 1-MiB chunk per shard and releases their incoming bytes. Full/no-fit chunks flush immediately; a 60-second timer flushes partial chunks even when idle. Larger entries write separately. Closing discards partial chunks.</p>
-                  <p>Memory presence is checked on dequeue, not at publication. Every payload occupies one contiguous aligned disk byte range, separate from metadata.</p>
+                  <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by queued writes and explicit batches. Copying releases incoming bytes. Flushing reserves payload chunks; metadata positions are taken only at publication. Full/no-fit chunks flush immediately; the worker drives a 60-second flush timer even when idle. Larger entries write separately. Closing discards partial chunks.</p>
+                  <p>Lookups can copy requested bytes from buffered entries after memory eviction. Busy/flushing chunks may miss until publication. Memory presence is checked only on dequeue; payloads occupy contiguous aligned disk byte ranges, separate from metadata.</p>
                   <a class="source-label" href="feuer/src/disk_write.rs">feuer/src/disk_write.rs · queue and timer</a>
                   <a class="source-label" href="feuer-storage/src/disk_cache/writer.rs">feuer-storage/src/disk_cache/writer.rs · preparation and publication</a>
                 </div>

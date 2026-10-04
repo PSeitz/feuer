@@ -124,15 +124,16 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
 
 [`format.md`](format.md) describes the experimental disk format;
 [`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) covers runtime behavior and remaining crash testing.
-`DiskWriter` prepares small-entry chunks; `insert_batch` uses it with an explicit final flush.
+Each shard owns an initialized 1-MiB buffer shared by queued writes and explicit batches; the worker drives flushing.
+Buffering reserves no disk space. A flush reserves payload chunks; metadata positions remain free until publication.
 Payload completion precedes publication; a separate writer persists metadata every second.
-Each entry has one contiguous payload range and XXHash64 checksum. Reads verify the whole covering entry,
-without reading neighboring entries or metadata.
+Reads first copy requested bytes from buffered entries; busy/flushing chunks may miss until publication.
+Disk reads verify the whole covering entry's XXHash64 checksum, without reading neighbors or metadata.
 
 Independent shards have their own allocator and range-index lock. The allocator tracks coalesced free
 whole-chunk runs; the metadata component reserves entry positions and grows metadata capacity internally.
 Detached payload writers retain reservations through completion despite caller cancellation.
-Failed payload writes release their chunk and metadata reservations.
+Failed payload writes release their chunks without metadata rollback. Insufficient metadata capacity at publication discards the whole written payload.
 Publication is not transactional across shards. Callers bound batch memory and concurrency.
 
 Entries with aligned size below 128 KiB share 1-MiB payload chunks. Larger entries own consecutive
@@ -148,7 +149,7 @@ Pressure eviction samples up to 64 live entries and selects the lowest recent re
 byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.
 Alignment, metadata and chunk overhead do not enter the score. Only selected entries are removed. Neighbors
 remain indexed and may keep a partially empty chunk unavailable. No eviction metadata reads are needed.
-Each admission is limited to 64 sampled decisions and 4,096 chunks charged to removed entries. Active
+Each flush or independent large write is limited to 64 sampled decisions and 4,096 chunks charged to removed entries. Active
 storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
 disk cache to a memory cache's evidence. Public tier orchestration now uses it.
 Recovery starts at each shard's first chunk and follows last-page links, reading exactly 1 MiB per metadata chunk
@@ -173,7 +174,7 @@ checks passed for the changed files.
 
 - A nonblocking queue allows at most 256 pending entries. Queued and active payload bytes are tracked
   but not limited or charged to the memory-cache capacity.
-- One worker prepares one small-entry chunk per shard, flushing on full/no-fit or every 60 seconds.
+- Each shard owns its small-entry chunk; one worker submits downloads and drives the 60-second flush sweep.
   Larger entries write separately. Queue saturation skips candidates; closing discards partial chunks.
 - Queued writes are discarded if their exact key and range are no longer cached in memory. Reinsertion of
   the same immutable range allows an earlier write to proceed.
@@ -192,10 +193,10 @@ added in this slice. Workspace Clippy passed with warnings denied. Formatting ch
 files, and whitespace checks passed.
 The isolated validation checkout is `/mnt/local-ssd/feuer-tiered.iB2JNA`.
 
-Small-entry writer validation: all 219 workspace library tests pass on `m8g-32cpu-local-ssd-2`
+Small-entry writer validation: all 221 workspace library tests pass on `m8g-32cpu-local-ssd-2`
 with real direct I/O and io_uring. Coverage includes full/no-fit chunks, the aligned cutoff,
-independent larger writes, 60-second flushing, incoming-buffer release, failure cleanup,
-and discarding partial chunks on close. Linux-target workspace Clippy passes with warnings denied.
+independent larger writes, 60-second flushing, incoming-buffer release, deferred disk admission,
+cancellation cleanup, and discarding partial chunks on close. Linux-target workspace Clippy passes with warnings denied.
 
 ## Implemented: cache metrics
 
@@ -205,7 +206,7 @@ and discarding partial chunks on close. Linux-target workspace Clippy passes wit
   and integrity outcomes, disk-write admission/skip/terminal outcomes, queue pressure/wait time,
   chunk capacity states, indexed payload/entries, pressure eviction and byte-weighted batch packing.
 - Queue gauges track entries and logical payload through preparation and completion; capacity gauges track
-  metadata and payload reservations through completion, failure, and discard. See [`metrics.md`](metrics.md) for exact accounting semantics.
+  payload reservations through completion, failure, and discard, with metadata positions taken only at publication. See [`metrics.md`](metrics.md) for exact accounting semantics.
 - Validation on macOS: portable Feuer/memory/types tests pass. Linux workspace all-target checks and Clippy
   pass. New Linux metric integration tests are compile-checked but have not been executed on this host.
 

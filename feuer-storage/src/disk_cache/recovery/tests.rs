@@ -187,22 +187,18 @@ async fn torn_entry_metadata_page_does_not_reject_other_pages() {
     let cache = reopen(directory.path(), cache).await;
     let shard = &cache.disk.shards[0];
     assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
-    assert!(cache.get(&ObjectKeyHash(0), range(0, 1)).await.is_none());
+    // Reverse publication assigns key 0 a position on the second page.
+    assert!(cache.get(&ObjectKeyHash(0), range(0, 1)).await.is_some());
     assert!(
         cache
             .get(&ObjectKeyHash(ENTRIES_PER_METADATA_PAGE as u128), range(0, 1))
             .await
-            .is_some()
+            .is_none()
     );
     assert!(cache.insert(ObjectKeyHash(999), download(0, 1)).await.unwrap());
     let cache = reopen(directory.path(), cache).await;
     assert!(cache.get(&ObjectKeyHash(999), range(0, 1)).await.is_some());
-    assert!(
-        cache
-            .get(&ObjectKeyHash(ENTRIES_PER_METADATA_PAGE as u128), range(0, 1))
-            .await
-            .is_some()
-    );
+    assert!(cache.get(&ObjectKeyHash(0), range(0, 1)).await.is_some());
 }
 
 #[tokio::test]
@@ -337,8 +333,8 @@ async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
     bytes[..8].copy_from_slice(&checksum.to_le_bytes());
     cache.disk.file.write_at(address, &Bytes::from(bytes)).await.unwrap();
     let cache = reopen(directory.path(), cache).await;
-    assert!(cache.get(&ObjectKeyHash(1), range(0, 1)).await.is_none());
-    assert!(cache.get(&ObjectKeyHash(2), range(0, 1)).await.is_some());
+    assert!(cache.get(&ObjectKeyHash(2), range(0, 1)).await.is_none());
+    assert!(cache.get(&ObjectKeyHash(1), range(0, 1)).await.is_some());
 }
 
 #[tokio::test]
@@ -354,9 +350,12 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
             .await
             .unwrap();
         cache.write_dirty_metadata_pages().await;
-        // Give the second record the first record's key and start, keeping distinct payload addresses.
+        // Give key 2's record key 1's identity, regardless of which payload was written first.
+        let position = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(2)][&0]
+            .metadata
+            .1;
         let mut page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap().to_vec();
-        let offset = PAGE_HEADER_BYTES + ENTRY_METADATA_BYTES;
+        let offset = PAGE_HEADER_BYTES + position * ENTRY_METADATA_BYTES;
         page[offset..offset + 16].copy_from_slice(&key.0.to_le_bytes());
         let checksum = XxHash64::oneshot(0, &page[8..]);
         page[..8].copy_from_slice(&checksum.to_le_bytes());
@@ -410,7 +409,8 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
         assert!(cache.insert(ObjectKeyHash(3), download(0, 1)).await.unwrap());
         let (_, entry_metadata_index) =
             shard.entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(3)][&0].metadata;
-        assert_ne!(entry_metadata_index, if second_length == 100 { 0 } else { 1 });
+        let retained_position = shard.entry_index.lock().unwrap().entries_by_key[&key][&0].metadata.1;
+        assert_ne!(entry_metadata_index, retained_position);
         assert_eq!(shard.metadata_pages.lock().unwrap().chunks.len(), 1);
         drop(cache);
         assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 0.0);

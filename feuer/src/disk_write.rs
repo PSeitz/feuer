@@ -123,13 +123,12 @@ impl DiskWriteQueue {
 
     /// Checks memory on dequeue; admitted writes finish independently of memory retention.
     async fn write_queued(mut receiver: mpsc::Receiver<PendingDiskWrite>, memory: Arc<MemoryCache>, disk: DiskCache) {
-        let mut writer = disk.writer();
         let mut flush = tokio::time::interval_at(tokio::time::Instant::now() + FLUSH_INTERVAL, FLUSH_INTERVAL);
         flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let result = tokio::select! {
                 biased;
-                _ = flush.tick() => writer.flush().await,
+                _ = flush.tick() => disk.flush().await,
                 next = receiver.recv() => {
                     let Some(PendingDiskWrite { download, mut entry_metrics }) = next else { break };
                     entry_metrics.finish_queue_wait();
@@ -137,12 +136,13 @@ impl DiskWriteQueue {
                         entry_metrics.metrics.record(DiskWriteQueueOutcome::Stale);
                         continue;
                     }
-                    writer.write(entry_metrics.key, download, entry_metrics).await
+                    disk.write(entry_metrics.key, download, entry_metrics).await
                 }
             };
             if let Err(error) = result {
                 tracing::warn!(target: "feuer::storage", %error, "disk write failed");
             }
         }
+        disk.discard_pending().await;
     }
 }

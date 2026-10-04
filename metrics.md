@@ -30,14 +30,14 @@ operations. Use the public lookup counters to measure caller-visible behavior.
 | Metric | Type | Labels / meaning |
 |---|---|---|
 | `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `checksum_failed` |
-| `feuer_disk_lookup_duration_seconds` | Histogram | `outcome`: `hit`. Includes whole-entry reading, checksum verification and copying |
+| `feuer_disk_lookup_duration_seconds` | Histogram | `outcome`: `hit`. Buffered copying, or whole-entry reading, checksum verification and copying |
 | `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`. Each chunk is 1 MiB |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
 | `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`. Payload and payload-chunk bytes of successfully written payload regions, before publication. Metadata writes are included in the raw I/O counters, not this packing counter |
 
-Disk read errors and checksum failures still behave as cache misses. Metrics
-make those distinct from absent entries. `covers_range()` does not count as a lookup.
+Disk-tier hits include copies from the shard's buffer; those perform no disk I/O, reserve no disk capacity, and are not yet indexed.
+Read errors and checksum failures are distinct misses. `covers_range()` includes buffered entries but does not count as a lookup.
 
 Chunk states are disjoint. Payload reservations are released after their last indexed
 entry is removed, without waiting for readers. Metadata chunks remain reserved while
@@ -95,10 +95,9 @@ Invalid or unsupported pages are discarded without a global reset or generation 
 
 Each incoming entry counts at most once, even if it evicts several entries.
 Replacement, invalidation, memory compaction and eviction searches that remove
-nothing do not count. Disk attribution is per entry, not per batch: an entry
-that fits into a chunk allocated by an earlier batch member does not inherit
-that member's evictions. An attempt still counts if it evicts entries but is
-later skipped, fails or is canceled.
+nothing do not count. Disk admission runs once per flush or independent large write;
+a shared flush attributes its evictions to its first buffered entry, not every neighbor.
+An attempt still counts if it evicts entries but is later skipped, fails or is canceled.
 
 Percentage of memory insertion attempts that trigger eviction:
 
@@ -204,14 +203,16 @@ means the exact key and range are no longer cached in memory before writing.
 Reinsertion of the same immutable range does not make a queued write stale.
 Active writes may publish after memory eviction; storage has no `stale` outcome.
 
-A storage `failed` outcome means the entry's payload write failed. Prepared entries discarded
+A storage `failed` outcome means the entry's payload write failed. `no_capacity` can also mean
+metadata capacity was unavailable after successful payload I/O; the whole flush is then discarded.
+Prepared entries discarded
 before completion count as `canceled`; downloads not yet handled have no storage attempt.
 Canceling an `insert_batch` caller does not cancel its detached writer.
 
 Successful writes may be discarded by disk containment checks. Pending-byte accounting lasts
 until each entry completes or is discarded, including its time in a partial chunk. The writer
-releases small incoming buffers after copying; each unfinished chunk has a 1-MiB scratch
-buffer. This gauge measures logical payload, not backing capacity.
+releases small incoming buffers after copying. Each shard always holds a 1-MiB buffer, even when empty;
+flushing retains the detached buffer through I/O as well. This gauge measures logical payload, not backing capacity.
 
 ## Existing metrics
 

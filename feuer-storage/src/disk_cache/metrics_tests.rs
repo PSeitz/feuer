@@ -328,6 +328,7 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
 #[tokio::test]
 async fn pressure_eviction_and_partial_write_failure_record_each_entry_outcome() {
     let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
+    let outcome = |label| value(&registry, "feuer_disk_write_entries_total", &[("outcome", label)]);
     cache.insert_batch(vec![("first".into(), download(4))]).await.unwrap();
     cache.insert_batch(vec![("second".into(), download(4))]).await.unwrap();
     assert_eq!(
@@ -349,28 +350,51 @@ async fn pressure_eviction_and_partial_write_failure_record_each_entry_outcome()
         cache
             .insert_batch(vec![
                 ("small".into(), download(1)),
-                ("large".into(), download(CHUNK_BYTES as usize))
+                ("large".into(), download(2 * CHUNK_BYTES as usize))
             ])
             .await
             .is_err()
     );
-    assert_eq!(
-        value(&registry, "feuer_disk_write_entries_total", &[("outcome", "failed")]),
-        1.0
-    );
+    assert_eq!(outcome("failed"), 1.0);
     assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 2.0);
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
+    assert_eq!(outcome("published"), 2.0);
+    assert!(cache.covers_range(&"small".into(), ByteRange::new(0, 1).unwrap()));
+    cache.discard_pending().await;
+    assert_eq!(outcome("canceled"), 1.0);
+    // The small entry never reserved disk space; discard only releases its buffered bytes and accounting.
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 4.0);
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 1.0);
+}
+
+#[tokio::test]
+async fn buffered_entries_only_attempt_disk_admission_when_flushed() {
+    let (_directory, cache, registry) = measured_cache(CHUNK_BYTES).await;
+    let key = ObjectKeyHash(1);
+    let range = ByteRange::new(0, 1).unwrap();
+    assert_eq!(cache.flush().await.unwrap(), 0);
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 0.0);
+    cache.write(key, download(1), ()).await.unwrap();
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 0.0);
+    assert_eq!(cache.get(&key, range).await.unwrap(), download(1).bytes());
+    assert_eq!(cache.flush().await.unwrap(), 0); // Only metadata fits on disk.
+    assert!(!cache.covers_range(&key, range));
     assert_eq!(
-        value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),
-        2.0
+        value(
+            &registry,
+            "feuer_disk_write_entries_total",
+            &[("outcome", "no_capacity")]
+        ),
+        1.0
     );
+    cache.write(key, download(1), ()).await.unwrap();
+    cache.discard_pending().await;
+    assert!(!cache.covers_range(&key, range));
+    assert_eq!(cache.flush().await.unwrap(), 0);
     assert_eq!(
         value(&registry, "feuer_disk_write_entries_total", &[("outcome", "canceled")]),
         1.0
     );
-    // Failure discards the unfinished small-entry chunk too; only metadata remains reserved.
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 4.0);
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 1.0);
 }
 
 #[test]

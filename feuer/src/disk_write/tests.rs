@@ -72,7 +72,7 @@ fn full_queue_skips_writes_without_waiting_or_rejecting_memory_admission() {
 async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
     let directory = tempfile::tempdir().unwrap();
     let memory = Arc::new(MemoryCache::new(4096));
-    let disk = DiskCache::open(directory.path(), 2 << 20, IoMetrics::noop())
+    let disk = DiskCache::open(directory.path(), 256 << 20, IoMetrics::noop())
         .await
         .unwrap();
     let (registry, backend) = registry();
@@ -93,8 +93,8 @@ async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 12.0);
     tokio::time::advance(Duration::from_secs(59)).await;
     for key in ["live-a", "readmitted", "live-b"] {
-        assert!(!disk.covers_range(&ObjectKeyHash::from(key), range));
         assert!(memory.remove(&ObjectKeyHash::from(key), range));
+        assert_eq!(disk.get(&ObjectKeyHash::from(key), range).await.unwrap(), b"abcd"[..]);
     }
     tokio::time::advance(Duration::from_secs(1)).await;
     tokio::time::resume();
@@ -108,7 +108,7 @@ async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
     drop(disk_write_queue);
     writer.await.unwrap();
     assert!(!disk.covers_range(&ObjectKeyHash::from("evicted"), range));
-    // Admitted entries share the chunk and publish even after memory eviction.
+    // The timer flushes both shards, even after memory eviction.
     for key in ["live-a", "readmitted", "live-b"] {
         assert_eq!(
             disk.get(&ObjectKeyHash::from(key), range).await.unwrap(),

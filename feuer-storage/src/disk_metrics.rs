@@ -42,12 +42,12 @@ impl DiskMetrics {
     pub fn new(registry: &BoxedRegistry) -> Arc<Self> {
         let lookups = registry.register_counter_vec(
             "feuer_disk_lookup_total".into(),
-            "Completed disk range lookups; errors and checksum failures are returned as misses".into(),
+            "Completed disk-tier lookups, including buffered entries; errors become misses".into(),
             &["outcome"],
         );
         let duration = registry.register_histogram_vec_with_buckets(
             "feuer_disk_lookup_duration_seconds".into(),
-            "Completed disk hit duration including integrity checking and copying".into(),
+            "Completed disk-tier hit duration, including buffered copies or verified reads".into(),
             &["outcome"],
             Buckets::exponential(0.000_001, 2.0, 25),
         );

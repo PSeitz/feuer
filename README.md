@@ -60,12 +60,13 @@ Active reads and caller-only results are outside the budget. Metadata and pendin
 can also keep additional memory alive.
 
 Disk capacity includes metadata and alignment overhead.
-The backing file is exclusively locked while open. Disk
-hits verify the entry's checksum and promote the requested bytes to memory.
-Corrupt or uncertain reads count as misses.
+The backing file is exclusively locked while open. Lookups first check the shard's buffered entries,
+then read disk and verify the covering entry's checksum. Both promote requested bytes to memory.
+Busy/flushing chunks may miss until publication; corrupt or uncertain disk reads are misses.
 
 Writes run in the background through a 256-entry queue. Entries with aligned size below
-128 KiB share 1-MiB chunks, flushed on full/no-fit or every 60 seconds. Larger entries write
+128 KiB share 1-MiB chunks, flushed on full/no-fit or every 60 seconds. Each shard always holds
+an initialized 1-MiB buffer; disk space is reserved only when flushing. Larger entries write
 separately. Closing discards partial chunks. Queue pressure or memory eviction can skip writes.
 
 Metadata is stored separately. Queued and active payload bytes have no byte limit. A payload chunk

@@ -21,7 +21,7 @@ records**, shared across payload chunks and write batches. Its last page contain
 chunk address, or `u64::MAX` for the end of the chain. Metadata chunks stay reserved for the cache's
 lifetime. Each active shard needs at least one metadata chunk, charged against its capacity. A one-chunk cache consequently has no room for payloads.
 
-Payloads with aligned size below 128 KiB share one unfinished chunk per shard and writer. Larger entries reserve consecutive whole chunks exclusively, including unused
+Payloads with aligned size below 128 KiB share one unfinished chunk owned by their shard. Larger entries reserve consecutive whole chunks exclusively, including unused
 tails. The allocator retains payload reservations; index entries and readers hold only addresses.
 Individual payload holes are never reused. `src/allocation.rs` tracks coalesced free chunk runs;
 each `ReservedChunks` has one owner: a pending write, the allocator, or a metadata chunk. I/O requests carry
@@ -33,10 +33,12 @@ it and the range-index lock never span I/O. Page bytes consume 1 MiB per metadat
 
 ## Writes
 
-`DiskWriter` copies small entries into aligned 1-MiB buffers, releasing their incoming bytes.
-Full/no-fit chunks flush immediately; the queue worker also flushes every 60 seconds, even when idle.
+Each shard always owns an initialized 1-MiB small-entry buffer. `DiskCache::write` copies bytes into it and releases incoming buffers.
+Buffered entries reserve no disk space or metadata positions. Flushing replaces the buffer with an empty one,
+then attempts admission for the whole flush. Empty entry lists skip flushing.
+The queue worker submits downloads and calls `flush` every 60 seconds; full/no-fit chunks flush immediately.
 Larger entries write independently without flushing pending small entries. Closing discards partial chunks.
-`insert_batch` uses the same writer and explicitly flushes before returning. Metadata growth never moves payloads.
+`insert_batch` shares those chunks and flushes them before returning; its publication count can include other callers' entries.
 
 After a region's payload writes finish, accepted entries update metadata in memory and publish into the index.
 One periodic writer persists dirty metadata pages every second, best-effort; see the
@@ -48,7 +50,9 @@ Later writes may replace or evict entries published earlier in the same batch. A
 that region without undoing earlier publication. Publication does not check memory residency: the writer
 owns prepared small-entry buffers or immutable larger downloads. Superseded entries release their payload occupancy without invalidation writes.
 
-The writer retains payload reservations and metadata positions until completion or discard. Queued I/O retains buffers,
+Only payload reservations cross I/O. Metadata chunks may grow before writing, but positions remain free until publication.
+Publication checks capacity for the whole flush under the index lock; insufficient metadata capacity discards the written payload.
+There are no metadata positions to return on failure or cancellation. Queued I/O retains buffers,
 not disk space: an abandoned write can overwrite a reused payload, producing a checksum miss.
 Failed metadata writes are not retried and neither reject published entries nor prevent payload reuse.
 An abnormal queue failure retains active I/O resources when completion cannot be established.
@@ -59,7 +63,9 @@ throughput has not yet been compared against v10.
 
 ## Reads and eviction
 
-`get` reads and hashes the complete covering entry against its XXHash64 checksum, excluding alignment
+`get` first copies the requested bytes from a covering buffered entry, without disk I/O. Busy buffers and
+chunks detached for flushing may miss until disk publication; no in-flight lookup state is retained.
+Otherwise it reads and hashes the complete covering disk entry against its XXHash64 checksum, excluding alignment
 padding, then returns exactly the requested bytes. It reads neither metadata nor neighboring entries.
 A read copies the address and expected checksum under the range-index lock, then reads into an
 owned memory buffer. Concurrent disk overwrite is allowed: checksum validation happens after I/O
@@ -69,7 +75,7 @@ checksum still matches the failed read; discarding a newer identical copy remain
 Disk and memory consult standalone access history through `feuer-types::retention`. Public requests
 record accesses before lookup; raw reads and writes do not. Eviction samples live entries and removes
 the lowest recent retrieval value per payload byte. Metadata, alignment, and unused chunk space
-count against capacity but not the score. Each admission allows at most 64 eviction attempts and
+count against capacity but not the score. Each flush or independent large write allows at most 64 eviction attempts and
 charges at most 4,096 chunks to removed entries; admission may be skipped when no contiguous run is free.
 Free capacity in another shard cannot satisfy admission.
 

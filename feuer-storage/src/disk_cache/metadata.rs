@@ -77,9 +77,9 @@ impl MetadataChunk {
 }
 
 impl MetadataPages {
-    /// Reserves an entry's metadata position, adding a metadata chunk when needed.
-    pub(super) fn reserve_metadata(&mut self, allocator: &DiskChunkAllocator) -> Option<(usize, usize)> {
-        if self.free_entry_positions.is_empty() {
+    /// Grows metadata capacity without taking positions; publication consumes them under the entry-index lock.
+    pub(super) fn ensure_free_positions(&mut self, count: usize, allocator: &DiskChunkAllocator) -> Option<()> {
+        while self.free_entry_positions.len() < count {
             let chunk = MetadataChunk::empty(allocator.reserve_chunks(1)?);
             self.set_last_chunk_link(chunk.reserved_chunk.disk_byte_range().start);
             let chunk_index = self.chunks.len();
@@ -88,7 +88,7 @@ impl MetadataPages {
             self.free_entry_positions
                 .extend((0..ENTRIES_PER_METADATA_CHUNK).rev().map(|entry| (chunk_index, entry)));
         }
-        self.free_entry_positions.pop()
+        Some(())
     }
 
     /// Updates an entry's reserved metadata bytes and marks its page for writing.

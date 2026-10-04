@@ -101,15 +101,16 @@ The background writer flushes full/no-fit chunks immediately and partial chunks 
 
 ## Write ordering and reuse
 
-1. Reserve metadata positions before payload I/O. Complete payload writes before updating
-   metadata in memory and publishing entries. Updates mark their pages dirty.
+1. Reserve payload chunks at flush time, not while buffering. Grow metadata chunks as needed, but take entry
+   positions only after successful payload I/O. Publication holds the index lock and requires metadata capacity
+   for the whole flush; otherwise discard the written payload. Metadata updates mark their pages dirty.
 2. One metadata writer runs every second after recovery. It copies dirty pages under the
    metadata mutex, releases it, then checksums and writes complete 4-KiB pages sequentially.
    It waits for I/O queue capacity and completion without holding the mutex. Concurrent changes
    remain dirty for the next round. Missed ticks are skipped; failed writes are not retried.
    Only changed record pages and next-chunk links are written; unused disk pages are left alone.
 3. The allocator releases payload chunks when their last entry is removed. Neither reads
-   nor queued writes reserve disk space. Removal does not invalidate the old metadata record.
+   nor queued or buffered writes reserve disk space. Removal does not invalidate the old metadata record.
    Readers validate owned buffers against the expected checksum after I/O; late writes to reused
    payloads can cause checksum misses.
 

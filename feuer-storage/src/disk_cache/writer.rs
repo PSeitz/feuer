@@ -1,233 +1,239 @@
-//! Packs small entries into one unfinished payload chunk per shard.
+//! Each shard owns an initialized small-entry buffer; disk space is reserved only when writing.
 
 use super::*;
 use feuer_memory::AlignedBuffer;
 
-const SMALL_ENTRY_BYTES: u64 = 128 * 1024;
+const SMALL_ENTRY_BYTES: usize = 128 * 1024;
 
-/// One writer's unfinished small-entry chunks. `T` is held until each entry finishes or is discarded.
-/// Drop discards unfinished chunks; it does not flush. Callers serialize writes and drive flushing.
-pub struct DiskWriter<'a, T> {
-    disk: &'a DiskCacheInner,
-    pending: Vec<PayloadWrite<'a, T>>,
+/// One chunk of small-entry bytes and their descriptions, with an aligned append offset.
+pub(super) struct BufferedSmallEntryChunk {
+    buffer: AlignedBuffer,
+    used_bytes: usize,
+    entries: Vec<BufferedEntry>,
 }
 
-/// Reserved payload chunks, entry metadata, and an optional prepared small-entry buffer.
-struct PayloadWrite<'a, T> {
-    shard: &'a DiskCacheShard,
-    chunks: Option<ReservedChunks>,
-    /// Prepared payload bytes, including alignment padding.
-    used_bytes: u64,
-    entries: Vec<(ObjectKeyHash, DiskEntry, DiskWriteAttempt, T)>,
-    buffer: Option<AlignedBuffer>,
+/// One entry's identity, checksum, offset in the write buffer, and completion accounting.
+pub(super) struct BufferedEntry {
+    key: ObjectKeyHash,
+    object_range: ByteRange,
+    payload_checksum: u64,
+    offset: usize,
+    attempt: DiskWriteAttempt,
+    completion: Box<dyn Send>,
 }
 
 impl DiskCache {
-    /// Starts a writer with one unfinished small-entry chunk per shard.
-    pub fn writer<T>(&self) -> DiskWriter<'_, T> {
-        DiskWriter {
-            disk: &self.disk,
-            pending: self.disk.shards.iter().map(PayloadWrite::new).collect(),
+    /// Flushes shared buffers. Returns the number of entries published by this call.
+    pub async fn flush(&self) -> Result<usize, DiskCacheError> {
+        let mut published = 0;
+        for shard in &self.disk.shards {
+            published += shard
+                .buffered_small_entry_chunk
+                .lock()
+                .await
+                .flush(shard, &self.disk)
+                .await?;
+        }
+        Ok(published)
+    }
+
+    /// Discards buffered entries without writing them; retains each shard's initialized buffer.
+    pub async fn discard_pending(&self) {
+        for shard in &self.disk.shards {
+            let mut buffer = shard.buffered_small_entry_chunk.lock().await;
+            buffer.entries.clear();
+            buffer.used_bytes = 0;
         }
     }
 
-    /// Writes an explicit batch and flushes its partial chunks. Returns published entry count.
-    /// Payload completion precedes publication; metadata is written separately every second.
-    /// Contained entries and unavailable capacity are skipped. Earlier publication survives later failure.
-    /// Dropping this future does not abort its detached writer.
+    /// Inserts a batch and flushes shared buffers. Counts entries published by this call, including neighbors.
+    /// Earlier publication survives later failure. Dropping this future does not abort its detached writer.
     pub async fn insert_batch(&self, mut downloads: Vec<(ObjectKeyHash, Download)>) -> Result<usize, DiskCacheError> {
         let cache = self.clone();
         downloads.sort_by_key(|(_, download)| download.bytes().len());
         tokio::spawn(async move {
-            let mut writer = cache.writer();
             let mut published = 0;
             for (key, download) in downloads {
-                published += writer.write(key, download, ()).await?;
+                published += cache.write(key, download, ()).await?;
             }
-            Ok(published + writer.flush().await?)
+            Ok(published + cache.flush().await?)
         })
         .await
         .map_err(DiskCacheError::WriteTaskFailed)?
     }
-}
 
-impl<T> DiskWriter<'_, T> {
-    /// Copies entries with aligned size <128 KiB into a shared chunk, releasing incoming bytes.
-    /// Full/no-fit chunks flush immediately. Larger entries write separately without flushing small entries.
-    /// Each admission allows 64 eviction attempts and 4,096 chunks charged to removed entries.
-    /// The caller must await completion; cancellation may leave submitted I/O running.
+    /// Buffers small entries; full/no-fit chunks and larger entries write immediately.
+    /// Holds completion state until publication or discard. Cancellation may leave submitted I/O running.
     pub async fn write(
-        &mut self,
+        &self,
         key: ObjectKeyHash,
         download: Download,
-        completion: T,
+        completion: impl Send + 'static,
     ) -> Result<usize, DiskCacheError> {
-        let disk = self.disk;
-        let index = disk.shard_index_for_key(&key);
-        let shard = &disk.shards[index];
+        let disk = &self.disk;
+        let shard = &disk.shards[disk.shard_index_for_key(&key)];
+        let (object_range, bytes) = download.into_parts();
+        let length = bytes.len().next_multiple_of(BUFFER_ALIGNMENT);
         let mut attempt = DiskWriteAttempt::new(disk.metrics.clone());
-        if shard
-            .entry_index
-            .lock()
-            .unwrap()
-            .covering_entry(&key, download.downloaded_range())
-            .is_some()
-        {
+        if self.covers_range(&key, object_range) {
             attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
             return Ok(0);
         }
-        let length = download
-            .downloaded_range()
-            .len()
-            .next_multiple_of(BUFFER_ALIGNMENT as u64);
+        let mut entry = BufferedEntry {
+            key,
+            object_range,
+            payload_checksum: XxHash64::oneshot(0, &bytes),
+            offset: 0,
+            attempt,
+            completion: Box::new(completion),
+        };
+        if length >= SMALL_ENTRY_BYTES {
+            return shard.write_payload(disk, bytes, vec![entry]).await;
+        }
+        let mut buffer = shard.buffered_small_entry_chunk.lock().await;
         let mut published = 0;
-        let mut exclusive = PayloadWrite::new(shard);
-        let pending = if length < SMALL_ENTRY_BYTES {
-            &mut self.pending[index]
-        } else {
-            &mut exclusive
-        };
-        if pending.used_bytes > 0 && pending.used_bytes + length > CHUNK_BYTES {
-            published += pending.take().write(disk, Bytes::new()).await?;
+        if buffer.used_bytes + length > CHUNK_BYTES as usize {
+            published += buffer.flush(shard, disk).await?;
         }
-        if length < SMALL_ENTRY_BYTES && pending.buffer.is_none() {
-            pending.buffer =
-                Some(
-                    AlignedBuffer::allocate_zeroed(CHUNK_BYTES as usize).map_err(|source| DataFileError::Task {
-                        operation: crate::IoOperation::Write,
-                        source: Box::new(source),
-                    })?,
-                );
-        }
-        let mut attempts = MAX_EVICTION_ATTEMPTS;
-        let mut chunks = MAX_EVICTION_CHUNKS;
-        let count = length.div_ceil(CHUNK_BYTES);
-        let (metadata, start) = loop {
-            let metadata = shard.metadata_pages.lock().unwrap().reserve_metadata(&shard.allocator);
-            let needed = if let Some(metadata) = metadata {
-                if pending.chunks.is_none() {
-                    pending.chunks = shard.allocator.reserve_chunks(count);
-                }
-                if let Some(reserved) = &pending.chunks {
-                    break (metadata, reserved.disk_byte_range().start + pending.used_bytes);
-                }
-                shard.metadata_pages.lock().unwrap().free_entry_positions.push(metadata);
-                count
-            } else {
-                1
-            };
-            let metadata_chunks = shard.metadata_pages.lock().unwrap().chunks.len() as u64;
-            let reserved = pending.chunks.as_ref().map_or(0, ReservedChunks::chunk_count);
-            if needed > shard.allocator.chunk_capacity - metadata_chunks - reserved
-                || !shard.sample_and_evict_entry(&disk.access_histories, &mut attempts, &mut chunks)
-            {
-                attempt.set_outcome(DiskWriteOutcome::NoCapacity);
-                attempt.evicted = chunks != MAX_EVICTION_CHUNKS;
-                return Ok(published);
-            }
-        };
-        attempt.evicted = chunks != MAX_EVICTION_CHUNKS;
-        let entry = DiskEntry {
-            in_flight_read: Weak::new(),
-            eviction_position: 0,
-            object_range: download.downloaded_range(),
-            payload_checksum: XxHash64::oneshot(0, download.bytes()),
-            payload_range: start..start + length,
-            metadata,
-        };
-        if let Some(buffer) = &mut pending.buffer {
-            let offset = pending.used_bytes as usize;
-            buffer.as_mut_slice()[offset..offset + download.bytes().len()].copy_from_slice(download.bytes());
-        }
-        pending.used_bytes += length;
-        pending.entries.push((key, entry, attempt, completion));
-        if length >= SMALL_ENTRY_BYTES || pending.used_bytes == CHUNK_BYTES {
-            published += pending.take().write(disk, download.into_parts().1).await?;
-        }
-        Ok(published)
-    }
-
-    /// Writes all unfinished chunks. This is payload publication, not a durability barrier.
-    pub async fn flush(&mut self) -> Result<usize, DiskCacheError> {
-        let mut published = 0;
-        for pending in &mut self.pending {
-            published += pending.take().write(self.disk, Bytes::new()).await?;
+        entry.offset = buffer.used_bytes;
+        buffer.buffer.as_mut_slice()[entry.offset..entry.offset + bytes.len()].copy_from_slice(&bytes);
+        drop(bytes);
+        buffer.used_bytes += length;
+        buffer.entries.push(entry);
+        if buffer.used_bytes == CHUNK_BYTES as usize {
+            published += buffer.flush(shard, disk).await?;
         }
         Ok(published)
     }
 }
 
-impl<T> Drop for PayloadWrite<'_, T> {
-    fn drop(&mut self) {
-        self.shard
-            .metadata_pages
-            .lock()
-            .unwrap()
-            .free_entry_positions
-            .extend(self.entries.drain(..).map(|(_, entry, _, _)| entry.metadata));
-    }
-}
-
-impl<'a, T> PayloadWrite<'a, T> {
-    fn new(shard: &'a DiskCacheShard) -> Self {
-        Self {
-            shard,
-            chunks: None,
+impl BufferedSmallEntryChunk {
+    pub(super) fn new() -> Result<Self, DataFileError> {
+        let buffer = AlignedBuffer::allocate_zeroed(CHUNK_BYTES as usize).map_err(|source| DataFileError::Task {
+            operation: crate::IoOperation::Write,
+            source: Box::new(source),
+        })?;
+        Ok(Self {
+            buffer,
             used_bytes: 0,
             entries: Vec::new(),
-            buffer: None,
-        }
+        })
     }
 
-    fn take(&mut self) -> Self {
-        std::mem::replace(self, Self::new(self.shard))
+    pub(super) fn covering_entry(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&BufferedEntry> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| &entry.key == key && entry.object_range.contains(requested))
     }
 
-    async fn write(mut self, disk: &DiskCacheInner, bytes: Bytes) -> Result<usize, DiskCacheError> {
-        let shard = self.shard;
-        let Some(chunks) = self.chunks.take() else { return Ok(0) };
-        let bytes = self.buffer.take().map_or(bytes, AlignedBuffer::into_bytes);
-        let range = chunks.disk_byte_range();
-        for address in range.clone().step_by(CHUNK_BYTES as usize) {
-            let start = (address - range.start) as usize;
-            let end = (start + CHUNK_BYTES as usize).min(bytes.len());
-            if let Err(error) = disk
-                .file
-                .write_parts(address..address + CHUNK_BYTES, &[(0, bytes.slice(start..end))])
-                .await
-            {
-                for (_, _, attempt, _) in &mut self.entries {
-                    attempt.set_outcome(DiskWriteOutcome::Failed);
-                }
-                return Err(error.into());
-            }
+    pub(super) fn get(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<Bytes> {
+        let entry = self.covering_entry(key, requested)?;
+        let start = entry.offset + (requested.start() - entry.object_range.start()) as usize;
+        Some(Bytes::copy_from_slice(
+            &self.buffer.as_ref()[start..start + requested.len() as usize],
+        ))
+    }
+
+    async fn flush(&mut self, shard: &DiskCacheShard, disk: &DiskCacheInner) -> Result<usize, DiskCacheError> {
+        if self.entries.is_empty() {
+            return Ok(0);
         }
-        let entries = std::mem::take(&mut self.entries);
-        disk.metrics.written_entries.increase(entries.len() as u64);
-        disk.metrics
-            .packed_payload_bytes
-            .increase(entries.iter().map(|(_, entry, _, _)| entry.object_range.len()).sum());
-        disk.metrics
-            .packed_chunk_bytes
-            .increase(chunks.chunk_count() * CHUNK_BYTES);
+        // Detached chunks are not lookup-visible until publication. Reads may miss during payload I/O.
+        let buffered = std::mem::replace(self, Self::new()?);
         shard
-            .allocator
-            .hold_chunks_until_payloads_released(chunks, entries.len());
-        let mut index = shard.entry_index.lock().unwrap();
-        let mut published = 0;
-        for (key, entry, mut attempt, _completion) in entries.into_iter().rev() {
-            if index.covering_entry(&key, entry.object_range).is_some() {
-                attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
-                shard.release_payload_and_allow_metadata_overwrite(entry);
-                continue;
+            .write_payload(disk, buffered.buffer.into_bytes(), buffered.entries)
+            .await
+    }
+}
+
+impl DiskCacheShard {
+    /// Reserves one payload run with one eviction budget. Only publication consumes metadata positions.
+    async fn write_payload(
+        &self,
+        disk: &DiskCacheInner,
+        bytes: Bytes,
+        mut entries: Vec<BufferedEntry>,
+    ) -> Result<usize, DiskCacheError> {
+        let result = async {
+            let count = (bytes.len() as u64).div_ceil(CHUNK_BYTES);
+            let mut attempts = MAX_EVICTION_ATTEMPTS;
+            let mut budget = MAX_EVICTION_CHUNKS;
+            let chunks = loop {
+                let mut pages = self.metadata_pages.lock().unwrap();
+                // Establish the metadata chain before payloads; leave all entry positions free during I/O.
+                let chunks = pages
+                    .ensure_free_positions(entries.len(), &self.allocator)
+                    .and_then(|()| self.allocator.reserve_chunks(count));
+                let capacity = self.allocator.chunk_capacity - pages.chunks.len() as u64;
+                drop(pages);
+                if let Some(chunks) = chunks {
+                    break chunks;
+                }
+                if count > capacity || !self.sample_and_evict_entry(&disk.access_histories, &mut attempts, &mut budget)
+                {
+                    return Ok(0);
+                }
+                entries[0].attempt.evicted = budget != MAX_EVICTION_CHUNKS;
+            };
+            let range = chunks.disk_byte_range();
+            for address in range.clone().step_by(CHUNK_BYTES as usize) {
+                let start = (address - range.start) as usize;
+                let end = (start + CHUNK_BYTES as usize).min(bytes.len());
+                disk.file
+                    .write_parts(address..address + CHUNK_BYTES, &[(0, bytes.slice(start..end))])
+                    .await?;
             }
-            shard.metadata_pages.lock().unwrap().set_entry_metadata(&key, &entry);
-            for removed in index.insert(key, entry) {
-                shard.release_payload_and_allow_metadata_overwrite(removed);
+            disk.metrics.written_entries.increase(entries.len() as u64);
+            disk.metrics
+                .packed_payload_bytes
+                .increase(entries.iter().map(|entry| entry.object_range.len()).sum());
+            disk.metrics
+                .packed_chunk_bytes
+                .increase(chunks.chunk_count() * CHUNK_BYTES);
+            let mut index = self.entry_index.lock().unwrap();
+            let mut pages = self.metadata_pages.lock().unwrap();
+            // Other writers may have consumed free positions during I/O. Publish all or discard this run.
+            if pages.ensure_free_positions(entries.len(), &self.allocator).is_none() {
+                return Ok(0);
             }
-            published += 1;
-            attempt.set_outcome(DiskWriteOutcome::Published);
+            self.allocator
+                .hold_chunks_until_payloads_released(chunks, entries.len());
+            let mut published = 0;
+            for mut buffered in entries.drain(..).rev() {
+                let _completion = buffered.completion;
+                if index.covering_entry(&buffered.key, buffered.object_range).is_some() {
+                    buffered.attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
+                    self.allocator.release_payload(range.start);
+                    continue;
+                }
+                let start = range.start + buffered.offset as u64;
+                let entry = DiskEntry {
+                    in_flight_read: Weak::new(),
+                    eviction_position: 0,
+                    object_range: buffered.object_range,
+                    payload_checksum: buffered.payload_checksum,
+                    payload_range: start..start + buffered.object_range.len().next_multiple_of(BUFFER_ALIGNMENT as u64),
+                    metadata: pages.free_entry_positions.pop().unwrap(),
+                };
+                pages.set_entry_metadata(&buffered.key, &entry);
+                for removed in index.insert(buffered.key, entry) {
+                    self.allocator.release_payload(removed.payload_range.start);
+                    pages.free_entry_positions.push(removed.metadata);
+                }
+                published += 1;
+                buffered.attempt.set_outcome(DiskWriteOutcome::Published);
+            }
+            Ok(published)
         }
-        Ok(published)
+        .await;
+        for mut entry in entries {
+            entry.attempt.set_outcome(if result.is_err() {
+                DiskWriteOutcome::Failed
+            } else {
+                DiskWriteOutcome::NoCapacity
+            });
+        }
+        result
     }
 }

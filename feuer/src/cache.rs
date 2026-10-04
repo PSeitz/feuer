@@ -259,7 +259,8 @@ mod tests {
             })
             .await
             .unwrap();
-        wait_for_disk(&cache, &key, range(0, 4)).await;
+        wait_for_buffered(&cache, &key, range(0, 4)).await;
+        cache.state.disk.flush().await.unwrap();
         cache
             .get_or_fetch(key.clone(), range(0, 2), || async {
                 Err::<Download, _>("memory hit must not fetch")
@@ -352,21 +353,18 @@ mod tests {
         (directory, cache)
     }
 
-    async fn wait_for_disk(cache: &TieredMemoryDiskCache, key: &str, range: ByteRange) {
-        tokio::time::pause();
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        tokio::time::resume();
+    async fn wait_for_buffered(cache: &TieredMemoryDiskCache, key: &str, range: ByteRange) {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while !cache.state.disk.covers_range(&ObjectKeyHash::from(key), range) {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("disk write did not finish");
+        .expect("disk write was not buffered");
     }
 
     #[tokio::test]
-    async fn disk_hit_after_memory_pressure_promotes_only_request_and_records_once() {
+    async fn buffered_hit_after_memory_pressure_promotes_only_request_and_records_once() {
         let (_directory, cache) = cache(32).await;
         let key = String::from("object");
         let history = &cache.state.access_histories;
@@ -378,7 +376,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"defg"));
-        wait_for_disk(&cache, &key, source.downloaded_range()).await;
+        wait_for_buffered(&cache, &key, source.downloaded_range()).await;
         assert_eq!(history.request_count(), 1);
 
         // The same key selects the same memory shard; an oversized disjoint range
@@ -404,7 +402,7 @@ mod tests {
             assert_eq!(hit, result);
             assert_eq!(history.request_count(), accesses);
         }
-        assert_eq!(cache.state.memory.used_bytes(), 32 * 1024);
+        assert_eq!(cache.state.memory.used_bytes(), 4);
     }
 
     #[tokio::test]
