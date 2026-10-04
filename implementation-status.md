@@ -35,8 +35,10 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 - Tier orchestration records each started request's exact range once, before lookup, in standalone shared
   history. Failures, invalid downloads, and cancellation after starting still count as demand.
   Raw memory/disk lookups and insertions do not record accesses; history takes no cache shard lock.
-- Cached allocations and idle buffers share the configured memory capacity. Disk promotions carry the
-  whole backing allocation capacity through slicing into memory admission. Callback downloads use payload
+- Cached allocations and idle buffers share the configured memory capacity. Disk promotions copy the
+  requested slice into the pool if its allocation capacity is smaller than the original backing
+  capacity; allocation failure retains the original slice. Admission charges the chosen allocation's
+  whole capacity. Whole-entry reads and checksums are unchanged. Callback downloads use payload
   length when allocation capacity is unknown. Entry targets remain divided among shards, preserving the
   existing oversized-entry exception. Caller-only results survive eviction outside cache accounting.
 - `feuer-memory` owns one aligned buffer pool per cache instance: 32 KiB, 256 KiB, 512 KiB, 1 MiB,

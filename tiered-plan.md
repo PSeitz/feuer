@@ -197,7 +197,9 @@ Feuer has one sharded in-memory cache sharing its allocation-byte target with an
   therefore make a shard, and aggregate entry allocation charges, exceed the configured target.
 - No memory entry is protected merely because it is queued for disk writes.
 - Memory pressure does not wait for disk throughput.
-- Disk promotions charge their whole backing allocation capacity, even when the cached range is a small slice.
+- Disk promotions copy a slice into the pool if the destination allocation has smaller backing
+  capacity; allocation failure retains the original slice. Both cache and caller use the chosen allocation,
+  charged at its whole capacity. Whole-entry disk reads and checksums are unchanged.
   Callback downloads use payload length when allocation capacity is unknown. Charges are per cached entry.
 - One buffer pool per cache instance retains 32 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB,
   8 MiB, 16 MiB, 32 MiB, and 64 MiB allocations.

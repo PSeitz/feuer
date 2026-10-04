@@ -75,12 +75,21 @@ impl BufferPool {
         Self::new(0, MemoryMetrics::noop())
     }
 
+    /// Backing capacity for a nonzero length, without allocating or taking an idle buffer.
+    pub fn allocation_capacity(length: usize) -> usize {
+        BUFFER_SIZES
+            .iter()
+            .find(|&&size| length <= size)
+            .copied()
+            .unwrap_or(length)
+    }
+
     /// Takes or allocates a buffer. Larger than 64 MiB is exact-size and unpooled.
     /// Reused bytes are initialized, but must be overwritten before returning a read result.
     pub fn allocate(self: &Arc<Self>, length: usize) -> io::Result<AlignedBuffer> {
         assert!(length > 0);
-        let bucket = BUFFER_SIZES.iter().position(|&size| length <= size);
-        let capacity = bucket.map_or(length, |index| BUFFER_SIZES[index]);
+        let capacity = Self::allocation_capacity(length);
+        let bucket = BUFFER_SIZES.iter().position(|&size| size == capacity);
         let reused = bucket.and_then(|index| {
             let mut state = self.state.lock();
             let buffer = state.by_size[index].pop();

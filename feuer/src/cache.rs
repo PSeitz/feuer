@@ -3,9 +3,9 @@ use std::{fmt, future::Future, sync::Arc, time::Instant};
 #[cfg(target_os = "linux")]
 use crate::disk_write::DiskWriteQueue;
 use bytes::Bytes;
-use feuer_memory::MemoryCache;
 #[cfg(target_os = "linux")]
 use feuer_memory::MemoryMetrics;
+use feuer_memory::{BufferPool, MemoryCache};
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskCache, DiskCacheError, IoMetrics};
 use feuer_types::{ByteRange, Download, ObjectKeyHash, retention::ObjectAccessHistories};
@@ -104,7 +104,8 @@ impl TieredMemoryDiskCache {
     /// Returns the requested bytes from memory, disk, or this call's callback.
     ///
     /// A covering memory range is checked first, then disk. A disk hit promotes
-    /// only the requested bytes to memory. On a miss in both tiers, `callback` is
+    /// only the requested bytes to memory, copying if the pool offers a smaller
+    /// backing allocation. On a miss in both tiers, `callback` is
     /// invoked exactly once by this call; Feuer performs no leader election,
     /// waiter coordination, or source retry. A successful callback must return
     /// one valid [`Download`] covering `requested_range`. The memory target is
@@ -136,6 +137,7 @@ impl TieredMemoryDiskCache {
 
         #[cfg(target_os = "linux")]
         if let Some((bytes, buffer_capacity)) = self.state.disk.fetch_from_disk(&object_key, requested_range).await {
+            let (bytes, buffer_capacity) = shrink_disk_result(&self.state.memory.buffer_pool(), bytes, buffer_capacity);
             self.state.memory.insert_with_allocation_charge(
                 object_key,
                 Download::new(requested_range.start(), bytes.clone()).expect("disk result covers the request"),
@@ -208,6 +210,20 @@ fn requested_slice(bytes: &Bytes, downloaded_range: ByteRange, requested_range: 
     let end = usize::try_from(requested_range.end() - downloaded_range.start())
         .expect("an offset within a callback Bytes payload must fit in usize");
     bytes.slice(start..end)
+}
+
+/// Copies a disk result only if the destination has smaller backing capacity.
+/// Allocation failure leaves the verified result and its charge unchanged.
+fn shrink_disk_result(pool: &Arc<BufferPool>, bytes: Bytes, capacity: usize) -> (Bytes, usize) {
+    if BufferPool::allocation_capacity(bytes.len()) >= capacity {
+        return (bytes, capacity);
+    }
+    let Ok(mut buffer) = pool.allocate(bytes.len()) else {
+        return (bytes, capacity);
+    };
+    buffer.as_mut_slice().copy_from_slice(&bytes);
+    let capacity = buffer.capacity();
+    (buffer.into_bytes(), capacity)
 }
 
 #[cfg(all(test, not(target_os = "linux")))]
@@ -406,7 +422,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disk_promotion_charges_the_whole_rounded_allocation_for_a_small_slice() {
+    async fn disk_promotion_charges_the_smaller_allocation_for_a_small_slice() {
         let (_directory, cache) = cache(32).await;
         let key = "large-entry".to_owned();
         cache
@@ -425,7 +441,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&bytes[..], &[0x77; 4]);
-        assert_eq!(cache.state.memory.used_bytes(), 256 * 1024);
+        assert_eq!(cache.state.memory.used_bytes(), 32 * 1024);
         assert_eq!(
             cache
                 .state
@@ -442,6 +458,41 @@ mod tests {
             .remove(&ObjectKeyHash::from(key.as_str()), range(5, 9));
         assert_eq!(cache.state.memory.used_bytes(), 0);
         assert_eq!(&bytes[..], &[0x77; 4]);
+    }
+
+    #[tokio::test]
+    async fn concurrent_disk_promotions_preserve_each_requested_slice() {
+        let (_directory, cache) = cache(8 << 20).await;
+        let key = "shared-entry".to_owned();
+        let hash = ObjectKeyHash::from(key.as_str());
+        let mut payload = vec![0x77; 40 * 1024];
+        payload[13..21].copy_from_slice(b"abcdefgh");
+        cache
+            .state
+            .disk
+            .insert_batch(vec![(hash, Download::new(0, Bytes::from(payload)).unwrap())])
+            .await
+            .unwrap();
+        cache.state.disk.flush().await.unwrap();
+        let (first, second) = tokio::join!(
+            cache.get_or_fetch(key.clone(), range(13, 17), || async {
+                Err::<Download, _>("disk hit must not fetch")
+            }),
+            cache.get_or_fetch(key, range(17, 21), || async {
+                Err::<Download, _>("disk hit must not fetch")
+            }),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(&first[..], b"abcd");
+        assert_eq!(&second[..], b"efgh");
+        for (range, bytes) in [(range(13, 17), &first), (range(17, 21), &second)] {
+            assert_eq!(cache.state.memory.get(&hash, range).unwrap().as_ptr(), bytes.as_ptr());
+        }
+        assert_eq!(
+            cache.state.memory.used_bytes(),
+            cache.state.memory.buffer_pool().idle_bytes() + 2 * 32 * 1024
+        );
     }
 
     #[tokio::test]

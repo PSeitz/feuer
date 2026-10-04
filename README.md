@@ -55,8 +55,11 @@ full keys are not stored or checked for collisions. Keys must not be adversarial
 ## Capacity and disk writes
 
 Memory capacity covers cached allocation charges and idle read buffers in one cache instance.
-Disk promotions are charged for the whole backing allocation, even when only a small slice is
-cached. Callback downloads are charged by payload length because `Bytes` does not expose capacity.
+Disk promotions copy the requested slice into a pooled buffer when its allocation capacity is
+smaller than the original backing allocation. Otherwise, or if allocation fails,
+they retain the original slice. Both the cached and returned bytes use the chosen allocation;
+memory is charged its whole capacity. Whole-entry disk reads and checksum verification are unchanged.
+Callback downloads are charged by payload length because `Bytes` does not expose capacity.
 Entry targets remain split across shards; an oversized entry empties its shard and remains cached.
 Active reads and caller-only results are outside the budget. Metadata and pending disk writes
 can also keep additional memory alive.

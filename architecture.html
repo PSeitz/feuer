@@ -233,7 +233,7 @@
             <summary>Memory usage<small>Cached bytes and reusable read buffers share the memory target</small></summary>
             <div class="content">
               <p>The cache retains reference-counted <code>Bytes</code>. Hits return slices sharing their allocations; there is <strong>no dedicated slab or arena allocator</strong> for cached payloads.</p>
-              <p>The memory target covers cached data and unused read buffers kept for reuse. For data read from disk, the cache counts the whole buffer, even if it keeps only a small slice. For downloads, it counts the returned byte length. Each shard gets a share of the target, but can exceed it to keep one oversized entry.</p>
+              <p>The memory target covers cached data and unused read buffers kept for reuse. For data read from disk, the cache copies the requested slice if the destination buffer has smaller backing capacity, then counts the chosen buffer's whole capacity. If allocation fails, it retains the original slice. For downloads, it counts the returned byte length. Each shard gets a share of the target, but can exceed it to keep one oversized entry.</p>
               <details class="deeper"><summary>Why the target is not an RSS limit</summary><div>
                 <ul><li>Caller-held slices survive eviction and may keep a larger allocation alive.</li><li>Metadata and access histories add memory beyond payload accounting.</li><li>Pending disk writes and I/O buffers have separate ownership and accounting.</li><li>The memory cache owns one aligned buffer pool, charged to the same capacity.</li></ul>
                 <a href="#io-buffers">Explore aligned I/O buffers →</a>
@@ -369,7 +369,7 @@
           <details class="branch" id="io-buffers">
             <summary><code>AlignedBuffer</code> &amp; <code>BufferPool</code><small>Allocate and reuse aligned memory for direct I/O</small></summary>
             <div class="content">
-              <p>Direct I/O needs memory addresses aligned to 4 KiB. <code>AlignedBuffer</code> allocates that memory. <code>BufferPool</code> keeps unused buffers in ten sizes so later reads can reuse them. A read returns only the requested bytes, but caching them counts the whole buffer toward memory usage.</p>
+              <p>Direct I/O needs memory addresses aligned to 4 KiB. <code>AlignedBuffer</code> allocates that memory. <code>BufferPool</code> keeps unused buffers in ten sizes so later reads can reuse them. A read returns only the requested bytes. Promotion copies them if the destination allocation has smaller capacity; caching counts the retained buffer's whole capacity. Whole-entry reads and checksum verification are unchanged.</p>
               <dl><dt>Allocation capacities</dt><dd>32 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB, 8 MiB, 16 MiB, 32 MiB, 64 MiB</dd><dt>Shared budget</dt><dd>Memory-cache capacity, including cached entries</dd><dt>Total idle cap</dt><dd>7% of memory capacity by default, shared by all buckets; no per-bucket caps or reservations</dd><dt>Above 64 MiB</dt><dd>Exact-size, unpooled allocations</dd></dl>
               <details class="deeper"><summary>Allocation lifetime and configuration</summary><div>
                 <p>Fresh aligned buffers use <code>alloc_zeroed</code> and matching <code>dealloc</code>. After the last owner releases a buffer, it returns to its cache's pool only if both the idle pool and the shared memory budget have room; otherwise it is freed.</p>

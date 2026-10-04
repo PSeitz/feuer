@@ -7,6 +7,7 @@ fn size_boundaries_round_up_without_exposing_spare_capacity() {
     let mut lower_bound = 0;
     for (index, size) in BUFFER_SIZES.into_iter().enumerate() {
         for length in [lower_bound + 1, size] {
+            assert_eq!(BufferPool::allocation_capacity(length), size);
             let buffer = pool.allocate(length).unwrap();
             assert_eq!(buffer.capacity(), size);
             assert_eq!(buffer.as_ref().len(), length);
@@ -110,6 +111,8 @@ fn small_and_zero_budgets_do_not_retain_buffers() {
 #[test]
 fn oversized_and_write_scratch_allocations_are_not_pooled() {
     let length = BUFFER_SIZES.last().unwrap() + BUFFER_ALIGNMENT;
+    assert_eq!(BufferPool::allocation_capacity(length), length);
+    assert_eq!(BufferPool::allocation_capacity(usize::MAX), usize::MAX);
     let pool = BufferPool::new(12 * length as u64, MemoryMetrics::noop());
     let buffer = pool.allocate(length).unwrap();
     assert_eq!(buffer.capacity(), length);
