@@ -49,7 +49,7 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 
 ### Memory retention and compaction
 
-- Cost-aware scoring uses exact-range access counts with an 8,192-request half-life by default,
+- Cost-aware scoring uses exact-range access counts with a 262,144-request half-life by default,
   measured across all keys. Both tiers consult standalone history in `feuer-types::retention`, with 64
   independently locked maps selected by object key and one global atomic request clock, separate from cache
   shards. Every distinct counter survives all cache evictions for the

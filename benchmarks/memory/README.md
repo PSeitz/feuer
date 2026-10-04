@@ -66,7 +66,7 @@ throughput, not end-to-end cache latency.
 ## Compared engines
 
 - `feuer-value-density`: `MemoryCache` with independent exact-range access counts
-  decaying with an 8,192-request half-life across all keys by default. Sampled eviction
+  decaying with a 262,144-request half-life across all keys by default. Sampled eviction
   compares decayed retrieval value per payload byte, crediting requests fully
   covered by each cached range. Trimming uses a separate history of at most 64 events per object by default.
   After a 64-request grace, pressure trims the selected victim to its observed

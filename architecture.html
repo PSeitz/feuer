@@ -396,7 +396,7 @@
             <div class="content">
               <p><code>ObjectAccessHistories</code> remembers which byte ranges people request and how often. Memory and disk use the same history when choosing entries to remove. <code>get_or_fetch</code> records each request before lookup, including failures and cancellations. Adding or removing cached data does not change that history.</p>
               <details class="deeper"><summary>Two histories with different purposes</summary><div>
-                <p><strong>Scoring counters:</strong> decayed counts per exact requested range. Default half-life is 8,192 requests across all keys. Distinct keys and range counters are never removed or capped during the history object's lifetime, even after both tiers evict the data.</p>
+                <p><strong>Scoring counters:</strong> decayed counts per exact requested range. Default half-life is 262,144 requests across all keys. Distinct keys and range counters are never removed or capped during the history object's lifetime, even after both tiers evict the data.</p>
                 <p><strong>Trimming history:</strong> a separate bounded event history. Defaults retain up to 64 events per object, aged out after 262,144 requests across all keys.</p>
                 <p>History uses 64 independently locked maps and one global request clock, separate from memory and disk shard counts. It is not persisted; aging is request-based, not wall-clock-based.</p>
               </div></details>

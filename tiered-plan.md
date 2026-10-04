@@ -215,7 +215,7 @@ unrequested cache memory.
 
 Compaction is pressure-driven. Policy samples at most 64 cached ranges and selects the one with the lowest recent
 retrieval value per charged allocation byte, using independent exact-range access counts with a half-life of
-8,192 requests across all keys. Standalone history owns every distinct counter for its full
+262,144 requests across all keys. Standalone history owns every distinct counter for its full
 in-process lifetime, independently of cache shards and eviction. Counter metadata has no capacity limit.
 For range trimming only, history keeps at most 64 exact events per object by default
 (`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this). Events expire after 262,144 later

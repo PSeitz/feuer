@@ -130,10 +130,10 @@ struct RangeAccess {
 }
 
 /// Half-life of access counts, in requests across all keys.
-/// Reads `FEUER_ACCESS_COUNT_HALF_LIFE` once on first use, defaulting to 8192.
+/// Reads `FEUER_ACCESS_COUNT_HALF_LIFE` once on first use, defaulting to 262,144.
 /// Accepts size suffixes as multipliers; panics unless the result is positive and fits `u64`.
 pub static ACCESS_COUNT_HALF_LIFE: LazyLock<u64> = LazyLock::new(|| {
-    read_env_number("FEUER_ACCESS_COUNT_HALF_LIFE", 8192, 1).unwrap_or_else(|error| panic!("{error}"))
+    read_env_number("FEUER_ACCESS_COUNT_HALF_LIFE", 262_144, 1).unwrap_or_else(|error| panic!("{error}"))
 });
 
 #[derive(Default)]
@@ -314,16 +314,20 @@ mod tests {
             return;
         }
         for (setting, half_life) in [
-            ("1", 1),
-            ("256", 256),
-            ("64KiB", 65_536),
-            ("18446744073709551615", u64::MAX),
+            (None, 262_144),
+            (Some("1"), 1),
+            (Some("256"), 256),
+            (Some("64KiB"), 65_536),
+            (Some("18446744073709551615"), u64::MAX),
         ] {
-            let output = environment_test_command("access_count_half_life_environment_override")
+            let mut command = environment_test_command("access_count_half_life_environment_override");
+            command
                 .env("FEUER_TEST_HALF_LIFE_CHILD", half_life.to_string())
-                .env("FEUER_ACCESS_COUNT_HALF_LIFE", setting)
-                .output()
-                .unwrap();
+                .env_remove("FEUER_ACCESS_COUNT_HALF_LIFE");
+            if let Some(setting) = setting {
+                command.env("FEUER_ACCESS_COUNT_HALF_LIFE", setting);
+            }
+            let output = command.output().unwrap();
             assert!(output.status.success(), "{output:?}");
         }
     }

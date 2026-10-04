@@ -124,7 +124,7 @@ are still checked before publishing bytes copied outside the memory shard lock.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Candidates per eviction decision. |
-| `FEUER_ACCESS_COUNT_HALF_LIFE` | `8192` | Score decay half-life in requests across all keys. |
+| `FEUER_ACCESS_COUNT_HALF_LIFE` | `262144` | Score decay half-life in requests across all keys. |
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Trimming event age limit in requests across all keys. |
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Maximum trimming events per key. |
 | `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed request cost in equivalent bytes. `0` scores bytes only. |
