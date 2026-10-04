@@ -418,7 +418,7 @@ impl DiskEntryIndex {
             .get(&key)
             .and_then(|entries| entries.range(object_range.start()..).next())
         {
-            // Retained ranges have increasing ends, so no later range can be contained either.
+            // Entry ranges have increasing ends, so no later range can be contained either.
             if !object_range.contains(existing.object_range) {
                 break;
             }
@@ -473,7 +473,7 @@ impl DiskEntryIndex {
 
     /// Finds the entry whose byte range covers the entire request.
     fn covering_entry(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&DiskEntry> {
-        // Retained ranges never contain one another, so their ends increase with their starts.
+        // Entry ranges never contain one another, so their ends increase with their starts.
         let (_, entry) = self.entries_by_key.get(key)?.range(..=requested.start()).next_back()?;
         entry.object_range.contains(requested).then_some(entry)
     }

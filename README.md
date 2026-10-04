@@ -46,7 +46,7 @@ Feuer leaves request coalescing, scheduling, and retries to your downloader.
 
 At the public lookup boundary, Feuer hashes the key's UTF-8 bytes once with XXH3-128
 (seed zero). Both tiers, access history, and disk recovery use only this 128-bit identity;
-full keys are not retained or checked for collisions. Keys must not be adversarial.
+full keys are not stored or checked for collisions. Keys must not be adversarial.
 [Disk format v13](format.md) stores the hash in little-endian form in fixed
 48-byte entry metadata. Older disk formats are not migrated.
 
@@ -81,15 +81,16 @@ those buffers' alignment, backing size, or reuse policy. No alignment is require
 Page-aligned buffers can avoid some disk-write scratch copies, though partial writes
 and padding can still require scratch buffers.
 
-In SSD replays, glibc retained substantial freed memory, making RSS much larger than
-live cache memory. Jemalloc avoided that retention in the tested workload. Aligning
-and bucketing synthetic download buffers also reduced RSS, but alignment alone was
+In SSD replays, glibc did not return substantial freed memory to the OS, making RSS
+much larger than live cache memory. Jemalloc avoided that retention in the tested
+workload. Aligning and bucketing synthetic download buffers also reduced RSS, but
+alignment alone was
 not isolated or proven sufficient. These are application allocation choices, not a
 requirement imposed by Feuer; the configured memory target is not an RSS limit.
 
 ## Eviction
 
-Both tiers sample entries and evict the lowest retention score per retained byte:
+Both tiers sample entries and evict the lowest retention score per byte:
 allocation capacity in memory, payload length on disk.
 For each request fully contained in a cached range, the score adds:
 
@@ -103,7 +104,7 @@ History hashes object keys into 64 independently locked maps, separate from cach
 One atomic request clock across all history shards preserves global request-age decay.
 Raw cache reads, insertions, and evictions do not record accesses or delete history.
 
-Every distinct `(object key, requested range)` counter is retained for the history object's lifetime,
+History keeps every distinct `(object key, requested range)` counter for its lifetime,
 even after both tiers evict the object. Repeated exact requests update the same counter. This metadata
 has no capacity limit and is not persisted across restarts; its memory grows with distinct keys and ranges.
 Scores still decay, measured in requests across all keys.
@@ -120,7 +121,7 @@ are still checked before publishing bytes copied outside the memory shard lock.
 | `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Candidates per eviction decision. |
 | `FEUER_ACCESS_COUNT_HALF_LIFE` | `8192` | Score decay half-life in requests across all keys. |
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Trimming event age limit in requests across all keys. |
-| `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Trimming events retained per key. |
+| `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Maximum trimming events per key. |
 | `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed request cost in equivalent bytes. `0` scores bytes only. |
 | `FEUER_IDLE_BUFFER_POOL_PERCENT` | `7` | Maximum idle buffers as a percentage of memory capacity, shared by all six buckets. Range 0–100; `0` disables idle retention. |
 

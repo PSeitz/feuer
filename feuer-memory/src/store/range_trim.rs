@@ -3,12 +3,12 @@ use feuer_types::ByteRange;
 /// Minimum percentage of source payload bytes that range trimming must save.
 const MIN_RANGE_TRIM_SAVINGS_PERCENT: u64 = 25;
 
-/// A plan to trim a cached range: its source, retained ranges, and retained byte count.
+/// The source range to trim, the ranges that will replace it, and their total byte count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RangeTrimPlan {
     source_range: ByteRange,
-    retained_ranges: Vec<ByteRange>,
-    retained_bytes: u64,
+    replacement_ranges: Vec<ByteRange>,
+    replacement_bytes: u64,
 }
 
 impl RangeTrimPlan {
@@ -16,12 +16,12 @@ impl RangeTrimPlan {
         self.source_range
     }
 
-    pub(super) fn retained_ranges(&self) -> &[ByteRange] {
-        &self.retained_ranges
+    pub(super) fn replacement_ranges(&self) -> &[ByteRange] {
+        &self.replacement_ranges
     }
 
     pub(super) const fn reclaimed_bytes(&self) -> u64 {
-        self.source_range.len() - self.retained_bytes
+        self.source_range.len() - self.replacement_bytes
     }
 }
 
@@ -32,14 +32,14 @@ pub(super) fn plan_range_trim(
     source_range: ByteRange,
     requested_ranges: impl IntoIterator<Item = ByteRange>,
 ) -> Option<RangeTrimPlan> {
-    let mut retained_ranges: Vec<_> = requested_ranges
+    let mut contained_requested_ranges: Vec<_> = requested_ranges
         .into_iter()
         .filter(|requested| source_range.contains(*requested))
         .collect();
-    retained_ranges.sort_unstable();
+    contained_requested_ranges.sort_unstable();
 
-    let mut merged_ranges: Vec<ByteRange> = Vec::with_capacity(retained_ranges.len());
-    for requested_range in retained_ranges {
+    let mut merged_ranges: Vec<ByteRange> = Vec::with_capacity(contained_requested_ranges.len());
+    for requested_range in contained_requested_ranges {
         if let Some(previous_range) = merged_ranges.last_mut()
             && requested_range.start() <= previous_range.end()
         {
@@ -53,8 +53,8 @@ pub(super) fn plan_range_trim(
     if merged_ranges.is_empty() {
         return None;
     }
-    let retained_bytes = merged_ranges.iter().map(|range| range.len()).sum();
-    let reclaimed_bytes = source_range.len() - retained_bytes;
+    let replacement_bytes = merged_ranges.iter().map(|range| range.len()).sum();
+    let reclaimed_bytes = source_range.len() - replacement_bytes;
     let minimum_saved_bytes =
         (u128::from(source_range.len()) * u128::from(MIN_RANGE_TRIM_SAVINGS_PERCENT)).div_ceil(100);
     if u128::from(reclaimed_bytes) < minimum_saved_bytes {
@@ -63,8 +63,8 @@ pub(super) fn plan_range_trim(
 
     Some(RangeTrimPlan {
         source_range,
-        retained_ranges: merged_ranges,
-        retained_bytes,
+        replacement_ranges: merged_ranges,
+        replacement_bytes,
     })
 }
 
@@ -92,7 +92,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.source_range(), range(10, 30));
-        assert_eq!(plan.retained_ranges(), &[range(12, 14), range(18, 24)]);
+        assert_eq!(plan.replacement_ranges(), &[range(12, 14), range(18, 24)]);
         assert_eq!(plan.reclaimed_bytes(), 12);
     }
 
@@ -100,16 +100,16 @@ mod tests {
     fn merges_adjacent_requests_so_each_original_request_stays_coverable() {
         let plan = plan_range_trim(range(0, 16), [range(2, 5), range(5, 9)]).unwrap();
 
-        assert_eq!(plan.retained_ranges(), &[range(2, 9)]);
+        assert_eq!(plan.replacement_ranges(), &[range(2, 9)]);
     }
 
     #[test]
     fn range_trim_savings_round_up_without_overflow() {
         for (source_bytes, minimum_saved_bytes) in [(9, 3), (u64::MAX, 1_u64 << 62)] {
             let source = range(0, source_bytes);
-            let retained_end = source_bytes - minimum_saved_bytes;
-            assert!(plan_range_trim(source, [range(0, retained_end + 1)]).is_none());
-            let plan = plan_range_trim(source, [range(0, retained_end)]).unwrap();
+            let replacement_end = source_bytes - minimum_saved_bytes;
+            assert!(plan_range_trim(source, [range(0, replacement_end + 1)]).is_none());
+            let plan = plan_range_trim(source, [range(0, replacement_end)]).unwrap();
             assert_eq!(plan.reclaimed_bytes(), minimum_saved_bytes);
         }
     }

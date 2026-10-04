@@ -60,7 +60,7 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
   configurable via `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES`) and requested bytes. Only cached ranges
   covering the exact request receive credit. Counter metadata is not capped per object.
 - A dense rotating candidate ring supplies a shared sample of at most 64 live entries per pressure decision.
-  The victim has the lowest retrieval value per retained byte, with object key and range breaking ties.
+  The victim has the lowest retrieval value per charged allocation byte, with object key and range breaking ties.
   Registration and removal are constant-work and leave no stale candidate backlog.
 - After a grace of 64 requests across all keys, the selected victim is trimmed to observed requests if
   that releases at least one quarter of its payload. Otherwise it is evicted. Grace never prevents eviction.
@@ -69,7 +69,7 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
   slices valid.
 - Copying happens outside the shard lock. Publication requires the exact source range to still be cached.
   Reinsertion of that immutable range, changes to neighboring ranges, and new accesses do not invalidate
-  a trimming snapshot. Retained ranges already covered by another entry are skipped.
+  a trimming snapshot. Replacement ranges already covered by another entry are skipped.
   Admission falls back to eviction if the source was removed or replaced by a different range.
 
 There is no periodic compaction, separate prefetch-promotion state, or public policy configuration.
@@ -104,10 +104,10 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
   ahead, coalesces gaps below the 10,000,000-byte source-cost break-even distance, and defaults to whole splits
   below 8 MiB and exact ranges otherwise.
 - [Memory results](benchmarks/memory/results.md) cover configured targets from 256 MiB through 32 GiB and
-  report request/source-cost hit rates, actual retained memory, throughput, and shard-count sensitivity.
+  report request/source-cost hit rates, actual cached payload bytes, throughput, and shard-count sensitivity.
   These results do not establish general or tiered superiority over Foyer.
 - The complete memory gate was rerun after sharing access evidence (eight capacities through 32 GiB, exact
-  and expanded downloads, 1/4/16/64 shards). All hit counts, hit bytes, source GETs/bytes and retained-payload
+  and expanded downloads, 1/4/16/64 shards). All hit counts, hit bytes, source GETs/bytes and cached-payload
   values matched the preceding implementation across all 256 engine rows. In this single same-host comparison,
   Feuer's median elapsed-time ratio across its 64 cases was 1.153 (about 15% slower). The native Foyer medians
   were approximately unchanged. Shared evidence adds synchronization and metadata. This is not a throughput

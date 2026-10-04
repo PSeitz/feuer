@@ -51,7 +51,7 @@ Before benchmarking, Rust tests check ABI struct sizes, sequential wrapping, ran
 
 Rust throughput counts successfully completed bytes inside the shared measurement window, divided by exactly 30 or 60 seconds. Completions outside that window—including final draining—are excluded. fio has its own boundary accounting; differences are small relative to a 30-second run but make this an independent replication rather than identical implementations.
 
-Per-worker CPU is measured with `CLOCK_THREAD_CPUTIME_ID` over the measured phase. fio CPU is user + system CPU. Mixed-case CPU totals sum both workers; 100% corresponds to one CPU core. Per-second completed-byte buckets and submitted/completed totals are retained outside this results folder. `iostat -dxm -y 5` monitors the disk throughout.
+Per-worker CPU is measured with `CLOCK_THREAD_CPUTIME_ID` over the measured phase. fio CPU is user + system CPU. Mixed-case CPU totals sum both workers; 100% corresponds to one CPU core. Per-second completed-byte buckets and submitted/completed totals are archived outside this results folder. `iostat -dxm -y 5` monitors the disk throughout.
 
 All throughput is **decimal MB/s**: completed bytes / seconds / 1,000,000. Both achieved read and achieved write rates must be compared, particularly when high write caps cannot be reached.
 
@@ -93,4 +93,4 @@ Run inside `tmux` or another persistent session. The runner checks the hostname,
 
 Successful completion produces `DONE` and removes only the dedicated data files/directory. On failure, inspect logs and confirm no I/O is active before cleaning up only that run's files.
 
-For reporting, copy the new outputs to a working directory outside `foyer2`, with the original archive available alongside it as `local-ssd-20260919`. Run the retained `summarize.py` there using Python and `matplotlib==3.10.9`. It regenerates `REPORT.md`, `comparison.csv`, and `comparison.png`; copy only those and this methodology into the final results folder.
+For reporting, copy the new outputs to a working directory outside `foyer2`, with the original archive available alongside it as `local-ssd-20260919`. Run the archived `summarize.py` there using Python and `matplotlib==3.10.9`. It regenerates `REPORT.md`, `comparison.csv`, and `comparison.png`; copy only those and this methodology into the final results folder.

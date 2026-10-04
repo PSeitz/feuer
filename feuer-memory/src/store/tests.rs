@@ -378,7 +378,7 @@ fn a_contained_download_is_discarded_without_replacing_cached_bytes() {
 }
 
 #[test]
-fn capacity_is_charged_by_retained_download_payload_bytes() {
+fn download_payload_bytes_count_toward_capacity() {
     let cache = cache(5);
     let key = ObjectKeyHash::from("object");
     insert(&cache, key, download(range(0, 3), Bytes::from_static(b"abc")));
@@ -478,7 +478,7 @@ fn access_history_caps_event_count_and_preserves_repeated_requests() {
 }
 
 #[test]
-fn repeated_requested_intervals_are_retained_over_single_accesses() {
+fn evicts_entry_requested_once_before_entry_requested_repeatedly() {
     let cache = cache(2);
     let hot = ObjectKeyHash::from("hot");
     let cold = ObjectKeyHash::from("cold");
@@ -598,9 +598,9 @@ fn range_trim_respects_grace_then_releases_unrequested_payload() {
         0.0
     );
     assert_eq!(returned, Bytes::from_static(b"cd"));
-    let retained = cache.get(&key, range(2, 4)).unwrap();
-    assert_eq!(retained, Bytes::from_static(b"cd"));
-    assert_ne!(retained.as_ptr(), original.slice(2..).as_ptr());
+    let bytes_after_trim = cache.get(&key, range(2, 4)).unwrap();
+    assert_eq!(bytes_after_trim, Bytes::from_static(b"cd"));
+    assert_ne!(bytes_after_trim.as_ptr(), original.slice(2..).as_ptr());
     assert!(cache.get(&key, range(0, 1)).is_none());
     assert_eq!(
         access_history_len(&cache, &key),
@@ -656,9 +656,9 @@ fn range_trim_waits_for_pressure_and_adds_no_access() {
     assert_eq!(cache.used_bytes(), 5);
     assert_eq!(access_history_len(&cache, &key), history_len);
     assert_eq!(returned, Bytes::from_static(b"efgh"));
-    let retained = cache.get(&key, range(4, 8)).unwrap();
-    assert_eq!(retained, returned);
-    assert_ne!(retained.as_ptr(), original.slice(4..).as_ptr());
+    let bytes_after_trim = cache.get(&key, range(4, 8)).unwrap();
+    assert_eq!(bytes_after_trim, returned);
+    assert_ne!(bytes_after_trim.as_ptr(), original.slice(4..).as_ptr());
 }
 
 #[test]
@@ -699,7 +699,7 @@ fn new_accesses_do_not_invalidate_a_copied_range_trim() {
             panic!("pressure should select the cold compactable cached range");
         };
         drop(shard);
-        source.copy_retained_payloads()
+        source.copy_replacement_payloads()
     };
 
     // Recording needs no memory shard lock, even while the shard is held here.
@@ -737,7 +737,7 @@ fn range_trim_requires_only_the_exact_source_range() {
             };
             source
         };
-        let replacement = trim_source.copy_retained_payloads();
+        let replacement = trim_source.copy_replacement_payloads();
         match change {
             0 => {
                 assert!(cache.remove(&key, range(0, 10)));
@@ -755,7 +755,7 @@ fn range_trim_requires_only_the_exact_source_range() {
                 cache.insert(key, download(range(0, 11), Bytes::from_static(b"abcdefghijk")));
             }
             _ => {
-                // A partial overlap can cover the retained range without replacing the source.
+                // A partial overlap can cover the replacement range without replacing the source.
                 cache.insert(key, download(range(2, 11), Bytes::from_static(b"cdefghijk")));
             }
         }
@@ -770,7 +770,7 @@ fn range_trim_requires_only_the_exact_source_range() {
             let (bytes, entries) = match change {
                 1 => (2, 1),
                 2 => (3, 2),
-                _ => (9, 1), // The neighbor already covers the retained bytes; do not insert them again.
+                _ => (9, 1), // The neighbor already covers the replacement bytes; do not insert them again.
             };
             assert_eq!(cache.used_bytes(), bytes);
             assert_eq!(cache.entry_count(), entries);

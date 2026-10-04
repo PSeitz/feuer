@@ -1,0 +1,34 @@
+--- a/feuer-storage/examples/direct_io.rs
++++ b/feuer-storage/examples/direct_io.rs
+@@ -41,7 +41,12 @@
+         .prefix("feuer-direct-bench-")
+         .tempdir_in(root)?;
+     let registry: mixtrics::metrics::BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
+-    let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::new(&registry)).await?;
++    let pool = if std::env::var_os("UNPOOLED").is_some() {
++        feuer_memory::BufferPool::unpooled()
++    } else {
++        feuer_memory::MemoryCache::new(4 * 1024 * MIB as u64).buffer_pool()
++    };
++    let file = DataFile::open_with_buffer_pool(temp.path(), CAPACITY, IoMetrics::new(&registry), pool).await?;
+     eprintln!("Initializing 8 GiB (direct writes), driver QD64, four Tokio workers");
+     let payload = Bytes::from(vec![0x5a; MIB]);
+     for offset in (0..CAPACITY).step_by(MIB) {
+@@ -50,15 +55,13 @@
+     println!(
+         "read_bytes,read_callers,write_callers,seconds,read_MB_s,write_MB_s,read_iops,read_p50_us,read_p99_us,cpu_percent"
+     );
+-    for read_size in [4096, 65536, MIB] {
+-        for readers in [1, 32, 64, 128] {
++    for read_size in [std::env::var("READ_SIZE").unwrap_or_else(|_| "4096".into()).parse::<usize>()?] {
++        for readers in [std::env::var("READERS").unwrap_or_else(|_| "32".into()).parse::<usize>()?] {
+             for &writers in &writer_counts {
+                 benchmark_concurrent_io(&file, read_size, readers, writers, seconds).await;
+             }
+         }
+     }
+-    // Verify that read protection does not permanently cap write-only throughput.
+-    benchmark_concurrent_io(&file, MIB, 0, 64, seconds).await;
+     drop(file); // drain and unlock before removing only the temporary benchmark directory
+     Ok(())
+ }

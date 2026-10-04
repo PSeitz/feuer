@@ -1,0 +1,11 @@
+# started on Thu Oct  1 20:18:44 2026
+
+
+ Performance counter stats for process id '472604':
+
+           2410766      syscalls:sys_enter_write                                              
+           1046292      syscalls:sys_enter_ppoll                                              
+           1000356      syscalls:sys_enter_io_uring_enter                                      
+
+       8.001060751 seconds time elapsed
+

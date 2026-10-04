@@ -142,7 +142,7 @@
                 <div class="node-body">
                   <p>A Tokio <code>mpsc::channel(64)</code> reserves waiting-channel capacity with <code>reserve().await</code>. A full channel yields the submitting task rather than blocking its executor thread.</p>
                   <p>Reserved capacity for preparing requests and queued requests share the channel's 64-position limit. The worker has <strong>64 additional active slots</strong>; receiving a request frees channel capacity, not completing it. Callers waiting to reserve are outside these counts.</p>
-                  <p class="note">There is no raw-I/O byte budget. A payload read allocates its whole aligned entry buffer before reserving channel capacity for each physical read of at most 1 MiB, so request counts do not cap retained memory.</p>
+                  <p class="note">There is no raw-I/O byte budget. A payload read allocates its whole aligned entry buffer before reserving channel capacity for each physical read of at most 1 MiB, so request counts do not cap read-buffer memory.</p>
                   <p>Startup recovery uses <code>try_reserve()</code> before allocating each 1-MiB metadata-read buffer. If full, it retries after 1 ms. Opening waits for all shard recovery to finish before serving lookups.</p>
                   <details class="source">
                     <summary>Code · async channel reservation</summary>
@@ -194,7 +194,7 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
             <summary><span class="node-name">Disk-write queue</span><span class="node-meta">256 entries · skip if full</span></summary>
             <div class="node-body">
               <p>After a callback download is admitted to memory, Feuer attempts to schedule a disk copy. This is a separate queue <strong>above</strong> the raw write-I/O queue.</p>
-              <div class="flow"><span>Retained download</span><span class="arrow">→</span><span>try_reserve</span><span class="arrow">→</span><span>Disk-write worker</span></div>
+              <div class="flow"><span>Download admitted to memory</span><span class="arrow">→</span><span>try_reserve</span><span class="arrow">→</span><span>Disk-write worker</span></div>
               <details class="node">
                 <summary><span class="node-name">Full means skip, not wait</span><span class="node-meta">Tokio mpsc</span></summary>
                 <div class="node-body">
@@ -263,7 +263,7 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;</code></pre>
                 <div class="node-body">
                   <p><strong>Disk-write queue full:</strong> the lookup skips scheduling a disk copy.</p>
                   <p><strong>Raw write channel full:</strong> the background work awaits a channel reservation. The successful lookup does not wait for that disk write.</p>
-                  <p>Preparing and queued writes share eight channel positions; up to eight more writes are active. Each physical operation transfers at most 1 MiB, but retained input slices can share larger backing allocations. There is no byte-budget semaphore.</p>
+                  <p>Preparing and queued writes share eight channel positions; up to eight more writes are active. Each physical operation transfers at most 1 MiB, but input slices can share larger backing allocations. There is no byte-budget semaphore.</p>
                 </div>
               </details>
             </div>

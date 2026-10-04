@@ -3,7 +3,7 @@
 Run started 2026-09-28 on `m8g-32cpu-local-ssd`. Production code is unchanged.
 The standalone release-mode binary imports `feuer-storage/src/uring.rs` and
 `error.rs` directly. Exact copies, git revision, and the pre-existing tracked
-worktree diff are retained in `source/`. The harness has its own Cargo.lock;
+worktree diff are archived in `source/`. The harness has its own Cargo.lock;
 bytes, io-uring, libc, tokio, and tracing versions match the root lockfile.
 
 ## Workload

@@ -51,7 +51,7 @@ Other fio settings: `thread=1`, `numjobs=1`, `invalidate=1`, `fallocate=none`, `
 
 ## Reproduction
 
-The raw results and original runners are retained **outside this folder**:
+The raw results and original runners are archived **outside this folder**:
 
 - Locally: `~/Development/benchmarks/results/local-ssd-20260919/`
 - On the instance: `/home/ubuntu/ssd-bench-results/local-ssd-20260919/`

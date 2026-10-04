@@ -191,7 +191,7 @@ impl WriteQueue {
     }
 
     /// Writes parts at aligned offsets, starting at zero; gaps become zero.
-    /// Aligned payload slices are retained directly; only other bytes need a copy.
+    /// Aligned payload slices are used directly; only other bytes need a copy.
     pub(crate) async fn write_parts(&self, offset: u64, length: usize, parts: &[(usize, Bytes)]) -> io::Result<()> {
         assert!(length > 0 && length <= MAX_IO_REQUEST_BYTES);
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
@@ -206,7 +206,7 @@ fn queue_stopped_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "io_uring queue stopped")
 }
 
-/// Memory retained by a read or vectored write until completion.
+/// Buffers owned by a read or vectored write until completion.
 enum IoBuffers {
     Read(AlignedBuffer),
     Write {

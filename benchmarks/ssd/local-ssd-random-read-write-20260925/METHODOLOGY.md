@@ -26,11 +26,11 @@ results remain unchanged.
 - Four longer repeats follow it: 16 KiB reads at caps 0/450/910 MB/s and 64 KiB
   reads at 910 MB/s, each **5 seconds warmup + 60 seconds measurement**. These
   reuse the initialized files and are reported separately.
-- All other fio options are retained from the original runner: `thread=1`,
+- All other fio options are unchanged from the original runner: `thread=1`,
   `numjobs=1`, `invalidate=1`, `fallocate=none`, `refill_buffers=1`,
   `exitall_on_error=1`, and no file creation during measured cases.
 - No concurrent benchmark was observed before launch; device I/O was idle.
-  `iostat -dxm -y 5` and per-second fio bandwidth logs are retained.
+  `iostat -dxm -y 5` and per-second fio bandwidth logs are archived.
 
 Both achieved read and write rates must be compared. A writer may fail to reach
 its cap under contention. Reported throughput is decimal MB/s; read p99 is fio
@@ -48,7 +48,7 @@ exactly. This checks execution and accounting, not byte-for-byte data contents.
 
 ## Reproduce
 
-Sources are retained here: [`run_bench.py`](run_bench.py) (adapted from the
+Sources are included here: [`run_bench.py`](run_bench.py) (adapted from the
 2026-09-19 runner) and [`summarize.py`](summarize.py). Python only orchestrates;
 fio issues all measured I/O. No third-party Python dependencies are needed.
 
@@ -73,7 +73,7 @@ Success creates `DONE` only after removing the two dedicated data files and
 their directory. Failure retains evidence and may leave those files; inspect
 logs and active I/O before cleaning up only that run's directory.
 
-Raw results for the 2026-09-25 run are retained outside this compact folder:
+Raw results for the 2026-09-25 run are archived outside this compact folder:
 
 - Instance: `/home/ubuntu/ssd-bench-results/local-ssd-random-read-write-20260925/`
 - Local archive: `~/Development/benchmarks/results/local-ssd-random-read-write-20260925/`

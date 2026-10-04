@@ -24,17 +24,18 @@ const MAX_SHARDS: usize = 64;
 ///
 /// All ranges for one [`ObjectKeyHash`] share a shard and are kept
 /// in an ordered index. Partial overlaps coexist and are treated no differently
-/// from disjoint ranges. A lookup succeeds only when one retained range covers
+/// from disjoint ranges. A lookup succeeds only when one entry covers
 /// the exact request and returns a [`Bytes`] slice containing only those
-/// requested bytes. The result can share the retained allocation and never
+/// requested bytes. The result can share the entry's allocation and never
 /// holds an entry guard. Request history is supplied separately: cache operations
 /// consult it for retention decisions but never record accesses or remove history.
 ///
 /// Cached allocations and idle read buffers share the configured capacity.
 /// Each shard evicts locally against its share before insertion; admission also
 /// frees idle buffers when needed. An allocation larger than its shard's target
-/// is retained after that shard is emptied, so total usage can exceed capacity.
-/// Victims are selected shard-locally by recent modeled retrieval value per retained byte. A rotating sample selects one victim;
+/// is cached after that shard is emptied, so total usage can exceed capacity.
+/// Victims are selected shard-locally by recent modeled retrieval value per charged allocation byte.
+/// A rotating sample selects one victim;
 /// if its observed requests form a useful smaller payload, Feuer trims that victim
 /// outside the shard lock.
 pub struct MemoryCache {
@@ -211,7 +212,7 @@ impl MemoryCache {
                 InsertOrReclaimResult::Trim(source) => {
                     // Payload copying is deliberately outside the shard lock.
                     // Publication checks that the exact source range is still cached, not history.
-                    let replacement = source.copy_retained_payloads();
+                    let replacement = source.copy_replacement_payloads();
                     let request_count = self.access_histories.request_count();
                     if !self.shards[shard_index]
                         .lock()

@@ -7,7 +7,7 @@ use thiserror::Error;
 ///
 /// `disk_capacity` includes metadata and alignment overhead.
 /// `memory_capacity` is a soft eviction target divided among the in-memory shards; oversized entries
-/// can make retained usage exceed it.
+/// can make entry allocation charges exceed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheConfig {
     directory: PathBuf,

@@ -67,13 +67,13 @@ throughput, not end-to-end cache latency.
 
 - `feuer-value-density`: `MemoryCache` with independent exact-range access counts
   decaying with an 8,192-request half-life across all keys by default. Sampled eviction
-  compares decayed retrieval value per retained byte, crediting requests fully
+  compares decayed retrieval value per payload byte, crediting requests fully
   covered by each cached range. Trimming uses a separate history of at most 64 events per object by default.
   After a 64-request grace, pressure trims the selected victim to its observed
   request ranges when useful. The replay driver records requests before lookup in standalone history;
   distinct counters survive all cache evictions for the duration of the run.
 - `foyer-native-exact-key`: requested ranges are native Foyer keys. The
-  complete callback payload is retained under that exact request key, but
+  complete callback payload is stored under that exact request key, but
   native Foyer does not perform containment lookup.
 - `foyer-native-expanded-key`: included with the `expanded` downloader. The
   application expands before lookup and uses that exact expanded range as the
@@ -84,7 +84,7 @@ throughput, not end-to-end cache latency.
   fork's `CostAwareConfig`. The policy estimates an exact key's access rate as
   its successful access count divided by its shard-clock residence time, then
   weights that rate by `10,000,000 + entry weight`. At pressure, it evicts the
-  lowest estimated retrieval cost saved per retained byte from a rotating
+  lowest estimated retrieval cost saved per payload byte from a rotating
   sample of 64 entries. The estimator uses only a count and admission clock per
   entry; idle value decays continuously instead of crossing a fixed lifetime
   threshold. It has no containment lookup, range evidence, or compaction.
@@ -178,7 +178,7 @@ cargo run --release -p feuer-memory-bench -- \
 ## Accounting and metrics
 
 The human-readable table reports request and source-cost hit rates, source GETs
-and bytes, retained payload, and throughput. `--csv` additionally emits
+and bytes, cached payload bytes, and throughput. `--csv` additionally emits
 requested-byte hit rate, raw byte counts, target utilization, and elapsed time.
 
 The source-cost model is 125 ms per GET plus transfer at 80 MB/s, represented

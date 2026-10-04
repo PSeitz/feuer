@@ -146,7 +146,7 @@
     <section class="flow" aria-label="Lookup order">
       <div class="flow-header"><span class="eyebrow">The read path</span><small>First covering hit wins. Every success returns the exact requested range.</small></div>
       <div class="flow-path">
-        <a href="#memory"><strong>Memory</strong><small>Retained byte ranges</small></a>
+        <a href="#memory"><strong>Memory</strong><small>Cached byte ranges</small></a>
         <span class="arrow">miss<b aria-hidden="true">→</b></span>
         <a href="#disk"><strong>Disk</strong><small>Verified stored ranges</small></a>
         <span class="arrow">miss<b aria-hidden="true">→</b></span>
@@ -172,7 +172,7 @@
             <summary><code>TieredMemoryDiskCache</code><small>Checks memory, then disk, then your download callback</small></summary>
             <div class="content">
               <p>Call <code>get_or_fetch</code> with an object key, a byte range, and a function that downloads missing data. It returns the requested bytes. Each request is counted before looking in the cache, even if it later fails or is canceled.</p>
-              <p>The public boundary hashes the key's UTF-8 bytes once with seed-zero XXH3-128. Both tiers and request history use only that 128-bit identity; full keys are not retained or checked for collisions.</p>
+              <p>The public boundary hashes the key's UTF-8 bytes once with seed-zero XXH3-128. Both tiers and request history use only that 128-bit identity; full keys are not stored or checked for collisions.</p>
               <ol><li>Check memory for one range covering the request.</li><li>On a miss, read and verify a covering disk entry. Promote only the requested bytes to memory.</li><li>On another miss, invoke this call's download callback and validate its coverage.</li></ol>
               <details class="deeper"><summary>What happens after a successful download?</summary><div>
                 <p>The cache keeps the download in memory and queues it for writing to disk. This does not count as another request.</p>
@@ -248,7 +248,7 @@
               <dl><dt>Trimming grace</dt><dd>64 requests across all keys</dd><dt>Minimum payload saving</dt><dd>25%</dd></dl>
               <details class="deeper"><summary>Copy outside the lock, validate before publishing</summary><div>
                 <p>Overlapping or adjacent observed intervals are merged and copied into independent <code>Bytes</code>. Copying occurs outside the shard lock.</p>
-                <p>Publication requires the exact source key and range to remain cached. Reinsertion of that immutable range, changes to neighboring ranges, and new requests do not invalidate the copy. Retained ranges already covered by another entry are skipped. If the source disappeared or was replaced by a different range, admission falls back to eviction.</p>
+                <p>Publication requires the exact source key and range to remain cached. Reinsertion of that immutable range, changes to neighboring ranges, and new requests do not invalidate the copy. Replacement ranges already covered by another entry are skipped. If the source disappeared or was replaced by a different range, admission falls back to eviction.</p>
                 <p>There is no periodic compaction. Caller-held slices remain valid.</p>
               </div></details>
               <a class="source" href="feuer-memory/src/store/range_trim.rs">feuer-memory/src/store/range_trim.rs · RangeTrimPlan</a>
@@ -311,7 +311,7 @@
               <p>The writer groups small entries into immutable <strong>1-MiB payload chunks</strong>, with 4-KiB-aligned addresses and storage lengths. Each entry occupies one contiguous byte range with no metadata gaps, even across chunk boundaries.</p>
               <p>Separate <strong>1-MiB metadata chunks</strong> contain checksummed 4-KiB pages. Their records are updated in place under the shard's metadata I/O lock. Payload writes complete before publication and in-memory metadata updates; a separate writer persists dirty metadata every second.</p>
               <details class="deeper"><summary>Packing constraints and persistent metadata</summary><div>
-                <ul><li>Entries with aligned size below 128 KiB are copied into per-shard chunk buffers; their incoming bytes are released.</li><li>Larger entries own consecutive whole chunks exclusively, including unused tails. Written payload chunks cannot be appended to.</li><li>The v13 format stores fixed 48-byte records: 128-bit key hash, object range start and length, payload address, and seed-zero XXHash64 payload checksum. Payload length equals the object range length; storage length rounds up to 4 KiB.</li><li>The first 255 metadata pages hold 84 records each: 21,420 entries per metadata chunk. The final 4-KiB page stores the next metadata chunk address. Every page has its own seed-zero XXHash64 checksum.</li><li>Metadata chunks stay reserved while open; cleared slots are reused across batches. An active shard needs at least one metadata chunk in addition to payload chunks. A one-chunk cache has no room for payloads.</li><li>Cached metadata pages and free-slot bookkeeping consume RAM outside the retained-memory target. Sharing a metadata chunk does not couple payload-chunk lifetimes.</li></ul>
+                <ul><li>Entries with aligned size below 128 KiB are copied into per-shard chunk buffers; their incoming bytes are released.</li><li>Larger entries own consecutive whole chunks exclusively, including unused tails. Written payload chunks cannot be appended to.</li><li>The v13 format stores fixed 48-byte records: 128-bit key hash, object range start and length, payload address, and seed-zero XXHash64 payload checksum. Payload length equals the object range length; storage length rounds up to 4 KiB.</li><li>The first 255 metadata pages hold 84 records each: 21,420 entries per metadata chunk. The final 4-KiB page stores the next metadata chunk address. Every page has its own seed-zero XXHash64 checksum.</li><li>Metadata chunks stay reserved while open; cleared slots are reused across batches. An active shard needs at least one metadata chunk in addition to payload chunks. A one-chunk cache has no room for payloads.</li><li>Cached metadata pages and free-slot bookkeeping consume RAM outside the memory-cache target. Sharing a metadata chunk does not couple payload-chunk lifetimes.</li></ul>
                 <p class="callout">New metadata chunks are initialized before linking. Record invalidation writes complete before payload ownership is released for reuse. No fsync or fdatasync is issued; completion is not a crash-durability or power-loss ordering guarantee. Older formats are not migrated.</p>
               </div></details>
               <a class="source" href="feuer-storage/format.md">feuer-storage/format.md · disk format v11</a>
@@ -404,10 +404,10 @@
             </div>
           </details>
           <details class="branch">
-            <summary>Value scoring &amp; sampled eviction<small>Prefer more avoided retrieval cost per retained byte</small></summary>
+            <summary>Value scoring &amp; sampled eviction<small>Prefer more avoided retrieval cost per byte</small></summary>
             <div class="content">
               <p>Only requests fully contained in an entry contribute to its value:</p>
-              <code class="formula">Σ decayed_count × (fixed_request_cost + requested_bytes)<br>──────────────────────────────────────<br>retained_bytes</code>
+              <code class="formula">Σ decayed_count × (fixed_request_cost + requested_bytes)<br>──────────────────────────────────────<br>entry_bytes</code>
               <p>Both tiers sample candidates and choose the lowest value per byte. Memory divides by the entry's charged allocation capacity; disk divides by payload length. Memory may trim that victim; disk removes selected entries.</p>
               <details class="deeper"><summary>Defaults and what the score excludes</summary><div>
                 <ul><li>Sample size: 64 live candidates per decision, configurable.</li><li>Fixed request cost: 10,000,000 equivalent bytes by default; zero scores bytes only.</li><li>Both tiers maintain dense candidate lists sampled in rotation; removal leaves no stale-candidate backlog.</li><li>Disk alignment, metadata, and chunk overhead do not enter the payload-only score.</li><li>Tier-aware memory valuation based on disk residency is not implemented.</li></ul>
@@ -455,7 +455,7 @@
           <details class="branch">
             <summary>Current boundaries<small>What this implementation does not provide yet</small></summary>
             <div class="content">
-              <ul><li><strong>No crash-durability guarantee.</strong> Open waits for best-effort recovery; writes are not synchronized to stable storage.</li><li><strong>No buffered I/O mode.</strong> The disk tier requires Linux direct I/O and io_uring.</li><li><strong>No built-in source client, download coalescing, or retry scheduler.</strong> Those belong to your callback.</li><li><strong>No hard total-memory cap.</strong> Active reads, caller-held buffers, queued writes, cached metadata pages, and uncapped request-history counters sit outside the retained-memory target.</li><li><strong>No multi-entry range assembly.</strong> One cached entry must cover a request.</li></ul>
+              <ul><li><strong>No crash-durability guarantee.</strong> Open waits for best-effort recovery; writes are not synchronized to stable storage.</li><li><strong>No buffered I/O mode.</strong> The disk tier requires Linux direct I/O and io_uring.</li><li><strong>No built-in source client, download coalescing, or retry scheduler.</strong> Those belong to your callback.</li><li><strong>No hard total-memory cap.</strong> Active reads, caller-held buffers, queued writes, cached metadata pages, and uncapped request-history counters sit outside the memory-cache target.</li><li><strong>No multi-entry range assembly.</strong> One cached entry must cover a request.</li></ul>
               <p>The disk layout and allocator remain experimental; this explorer describes the current implementation, not a stable on-disk interface.</p>
               <a class="source" href="implementation-status.md">implementation-status.md · implemented and remaining work</a>
             </div>

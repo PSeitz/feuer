@@ -1,0 +1,3 @@
+# Analyze Linux-only storage code even when editing on macOS.
+[cargo]
+target = "x86_64-unknown-linux-gnu"

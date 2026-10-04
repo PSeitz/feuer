@@ -17,7 +17,7 @@ pub(super) const MIN_REQUESTS_BEFORE_RANGE_TRIM: u64 = 64;
 struct MemoryEntry {
     /// Exact object interval represented by `bytes`.
     range: ByteRange,
-    /// Retained payload; lookup results share slices of this allocation.
+    /// Entry payload; lookup results share slices of this allocation.
     bytes: Bytes,
     /// Allocation bytes charged to this entry, possibly larger than the visible payload.
     allocation_charge: u64,
@@ -136,11 +136,11 @@ pub(super) struct RangeTrimSource {
 }
 
 impl RangeTrimSource {
-    /// Copies the retained payloads into separate allocations while no shard metadata lock is held.
-    pub(super) fn copy_retained_payloads(self) -> RangeTrimReplacement {
-        let retained_payloads = self
+    /// Copies payloads for the replacement ranges into separate allocations outside the shard metadata lock.
+    pub(super) fn copy_replacement_payloads(self) -> RangeTrimReplacement {
+        let payloads = self
             .plan
-            .retained_ranges()
+            .replacement_ranges()
             .iter()
             .map(|range| {
                 let start = usize::try_from(range.start() - self.plan.source_range().start())
@@ -153,7 +153,7 @@ impl RangeTrimSource {
         RangeTrimReplacement {
             object_key: self.object_key,
             plan: self.plan,
-            retained_payloads,
+            payloads,
         }
     }
 }
@@ -162,7 +162,7 @@ impl RangeTrimSource {
 pub(super) struct RangeTrimReplacement {
     object_key: ObjectKeyHash,
     plan: RangeTrimPlan,
-    retained_payloads: Vec<(ByteRange, Bytes)>,
+    payloads: Vec<(ByteRange, Bytes)>,
 }
 
 /// Result of trying to insert a download or reclaim space:
@@ -308,7 +308,7 @@ impl MemoryCacheShard {
             .is_some_and(|entry| entry.range == range)
     }
 
-    /// Inserts an entry holding bytes retained by trimming; the caller accounts for its bytes.
+    /// Inserts an entry holding a copied subrange payload; the caller accounts for its bytes.
     fn insert_trimmed_entry(&mut self, object_key: &ObjectKeyHash, range: ByteRange, bytes: Bytes, request_count: u64) {
         let allocation_charge = bytes.len() as u64;
         self.buffer_pool.add_entry_bytes(allocation_charge);
@@ -390,7 +390,7 @@ impl MemoryCacheShard {
         entry.candidate_index = candidate_index;
     }
 
-    /// Samples up to `reclaim_sample_size` entries and selects the lowest retrieval cost per retained byte.
+    /// Samples up to `reclaim_sample_size` entries and selects the lowest retrieval cost per charged allocation byte.
     fn select_reclaim_candidate(
         &mut self,
         admitting_key: &ObjectKeyHash,
@@ -472,29 +472,30 @@ impl MemoryCacheShard {
         let Some(removed_bytes) = self.remove_entry(&replacement.object_key, replacement.plan.source_range()) else {
             return false;
         };
-        let mut retained_bytes = 0_u64;
-        let mut retained_entries = 0_u64;
+        let mut inserted_payload_bytes = 0_u64;
+        let mut inserted_entry_count = 0_u64;
 
-        for (retained_range, bytes) in replacement.retained_payloads {
+        for (range, bytes) in replacement.payloads {
             if self
                 .entries_by_key
                 .get(&replacement.object_key)
-                .and_then(|entries| entries.covering_entry(retained_range))
+                .and_then(|entries| entries.covering_entry(range))
                 .is_some()
             {
                 continue;
             }
-            retained_bytes += bytes.len() as u64;
-            retained_entries += 1;
+            inserted_payload_bytes += bytes.len() as u64;
+            inserted_entry_count += 1;
             self.used_bytes += bytes.len() as u64;
-            self.insert_trimmed_entry(&replacement.object_key, retained_range, bytes, request_count);
+            self.insert_trimmed_entry(&replacement.object_key, range, bytes, request_count);
         }
 
-        let reclaimed_bytes = removed_bytes - retained_bytes;
+        let reclaimed_bytes = removed_bytes - inserted_payload_bytes;
         debug_assert!(reclaimed_bytes >= replacement.plan.reclaimed_bytes());
         self.metrics.decrease_usage(removed_bytes, 1);
-        if retained_entries != 0 {
-            self.metrics.increase_usage(retained_bytes, retained_entries);
+        if inserted_entry_count != 0 {
+            self.metrics
+                .increase_usage(inserted_payload_bytes, inserted_entry_count);
         }
         self.metrics.record_range_trim(reclaimed_bytes);
         true

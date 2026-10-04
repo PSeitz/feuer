@@ -52,17 +52,17 @@ Buffered write bandwidth means acceptance into the page cache; it is **not fsync
 - `/sys/block/nvme1n1/stat` sector counters (512 bytes/sector) are captured around each fio process and its subsequent flush.
 - Device-rate averages cover the whole fio process, including startup, cache invalidation, and warmup. They are **not exactly aligned** with fio's ten-second measured interval.
 - Post-case physical write bytes and `fdatasync` duration expose deferred work; do not add them to the timed bandwidth numerator or label application bandwidth durable.
-- `iostat -dxm -y 1` and one-second samples of device counters, Dirty, Writeback, Cached, and MemAvailable are retained outside the compact results folder.
+- `iostat -dxm -y 1` and one-second samples of device counters, Dirty, Writeback, Cached, and MemAvailable are archived outside the compact results folder.
 - Direct comparisons use the original fio results from earlier in the session. Timing, dataset contents, and disk/cache state are not perfectly matched; this is a screening comparison, not a controlled single-variable repeated experiment.
 
 ## Reproduction
 
-Raw results and runner are retained outside this results folder:
+Raw results and runner are archived outside this results folder:
 
 - Local: `~/Development/benchmarks/results/local-ssd-buffered-20260919/`
 - Instance: `/home/ubuntu/ssd-bench-results/local-ssd-buffered-20260919/`
 
-On the same idle instance, create a fresh results directory on EBS. If fully initialized files are no longer available, recreate them with the retained Rust initializer; this adds about two minutes of preparation:
+On the same idle instance, create a fresh results directory on EBS. If fully initialized files are no longer available, recreate them with the archived Rust initializer; this adds about two minutes of preparation:
 
 ```sh
 BASE=/home/ubuntu/ssd-bench-results/local-ssd-buffered-20260919
@@ -75,6 +75,6 @@ cd "$RUN"
 python3 -u run_buffered.py > progress.log 2>&1
 ```
 
-The runner checks host/device identity and file sizes, and waits for the retained preceding suite's `DONE` marker. Ensure no other benchmark is active. Do not use Python `-O`, which disables assertions. The initializer refuses an existing data directory; do not format the device or remove unrelated files.
+The runner checks host/device identity and file sizes, and waits for the preceding suite's `DONE` marker. Ensure no other benchmark is active. Do not use Python `-O`, which disables assertions. The initializer refuses an existing data directory; do not format the device or remove unrelated files.
 
-On success, `DONE` is created and the dedicated data links/directory are removed. Reporting uses the retained `summarize.py`, Python with `matplotlib==3.10.9`, and the original baseline archive alongside the working directory as `local-ssd-20260919`. Copy only the report, methodology, CSV, and chart into the final results folder.
+On success, `DONE` is created and the dedicated data links/directory are removed. Reporting uses the archived `summarize.py`, Python with `matplotlib==3.10.9`, and the original baseline archive alongside the working directory as `local-ssd-20260919`. Copy only the report, methodology, CSV, and chart into the final results folder.

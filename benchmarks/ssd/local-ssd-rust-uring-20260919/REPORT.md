@@ -169,4 +169,4 @@ Each fio case runs immediately before its matching Rust case on the same initial
 - `comparison.png`: QD32 throughput and read/write contention plots.
 - `METHODOLOGY.md`: implementation details, correctness checks, limitations, and reproduction instructions.
 
-Source, locked dependencies, raw results, and logs are retained **outside the results folder**, at `~/Development/benchmarks/results/local-ssd-rust-uring-20260919/` and on the instance at `/home/ubuntu/ssd-bench-results/local-ssd-rust-uring-20260919/`.
+Source, locked dependencies, raw results, and logs are archived **outside the results folder**, at `~/Development/benchmarks/results/local-ssd-rust-uring-20260919/` and on the instance at `/home/ubuntu/ssd-bench-results/local-ssd-rust-uring-20260919/`.

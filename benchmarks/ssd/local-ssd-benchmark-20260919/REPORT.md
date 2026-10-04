@@ -15,7 +15,7 @@ All throughput values are **decimal MB/s** (1 MB = 1,000,000 bytes). Block sizes
 - SSD initially empty and idle. These are low-occupancy file overwrite measurements, not a fully preconditioned/full-drive endurance benchmark.
 - Writes use direct I/O, **not per-write fsync**. This measures throughput rather than transactional durable-write latency.
 - Application block sizes above 128 KiB can be split by the kernel: device `max_sectors_kb=128`.
-- Each main-table cell is one run, not an average of repeats. Selected contention cases are repeated for 60 seconds in the validation section. Raw fio JSON, configs, per-second bandwidth logs, and iostat are retained.
+- Each main-table cell is one run, not an average of repeats. Selected contention cases are repeated for 60 seconds in the validation section. Raw fio JSON, configs, per-second bandwidth logs, and iostat are archived.
 - Results describe these specific stream counts and queue depths, not a proven maximum across all concurrency levels. Small-block sequential reads can also approach one fio CPU core's limit.
 - UTC start: 2026-09-19T15:39:16.934546+00:00; end: 2026-09-19T16:20:35.689125+00:00.
 
@@ -84,4 +84,4 @@ Selected contention cases repeated with 5 s warmup + **60 s measurement**, after
 - `throughput.png`: standalone throughput and read/write contention plots.
 - `METHODOLOGY.md`: test design, validation, limitations, and reproduction instructions.
 
-Raw artifacts and runners are retained outside this folder at `~/Development/benchmarks/results/local-ssd-20260919/` and on the benchmark instance at `/home/ubuntu/ssd-bench-results/local-ssd-20260919/`.
+Raw artifacts and runners are archived outside this folder at `~/Development/benchmarks/results/local-ssd-20260919/` and on the benchmark instance at `/home/ubuntu/ssd-bench-results/local-ssd-20260919/`.

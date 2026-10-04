@@ -24,7 +24,7 @@ pub(crate) const BUFFER_SIZES: [usize; 6] = [
     64 * 1024 * 1024,
 ];
 
-/// Maximum share of memory capacity retained as idle buffers across all buckets.
+/// Maximum share of memory capacity occupied by idle buffers across all buckets.
 static IDLE_BUFFER_POOL_PERCENT: LazyLock<u64> = LazyLock::new(|| {
     let percent = read_env_number("FEUER_IDLE_BUFFER_POOL_PERCENT", 7, 0).unwrap_or_else(|error| panic!("{error}"));
     assert!(
@@ -39,12 +39,12 @@ static IDLE_BUFFER_POOL_PERCENT: LazyLock<u64> = LazyLock::new(|| {
 pub struct BufferPool {
     capacity: u64,
     idle_limit: u64,
-    state: Mutex<RetainedBuffers>,
+    state: Mutex<EntryAllocationBytesAndIdleBuffers>,
     metrics: Arc<MemoryMetrics>,
 }
 
-/// Cached allocation bytes and idle allocations, protected by the same lock.
-struct RetainedBuffers {
+/// Entry allocation byte counts and idle buffers grouped by size, protected by one lock.
+struct EntryAllocationBytesAndIdleBuffers {
     cached_bytes: u64,
     idle_bytes: u64,
     by_size: [Vec<AlignedBuffer>; BUFFER_SIZES.len()],
@@ -57,7 +57,7 @@ impl BufferPool {
         Arc::new(Self {
             capacity,
             idle_limit,
-            state: Mutex::new(RetainedBuffers {
+            state: Mutex::new(EntryAllocationBytesAndIdleBuffers {
                 cached_bytes: 0,
                 idle_bytes: 0,
                 by_size: std::array::from_fn(|_| Vec::new()),
@@ -99,7 +99,7 @@ impl BufferPool {
         Ok(buffer)
     }
 
-    /// Allocation bytes retained as cached entries or idle buffers.
+    /// Entry allocation charges plus idle buffer capacity.
     pub fn used_bytes(&self) -> u64 {
         let state = self.state.lock();
         state.cached_bytes + state.idle_bytes

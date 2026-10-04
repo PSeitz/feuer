@@ -17,7 +17,7 @@ definitions. These historical results used a 32,768-access history age; the curr
 - host: Apple M4 Max (16 logical CPUs, 64 GiB), arm64 macOS 26.4.1
 - compiler: `rustc 1.96.0 (ac68faa20 2026-05-25)`, release profile
 
-`Used Memory` is retained payload, not RSS. `Foyer (expanded key)` expands
+`Used Memory` is cached payload bytes, not RSS. `Foyer (expanded key)` expands
 before lookup and reuses the one identical native range key assigned to its
 coalesced batch; it does not perform Feuer's containing-range lookup. Throughput
 excludes the simulated wait.

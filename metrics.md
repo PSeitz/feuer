@@ -48,7 +48,7 @@ Detached writes can outlive the last public cache handle.
 
 `allocated * 1 MiB - indexed payload bytes` measures capacity unavailable for
 indexed payload, including metadata, padding, partially dead chunks, and active
-writes. It is not a pure fragmentation measurement. Indexed payload bytes count retained
+writes. It is not a pure fragmentation measurement. Indexed payload bytes count
 entry payloads, not a deduplicated union of overlapping object ranges.
 
 For byte-weighted packing efficiency, divide the rate of batch `payload` bytes
@@ -62,7 +62,7 @@ individual kernel submissions.
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `feuer_disk_recovered_chunks` | Gauge | Currently allocated 1-MiB chunks retained by recovery; no labels |
+| `feuer_disk_recovered_chunks` | Gauge | Currently allocated 1-MiB chunks restored by recovery; no labels |
 
 Recovered chunks are a subset of `feuer_disk_chunks{state="allocated"}`, not
 additional capacity. Each chunk counts once, including shared chunks and every
@@ -176,9 +176,9 @@ sum by (bucket, status) (feuer_io_buffer_pool_bytes)
 Omit `bucket` to aggregate across all sizes. Utilization is undefined for zero capacity.
 
 Buffers remain `used` until their last owner releases them, even if the pool has
-already been destroyed. They then become `idle` if retained, or leave the gauge
-if freed. Idle bytes are included in `feuer_memory_used_bytes`; used buffer bytes
-are charged there only when retained as cached entries. Do not add the two gauges.
+already been destroyed. They then become `idle` if returned to the pool, or leave
+the gauge if freed. Idle bytes are included in `feuer_memory_used_bytes`; used buffer bytes
+are charged there only when held by cache entries. Do not add the two gauges.
 Allocations above 64 MiB and write scratch bypass the pool gauge. Admission frees
 idle buffers as necessary before retaining cached allocations. Gauges sum across
 cache instances sharing a registry. Standalone storage without a memory cache
@@ -219,7 +219,7 @@ flushing retains the detached buffer through I/O as well. This gauge measures lo
 - `feuer_memory_operations_total{operation}`: `insert`, `replace`, `redundant`,
   `remove`, `compact`. Internal access/hit/miss counters are not emitted.
   Use public lookup counters for hit ratios.
-- `feuer_memory_entries`: retained entries (not idle buffers).
+- `feuer_memory_entries`: cache entries (not idle buffers).
 - `feuer_memory_compacted_payload_bytes_total`: cached allocation charges released
   by compaction; does not guarantee the allocation was freed if callers still hold it.
 - `feuer_disk_io_total{operation,outcome}`: operations `read` and `write`,

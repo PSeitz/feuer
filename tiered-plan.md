@@ -14,7 +14,7 @@ Its purpose is to reduce source requests, lookup latency, and retrieval cost wit
 boundaries onto callers. On a miss, an application callback may coalesce work or prefetch a downloaded range
 larger than the request. Feuer indexes that exact interval so later contained requests can reuse it, while
 tracking which bytes are actually requested so unused prefetched data does not have to remain in memory. The
-broader download may still be retained on disk for future subrange reads.
+broader download may still be stored on disk for future subrange reads.
 
 Feuer is a performance layer, not authoritative storage. The application owns object identity, source access,
 and download coordination. Feuer owns cache retention, range lookup, integrity-checked disk reads, and
@@ -33,7 +33,7 @@ before use, subject to the probabilistic key identity and checksum-collision lim
 
 - `ObjectKey` is a `String` identifying immutable content. At the public lookup boundary, Feuer hashes its
   UTF-8 bytes once with seed-zero XXH3-128. Both tiers, access history, and recovery compare only that
-  128-bit identity; full keys are not retained or checked for collisions. Keys must not be adversarial.
+  128-bit identity; full keys are not stored or checked for collisions. Keys must not be adversarial.
 - Callers are responsible for making the key distinguish every object version that can have different bytes,
   including across process restarts and application upgrades.
 - A requested range is an exact, valid, non-empty half-open object byte range supplied to a lookup.
@@ -45,7 +45,7 @@ before use, subject to the probabilistic key identity and checksum-collision lim
 
 The first implementation accepts one contiguous `Bytes` per download. Memory capacity follows Foyer's soft
 per-shard contract: the configured value is divided among shards as an eviction target. A download larger than
-its shard's target empties that shard and remains cached, so retained payload may exceed the configured value.
+its shard's target empties that shard and remains cached, so cached payload bytes may exceed the configured value.
 
 ## 3. Public lookup and download boundary
 
@@ -84,7 +84,7 @@ If a cached range already contains the returned downloaded range, Feuer discards
 instead of retaining it or scheduling another disk write. The lookup can still return its requested bytes from
 the callback result.
 
-A partially overlapping download may be retained in full. Storing only the physical difference is deferred as
+A partially overlapping download may be cached in full. Storing only the physical difference is deferred as
 a coupled optimization with multi-range reads. The product contract neither requires nor prohibits
 satisfying a lookup by assembling several cached ranges.
 
@@ -152,10 +152,10 @@ For a controlled cache-engine comparison, callback download ranges and applicati
 constant. Prefetch and downloaded-range selection are evaluated in a separate end-to-end benchmark that
 charges each strategy for its actual source GETs and downloaded bytes.
 
-The retention objective is expected future source or lower-tier retrieval time avoided per retained footprint,
+The retention objective is expected future source or lower-tier retrieval time avoided per byte,
 not raw object hit rate. The shared policy values each exact access at the modeled fixed source-request
-cost plus its requested bytes, then compares recent retrieval value per retained payload byte. Disk scoring
-uses payload length only. Alignment, metadata and chunk overhead still consume physical capacity but do not
+cost plus its requested bytes, then divides recent retrieval value by the memory allocation charge or disk
+payload length. Alignment, metadata and chunk overhead still consume physical disk capacity but do not
 enter the score's denominator. Repeated access must
 increase retention value, stale evidence must eventually expire, and only the exact requested interval receives
 observed-access credit.
@@ -193,7 +193,7 @@ Feuer has one sharded in-memory cache sharing its allocation-byte target with an
 
 - The configured target is divided among shards. Admission evicts only from the selected shard.
 - A download larger than its shard target is admitted after the shard is emptied. One oversized entry can
-  therefore make a shard, and aggregate retained allocation charges, exceed the configured target.
+  therefore make a shard, and aggregate entry allocation charges, exceed the configured target.
 - No memory entry is protected merely because it is queued for disk writes.
 - Memory pressure does not wait for disk throughput.
 - Disk promotions charge their whole backing allocation capacity, even when the cached range is a small slice.
@@ -210,11 +210,11 @@ can replace a cached larger download with smaller cached payloads biased toward 
 unrequested cache memory.
 
 Compaction is pressure-driven. Policy samples at most 64 cached ranges and selects the one with the lowest recent
-retrieval value per retained byte, using independent exact-range access counts with a half-life of
+retrieval value per charged allocation byte, using independent exact-range access counts with a half-life of
 8,192 requests across all keys. Standalone history owns every distinct counter for its full
 in-process lifetime, independently of cache shards and eviction. Counter metadata has no capacity limit.
-For range trimming only, at most 64 exact events are retained per object by default
-(`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this) and expire after 262,144 later
+For range trimming only, history keeps at most 64 exact events per object by default
+(`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this). Events expire after 262,144 later
 requests across all keys by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this).
 Once its grace of 64 requests across all keys expires, that same
 victim is trimmed when its observed requests can release at least one quarter of its payload. Otherwise it is
@@ -227,14 +227,14 @@ configured number of entries (64 by default). Scoring work depends on the distin
 candidate covers.
 Copies made outside the metadata lock require the exact source range to still be cached at publication.
 Reinsertion of the same immutable range and changes to neighboring ranges do not invalidate a copy.
-Retained ranges already covered by another entry are skipped.
+Replacement ranges already covered by another entry are skipped.
 Access history is only policy input: newer accesses do not invalidate a trimming snapshot.
 
 ## 7. Best-effort disk writes
 
 Disk writes are best-effort and may be skipped when the pending-write queue is full.
 
-- A retained download may be scheduled for a disk write.
+- A download admitted to memory may be scheduled for a disk write.
 - The pending-write queue holds at most 256 entries. Queued and active payload bytes have no byte limit
   and are outside the memory-cache capacity.
 - Under queue pressure, the internal policy may skip or replace a disk-write candidate. This never fails
@@ -279,7 +279,7 @@ metadata chunk. Metadata chunks remain reserved while open.
 Disk pressure selects individual entries by sampled retrieval value per payload byte, not all owners of a
 shared chunk together. Removing an entry may free no whole chunk. If eviction exhausts its attempt or chunk
 budget before reclaiming enough contiguous capacity, the write is skipped rather than scattered across free chunks.
-Still-retained neighbors are not removed merely to empty the chunk.
+Neighboring entries are not removed merely to empty the chunk.
 Fragmentation may cause a write to be skipped despite sufficient total free space. Relocation and cleaning
 are not required for admission; free-space structures remain private mechanisms.
 
@@ -371,7 +371,7 @@ The MVP is complete when tests demonstrate that:
 - after that grace, pressure can trim the selected victim to its observed exact requests without separate
   promotion or prefetch-reuse state.
 - returned `Bytes` may safely outlive cache eviction.
-- shard pressure evicts toward each shard's assigned target, while an oversized download empties its shard and remains cached even when aggregate retained payload exceeds the configured target.
+- shard pressure evicts toward each shard's assigned target, while an oversized download empties its shard and remains cached even when aggregate cached payload bytes exceed the configured target.
 - pressure-driven in-memory compaction can release unrequested cached payload without changing results, and
   normal access and victim selection avoid full scans of all live shard entries.
 - the disk-write queue enforces its entry-count limit; queue pressure does not block or fail successful lookups.
@@ -394,7 +394,7 @@ The MVP is complete when tests demonstrate that:
 - unsupported metadata page tags are discarded without requiring migration or a global cache reset.
 - disk capacities of at least 1 TiB are representable with limits on memory used by free-space accounting and entry indexes.
 - the memory-only gate runs exact and expanded downloader controls with 1, 4, 16, and 64 shards through
-  32 GiB, compares actual retained payload, and reports policy throughput.
+  32 GiB, compares actual cached payload bytes, and reports policy throughput.
 - the controlled native-Foyer comparison and separate end-to-end prefetch benchmark produce the metrics
   defined in Section 5.
 

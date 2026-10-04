@@ -68,7 +68,7 @@ impl DiskMetrics {
         );
         let recovered = registry.register_gauge_vec(
             "feuer_disk_recovered_chunks".into(),
-            "Currently allocated chunks retained by recovery, excluding temporary scan reservations".into(),
+            "Currently allocated chunks restored by recovery, excluding temporary scan reservations".into(),
             &[],
         );
         let chunks = registry.register_gauge_vec(

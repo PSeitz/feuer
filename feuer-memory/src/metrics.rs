@@ -50,7 +50,7 @@ impl MemoryMetrics {
         );
         let used_bytes = registry.register_gauge_vec(
             "feuer_memory_used_bytes".into(),
-            "Allocation bytes retained by cached entries and idle buffers".into(),
+            "Cached allocation charges plus idle buffer capacity".into(),
             &[],
         );
         let capacity_bytes = registry.register_gauge_vec(
@@ -65,7 +65,7 @@ impl MemoryMetrics {
         );
         let entries = registry.register_gauge_vec(
             "feuer_memory_entries".into(),
-            "Downloaded range entries retained in Feuer's memory tier".into(),
+            "Object-range entries in Feuer's memory tier".into(),
             &[],
         );
         let operation_counter = |label: &'static str| operations.counter(&[label.into()]);

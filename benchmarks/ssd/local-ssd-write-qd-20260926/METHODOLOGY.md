@@ -52,7 +52,7 @@ results were archived locally and the dedicated SSD data directory was removed.
 - Same host: `m8g-32cpu-local-ssd`, EC2 `m8gd.8xlarge`, 32 Graviton4 vCPUs,
   128 GiB RAM. ext4 on local NVMe instance store `/dev/nvme1n1`, not EBS.
 - fio 3.36, `libaio`, O_DIRECT, one thread per stream. Engine and fio options
-  retained from the previous random-read benchmark so QD is the changed variable.
+  unchanged from the previous random-read benchmark so QD is the changed variable.
 - Fully initialized, separate **128 GiB read** and **64 GiB write** files.
   Initialization uses 1 MiB sequential direct writes with ending fsync.
 - One uniform random reader, QD32: **4, 16, 32, 64 KiB, 1 MiB** requests.
@@ -67,7 +67,7 @@ results were archived locally and the dedicated SSD data directory was removed.
 - Four longer repeats: 16 KiB reads at write QD0/1/4, 64 KiB reads at write QD4;
   **5 seconds warmup + 60 seconds measurement** each, after the main sweep.
 - Host load and device I/O were idle before launch; no concurrent benchmark
-  was observed. `iostat -dxm -y 5` and per-second fio bandwidth logs are retained.
+  was observed. `iostat -dxm -y 5` and per-second fio bandwidth logs are archived.
 - No polling, device tuning, cache dropping, per-write fsync, or raw-device writes.
   Kernel splitting of 1 MiB writes means fio QD is not physical device QD.
 

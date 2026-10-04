@@ -38,7 +38,7 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 
 /// Standalone request history shared by both cache tiers, independent of their shards and entries.
 /// Object keys select one of 64 independently locked history maps; the request clock remains global.
-/// Every distinct key and requested-range counter is retained for this object's lifetime, even after
+/// Every distinct key and requested-range counter lasts for this object's lifetime, even after
 /// cache eviction. Trimming retains at most `MAX_ACCESS_EVENTS_PER_KEY` events per object key.
 /// History is not persisted across restarts.
 pub struct ObjectAccessHistories {
@@ -80,7 +80,8 @@ impl ObjectAccessHistories {
     }
 
     /// Sums retrieval costs for contained requests, weighted by decayed access counts.
-    /// Eviction compares this cost per retained byte. Unknown keys have zero cost.
+    /// Eviction divides this cost by the memory allocation charge or disk payload length.
+    /// Unknown keys have zero cost.
     pub fn decayed_retrieval_cost(&self, key: &ObjectKeyHash, cached_range: ByteRange) -> f64 {
         let objects = self.shard(key).lock().unwrap();
         objects.get(key).map_or(0.0, |history| {
@@ -110,7 +111,7 @@ impl ObjectAccessHistories {
 pub static FIXED_RETRIEVAL_EQUIVALENT_BYTES: LazyLock<u64> = LazyLock::new(|| {
     read_env_number("FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES", 10_000_000, 0).unwrap_or_else(|error| panic!("{error}"))
 });
-/// Maximum exact access events retained for range trimming for one object key.
+/// Maximum exact access events in one object key's range-trimming history.
 /// Reads `FEUER_MAX_ACCESS_EVENTS_PER_KEY` once on first use, defaulting to 64.
 /// Accepts size suffixes as multipliers; panics unless the result is positive and fits `usize`.
 pub static MAX_ACCESS_EVENTS_PER_KEY: LazyLock<usize> = LazyLock::new(|| {
@@ -206,7 +207,8 @@ impl RangeAccessHistory {
     }
 
     /// Sums retrieval costs for contained requests, weighted by decayed access counts.
-    /// The caller compares this cost per retained byte when selecting an entry to evict.
+    /// The caller divides this cost by the memory allocation charge or disk payload length
+    /// to select an entry to evict.
     pub fn decayed_retrieval_cost(&self, cached_range: ByteRange, access_clock: u64) -> f64 {
         let fixed_retrieval_cost = *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64;
         if let Some(&count_index) = self.access_count_indices.get(&cached_range) {
