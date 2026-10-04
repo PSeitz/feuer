@@ -40,8 +40,10 @@ Replace the callback with your source download. It returns a starting offset and
 non-empty `Bytes` covering at least the requested range. Feuer returns exactly the
 requested bytes as one contiguous `Bytes`.
 
-Keys must identify immutable content. Distinct requested ranges for a key must not
-overlap, though exact repeats are allowed. Downloads may cover multiple requests.
+Keys must identify immutable content. Requested ranges for a key may overlap;
+exact repeats update the same access counter. Cached ranges receive retrieval credit
+for every recorded request range they fully contain, not for partial overlaps.
+Downloads may cover multiple requests.
 Feuer leaves request coalescing, scheduling, and retries to your downloader.
 
 At the public lookup boundary, Feuer hashes the key's UTF-8 bytes once with XXH3-128
@@ -123,7 +125,7 @@ are still checked before publishing bytes copied outside the memory shard lock.
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Trimming event age limit in requests across all keys. |
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Maximum trimming events per key. |
 | `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed request cost in equivalent bytes. `0` scores bytes only. |
-| `FEUER_IDLE_BUFFER_POOL_PERCENT` | `7` | Maximum idle buffers as a percentage of memory capacity, shared by all six buckets. Range 0–100; `0` disables idle retention. |
+| `FEUER_IDLE_BUFFER_POOL_PERCENT` | `7` | Maximum idle buffers as a percentage of memory capacity, shared by all buckets. Range 0–100; `0` disables idle retention. |
 
 Values accept integers or size suffixes such as `8KiB`, `1.5 GiB`, and `5GB`.
 Binary suffixes use powers of 1024 and decimal suffixes use powers of 1000.
@@ -137,12 +139,13 @@ process-wide, read once on first use, and panic on invalid values.
 ### Read buffers
 
 `feuer-memory` owns one aligned buffer pool per cache instance, shared by its storage
-readers. Allocation sizes are 32 KiB, 256 KiB, 4 MiB, 16 MiB, 32 MiB, and 64 MiB.
+readers. Allocation sizes are 32 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB,
+8 MiB, 16 MiB, 32 MiB, and 64 MiB.
 Aligned read lengths round up to the smallest fitting size; callers receive only the
 requested bytes. Larger allocations are exact-size and unpooled.
 
 Cached entries and idle buffers share the configured memory capacity. The idle pool is
-capped at 7% of that capacity by default. All six size buckets share this limit;
+capped at 7% of that capacity by default. All size buckets share this limit;
 there are no per-bucket caps or reservations. Cached entries can use the full capacity.
 Released buffers are freed if the idle pool or the shared memory budget has no room. Admission
 frees idle buffers before retaining new cached allocations; returning buffers never evicts

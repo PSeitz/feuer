@@ -3,7 +3,7 @@ use crate::test_metrics::{registry, value};
 
 #[test]
 fn size_boundaries_round_up_without_exposing_spare_capacity() {
-    let pool = BufferPool::new(100 * BUFFER_SIZES[5] as u64, MemoryMetrics::noop());
+    let pool = BufferPool::new(100 * *BUFFER_SIZES.last().unwrap() as u64, MemoryMetrics::noop());
     let mut lower_bound = 0;
     for (index, size) in BUFFER_SIZES.into_iter().enumerate() {
         for length in [lower_bound + 1, size] {
@@ -109,7 +109,7 @@ fn small_and_zero_budgets_do_not_retain_buffers() {
 
 #[test]
 fn oversized_and_write_scratch_allocations_are_not_pooled() {
-    let length = BUFFER_SIZES[5] + BUFFER_ALIGNMENT;
+    let length = BUFFER_SIZES.last().unwrap() + BUFFER_ALIGNMENT;
     let pool = BufferPool::new(12 * length as u64, MemoryMetrics::noop());
     let buffer = pool.allocate(length).unwrap();
     assert_eq!(buffer.capacity(), length);
@@ -212,7 +212,7 @@ fn bucket_gauges_follow_pressure_reclamation_and_shutdown_independently() {
     }
     for family in registry.gather() {
         if family.name() == "feuer_io_buffer_pool_bytes" {
-            assert_eq!(family.get_metric().len(), 12);
+            assert_eq!(family.get_metric().len(), 2 * BUFFER_SIZES.len());
         }
     }
 }

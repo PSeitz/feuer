@@ -15,10 +15,14 @@ use crate::MemoryMetrics;
 
 /// Alignment of buffers used for direct disk I/O.
 pub const BUFFER_ALIGNMENT: usize = 4096;
-pub(crate) const BUFFER_SIZES: [usize; 6] = [
+pub(crate) const BUFFER_SIZES: [usize; 10] = [
     32 * 1024,
     256 * 1024,
+    512 * 1024,
+    1024 * 1024,
+    2 * 1024 * 1024,
     4 * 1024 * 1024,
+    8 * 1024 * 1024,
     16 * 1024 * 1024,
     32 * 1024 * 1024,
     64 * 1024 * 1024,

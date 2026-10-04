@@ -198,8 +198,9 @@ Feuer has one sharded in-memory cache sharing its allocation-byte target with an
 - Memory pressure does not wait for disk throughput.
 - Disk promotions charge their whole backing allocation capacity, even when the cached range is a small slice.
   Callback downloads use payload length when allocation capacity is unknown. Charges are per cached entry.
-- One buffer pool per cache instance retains 32 KiB, 256 KiB, 4 MiB, 16 MiB, 32 MiB, and 64 MiB allocations.
-  The idle pool is capped at 7% of configured memory capacity by default, shared by all six buckets
+- One buffer pool per cache instance retains 32 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB,
+  8 MiB, 16 MiB, 32 MiB, and 64 MiB allocations.
+  The idle pool is capped at 7% of configured memory capacity by default, shared by all buckets
   without per-bucket caps or reservations. `FEUER_IDLE_BUFFER_POOL_PERCENT` configures this percentage (0–100; zero disables
   idle retention). Cached entries and idle buffers together share the full memory capacity. Admission frees
   idle buffers first; released buffers never evict entries. Allocations above 64 MiB are not pooled.
