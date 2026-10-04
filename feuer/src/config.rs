@@ -127,31 +127,22 @@ mod tests {
 
     #[test]
     fn requires_both_capacity_roles_to_be_explicit() {
-        let config = CacheConfig::new("cache", 1 << 40, 256 << 20).unwrap();
+        for (disk_capacity, memory_capacity) in [(1 << 40, 256 << 20), (4 * (1 << 40), 1)] {
+            let config = CacheConfig::new("cache", disk_capacity, memory_capacity).unwrap();
 
-        assert_eq!(config.directory(), Path::new("cache"));
-        assert_eq!(config.disk_capacity(), 1 << 40);
-        assert_eq!(config.memory_capacity(), 256 << 20);
-    }
-
-    #[test]
-    fn represents_tib_scale_capacity() {
-        let capacity = 4 * (1_u64 << 40);
-        let config = CacheConfig::new("cache", capacity, 1).unwrap();
-
-        assert_eq!(config.disk_capacity(), capacity);
-        assert_eq!(config.memory_capacity(), 1);
+            assert_eq!(config.directory(), Path::new("cache"));
+            assert_eq!(config.disk_capacity(), disk_capacity);
+            assert_eq!(config.memory_capacity(), memory_capacity);
+        }
     }
 
     #[test]
     fn rejects_zero_capacities() {
-        assert_eq!(
-            CacheConfig::new("cache", 0, 1).unwrap_err(),
-            CacheConfigError::InvalidDiskCapacity
-        );
-        assert_eq!(
-            CacheConfig::new("cache", 1, 0).unwrap_err(),
-            CacheConfigError::InvalidMemoryCapacity
-        );
+        for (disk_capacity, memory_capacity, error) in [
+            (0, 1, CacheConfigError::InvalidDiskCapacity),
+            (1, 0, CacheConfigError::InvalidMemoryCapacity),
+        ] {
+            assert_eq!(CacheConfig::new("cache", disk_capacity, memory_capacity), Err(error));
+        }
     }
 }

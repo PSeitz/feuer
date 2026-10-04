@@ -49,13 +49,9 @@ pub(super) fn plan_range_trim(
         source_range,
         replacement_ranges: merged_ranges,
     };
-    if plan.replacement_ranges.is_empty()
-        || u128::from(plan.reclaimed_bytes()) * 100 < u128::from(source_range.len()) * MIN_RANGE_TRIM_SAVINGS_PERCENT
-    {
-        return None;
-    }
-
-    Some(plan)
+    (!plan.replacement_ranges.is_empty()
+        && u128::from(plan.reclaimed_bytes()) * 100 >= u128::from(source_range.len()) * MIN_RANGE_TRIM_SAVINGS_PERCENT)
+        .then_some(plan)
 }
 
 #[cfg(test)]
@@ -67,10 +63,11 @@ mod tests {
     }
 
     #[test]
-    fn projects_and_groups_only_exact_requests_covered_by_the_source() {
+    fn merges_duplicate_overlapping_and_adjacent_requests_covered_by_the_source() {
         let plan = plan_range_trim(
             range(10, 30),
             [
+                range(14, 16),
                 range(12, 14),
                 range(12, 14),
                 range(18, 22),
@@ -82,15 +79,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(plan.source_range(), range(10, 30));
-        assert_eq!(plan.replacement_ranges(), &[range(12, 14), range(18, 24)]);
-        assert_eq!(plan.reclaimed_bytes(), 12);
-    }
-
-    #[test]
-    fn merges_adjacent_requests_so_each_original_request_stays_coverable() {
-        let plan = plan_range_trim(range(0, 16), [range(2, 5), range(5, 9)]).unwrap();
-
-        assert_eq!(plan.replacement_ranges(), &[range(2, 9)]);
+        assert_eq!(plan.replacement_ranges(), &[range(12, 16), range(18, 24)]);
+        assert_eq!(plan.reclaimed_bytes(), 10);
     }
 
     #[test]

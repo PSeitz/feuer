@@ -108,9 +108,7 @@ impl Drop for IoQueueHandle {
         self.sender.take();
         wake_queue(&self.wake_fd);
         // The queue drains submitted I/O before releasing buffers and the directory lock.
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        let _ = self.thread.take().map(JoinHandle::join);
     }
 }
 
@@ -171,11 +169,11 @@ impl WriteQueue {
         })
     }
 
-    /// Writes parts at aligned offsets, starting at zero; gaps become zero.
+    /// Writes bytes with zero padding to fill `length`.
     /// Aligned payload slices are used directly; only other bytes need a copy.
-    pub(crate) async fn write_parts(&self, offset: u64, length: usize, parts: &[(usize, Bytes)]) -> io::Result<()> {
+    pub(crate) async fn write_padded(&self, offset: u64, length: usize, bytes: &Bytes) -> io::Result<()> {
         let permit = self.handle.reserve_request().await?;
-        let buffers = IoBuffers::from_write_parts(length, parts)?;
+        let buffers = IoBuffers::from_write_bytes(length, bytes)?;
         self.handle.submit_and_wait(offset, buffers, 0..length, permit).await?;
         Ok(())
     }
@@ -195,29 +193,24 @@ enum IoBuffers {
 }
 
 impl IoBuffers {
-    /// Builds buffers from write parts, retaining aligned slices and copying the rest with zero padding.
+    /// Retains the aligned prefix and copies the rest with zero padding.
     /// This prepares memory only; it does not issue a disk write.
-    fn from_write_parts(length: usize, parts: &[(usize, Bytes)]) -> io::Result<Self> {
-        assert_eq!(parts.first().map(|part| part.0), Some(0));
+    fn from_write_bytes(length: usize, bytes: &Bytes) -> io::Result<Self> {
+        assert!(bytes.len() <= length && length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         let mut buffers = Vec::new();
-        for (index, (offset, bytes)) in parts.iter().enumerate() {
-            let end = parts.get(index + 1).map_or(length, |part| part.0);
-            assert!(*offset <= end && end <= length && end.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
-            assert!(bytes.len() <= end - offset);
-            let aligned_length = if (bytes.as_ptr() as usize).is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
-                bytes.len() / DIRECT_IO_ALIGNMENT_BYTES * DIRECT_IO_ALIGNMENT_BYTES
-            } else {
-                0
-            };
-            if aligned_length > 0 {
-                buffers.push(bytes.slice(..aligned_length));
-            }
-            let copy_length = end - offset - aligned_length;
-            if copy_length > 0 {
-                let mut buffer = AlignedBuffer::allocate_zeroed(copy_length)?;
-                buffer.as_mut_slice()[..bytes.len() - aligned_length].copy_from_slice(&bytes[aligned_length..]);
-                buffers.push(buffer.into_bytes());
-            }
+        let aligned_length = if (bytes.as_ptr() as usize).is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
+            bytes.len() / DIRECT_IO_ALIGNMENT_BYTES * DIRECT_IO_ALIGNMENT_BYTES
+        } else {
+            0
+        };
+        if aligned_length > 0 {
+            buffers.push(bytes.slice(..aligned_length));
+        }
+        let copy_length = length - aligned_length;
+        if copy_length > 0 {
+            let mut buffer = AlignedBuffer::allocate_zeroed(copy_length)?;
+            buffer.as_mut_slice()[..bytes.len() - aligned_length].copy_from_slice(&bytes[aligned_length..]);
+            buffers.push(buffer.into_bytes());
         }
         Ok(Self::Write {
             vectors: Vec::with_capacity(buffers.len()),
@@ -247,8 +240,8 @@ impl IoBuffers {
                     });
                     bytes_to_skip = 0;
                 }
-                // Each slice covers at least 4 KiB: at most 256 descriptors per
-                // 1-MiB request, below Linux's IOV_MAX. The request owns them all.
+                // At most two descriptors: an aligned prefix and a padded tail.
+                // The request owns both, and their count is below Linux's IOV_MAX.
                 opcode::Writev::new(fd, vectors.as_ptr(), vectors.len() as u32)
                     .offset(offset)
                     .build()
@@ -271,14 +264,12 @@ unsafe impl Send for IoBuffers {}
 
 /// One I/O request, owning its buffers through completion.
 struct IoRequest {
-    // Aligned physical start, used for kernel offsets.
+    // Aligned physical start of the remaining I/O.
     offset: u64,
     // Aligned memory for disk reads/writes; kept alive until I/O completes.
     buffers: IoBuffers,
-    // Byte range within the I/O buffers to read into or write from.
+    // Remaining byte range within the I/O buffers to read into or write from.
     buffer_range: Range<usize>,
-    // Bytes completed, allowing aligned short-I/O continuations.
-    completed_bytes: usize,
     // Caller result channel; consumed on finish/failure, also detects cancellation.
     reply: oneshot::Sender<io::Result<IoBuffers>>,
 }
@@ -303,22 +294,17 @@ impl IoRequest {
             offset,
             buffers,
             buffer_range,
-            completed_bytes: 0,
             reply,
         }
     }
 
     fn submission_entry(&mut self, fd: i32, request_index: usize) -> squeue::Entry {
         self.buffers
-            .submission_entry(
-                types::Fd(fd),
-                self.offset + self.completed_bytes as u64,
-                self.buffer_range.start + self.completed_bytes..self.buffer_range.end,
-            )
+            .submission_entry(types::Fd(fd), self.offset, self.buffer_range.clone())
             .user_data(request_index as u64)
     }
 
-    /// Applies a kernel completion result to the completed-byte count.
+    /// Advances the remaining disk offset and buffer range after a kernel completion.
     /// Returns true when the request needs a retry or its aligned remainder submitted.
     fn apply_completion_result(&mut self, result: i32) -> io::Result<bool> {
         if result == -libc::EINTR {
@@ -328,16 +314,13 @@ impl IoRequest {
             return Err(io::Error::from_raw_os_error(-result));
         }
         let completion_bytes = result as usize;
-        if completion_bytes == 0 || completion_bytes > self.buffer_range.len() - self.completed_bytes {
+        // An unaligned completion leaves a remainder that cannot be resubmitted with O_DIRECT.
+        if completion_bytes == 0 || !completion_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
             return Err(self.incomplete_io_error());
         }
-        self.completed_bytes += completion_bytes;
-        let is_incomplete = self.completed_bytes != self.buffer_range.len();
-        // An unaligned remainder cannot be resubmitted with O_DIRECT.
-        if is_incomplete && !self.completed_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
-            return Err(self.incomplete_io_error());
-        }
-        Ok(is_incomplete)
+        self.offset += completion_bytes as u64;
+        self.buffer_range.start += completion_bytes;
+        Ok(!self.buffer_range.is_empty())
     }
 
     fn incomplete_io_error(&self) -> io::Error {

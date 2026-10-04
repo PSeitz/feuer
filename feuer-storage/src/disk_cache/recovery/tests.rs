@@ -437,10 +437,7 @@ async fn stale_metadata_after_payload_reuse_recovers_as_a_checksum_miss() {
     cache
         .disk
         .file
-        .write_parts(
-            reused.disk_byte_range(),
-            &[(0, Bytes::from(vec![99; CHUNK_BYTES as usize]))],
-        )
+        .write_padded(reused.disk_byte_range(), &Bytes::from(vec![99; CHUNK_BYTES as usize]))
         .await
         .unwrap();
     drop(reused);

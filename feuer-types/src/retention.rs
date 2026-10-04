@@ -149,18 +149,17 @@ impl DecayedAccessCount {
         let elapsed_accesses = access_clock.saturating_sub(self.observed_at_access);
         let half_lives_elapsed = elapsed_accesses as f64 / *ACCESS_COUNT_HALF_LIFE as f64;
 
+        if half_lives_elapsed >= 126.0 {
+            return 0.0; // Discard negligible counts rather than constructing subnormal floats.
+        }
+
         // Approximate 2^(-age) through IEEE-754 bits: the exponent gives powers of two,
         // and the mantissa interpolates between them. Each decay is up to ~6.15% high;
         // repeated updates can compound that error.
-        let decay_factor = if half_lives_elapsed >= 126.0 {
-            0.0 // Discard negligible counts rather than constructing subnormal floats.
-        } else {
-            let exponent_bias = 127.0;
-            let mantissa_scale = (1u32 << 23) as f64;
-            let float_bits = ((exponent_bias - half_lives_elapsed) * mantissa_scale) as u32;
-            f32::from_bits(float_bits) as f64
-        };
-        self.count * decay_factor
+        let exponent_bias = 127.0;
+        let mantissa_scale = (1u32 << 23) as f64;
+        let float_bits = ((exponent_bias - half_lives_elapsed) * mantissa_scale) as u32;
+        self.count * f32::from_bits(float_bits) as f64
     }
 }
 
@@ -199,7 +198,7 @@ impl RangeAccessHistory {
     pub fn recent_requested_ranges(&self, access_clock: u64) -> impl Iterator<Item = ByteRange> + '_ {
         self.events
             .iter()
-            .filter(move |event| is_within_range_trim_age_limit(**event, access_clock))
+            .skip_while(move |event| access_clock.saturating_sub(event.observed_at_access) > *MAX_ACCESS_AGE_ACCESSES)
             .map(|event| event.range)
     }
 
@@ -228,12 +227,6 @@ impl RangeAccessHistory {
     }
 }
 
-/// Checks whether the access is within the configured range-trimming age limit,
-/// measured in requests across all keys rather than elapsed time.
-fn is_within_range_trim_age_limit(event: RangeAccess, access_clock: u64) -> bool {
-    access_clock.saturating_sub(event.observed_at_access) <= *MAX_ACCESS_AGE_ACCESSES
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,9 +241,14 @@ mod tests {
         command
     }
 
+    // Fresh processes isolate environment settings and LazyLock initialization.
+    fn assert_command_succeeds(command: &mut std::process::Command) {
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+
     #[test]
     fn fixed_retrieval_cost_environment_override() {
-        // Separate processes exercise environment loading without mutating this process's environment.
         if let Ok(value) = std::env::var("FEUER_TEST_FIXED_RETRIEVAL_CHILD") {
             let fixed_cost = value.parse::<u64>().unwrap();
             assert_eq!(*FIXED_RETRIEVAL_EQUIVALENT_BYTES, fixed_cost);
@@ -265,45 +263,47 @@ mod tests {
             return;
         }
         for fixed_cost in [0, 1_000_000, 10_000_000, u64::MAX] {
-            let output = environment_test_command("fixed_retrieval_cost_environment_override")
-                .env("FEUER_TEST_FIXED_RETRIEVAL_CHILD", fixed_cost.to_string())
-                .env("FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES", fixed_cost.to_string())
-                .env("FEUER_MAX_ACCESS_EVENTS_PER_KEY", "64")
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{output:?}");
+            assert_command_succeeds(
+                environment_test_command("fixed_retrieval_cost_environment_override")
+                    .env("FEUER_TEST_FIXED_RETRIEVAL_CHILD", fixed_cost.to_string())
+                    .env("FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES", fixed_cost.to_string())
+                    .env("FEUER_MAX_ACCESS_EVENTS_PER_KEY", "64"),
+            );
         }
     }
 
     #[test]
     fn access_event_limit_environment_override() {
-        // Separate processes avoid mutating the environment or reusing an initialized LazyLock.
         if let Ok(value) = std::env::var("FEUER_TEST_ACCESS_EVENTS_CHILD") {
             let limit = value.parse::<usize>().unwrap();
             assert_eq!(*MAX_ACCESS_EVENTS_PER_KEY, limit);
+            let requested_ranges: Vec<_> = (0..limit)
+                .map(|index| range(index as u64, index as u64 + 1))
+                .chain(std::iter::repeat_n(range(10, 20), 3))
+                .collect();
             let mut history = RangeAccessHistory::default();
-            for index in 0..limit + 3 {
-                history.record(range(index as u64, index as u64 + 1), 0);
+            for &requested in &requested_ranges {
+                history.record(requested, 0);
             }
             assert_eq!(history.len(), limit);
-            assert_eq!(history.ranges()[0], range(3, 4));
-            assert_eq!(history.ranges()[limit - 1], range(limit as u64 + 2, limit as u64 + 3));
-            assert!(history.decayed_retrieval_cost(range(0, 1), 0) > 0.0);
+            assert_eq!(history.ranges(), requested_ranges[3..]);
+            assert_eq!(
+                history.decayed_retrieval_cost(range(0, 1), 0),
+                *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 1.0
+            );
             return;
         }
-        for limit in [1, 256] {
-            let output = environment_test_command("access_event_limit_environment_override")
-                .env("FEUER_TEST_ACCESS_EVENTS_CHILD", limit.to_string())
-                .env("FEUER_MAX_ACCESS_EVENTS_PER_KEY", limit.to_string())
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{output:?}");
+        for limit in [1, 64, 256] {
+            assert_command_succeeds(
+                environment_test_command("access_event_limit_environment_override")
+                    .env("FEUER_TEST_ACCESS_EVENTS_CHILD", limit.to_string())
+                    .env("FEUER_MAX_ACCESS_EVENTS_PER_KEY", limit.to_string()),
+            );
         }
     }
 
     #[test]
     fn access_count_half_life_environment_override() {
-        // Separate processes avoid mutating the environment or reusing an initialized LazyLock.
         if let Ok(value) = std::env::var("FEUER_TEST_HALF_LIFE_CHILD") {
             let half_life = value.parse::<u64>().unwrap();
             assert_eq!(*ACCESS_COUNT_HALF_LIFE, half_life);
@@ -327,14 +327,12 @@ mod tests {
             if let Some(setting) = setting {
                 command.env("FEUER_ACCESS_COUNT_HALF_LIFE", setting);
             }
-            let output = command.output().unwrap();
-            assert!(output.status.success(), "{output:?}");
+            assert_command_succeeds(&mut command);
         }
     }
 
     #[test]
     fn access_age_environment_override() {
-        // A fresh process tests environment loading without mutating this test process's environment.
         if std::env::var_os("FEUER_TEST_ACCESS_AGE_CHILD").is_some() {
             assert_eq!(*MAX_ACCESS_AGE_ACCESSES, 65_536);
             let mut history = RangeAccessHistory::default();
@@ -349,12 +347,11 @@ mod tests {
             );
             return;
         }
-        let output = environment_test_command("access_age_environment_override")
-            .env("FEUER_TEST_ACCESS_AGE_CHILD", "1")
-            .env("FEUER_MAX_ACCESS_AGE_ACCESSES", "64KiB")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{output:?}");
+        assert_command_succeeds(
+            environment_test_command("access_age_environment_override")
+                .env("FEUER_TEST_ACCESS_AGE_CHILD", "1")
+                .env("FEUER_MAX_ACCESS_AGE_ACCESSES", "64KiB"),
+        );
     }
 
     #[test]
@@ -477,26 +474,6 @@ mod tests {
     }
 
     #[test]
-    fn keeps_newest_events_without_merging_repeated_ranges() {
-        let repeated = range(10, 20);
-        let mut history = RangeAccessHistory::default();
-        let limit = *MAX_ACCESS_EVENTS_PER_KEY;
-        for index in 0..limit + 3 {
-            let requested = if index >= limit {
-                repeated
-            } else {
-                range(index as u64, index as u64 + 1)
-            };
-            history.record(requested, 0);
-        }
-
-        assert_eq!(history.len(), limit);
-        let mut expected: Vec<_> = (3..limit).map(|index| range(index as u64, index as u64 + 1)).collect();
-        expected.extend(std::iter::repeat_n(repeated, limit.min(3)));
-        assert_eq!(history.ranges(), expected);
-    }
-
-    #[test]
     fn retrieval_value_decays_and_new_accesses_add_one() {
         let requested = range(2, 4);
         let cached_range = range(0, 8);
@@ -578,20 +555,6 @@ mod tests {
     }
 
     #[test]
-    fn other_ranges_do_not_displace_decayed_counts() {
-        let mut history = RangeAccessHistory::default();
-        history.record(range(0, 1), 0);
-        for _ in 0..*MAX_ACCESS_EVENTS_PER_KEY {
-            history.record(range(2, 3), 0);
-        }
-        assert!(!history.ranges().contains(&range(0, 1)));
-        assert_eq!(
-            history.decayed_retrieval_cost(range(0, 1), 0),
-            *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 1.0
-        );
-    }
-
-    #[test]
     fn decayed_count_never_increases_and_relative_error_is_at_most_6_15_percent() {
         let accesses = DecayedAccessCount {
             count: 1.0,
@@ -633,31 +596,23 @@ mod tests {
 
     #[test]
     fn credits_only_cached_ranges_covering_the_exact_request() {
+        let fixed_cost = *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64;
         let mut history = RangeAccessHistory::default();
         history.record(range(3, 7), 0);
-
-        assert_eq!(
-            history.decayed_retrieval_cost(range(0, 8), 0),
-            *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 4.0
-        );
-        assert_eq!(history.decayed_retrieval_cost(range(3, 5), 0), 0.0);
-        assert_eq!(history.decayed_retrieval_cost(range(5, 8), 0), 0.0);
+        for (cached_range, expected) in [(range(0, 8), fixed_cost + 4.0), (range(3, 5), 0.0), (range(5, 8), 0.0)] {
+            assert_eq!(history.decayed_retrieval_cost(cached_range, 0), expected);
+        }
 
         let mut history = RangeAccessHistory::default();
         history.record(range(3, 5), 0);
         history.record(range(5, 8), 0);
-        assert_eq!(
-            history.decayed_retrieval_cost(range(3, 5), 0),
-            *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 2.0
-        );
-        assert_eq!(
-            history.decayed_retrieval_cost(range(0, 8), 0),
-            (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 2.0) + (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 3.0)
-        );
         history.record(range(u64::MAX - 1, u64::MAX), 0);
-        assert_eq!(
-            history.decayed_retrieval_cost(range(u64::MAX - 1, u64::MAX), 0),
-            *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 1.0
-        );
+        for (cached_range, expected) in [
+            (range(3, 5), fixed_cost + 2.0),
+            (range(0, 8), (fixed_cost + 2.0) + (fixed_cost + 3.0)),
+            (range(u64::MAX - 1, u64::MAX), fixed_cost + 1.0),
+        ] {
+            assert_eq!(history.decayed_retrieval_cost(cached_range, 0), expected);
+        }
     }
 }

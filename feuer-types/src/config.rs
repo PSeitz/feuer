@@ -15,15 +15,14 @@ pub fn parse_config_number<T: TryFrom<u64>>(value: &OsStr, minimum: u64) -> Opti
 /// Reads a numeric environment setting, using the default only when it is unset.
 /// Invalid settings return an error naming the variable and its required range.
 pub fn read_env_number<T: TryFrom<u64>>(name: &str, default: T, minimum: u64) -> Result<T, String> {
-    match std::env::var_os(name) {
-        None => Ok(default),
-        Some(value) => parse_config_number(&value, minimum).ok_or_else(|| {
+    std::env::var_os(name).map_or(Ok(default), |value| {
+        parse_config_number(&value, minimum).ok_or_else(|| {
             format!(
                 "{name} must be a number >= {minimum} fitting {} (e.g. 8192 or 8KiB)",
                 std::any::type_name::<T>()
             )
-        }),
-    }
+        })
+    })
 }
 
 #[cfg(test)]
@@ -80,12 +79,10 @@ mod tests {
         const CHILD: &str = "FEUER_TEST_CONFIG_NUMBER_CHILD";
         if let Ok(expected) = std::env::var(CHILD) {
             let result = read_env_number::<usize>(NAME, 64, 1);
-            if expected == "error" {
-                let error = result.unwrap_err();
+            assert_eq!(result.as_ref().ok().copied(), expected.parse::<usize>().ok());
+            if let Err(error) = result {
                 assert!(error.contains(NAME));
                 assert!(error.contains(">= 1 fitting usize"));
-            } else {
-                assert_eq!(result.unwrap(), expected.parse::<usize>().unwrap());
             }
             return;
         }

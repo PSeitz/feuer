@@ -189,10 +189,10 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
     let read_queue = ReadQueue::new(file.clone(), lock.clone(), pool).unwrap();
     let write_queue = WriteQueue::new(file.clone(), lock.clone()).unwrap();
     write_queue
-        .write_parts(
+        .write_padded(
             0,
             DIRECT_IO_ALIGNMENT_BYTES,
-            &[(0, Bytes::from(vec![0x99; DIRECT_IO_ALIGNMENT_BYTES]))],
+            &Bytes::from(vec![0x99; DIRECT_IO_ALIGNMENT_BYTES]),
         )
         .await
         .unwrap();
@@ -241,7 +241,7 @@ fn canceled_submitted_write_retains_buffers_but_not_disk_space() {
     buffer.as_mut_slice().fill(0x99);
     let address = buffer.as_ref().as_ptr();
     let (mut write, reply) = request(IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
-    write.buffers = IoBuffers::from_write_parts(DIRECT_IO_ALIGNMENT_BYTES, &[(0, buffer.into_bytes())]).unwrap();
+    write.buffers = IoBuffers::from_write_bytes(DIRECT_IO_ALIGNMENT_BYTES, &buffer.into_bytes()).unwrap();
     sender.try_send(write).unwrap();
     drop(sender);
     queue.receive_requests();
@@ -411,11 +411,11 @@ async fn reads_into_consecutive_slices_without_reallocating() {
     let write = WriteQueue::new(file.clone(), lock.clone()).unwrap();
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     write
-        .write_parts(0, page, &[(0, Bytes::from(vec![0x99; page]))])
+        .write_padded(0, page, &Bytes::from(vec![0x99; page]))
         .await
         .unwrap();
     write
-        .write_parts((2 * page) as u64, page, &[(0, Bytes::from(vec![0x77; page]))])
+        .write_padded((2 * page) as u64, page, &Bytes::from(vec![0x77; page]))
         .await
         .unwrap();
     let mut buffer = read.allocate_buffer(3 * page).unwrap();
@@ -467,27 +467,32 @@ fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
     let mut source = pool.allocate(2 * page).unwrap();
     source.as_mut_slice().fill(0x77);
     let source = source.into_bytes();
-    for length in [17, page] {
+    for (start, borrowed_length) in [(0, page), (1, 0)] {
+        let length = page + 17;
         let mut dirty = pool.allocate(2 * page).unwrap();
         dirty.as_mut_slice().fill(0xff);
         drop(dirty);
-        let parts = [(0, source.slice(1..length + 1)), (page, source.slice(..page + 17))];
-        let mut buffers = IoBuffers::from_write_parts(4 * page, &parts).unwrap();
+        let payload = source.slice(start..start + length);
+        let mut buffers = IoBuffers::from_write_bytes(2 * page, &payload).unwrap();
         assert_eq!(pool.idle_bytes(), 32 * 1024);
-        buffers.submission_entry(types::Fd(-1), page as u64, page..4 * page);
+        buffers.submission_entry(types::Fd(-1), page as u64, page..2 * page);
         let IoBuffers::Write { bytes, vectors, .. } = buffers else {
             unreachable!()
         };
-        assert_eq!(bytes.len(), 3);
-        assert_ne!(bytes[0].as_ptr(), parts[0].1.as_ptr());
-        assert_eq!(&bytes[0][..length], parts[0].1);
-        assert!(bytes[0][length..].iter().all(|&byte| byte == 0));
-        assert_eq!(bytes[1].as_ptr(), source.as_ptr());
-        assert_eq!(bytes[1].len(), page);
-        assert_eq!(&bytes[2][..17], &source[..17]);
-        assert!(bytes[2][17..].iter().all(|&byte| byte == 0));
-        assert_eq!(vectors.len(), 2);
-        assert_eq!(vectors[0].iov_base.cast_const().cast::<u8>(), source.as_ptr());
+        assert_eq!(bytes[0].as_ptr() == payload.as_ptr(), borrowed_length > 0);
+        if borrowed_length > 0 {
+            assert_eq!(bytes[0].len(), borrowed_length);
+        }
+        let mut expected = vec![0; 2 * page];
+        expected[..length].copy_from_slice(&payload);
+        assert_eq!(bytes.concat(), expected);
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].iov_len, page);
+        let last = bytes.last().unwrap();
+        assert_eq!(
+            vectors[0].iov_base.cast_const().cast::<u8>(),
+            last[last.len() - page..].as_ptr()
+        );
         drop(bytes);
         assert_eq!(pool.idle_bytes(), 32 * 1024);
     }
@@ -495,18 +500,23 @@ fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
 
 #[test]
 fn completion_state_handles_short_io_and_errors() {
-    let (mut read, _reply) = request(IoOperation::Read, 0, 2 * DIRECT_IO_ALIGNMENT_BYTES);
+    let page = DIRECT_IO_ALIGNMENT_BYTES;
+    let (mut read, _reply) = request(IoOperation::Read, page as u64, 3 * page);
+    read.buffer_range.start = page;
     assert!(read.apply_completion_result(-libc::EINTR).unwrap());
-    assert_eq!(read.completed_bytes, 0);
-    assert!(read.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
-    assert!(!read.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+    assert_eq!((read.offset, read.buffer_range.start), (page as u64, page));
+    assert!(read.apply_completion_result(page as i32).unwrap());
+    assert_eq!(read.offset, 2 * page as u64);
+    assert_eq!(read.buffer_range, 2 * page..3 * page);
+    assert!(!read.apply_completion_result(page as i32).unwrap());
+    assert!(read.buffer_range.is_empty());
 
-    let (mut read, _reply) = request(IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    let (mut read, _reply) = request(IoOperation::Read, 0, page);
     assert_eq!(
         read.apply_completion_result(17).unwrap_err().kind(),
         io::ErrorKind::UnexpectedEof
     );
-    let (mut write, _reply) = request(IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    let (mut write, _reply) = request(IoOperation::Write, 0, page);
     assert_eq!(
         write.apply_completion_result(0).unwrap_err().kind(),
         io::ErrorKind::WriteZero
@@ -516,10 +526,10 @@ fn completion_state_handles_short_io_and_errors() {
         Some(libc::ENOSPC)
     );
 
-    let (mut write, _reply) = request(IoOperation::Write, 0, 2 * DIRECT_IO_ALIGNMENT_BYTES);
-    assert!(write.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
-    assert_eq!(write.completed_bytes, DIRECT_IO_ALIGNMENT_BYTES);
-    assert!(!write.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap());
+    let (mut write, _reply) = request(IoOperation::Write, 0, 2 * page);
+    assert!(write.apply_completion_result(page as i32).unwrap());
+    assert_eq!((write.offset, write.buffer_range.start), (page as u64, page));
+    assert!(!write.apply_completion_result(page as i32).unwrap());
 }
 
 #[test]

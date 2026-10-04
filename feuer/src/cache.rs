@@ -166,12 +166,7 @@ impl TieredMemoryDiskCache {
         #[cfg(target_os = "linux")]
         if self.state.disk.covers_range(&object_key, downloaded_range) {
             self.state.disk_write_queue.record_already_covered();
-            metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
-            return Ok(requested_bytes);
-        }
-        let inserted = self.state.memory.insert(object_key, download.clone());
-        #[cfg(target_os = "linux")]
-        if inserted {
+        } else if self.state.memory.insert(object_key, download.clone()) {
             self.state
                 .disk_write_queue
                 .enqueue_if_space_available(object_key, download);
@@ -179,7 +174,7 @@ impl TieredMemoryDiskCache {
             self.state.disk_write_queue.record_already_in_memory();
         }
         #[cfg(not(target_os = "linux"))]
-        let _ = inserted;
+        self.state.memory.insert(object_key, download);
 
         metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
         Ok(requested_bytes)
@@ -572,30 +567,22 @@ mod tests {
         let (_directory, cache) = cache(32).await;
         let key = String::from("object");
         let payload = Bytes::from_static(b"abcdefghij");
-        let callback_count = Arc::new(AtomicU64::new(0));
-
-        let count = callback_count.clone();
-        let callback_payload = payload.clone();
         let result = cache
-            .get_or_fetch(key.clone(), range(13, 17), move || async move {
-                count.fetch_add(1, Ordering::Relaxed);
-                Ok::<_, Infallible>(Download::new(10, callback_payload).unwrap())
+            .get_or_fetch(key.clone(), range(13, 17), || async {
+                Ok::<_, Infallible>(Download::new(10, payload.clone()).unwrap())
             })
             .await
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"defg"));
         assert_eq!(result.as_ptr(), payload.slice(3..).as_ptr());
 
-        let count = callback_count.clone();
         let result = cache
-            .get_or_fetch(key, range(11, 19), move || async move {
-                count.fetch_add(1, Ordering::Relaxed);
-                Ok::<_, Infallible>(Download::new(11, Bytes::from_static(b"12345678")).unwrap())
+            .get_or_fetch(key, range(11, 19), || async {
+                Err::<Download, _>("memory hit must not fetch")
             })
             .await
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"bcdefghi"));
-        assert_eq!(callback_count.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -678,17 +665,13 @@ mod tests {
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"cd"));
 
-        let unexpected_callback_count = Arc::new(AtomicU64::new(0));
-        let count = unexpected_callback_count.clone();
         let result = cache
-            .get_or_fetch(key, range(0, 5), move || async move {
-                count.fetch_add(1, Ordering::Relaxed);
-                Ok::<_, Infallible>(Download::new(0, Bytes::from_static(b"XXXXX")).unwrap())
+            .get_or_fetch(key, range(0, 5), || async {
+                Err::<Download, _>("memory hit must not fetch")
             })
             .await
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"abcde"));
-        assert_eq!(unexpected_callback_count.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -725,16 +708,12 @@ mod tests {
         release_callback.notify_one();
 
         assert_eq!(pending.await.unwrap(), Bytes::from_static(b"XX"));
-        let unexpected_callback_count = Arc::new(AtomicU64::new(0));
-        let count = unexpected_callback_count.clone();
         let cached = cache
-            .get_or_fetch(key, range(2, 8), move || async move {
-                count.fetch_add(1, Ordering::Relaxed);
-                Ok::<_, Infallible>(Download::new(2, Bytes::from_static(b"123456")).unwrap())
+            .get_or_fetch(key, range(2, 8), || async {
+                Err::<Download, _>("memory hit must not fetch")
             })
             .await
             .unwrap();
         assert_eq!(cached, Bytes::from_static(b"cdefgh"));
-        assert_eq!(unexpected_callback_count.load(Ordering::Relaxed), 0);
     }
 }

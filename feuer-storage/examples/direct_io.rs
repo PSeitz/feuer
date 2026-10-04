@@ -2,10 +2,7 @@
 //! Run: cargo run -p feuer-storage --release --example direct_io -- /mnt/local-ssd [seconds] [write_callers]
 //! Uses and removes a fresh 8-GiB temporary directory under the supplied mount.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use feuer_storage::{DataFile, IoMetrics};
@@ -26,12 +23,13 @@ struct IoMeasurements {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let root = args.next().expect("provide a directory on the target filesystem");
-    let seconds: u64 = args.next().unwrap_or_else(|| "5".into()).parse()?;
+    let seconds: u64 = args.next().map(|value| value.parse()).transpose()?.unwrap_or(5);
     assert!(seconds > 0);
-    let writer_counts: Vec<usize> = match args.next() {
-        Some(value) => vec![value.parse()?],
-        None => vec![0, 4],
-    };
+    let writer_counts: Vec<usize> = args
+        .next()
+        .map(|value| value.parse().map(|count| vec![count]))
+        .transpose()?
+        .unwrap_or_else(|| vec![0, 4]);
     assert!(
         writer_counts
             .iter()
@@ -70,7 +68,7 @@ async fn benchmark_concurrent_io(file: &DataFile, read_size: usize, readers: usi
     let mut tasks = Vec::new();
     // Random reads and sequential 1-MiB writes use disjoint regions. Write lanes
     // are disjoint too, satisfying DataFile's caller-owned conflict prevention.
-    let payload = Arc::new(Bytes::from(vec![0x5a; MIB]));
+    let payload = Bytes::from(vec![0x5a; MIB]);
     for caller_index in 0..readers + writers {
         let file = file.clone();
         let payload = payload.clone();

@@ -5,12 +5,11 @@ use std::task::Poll;
 
 #[tokio::test]
 async fn records_each_started_request_before_any_result() {
-    let directory = tempfile::tempdir().unwrap();
     let (_, registry) = crate::test_metrics::registry();
     let history = Arc::new(ObjectAccessHistories::new());
     let cache = TieredMemoryDiskCache {
         state: Arc::new(CacheState {
-            config: CacheConfig::new(directory.path(), 4 << 20, 1024).unwrap(),
+            config: CacheConfig::new("cache", 4 << 20, 1024).unwrap(),
             memory: Arc::new(MemoryCache::with_access_histories(
                 1024,
                 feuer_memory::MemoryMetrics::new(&registry),

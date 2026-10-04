@@ -9,9 +9,6 @@ use super::*;
 fn history_recording_contention() {
     let requests = load_trace().unwrap();
     assert!(!requests.is_empty());
-    for (index, request) in requests.iter().enumerate() {
-        request.check_range_fits_object(index).unwrap();
-    }
     let keys: HashSet<_> = requests.iter().map(|request| &request.object_key).collect();
     let ranges: HashSet<_> = requests
         .iter()

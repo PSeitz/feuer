@@ -22,73 +22,31 @@ fn size_boundaries_round_up_without_exposing_spare_capacity() {
 }
 
 #[test]
-fn different_lengths_reuse_one_allocation() {
-    let pool = BufferPool::new(100 * BUFFER_SIZES[0] as u64, MemoryMetrics::noop());
-    let mut buffer = pool.allocate(BUFFER_ALIGNMENT).unwrap();
-    let address = buffer.as_ref().as_ptr();
-    buffer.as_mut_slice().fill(0x99);
-    drop(buffer);
-    let mut larger = pool.allocate(4 * BUFFER_ALIGNMENT).unwrap();
-    assert_eq!(larger.as_ref().as_ptr(), address);
-    assert_eq!(larger.as_mut_slice().len(), 4 * BUFFER_ALIGNMENT);
-    larger.as_mut_slice().fill(0x77);
-    drop(larger);
-    let smaller = pool.allocate(2 * BUFFER_ALIGNMENT).unwrap();
-    assert_eq!(smaller.as_ref().as_ptr(), address);
-    let bytes = smaller.into_bytes();
-    assert_eq!(&bytes[..], &vec![0x77; 2 * BUFFER_ALIGNMENT]);
-    assert_eq!(pool.used_bytes(), 0);
-    drop(bytes);
-    assert_eq!(pool.used_bytes(), BUFFER_SIZES[0] as u64);
-}
-
-#[test]
-fn last_bytes_owner_returns_allocation_without_keeping_pool_alive() {
-    let pool = BufferPool::new(120 * BUFFER_SIZES[0] as u64, MemoryMetrics::noop());
-    let mut buffer = pool.allocate(BUFFER_ALIGNMENT).unwrap();
-    buffer.as_mut_slice().fill(0x99);
-    let address = buffer.as_ref().as_ptr();
-    let bytes = buffer.into_bytes();
-    let slice = bytes.slice(1..);
-    drop(bytes);
-    assert_eq!(pool.idle_bytes(), 0);
-    let other = pool.allocate(BUFFER_ALIGNMENT).unwrap();
-    assert_ne!(other.as_ref().as_ptr(), address);
-    drop(slice);
-    let reused = pool.allocate(BUFFER_ALIGNMENT).unwrap();
-    assert_eq!(reused.as_ref().as_ptr(), address);
-    let weak = Arc::downgrade(&pool);
-    let bytes = reused.into_bytes();
-    drop(other);
-    drop(pool);
-    assert!(weak.upgrade().is_none());
-    assert_eq!(&bytes[..], &[0x99; BUFFER_ALIGNMENT]);
-}
-
-#[test]
-fn one_bucket_can_fill_the_idle_limit() {
-    for (index, size) in BUFFER_SIZES.into_iter().enumerate() {
-        let pool = BufferPool::new((100 * size as u64).div_ceil(7), MemoryMetrics::noop());
-        let buffers: Vec<_> = (0..2).map(|_| pool.allocate(size).unwrap()).collect();
-        assert_eq!(pool.used_bytes(), 0);
-        drop(buffers);
-        assert_eq!(pool.used_bytes(), size as u64);
-        assert_eq!(pool.idle_bytes(), pool.idle_limit);
-        assert_eq!(pool.state.lock().by_size[index].len(), 1);
-    }
-}
-
-#[test]
-fn idle_limit_does_not_reserve_memory_and_cache_pressure_frees_idle_buffers_first() {
+fn cache_pressure_frees_larger_idle_buffers_and_updates_bucket_gauges() {
+    let (registry, backend) = registry();
     let capacity = 100 * BUFFER_SIZES[2] as u64;
-    let pool = BufferPool::new(capacity, MemoryMetrics::noop());
-    for size in &BUFFER_SIZES[..3] {
-        drop(pool.allocate(*size).unwrap());
+    let pool = BufferPool::new(capacity, MemoryMetrics::new(&backend));
+    let idle = |size: usize| {
+        let bucket = format!("{:.0}", bytesize::ByteSize(size as u64));
+        value(
+            &registry,
+            "feuer_io_buffer_pool_bytes",
+            &[("bucket", &bucket), ("status", "idle")],
+        )
+    };
+    for &size in &BUFFER_SIZES[..3] {
+        drop(pool.allocate(size).unwrap());
+    }
+    for (index, &size) in BUFFER_SIZES.iter().enumerate() {
+        assert_eq!(idle(size), if index < 3 { size as f64 } else { 0.0 });
     }
     pool.add_entry_bytes(capacity - BUFFER_SIZES[0] as u64);
     assert_eq!(pool.used_bytes(), capacity);
     assert_eq!(pool.idle_bytes(), BUFFER_SIZES[0] as u64);
     assert_eq!(pool.state.lock().by_size[0].len(), 1);
+    for (index, &size) in BUFFER_SIZES.iter().enumerate() {
+        assert_eq!(idle(size), if index == 0 { size as f64 } else { 0.0 });
+    }
     pool.add_entry_bytes(BUFFER_SIZES[0] as u64);
     assert_eq!(pool.idle_bytes(), 0);
     assert_eq!(pool.used_bytes(), capacity);
@@ -97,6 +55,15 @@ fn idle_limit_does_not_reserve_memory_and_cache_pressure_frees_idle_buffers_firs
     pool.remove_entry_bytes(capacity);
     drop(pool.allocate(BUFFER_SIZES[2]).unwrap());
     assert_eq!(pool.idle_bytes(), BUFFER_SIZES[2] as u64);
+    drop(pool);
+    for size in BUFFER_SIZES {
+        assert_eq!(idle(size), 0.0);
+    }
+    for family in registry.gather() {
+        if family.name() == "feuer_io_buffer_pool_bytes" {
+            assert_eq!(family.get_metric().len(), 2 * BUFFER_SIZES.len());
+        }
+    }
 }
 
 #[test]
@@ -132,7 +99,7 @@ fn oversized_and_write_scratch_allocations_are_not_pooled() {
 
 #[test]
 fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
-    for size in BUFFER_SIZES {
+    for (index, size) in BUFFER_SIZES.into_iter().enumerate() {
         let (registry, backend) = registry();
         let metrics = MemoryMetrics::new(&backend);
         let capacity = (100 * size as u64).div_ceil(7);
@@ -149,31 +116,47 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         assert_eq!(buffer_bytes("idle"), 0.0);
         assert_eq!(buffer_bytes("used"), 0.0);
         assert_eq!(gauge("feuer_memory_capacity_bytes"), capacity as f64);
-        let bytes = pool.allocate(size - BUFFER_ALIGNMENT).unwrap().into_bytes();
+        let mut buffer = pool.allocate(size - 2 * BUFFER_ALIGNMENT).unwrap();
+        buffer.as_mut_slice().fill(0x99);
+        let bytes = buffer.into_bytes();
+        let address = bytes.as_ptr();
         let slice = bytes.slice(1..);
         drop(bytes);
         assert_eq!(buffer_bytes("used"), size as f64);
         assert_eq!(buffer_bytes("idle"), 0.0);
         assert_eq!(gauge("feuer_memory_used_bytes"), 0.0);
         let other = pool.allocate(size).unwrap();
+        assert_ne!(other.as_ref().as_ptr(), address);
+        assert_eq!(pool.used_bytes(), 0);
         assert_eq!(buffer_bytes("used"), (2 * size) as f64);
         drop(slice);
         assert_eq!(buffer_bytes("used"), size as f64);
         assert_eq!(buffer_bytes("idle"), size as f64);
         drop(other);
+        assert_eq!(pool.used_bytes(), size as u64);
+        assert_eq!(pool.idle_bytes(), pool.idle_limit);
+        assert_eq!(pool.state.lock().by_size[index].len(), 1);
         assert_eq!(buffer_bytes("idle"), size as f64);
         assert_eq!(buffer_bytes("used"), 0.0);
         assert_eq!(gauge("feuer_memory_used_bytes"), size as f64);
-        let reused = pool.allocate(size).unwrap();
+        let mut reused = pool.allocate(size).unwrap();
+        assert_eq!(reused.as_ref().as_ptr(), address);
+        assert_eq!(reused.as_mut_slice().len(), size);
         assert_eq!(buffer_bytes("idle"), 0.0);
         assert_eq!(buffer_bytes("used"), size as f64);
         assert_eq!(gauge("feuer_memory_used_bytes"), 0.0);
+        reused.as_mut_slice().fill(0x77);
         drop(reused);
-        let outstanding = pool.allocate(size).unwrap();
+        let outstanding = pool.allocate(size - BUFFER_ALIGNMENT).unwrap().into_bytes();
+        assert_eq!(outstanding.as_ptr(), address);
+        assert_eq!(outstanding.len(), size - BUFFER_ALIGNMENT);
         let second = BufferPool::new(capacity, metrics);
         drop(second.allocate(size).unwrap());
         assert_eq!(gauge("feuer_memory_capacity_bytes"), (2 * capacity) as f64);
+        let weak = Arc::downgrade(&pool);
         drop(pool);
+        assert!(weak.upgrade().is_none());
+        assert!(outstanding.iter().all(|&byte| byte == 0x77));
         assert_eq!(buffer_bytes("used"), size as f64);
         assert_eq!(buffer_bytes("idle"), size as f64);
         drop(outstanding);
@@ -182,41 +165,6 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         assert_eq!(gauge("feuer_memory_capacity_bytes"), 0.0);
         assert_eq!(gauge("feuer_memory_used_bytes"), 0.0);
         assert_eq!(buffer_bytes("idle"), 0.0);
-    }
-}
-
-#[test]
-fn bucket_gauges_follow_pressure_reclamation_and_shutdown_independently() {
-    let (registry, backend) = registry();
-    let capacity = 100 * BUFFER_SIZES[2] as u64;
-    let pool = BufferPool::new(capacity, MemoryMetrics::new(&backend));
-    let idle = |size: usize| {
-        let bucket = format!("{:.0}", bytesize::ByteSize(size as u64));
-        value(
-            &registry,
-            "feuer_io_buffer_pool_bytes",
-            &[("bucket", &bucket), ("status", "idle")],
-        )
-    };
-    for &size in &BUFFER_SIZES[..3] {
-        drop(pool.allocate(size).unwrap());
-    }
-    for (index, &size) in BUFFER_SIZES.iter().enumerate() {
-        assert_eq!(idle(size), if index < 3 { size as f64 } else { 0.0 });
-    }
-    pool.add_entry_bytes(capacity - BUFFER_SIZES[0] as u64);
-    for (index, &size) in BUFFER_SIZES.iter().enumerate() {
-        assert_eq!(idle(size), if index == 0 { size as f64 } else { 0.0 });
-    }
-    pool.remove_entry_bytes(capacity - BUFFER_SIZES[0] as u64);
-    drop(pool);
-    for size in BUFFER_SIZES {
-        assert_eq!(idle(size), 0.0);
-    }
-    for family in registry.gather() {
-        if family.name() == "feuer_io_buffer_pool_bytes" {
-            assert_eq!(family.get_metric().len(), 2 * BUFFER_SIZES.len());
-        }
     }
 }
 

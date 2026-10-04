@@ -190,7 +190,7 @@ impl DataFile {
                 let end = (start + uring::MAX_IO_REQUEST_BYTES).min(bytes.len());
                 self.state
                     .write_queue
-                    .write_parts(offset + start as u64, end - start, &[(0, bytes.slice(start..end))])
+                    .write_padded(offset + start as u64, end - start, &bytes.slice(start..end))
                     .await
                     .map_err(|source| self.io_error(IoOperation::Write, source))?;
             }
@@ -199,16 +199,16 @@ impl DataFile {
         .await
     }
 
-    /// Writes an aligned region of at most 1 MiB from parts starting at zero, without
-    /// an intermediate region buffer. Gaps are zero-filled. The queue retains only I/O buffers.
-    pub(crate) async fn write_parts(&self, range: Range<u64>, parts: &[(usize, Bytes)]) -> DataFileResult<()> {
+    /// Writes bytes with zero padding to fill an aligned region of at most 1 MiB,
+    /// without an intermediate region buffer. The queue retains only I/O buffers.
+    pub(crate) async fn write_padded(&self, range: Range<u64>, bytes: &Bytes) -> DataFileResult<()> {
         let offset = range.start;
         let length = (range.end - range.start) as usize;
         self.measure_io(IoOperation::Write, offset, length, async {
             check_range_fits_file(IoOperation::Write, offset, length as u64, self.state.capacity)?;
             self.state
                 .write_queue
-                .write_parts(offset, length, parts)
+                .write_padded(offset, length, bytes)
                 .await
                 .map_err(|source| self.io_error(IoOperation::Write, source))
         })
@@ -251,7 +251,6 @@ impl DataFile {
 
     async fn read_aligned_range(&self, range: Range<u64>) -> DataFileResult<(Bytes, usize)> {
         let operation = IoOperation::Read;
-        check_range_fits_file(operation, range.start, range.end - range.start, self.state.capacity)?;
         let buffer_length = usize::try_from(range.end - range.start).map_err(|_| DataFileError::LengthOverflow {
             operation,
             length: usize::MAX,
@@ -360,8 +359,6 @@ fn check_direct_io_alignment(file: &File) -> io::Result<()> {
     // SAFETY: statx succeeded and initialized the output.
     let stat = unsafe { stat.assume_init() };
     if stat.stx_mask & libc::STATX_DIOALIGN == 0
-        || stat.stx_dio_mem_align == 0
-        || stat.stx_dio_offset_align == 0
         || !uring::DIRECT_IO_ALIGNMENT_BYTES.is_multiple_of(stat.stx_dio_mem_align as usize)
         || !uring::DIRECT_IO_ALIGNMENT_BYTES.is_multiple_of(stat.stx_dio_offset_align as usize)
     {
@@ -375,7 +372,7 @@ fn check_direct_io_alignment(file: &File) -> io::Result<()> {
 
 /// Checks that the requested byte range fits in the file, rejecting offset-plus-length overflow.
 fn check_range_fits_file(operation: IoOperation, offset: u64, length: u64, capacity: u64) -> DataFileResult<()> {
-    if offset.checked_add(length).is_none_or(|end| end > capacity) {
+    if offset.checked_add(length).map(|end| end > capacity).unwrap_or(true) {
         return Err(DataFileError::RangeExceedsCapacity {
             operation,
             offset,
@@ -388,14 +385,9 @@ fn check_range_fits_file(operation: IoOperation, offset: u64, length: u64, capac
 
 fn record_span_outcome<T>(span: &Span, elapsed: std::time::Duration, result: &DataFileResult<T>) {
     span.record("duration_seconds", elapsed.as_secs_f64());
-    match result {
-        Ok(_) => {
-            span.record("outcome", "success");
-        }
-        Err(error) => {
-            span.record("outcome", "error");
-            span.record("error_kind", error.kind().as_str());
-        }
+    span.record("outcome", if result.is_ok() { "success" } else { "error" });
+    if let Err(error) = result {
+        span.record("error_kind", error.kind().as_str());
     }
 }
 

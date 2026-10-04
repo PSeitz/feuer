@@ -1,20 +1,15 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use mixtrics::metrics::{BoxedCounter, BoxedHistogram, BoxedRegistry, Buckets};
 
 use crate::IoOperation;
 
+#[derive(Debug)]
 struct IoOperationMetrics {
     success: BoxedCounter,
     error: BoxedCounter,
     bytes: BoxedCounter,
     success_duration: BoxedHistogram,
-}
-
-impl fmt::Debug for IoOperationMetrics {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IoOperationMetrics").finish_non_exhaustive()
-    }
 }
 
 /// Internal metric handles for fixed-file positional I/O.
@@ -101,7 +96,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn read_size_records_only_successful_reads() {
+    fn read_sizes_and_durations_only_record_successes_but_counters_include_errors() {
         let (registry, backend) = crate::test_metrics::registry();
         let metrics = IoMetrics::new(&backend);
         let elapsed = Duration::from_micros(2);
@@ -110,6 +105,7 @@ mod tests {
         metrics.record(IoOperation::Read, 4096, elapsed, true);
         metrics.record(IoOperation::Read, 8192, elapsed, false);
         metrics.record(IoOperation::Write, 16384, elapsed, true);
+        metrics.record(IoOperation::Write, 0, elapsed, false);
 
         let family = registry
             .gather()
@@ -127,23 +123,19 @@ mod tests {
                 .unwrap();
             assert_eq!(bucket.cumulative_count(), count);
         }
-    }
-
-    #[test]
-    fn durations_only_record_successes_but_counters_include_errors() {
-        let (registry, backend) = crate::test_metrics::registry();
-        let metrics = IoMetrics::new(&backend);
-        for operation in [IoOperation::Read, IoOperation::Write] {
-            metrics.record(operation, 17, Duration::from_micros(2), true);
-            metrics.record(operation, 0, Duration::from_micros(3), false);
-            for outcome in ["success", "error"] {
+        for (operation, successes) in [(IoOperation::Read, 2.0), (IoOperation::Write, 1.0)] {
+            for (metric_name, outcome, count) in [
+                ("feuer_disk_io_total", "success", successes),
+                ("feuer_disk_io_total", "error", 1.0),
+                ("feuer_disk_io_duration_seconds", "success", successes),
+            ] {
                 assert_eq!(
                     crate::test_metrics::value(
                         &registry,
-                        "feuer_disk_io_total",
+                        metric_name,
                         &[("operation", operation.as_str()), ("outcome", outcome)]
                     ),
-                    1.0
+                    count
                 );
             }
         }
@@ -153,14 +145,5 @@ mod tests {
             .find(|family| family.name() == "feuer_disk_io_duration_seconds")
             .unwrap();
         assert_eq!(family.get_metric().len(), 2);
-        for metric in family.get_metric() {
-            assert_eq!(metric.get_histogram().get_sample_count(), 1);
-            assert!(
-                metric
-                    .get_label()
-                    .iter()
-                    .any(|label| { label.name() == "outcome" && label.value() == "success" })
-            );
-        }
     }
 }

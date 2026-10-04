@@ -84,7 +84,7 @@ impl BufferPool {
     /// Reused bytes are initialized, but must be overwritten before returning a read result.
     pub fn allocate(self: &Arc<Self>, length: usize) -> io::Result<AlignedBuffer> {
         let bucket = BUFFER_SIZES.iter().position(|&size| length <= size);
-        let capacity = bucket.map_or(length, |index| BUFFER_SIZES[index]);
+        let capacity = bucket.map(|index| BUFFER_SIZES[index]).unwrap_or(length);
         let mut buffer = bucket
             .and_then(|index| {
                 let mut state = self.state.lock();

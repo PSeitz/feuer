@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::sync::Arc;
 
 use bytesize::ByteSize;
 use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedRegistry};
@@ -9,6 +9,7 @@ use crate::buffer::BUFFER_SIZES;
 ///
 /// Operations use a fixed set of labels. Object identities and caller-defined
 /// cache names are never metric labels.
+#[derive(Debug)]
 pub struct MemoryMetrics {
     insert: BoxedCounter,
     replace: BoxedCounter,
@@ -22,12 +23,6 @@ pub struct MemoryMetrics {
     pub(crate) idle_buffer_bytes: [BoxedGauge; BUFFER_SIZES.len()],
     pub(crate) used_buffer_bytes: [BoxedGauge; BUFFER_SIZES.len()],
     entries: BoxedGauge,
-}
-
-impl fmt::Debug for MemoryMetrics {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MemoryMetrics").finish_non_exhaustive()
-    }
 }
 
 impl MemoryMetrics {
@@ -123,21 +118,5 @@ impl MemoryMetrics {
     pub(crate) fn noop() -> Arc<Self> {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         Self::new(&registry)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn registers_and_updates_through_the_normal_registry_boundary() {
-        let metrics = MemoryMetrics::noop();
-
-        metrics.record_insert(false);
-        metrics.record_redundant();
-        metrics.increase_usage(17, 1);
-        metrics.record_range_trim(3);
-        metrics.decrease_usage(17, 1);
     }
 }

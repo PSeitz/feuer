@@ -181,7 +181,7 @@ impl DiskCacheShard {
                 let start = (address - range.start) as usize;
                 let end = (start + CHUNK_BYTES as usize).min(bytes.len());
                 disk.file
-                    .write_parts(address..address + CHUNK_BYTES, &[(0, bytes.slice(start..end))])
+                    .write_padded(address..address + CHUNK_BYTES, &bytes.slice(start..end))
                     .await?;
             }
             disk.metrics.written_entries.increase(entries.len() as u64);

@@ -103,12 +103,6 @@ impl ReclaimCandidateList {
     }
 }
 
-/// Object key and range identifying the entry selected for trimming or eviction.
-struct ReclaimCandidate {
-    object_key: ObjectKeyHash,
-    range: ByteRange,
-}
-
 /// Source payload and plan for trimming a cached range outside the shard lock.
 pub(super) struct RangeTrimSource {
     object_key: ObjectKeyHash,
@@ -236,17 +230,18 @@ impl MemoryCacheShard {
             return InsertOrReclaimResult::Complete(true);
         }
 
-        let Some(candidate) = self.select_reclaim_candidate(object_key, range, access_histories) else {
+        let Some((key, entry)) = self.select_reclaim_candidate(object_key, range, access_histories) else {
             // The sample cursor advanced, but no eligible victim was found.
             // Return to the caller so it can release the lock before sampling again.
             return InsertOrReclaimResult::Retry;
         };
-        if allow_range_trim && let Some(source) = self.prepare_range_trim(&candidate, access_histories) {
+        if allow_range_trim && let Some(source) = Self::prepare_range_trim(key, entry, access_histories) {
             return InsertOrReclaimResult::Trim(source);
         }
 
+        let range = entry.range;
         let removed_bytes = self
-            .remove_entry(&candidate.object_key, candidate.range)
+            .remove_entry(&key, range)
             .expect("an entry selected for eviction cannot disappear while its shard is locked");
         self.metrics.decrease_usage(removed_bytes, 1);
         InsertOrReclaimResult::Evicted
@@ -288,12 +283,11 @@ impl MemoryCacheShard {
     }
 
     pub(super) fn remove(&mut self, object_key: &ObjectKeyHash, range: ByteRange) -> bool {
-        let Some(removed_bytes) = self.remove_entry(object_key, range) else {
-            return false;
-        };
-        self.metrics.decrease_usage(removed_bytes, 1);
-        self.metrics.record_remove();
-        true
+        self.remove_entry(object_key, range).is_some_and(|removed_bytes| {
+            self.metrics.decrease_usage(removed_bytes, 1);
+            self.metrics.record_remove();
+            true
+        })
     }
 
     /// Removes one entry from the shard and returns its allocation charge.
@@ -337,7 +331,7 @@ impl MemoryCacheShard {
         admitting_key: &ObjectKeyHash,
         admitting_range: ByteRange,
         access_histories: &ObjectAccessHistories,
-    ) -> Option<ReclaimCandidate> {
+    ) -> Option<(ObjectKeyHash, &MemoryEntry)> {
         let (sample_start, sample_count) = self.candidates.sample(self.reclaim_sample_size);
         self.candidates
             .entries
@@ -367,36 +361,22 @@ impl MemoryCacheShard {
                     .then_with(|| left_entry.range.cmp(&right_entry.range))
                 },
             )
-            .map(|(object_key, entry, _)| ReclaimCandidate {
-                object_key: *object_key,
-                range: entry.range,
-            })
+            .map(|(object_key, entry, _)| (*object_key, entry))
     }
 
     /// Prepares a range trim by retaining its source bytes and plan after the grace period.
     fn prepare_range_trim(
-        &self,
-        candidate: &ReclaimCandidate,
+        object_key: ObjectKeyHash,
+        entry: &MemoryEntry,
         access_histories: &ObjectAccessHistories,
     ) -> Option<RangeTrimSource> {
-        let entries = self
-            .entries_by_key
-            .get(&candidate.object_key)
-            .expect("an entry selected for trimming must have an object index");
-        let entry = entries
-            .by_start
-            .get(&candidate.range.start())
-            .expect("an entry selected for trimming must still be indexed");
         let request_count = access_histories.request_count();
         if request_count.saturating_sub(entry.request_count_at_insertion) < MIN_REQUESTS_BEFORE_RANGE_TRIM {
             return None;
         }
-        let plan = plan_range_trim(
-            entry.range,
-            access_histories.recent_requested_ranges(&candidate.object_key),
-        )?;
+        let plan = plan_range_trim(entry.range, access_histories.recent_requested_ranges(&object_key))?;
         Some(RangeTrimSource {
-            object_key: candidate.object_key,
+            object_key,
             plan,
             source_bytes: entry.bytes.clone(),
         })

@@ -235,8 +235,5 @@ fn shard_capacity_for(total_capacity: u64, num_shards: usize, shard_index: usize
 }
 
 fn default_shard_count() -> usize {
-    std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .saturating_mul(4)
-        .min(MAX_SHARDS)
+    std::thread::available_parallelism().map_or(4, |cpus| cpus.get().min(MAX_SHARDS / 4) * 4)
 }

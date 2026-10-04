@@ -56,7 +56,7 @@ impl DiskEntry {
 pub(super) async fn entry_disk_ranges(
     cache: &DiskCache,
     key: &ObjectKeyHash,
-) -> (Vec<std::ops::Range<u64>>, Vec<std::ops::Range<u64>>) {
+) -> (std::ops::Range<u64>, std::ops::Range<u64>) {
     let shard = &cache.disk.shards[cache.disk.shard_index_for_key(key)];
     let index = shard.entry_index.lock().unwrap();
     let entry = index.entries_by_key[key].first_key_value().unwrap().1;
@@ -65,7 +65,7 @@ pub(super) async fn entry_disk_ranges(
     let address = pages.chunks[chunk_index].reserved_chunk.disk_byte_range().start
         + (entry_metadata_index / page_format::ENTRIES_PER_METADATA_PAGE * METADATA_PAGE_BYTES) as u64;
     let metadata = address..address + METADATA_PAGE_BYTES as u64;
-    (vec![entry.payload_range.clone()], vec![metadata])
+    (entry.payload_range.clone(), metadata)
 }
 
 #[tokio::test]
@@ -140,9 +140,7 @@ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers()
     for length in [1, 1024, 4016, 4096, 4097, 3 * 4096 + 9] {
         let key = ObjectKeyHash::from(format!("entry-{length}"));
         let source = download(17, length);
-        let (payload, entry_metadata) = entry_disk_ranges(&cache, &key).await;
-        assert_eq!(payload.len(), 1);
-        let allocated = &payload[0];
+        let (allocated, entry_metadata) = entry_disk_ranges(&cache, &key).await;
         assert_eq!(allocated.start, previous_end);
         assert!(allocated.start.is_multiple_of(BUFFER_ALIGNMENT as u64));
         assert!(allocated.end <= 2 * CHUNK_BYTES);
@@ -162,7 +160,7 @@ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers()
             cache.get(&key, source.downloaded_range()).await.unwrap(),
             source.bytes()
         );
-        assert_eq!(entry_metadata[0], 0..METADATA_PAGE_BYTES as u64);
+        assert_eq!(entry_metadata, 0..METADATA_PAGE_BYTES as u64);
         previous_end = allocated.end;
     }
 }
@@ -174,7 +172,7 @@ async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
     let mut inputs = vec![(ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize))];
     inputs.extend((0..130).map(|i| (ObjectKeyHash::from(format!("small-{i}")), download(i, 1024))));
     assert_eq!(cache.insert_batch(inputs).await.unwrap(), 131);
-    let large_start = entry_disk_ranges(&cache, &ObjectKeyHash::from("large")).await.0[0].start;
+    let large_start = entry_disk_ranges(&cache, &ObjectKeyHash::from("large")).await.0.start;
     let metadata_end = METADATA_PAGE_BYTES as u64;
     for i in 0..130 {
         let key = ObjectKeyHash::from(format!("small-{i}"));
@@ -182,11 +180,11 @@ async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
             cache.get(&key, range(i, i + 1024)).await.unwrap(),
             download(i, 1024).bytes()
         );
-        assert!(entry_disk_ranges(&cache, &key).await.0[0].start > large_start);
+        assert!(entry_disk_ranges(&cache, &key).await.0.start > large_start);
     }
     let (first_payload, metadata) = entry_disk_ranges(&cache, &ObjectKeyHash::from("small-0")).await;
-    assert_eq!(metadata[0], metadata_end..2 * metadata_end);
-    assert_eq!(first_payload[0].start, 2 * CHUNK_BYTES);
+    assert_eq!(metadata, metadata_end..2 * metadata_end);
+    assert_eq!(first_payload.start, 2 * CHUNK_BYTES);
     assert_eq!(large_start, CHUNK_BYTES);
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
     assert_eq!(
@@ -256,7 +254,7 @@ async fn full_and_no_fit_chunks_flush_across_metadata_pages() {
         for i in 0..count {
             let key = ObjectKeyHash(i as u128);
             let (payload, _) = entry_disk_ranges(&cache, &key).await;
-            assert_eq!(payload[0].start, CHUNK_BYTES + (i * length) as u64);
+            assert_eq!(payload.start, CHUNK_BYTES + (i * length) as u64);
             assert_eq!(
                 cache.get(&key, source.downloaded_range()).await.unwrap(),
                 source.bytes()
@@ -305,11 +303,11 @@ async fn failed_large_reservation_leaves_buffered_entries_and_metadata_positions
     );
     assert_eq!(cache.flush().await.unwrap(), 2);
     assert_eq!(
-        entry_disk_ranges(&cache, &ObjectKeyHash(1)).await.0[0],
+        entry_disk_ranges(&cache, &ObjectKeyHash(1)).await.0,
         CHUNK_BYTES..CHUNK_BYTES + 8192
     );
     assert_eq!(
-        entry_disk_ranges(&cache, &ObjectKeyHash(3)).await.0[0].start,
+        entry_disk_ranges(&cache, &ObjectKeyHash(3)).await.0.start,
         CHUNK_BYTES + 8192
     );
     assert_eq!(cache.get(&ObjectKeyHash(1), range(0, 4097)).await.unwrap(), bytes);
@@ -714,13 +712,13 @@ async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk_or_its_entry_met
         2
     );
     let (payload, _) = entry_disk_ranges(&cache, &key).await;
-    assert_eq!(payload[0].end - payload[0].start, BUFFER_ALIGNMENT as u64);
+    assert_eq!(payload.end - payload.start, BUFFER_ALIGNMENT as u64);
     // A read reaching beyond this entry's alignment boundary would now fail with short I/O.
     std::fs::OpenOptions::new()
         .write(true)
         .open(directory.path().join("data"))
         .unwrap()
-        .set_len(payload[0].end)
+        .set_len(payload.end)
         .unwrap();
     assert_eq!(
         cache.get(&key, source.downloaded_range()).await.unwrap(),
@@ -735,7 +733,7 @@ async fn alignment_padding_is_not_part_of_the_entry_checksum() {
     let source = download(3, 1024);
     cache.insert(key, source.clone()).await.unwrap();
     let (payload, _) = entry_disk_ranges(&cache, &key).await;
-    let address = payload[0].start;
+    let address = payload.start;
     let mut bytes = cache
         .disk
         .file
@@ -798,20 +796,19 @@ async fn multi_chunk_payload_has_no_metadata_gaps() {
     let source = download(100, 2 * CHUNK_BYTES as usize + 17);
     assert!(cache.insert(key, source.clone()).await.unwrap());
     let (payload, metadata) = entry_disk_ranges(&cache, &key).await;
-    assert_eq!(payload.len(), 1);
-    assert!(metadata[0].end <= payload[0].start);
-    assert!(payload[0].start.is_multiple_of(CHUNK_BYTES));
+    assert!(metadata.end <= payload.start);
+    assert!(payload.start.is_multiple_of(CHUNK_BYTES));
     // Read the disk bytes directly across physical chunk boundaries: no assembly or skipped headers.
     assert_eq!(
         cache
             .disk
             .file
-            .read_at(payload[0].start, source.bytes().len())
+            .read_at(payload.start, source.bytes().len())
             .await
             .unwrap(),
         source.bytes()
     );
-    let boundary = 100 + CHUNK_BYTES - payload[0].start % CHUNK_BYTES;
+    let boundary = 100 + CHUNK_BYTES - payload.start % CHUNK_BYTES;
     assert_eq!(
         cache.get(&key, range(boundary - 3, boundary + 7)).await.unwrap(),
         download(boundary - 3, 10).bytes()
@@ -881,8 +878,8 @@ async fn writes_key_hash_range_and_payload_address_in_fixed_size_metadata() {
     let source = download(17, (CHUNK_BYTES + 7) as usize);
     assert!(cache.insert(key, source.clone()).await.unwrap());
     let (payload, entry_metadata) = entry_disk_ranges(&cache, &key).await;
-    assert_eq!(entry_metadata[0], 0..METADATA_PAGE_BYTES as u64);
-    assert_eq!(payload[0].start, CHUNK_BYTES);
+    assert_eq!(entry_metadata, 0..METADATA_PAGE_BYTES as u64);
+    assert_eq!(payload.start, CHUNK_BYTES);
     cache.write_dirty_metadata_pages().await;
     let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
     let entry_metadata_bytes = page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG).unwrap();
@@ -890,7 +887,7 @@ async fn writes_key_hash_range_and_payload_address_in_fixed_size_metadata() {
     assert_eq!(&entry_metadata_bytes[..16], &key.0.to_le_bytes());
     assert_eq!(read_u64(16), 17);
     assert_eq!(read_u64(24), source.downloaded_range().len());
-    assert_eq!(read_u64(32), payload[0].start);
+    assert_eq!(read_u64(32), payload.start);
     assert_eq!(read_u64(40), XxHash64::oneshot(0, source.bytes()));
     assert!(
         entry_metadata_bytes[page_format::ENTRY_METADATA_BYTES..]
@@ -935,10 +932,8 @@ async fn long_keys_do_not_allocate_extra_metadata_chunks() {
     let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
     let key = ObjectKeyHash::from("k".repeat(CHUNK_BYTES as usize));
     assert!(cache.insert(key, download(0, 1)).await.unwrap());
-    let (payload, metadata) = entry_disk_ranges(&cache, &key).await;
-    assert_eq!(payload.len(), 1);
-    assert_eq!(metadata.len(), 1);
-    assert_eq!(metadata[0].end - metadata[0].start, METADATA_PAGE_BYTES as u64);
+    let (_, metadata) = entry_disk_ranges(&cache, &key).await;
+    assert_eq!(metadata.end - metadata.start, METADATA_PAGE_BYTES as u64);
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
     assert!(
         cache
@@ -1101,7 +1096,7 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
         let key = ObjectKeyHash::from("object");
         cache.insert(key, download(3, 50)).await.unwrap();
         let (payload, _) = entry_disk_ranges(&cache, &key).await;
-        let address = payload[0].start;
+        let address = payload.start;
         let mut bytes = cache
             .disk
             .file
@@ -1117,7 +1112,7 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
             bytes = cache
                 .disk
                 .file
-                .read_at(other_payload[0].start, BUFFER_ALIGNMENT)
+                .read_at(other_payload.start, BUFFER_ALIGNMENT)
                 .await
                 .unwrap()
                 .to_vec();
@@ -1203,7 +1198,7 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
     let key = ObjectKeyHash::from("large object");
     let source = download(3, 100 * CHUNK_BYTES as usize + 17);
     assert!(cache.insert(key, source.clone()).await.unwrap());
-    let boundary = 3 + CHUNK_BYTES - entry_disk_ranges(&cache, &key).await.0[0].start % CHUNK_BYTES;
+    let boundary = 3 + CHUNK_BYTES - entry_disk_ranges(&cache, &key).await.0.start % CHUNK_BYTES;
     for request in [
         source.downloaded_range(),
         range(7, 33),
@@ -1218,7 +1213,7 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
         );
     }
     let (payload, _) = entry_disk_ranges(&cache, &key).await;
-    let last_aligned_offset = payload.last().unwrap().end - BUFFER_ALIGNMENT as u64;
+    let last_aligned_offset = payload.end - BUFFER_ALIGNMENT as u64;
     cache
         .disk
         .file
@@ -1242,8 +1237,8 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
     assert_eq!(cache.insert_batch(vec![(keys[0], download(0, 100))]).await.unwrap(), 2);
     let first = entry_disk_ranges(&cache, &keys[0]).await.0;
     let second = entry_disk_ranges(&cache, &keys[1]).await.0;
-    assert!(first.last().unwrap().end <= 128 * CHUNK_BYTES);
-    assert!(second[0].start >= 128 * CHUNK_BYTES);
+    assert!(first.end <= 128 * CHUNK_BYTES);
+    assert!(second.start >= 128 * CHUNK_BYTES);
     let returned = cache.get(&keys[0], range(0, 100)).await.unwrap();
     cache.write_dirty_metadata_pages().await;
     let capacity = cache.disk.file.capacity();

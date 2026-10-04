@@ -232,9 +232,7 @@ impl DiskCache {
             recovery_tasks
                 .spawn_blocking(move || tokio::runtime::Handle::current().block_on(disk.recover_shard(index)));
         }
-        while let Some(result) = recovery_tasks.join_next().await {
-            result.expect("shard recovery task failed");
-        }
+        recovery_tasks.join_all().await;
         tracing::info!(target: "feuer::storage", elapsed_seconds = started.elapsed().as_secs_f64(), "disk cache recovery finished");
         tokio::spawn(DiskCacheInner::write_metadata_periodically(Arc::downgrade(&disk)));
         Ok(Self { disk })
@@ -403,15 +401,13 @@ impl DiskEntryIndex {
             return vec![entry];
         }
         let mut removed = Vec::new();
+        // Entry ranges have increasing ends, so stop at the first range not contained.
         while let Some((&start, existing)) = self
             .entries_by_key
             .get(&key)
             .and_then(|entries| entries.range(object_range.start()..).next())
+            && object_range.contains(existing.object_range)
         {
-            // Entry ranges have increasing ends, so no later range can be contained either.
-            if !object_range.contains(existing.object_range) {
-                break;
-            }
             removed.push(self.remove_entry(&key, start).unwrap());
         }
         entry.eviction_position = self.eviction_candidates.len();
