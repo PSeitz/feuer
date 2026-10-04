@@ -37,8 +37,8 @@ fn queue() -> (IoQueue, mpsc::Sender<IoRequest>) {
     (
         IoQueue {
             ring: IoUring::new(MAX_IN_FLIGHT_READS as u32).unwrap(),
-            file: Some(Arc::new(file)),
-            directory_lock: Some(Arc::new(tempfile::tempfile().unwrap())),
+            file: Arc::new(file),
+            directory_lock: Arc::new(tempfile::tempfile().unwrap()),
             wake_fd,
             receiver,
             active: (0..MAX_IN_FLIGHT_READS).map(|_| None).collect(),
@@ -183,8 +183,8 @@ async fn active_request_limit_keeps_channel_full_until_completion() {
 #[tokio::test]
 async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
     let (queue, _) = queue();
-    let file = queue.file.as_ref().unwrap();
-    let lock = queue.directory_lock.as_ref().unwrap();
+    let file = &queue.file;
+    let lock = &queue.directory_lock;
     let pool = buffer_pool();
     let read_queue = ReadQueue::new(file.clone(), lock.clone(), pool).unwrap();
     let write_queue = WriteQueue::new(file.clone(), lock.clone()).unwrap();
@@ -298,17 +298,10 @@ fn requests_are_submitted_in_channel_order_and_drained_on_shutdown() {
 }
 
 #[tokio::test]
-async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
+async fn reads_wait_for_channel_capacity_without_taking_idle_buffers() {
     let (queue, _) = queue();
     let pool = buffer_pool();
-    let handle = ReadQueue::new(
-        queue.file.as_ref().unwrap().clone(),
-        queue.directory_lock.as_ref().unwrap().clone(),
-        pool.clone(),
-    )
-    .unwrap();
-    let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_REQUEST_BYTES as u64).unwrap();
-    let chunk = allocator.reserve_chunks(1).unwrap();
+    let handle = ReadQueue::new(queue.file.clone(), queue.directory_lock.clone(), pool.clone()).unwrap();
     let reservations = handle
         .handle
         .sender
@@ -317,20 +310,12 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
         .reserve_many(MAX_IN_FLIGHT_READS)
         .await
         .unwrap();
-    assert_eq!(pool.idle_bytes(), 0);
-    let read = handle.try_read_recovery_chunk(chunk.disk_byte_range().start);
-    let result = tokio::time::timeout(std::time::Duration::from_secs(1), read)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(result.is_none());
-    assert_eq!(pool.idle_bytes(), 0);
-    // An available pooled buffer must remain untouched while a foreground read waits.
-    drop(handle.allocate_buffer(DIRECT_IO_ALIGNMENT_BYTES).unwrap());
-    let idle_bytes = pool.idle_bytes();
-    assert!(idle_bytes > 0);
-    {
-        let read = handle.read(0, DIRECT_IO_ALIGNMENT_BYTES);
+    for length in [DIRECT_IO_ALIGNMENT_BYTES, MAX_IO_REQUEST_BYTES] {
+        // Neither payload nor metadata reads take an idle buffer before admission.
+        drop(handle.allocate_buffer(length).unwrap());
+        let idle_bytes = pool.idle_bytes();
+        assert!(idle_bytes > 0);
+        let read = handle.read(0, length);
         tokio::pin!(read);
         assert!(
             read.as_mut()
@@ -342,12 +327,9 @@ async fn recovery_skips_full_channel_without_allocating_and_foreground_waits() {
     }
     drop(reservations);
     assert_eq!(handle.handle.sender.as_ref().unwrap().capacity(), MAX_IN_FLIGHT_READS);
-    assert!(
-        handle
-            .try_read_recovery_chunk(chunk.disk_byte_range().start)
-            .await
-            .unwrap()
-            .is_some()
+    assert_eq!(
+        handle.read(0, MAX_IO_REQUEST_BYTES).await.unwrap().len(),
+        MAX_IO_REQUEST_BYTES
     );
 }
 
@@ -380,14 +362,8 @@ async fn queue_exit_releases_admission_waiters_and_queued_requests() {
     for mut reply in replies {
         assert!(matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
     }
-    let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_REQUEST_BYTES as u64).unwrap();
-    let chunk = allocator.reserve_chunks(1).unwrap();
     assert_eq!(
-        handle
-            .try_read_recovery_chunk(chunk.disk_byte_range().start)
-            .await
-            .unwrap_err()
-            .kind(),
+        handle.read(0, MAX_IO_REQUEST_BYTES).await.unwrap_err().kind(),
         io::ErrorKind::BrokenPipe
     );
 }
@@ -428,8 +404,8 @@ fn finished_read_transfers_buffer_ownership() {
 #[tokio::test]
 async fn reads_into_consecutive_slices_without_reallocating() {
     let (queue, _) = queue();
-    let file = queue.file.as_ref().unwrap();
-    let lock = queue.directory_lock.as_ref().unwrap();
+    let file = &queue.file;
+    let lock = &queue.directory_lock;
     let pool = buffer_pool();
     let read = ReadQueue::new(file.clone(), lock.clone(), pool).unwrap();
     let write = WriteQueue::new(file.clone(), lock.clone()).unwrap();

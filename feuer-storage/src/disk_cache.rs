@@ -41,6 +41,13 @@ use page_format::METADATA_PAGE_BYTES;
 const MAX_EVICTION_ATTEMPTS: usize = 64;
 const MAX_EVICTION_CHUNKS: usize = 4096;
 
+/// Disk byte count for a payload, including alignment padding and a 4-KiB minimum.
+fn payload_disk_bytes(length: u64) -> u64 {
+    length
+        .max(BUFFER_ALIGNMENT as u64)
+        .next_multiple_of(BUFFER_ALIGNMENT as u64)
+}
+
 /// Caches object bytes on disk, looked up by object key and byte range.
 ///
 /// Small entries share immutable 1-MiB payload chunks. Separate mutable metadata chunks
@@ -275,8 +282,6 @@ impl DiskCache {
                 metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
                 return None;
             };
-            let start = entry.object_range.start();
-            let entry = index.entries_by_key.get_mut(key).unwrap().get_mut(&start).unwrap();
             let in_flight_read = entry.in_flight_read.upgrade().unwrap_or_else(|| {
                 let result = Arc::new(OnceCell::new());
                 entry.in_flight_read = Arc::downgrade(&result);
@@ -294,22 +299,14 @@ impl DiskCache {
         // If the initializing caller is canceled, OnceCell lets a waiter take over.
         let result = in_flight_read
             .get_or_init(|| async {
-                let outcome = match read.read_and_verify_payload(&self.disk.file).await {
-                    Ok(Some(bytes)) => return Ok(bytes),
-                    Err(error) => {
-                        tracing::warn!(target: "feuer::storage", %error, "disk read failed; entry invalidated");
-                        DiskLookupOutcome::IoError
+                let result = read.read_and_verify_payload(&self.disk.file).await;
+                if result.is_err() {
+                    let mut index = shard.entry_index.lock().unwrap();
+                    if let Some(entry) = index.remove_entry_matching_read(key, &read) {
+                        shard.release_payload_and_allow_metadata_overwrite(entry);
                     }
-                    Ok(None) => {
-                        tracing::warn!(target: "feuer::storage", "disk checksum failed; entry invalidated");
-                        DiskLookupOutcome::ChecksumFailed
-                    }
-                };
-                let mut index = shard.entry_index.lock().unwrap();
-                if let Some(entry) = index.remove_entry_matching_read(key, &read) {
-                    shard.release_payload_and_allow_metadata_overwrite(entry);
                 }
-                Err(outcome)
+                result
             })
             .await;
         match result {
@@ -348,22 +345,19 @@ impl DiskCacheShard {
         *remaining_eviction_attempts -= 1;
         let (sample_start, sample_count) =
             sample_candidates(&mut index.next_sample_start, candidate_count, self.reclaim_sample_size);
-        let mut selected_candidate: Option<(usize, f64, u64)> = None;
-        for sample_offset in 0..sample_count {
-            let position = (sample_start + sample_offset) % candidate_count;
-            let (key, range_start) = &index.eviction_candidates[position];
-            let entry = &index.entries_by_key[key][range_start];
-            if entry.chunk_count() as usize > *remaining_eviction_chunk_budget {
-                continue;
-            }
-            let retrieval_cost = access_histories.decayed_retrieval_cost(key, entry.object_range);
-            let payload_bytes = entry.object_range.len();
-            if selected_candidate.is_none_or(|(_, selected_cost, selected_bytes)| {
-                compare_cost_per_byte(retrieval_cost, payload_bytes, selected_cost, selected_bytes).is_lt()
-            }) {
-                selected_candidate = Some((position, retrieval_cost, payload_bytes));
-            }
-        }
+        let selected_candidate = (0..sample_count)
+            .filter_map(|sample_offset| {
+                let position = (sample_start + sample_offset) % candidate_count;
+                let (key, range_start) = &index.eviction_candidates[position];
+                let entry = &index.entries_by_key[key][range_start];
+                (entry.chunk_count() as usize <= *remaining_eviction_chunk_budget).then(|| {
+                    let cost = access_histories.decayed_retrieval_cost(key, entry.object_range);
+                    (position, cost, entry.object_range.len())
+                })
+            })
+            .min_by(|(_, left_cost, left_bytes), (_, right_cost, right_bytes)| {
+                compare_cost_per_byte(*left_cost, *left_bytes, *right_cost, *right_bytes)
+            });
         if let Some((position, ..)) = selected_candidate {
             let (key, start) = index.eviction_candidates[position];
             *remaining_eviction_chunk_budget -= index.entries_by_key[&key][&start].chunk_count() as usize;
@@ -464,9 +458,10 @@ impl DiskEntryIndex {
     }
 
     /// Finds the entry whose byte range covers the entire request.
-    fn covering_entry(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&DiskEntry> {
+    fn covering_entry(&mut self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&mut DiskEntry> {
         // Entry ranges never contain one another, so their ends increase with their starts.
-        let (_, entry) = self.entries_by_key.get(key)?.range(..=requested.start()).next_back()?;
+        let entries = self.entries_by_key.get_mut(key)?;
+        let (_, entry) = entries.range_mut(..=requested.start()).next_back()?;
         entry.object_range.contains(requested).then_some(entry)
     }
 }
@@ -492,13 +487,18 @@ impl DiskCacheInner {
 
 impl PayloadRead {
     /// Reads the whole entry payload and verifies its checksum.
-    async fn read_and_verify_payload(&self, file: &DataFile) -> DataFileResult<Option<(Bytes, usize)>> {
+    async fn read_and_verify_payload(&self, file: &DataFile) -> Result<(Bytes, usize), DiskLookupOutcome> {
         let (bytes, buffer_capacity) = file
             .read_payload(self.payload_range.clone(), self.object_range.len() as usize)
-            .await?;
+            .await
+            .map_err(|error| {
+                tracing::warn!(target: "feuer::storage", %error, "disk read failed; entry invalidated");
+                DiskLookupOutcome::IoError
+            })?;
         if XxHash64::oneshot(0, &bytes) != self.payload_checksum {
-            return Ok(None);
+            tracing::warn!(target: "feuer::storage", "disk checksum failed; entry invalidated");
+            return Err(DiskLookupOutcome::ChecksumFailed);
         }
-        Ok(Some((bytes, buffer_capacity)))
+        Ok((bytes, buffer_capacity))
     }
 }

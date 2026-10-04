@@ -143,7 +143,7 @@
                   <p>A Tokio <code>mpsc::channel(64)</code> reserves waiting-channel capacity with <code>reserve().await</code>. A full channel yields the submitting task rather than blocking its executor thread.</p>
                   <p>Reserved capacity for preparing requests and queued requests share the channel's 64-position limit. The worker has <strong>64 additional active slots</strong>; receiving a request frees channel capacity, not completing it. Callers waiting to reserve are outside these counts.</p>
                   <p class="note">There is no raw-I/O byte budget. A payload read allocates its whole aligned entry buffer before reserving channel capacity for each physical read of at most 1 MiB, so request counts do not cap read-buffer memory.</p>
-                  <p>Startup recovery uses <code>try_reserve()</code> before allocating each 1-MiB metadata-read buffer. If full, it retries after 1 ms. Opening waits for all shard recovery to finish before serving lookups.</p>
+                  <p>Startup recovery uses the same <code>reserve().await</code> admission before allocating each 1-MiB metadata-read buffer. Opening waits for all shard recovery to finish before serving lookups.</p>
                   <details class="source">
                     <summary>Code · async channel reservation</summary>
                     <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · reserve_request</a>
@@ -154,7 +154,7 @@
     .await
     .map_err(|_| queue_stopped_error())</code></pre>
                     <a class="source-label" href="feuer-storage/src/file.rs">feuer-storage/src/file.rs · read_aligned_range / read_recovery_chunk</a>
-                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · try_read_recovery_chunk</a>
+                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · ReadQueue::read</a>
                   </details>
                 </div>
               </details>
@@ -443,7 +443,7 @@ let (tx, rx) = mpsc::sync_channel(4096);</code></pre>
             <thead><tr><th scope="col">Boundary</th><th scope="col">When full</th><th scope="col">Who pays?</th></tr></thead>
             <tbody>
               <tr><th scope="row">Feuer disk-write queue</th><td>Skip the disk copy</td><td>The cache skips a disk write. The successful lookup continues.</td></tr>
-              <tr><th scope="row">Feuer raw I/O</th><td>Await channel reservation</td><td>The submitting task waits: foreground on reads, background for disk-cache writes. Startup recovery retries a full read channel.</td></tr>
+              <tr><th scope="row">Feuer raw I/O</th><td>Await channel reservation</td><td>The submitting task waits: foreground on reads, background for disk-cache writes. Startup recovery also waits for read-channel capacity.</td></tr>
               <tr><th scope="row">Foyer io_uring input</th><td>Blocking channel send</td><td>The calling thread can wait for channel space. Later completion is awaited asynchronously.</td></tr>
             </tbody>
           </table>

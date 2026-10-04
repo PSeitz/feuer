@@ -412,7 +412,7 @@ async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
     let source = download(3, CHUNK_BYTES as usize + 17);
     cache.insert(key, source.clone()).await.unwrap();
     let read = {
-        let index = cache.disk.shards[0].entry_index.lock().unwrap();
+        let mut index = cache.disk.shards[0].entry_index.lock().unwrap();
         let entry = index.covering_entry(&key, source.downloaded_range()).unwrap();
         PayloadRead {
             object_range: entry.object_range,
@@ -427,7 +427,8 @@ async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
             .unwrap()
     );
     assert!(cache.get(&key, range(3, 4)).await.is_none());
-    assert!(read.read_and_verify_payload(&cache.disk.file).await.unwrap().is_none());
+    let result = read.read_and_verify_payload(&cache.disk.file).await;
+    assert!(matches!(result, Err(DiskLookupOutcome::ChecksumFailed)));
 }
 
 #[tokio::test]
@@ -1080,7 +1081,7 @@ async fn read_addresses_and_results_do_not_delay_replaced_payload_reuse() {
     let key = ObjectKeyHash::from("object");
     cache.insert(key, download(5, 100)).await.unwrap();
     let (guard, payload_checksum) = {
-        let index = cache.disk.shards[0].entry_index.lock().unwrap();
+        let mut index = cache.disk.shards[0].entry_index.lock().unwrap();
         let entry = index.covering_entry(&key, range(6, 7)).unwrap();
         (entry.payload_range.clone(), entry.payload_checksum)
     };

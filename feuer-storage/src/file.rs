@@ -157,27 +157,16 @@ impl DataFile {
         .await
     }
 
-    /// Reads a complete metadata chunk, retrying when the read channel is full.
+    /// Reads a complete metadata chunk, waiting for read-channel capacity before allocating.
     /// Recovery finishes before any writes begin.
     pub(crate) async fn read_recovery_chunk(&self, address: u64) -> DataFileResult<Bytes> {
         let length = uring::MAX_IO_REQUEST_BYTES;
         self.measure_io(IoOperation::Read, address, length, async {
-            loop {
-                let result = self
-                    .state
-                    .read_queue
-                    .try_read_recovery_chunk(address)
-                    .await
-                    .map_err(|source| DataFileError::Io {
-                        operation: IoOperation::Read,
-                        path: self.state.data_path.clone(),
-                        source,
-                    })?;
-                if let Some(bytes) = result {
-                    return Ok(bytes);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
+            self.state
+                .read_queue
+                .read(address, length)
+                .await
+                .map_err(|source| self.io_error(IoOperation::Read, source))
         })
         .await
     }
@@ -203,11 +192,7 @@ impl DataFile {
                     .write_queue
                     .write_parts(offset + start as u64, end - start, &[(0, bytes.slice(start..end))])
                     .await
-                    .map_err(|source| DataFileError::Io {
-                        operation: IoOperation::Write,
-                        path: self.state.data_path.clone(),
-                        source,
-                    })?;
+                    .map_err(|source| self.io_error(IoOperation::Write, source))?;
             }
             Ok(())
         })
@@ -225,13 +210,17 @@ impl DataFile {
                 .write_queue
                 .write_parts(offset, length, parts)
                 .await
-                .map_err(|source| DataFileError::Io {
-                    operation: IoOperation::Write,
-                    path: self.state.data_path.clone(),
-                    source,
-                })
+                .map_err(|source| self.io_error(IoOperation::Write, source))
         })
         .await
+    }
+
+    fn io_error(&self, operation: IoOperation, source: io::Error) -> DataFileError {
+        DataFileError::Io {
+            operation,
+            path: self.state.data_path.clone(),
+            source,
+        }
     }
 
     async fn measure_io<T>(
@@ -267,11 +256,7 @@ impl DataFile {
             operation,
             length: usize::MAX,
         })?;
-        let io_error = |source| DataFileError::Io {
-            operation,
-            path: self.state.data_path.clone(),
-            source,
-        };
+        let io_error = |source| self.io_error(operation, source);
         let mut buffer = self.state.read_queue.allocate_buffer(buffer_length).map_err(io_error)?;
         for offset in (range.start..range.end).step_by(uring::MAX_IO_REQUEST_BYTES) {
             let destination_offset = (offset - range.start) as usize;

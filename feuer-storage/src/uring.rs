@@ -60,8 +60,8 @@ impl IoQueueHandle {
         let (sender, receiver) = mpsc::channel(max_in_flight);
         let mut queue = IoQueue {
             ring,
-            file: Some(file),
-            directory_lock: Some(directory_lock),
+            file,
+            directory_lock,
             wake_fd: wake_fd.clone(),
             receiver,
             active: (0..max_in_flight).map(|_| None).collect(),
@@ -143,25 +143,6 @@ impl ReadQueue {
             .into_bytes())
     }
 
-    /// One metadata read. Never waits for channel capacity or allocates a buffer without it.
-    /// The scanner retries later when the channel is full; admitted requests run in FIFO order.
-    pub(crate) async fn try_read_recovery_chunk(&self, offset: u64) -> io::Result<Option<Bytes>> {
-        let length = MAX_IO_REQUEST_BYTES;
-        let permit = match self.handle.sender.as_ref().unwrap().try_reserve() {
-            Ok(permit) => permit,
-            Err(mpsc::error::TrySendError::Full(_)) => return Ok(None),
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err(queue_stopped_error()),
-        };
-        let buffer = self.allocate_buffer(length)?;
-        Ok(Some(
-            self.handle
-                .submit_and_wait(offset, IoBuffers::Read(buffer), 0..length, permit)
-                .await?
-                .into_read_buffer()
-                .into_bytes(),
-        ))
-    }
-
     /// Transfers exclusive buffer ownership to the queue until this slice completes.
     pub(crate) async fn read_into(
         &self,
@@ -193,8 +174,6 @@ impl WriteQueue {
     /// Writes parts at aligned offsets, starting at zero; gaps become zero.
     /// Aligned payload slices are used directly; only other bytes need a copy.
     pub(crate) async fn write_parts(&self, offset: u64, length: usize, parts: &[(usize, Bytes)]) -> io::Result<()> {
-        assert!(length > 0 && length <= MAX_IO_REQUEST_BYTES);
-        assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         let permit = self.handle.reserve_request().await?;
         let buffers = IoBuffers::from_write_parts(length, parts)?;
         self.handle.submit_and_wait(offset, buffers, 0..length, permit).await?;
@@ -300,8 +279,8 @@ struct IoRequest {
     buffer_range: Range<usize>,
     // Bytes completed, allowing aligned short-I/O continuations.
     completed_bytes: usize,
-    // Caller result channel; taken on finish/failure, also detects cancellation.
-    reply: Option<oneshot::Sender<io::Result<IoBuffers>>>,
+    // Caller result channel; consumed on finish/failure, also detects cancellation.
+    reply: oneshot::Sender<io::Result<IoBuffers>>,
 }
 
 impl IoRequest {
@@ -325,7 +304,7 @@ impl IoRequest {
             buffers,
             buffer_range,
             completed_bytes: 0,
-            reply: Some(reply),
+            reply,
         }
     }
 
@@ -373,19 +352,18 @@ impl IoRequest {
     }
 
     /// Sends the buffers or error as the request result.
-    fn send_result(mut self, result: io::Result<()>) {
-        let result = result.map(|()| self.buffers);
-        let _ = self.reply.take().unwrap().send(result);
+    fn send_result(self, result: io::Result<()>) {
+        let _ = self.reply.send(result.map(|()| self.buffers));
     }
 }
 
 struct IoQueue {
     // Thread-owned kernel submission/completion queues; no cross-thread ring access.
     ring: IoUring,
-    // Direct-I/O payload file; taken to retain ownership on abnormal exit.
-    file: Option<Arc<File>>,
+    // Direct-I/O payload file; retained on abnormal exit.
+    file: Arc<File>,
     // Shared directory lock; both queues must drain before it can be released.
-    directory_lock: Option<Arc<File>>,
+    directory_lock: Arc<File>,
     // Eventfd polled alongside the ring so new work need not wait for completion.
     wake_fd: Arc<OwnedFd>,
     // Holds up to active.len() waiting requests; receive only when the active array has room.
@@ -443,7 +421,7 @@ impl IoQueue {
             }
             let request = loop {
                 match self.receiver.try_recv() {
-                    Ok(request) if request.reply.as_ref().unwrap().is_closed() => continue,
+                    Ok(request) if request.reply.is_closed() => continue,
                     Ok(request) => break request,
                     Err(mpsc::error::TryRecvError::Empty) => return false,
                     Err(mpsc::error::TryRecvError::Disconnected) => return true,
@@ -460,7 +438,7 @@ impl IoQueue {
         let entry = self.active[request_index]
             .as_mut()
             .unwrap()
-            .submission_entry(self.file.as_ref().unwrap().as_raw_fd(), request_index);
+            .submission_entry(self.file.as_raw_fd(), request_index);
         // SAFETY: all referenced resources are owned by the active request through completion.
         // The ring is sized for all active requests, each with at most one submitted or queued SQE.
         unsafe {
@@ -515,18 +493,16 @@ impl Drop for IoQueue {
         self.receiver.close();
         if self.active.iter().any(Option::is_some) {
             // An abnormal queue exit cannot prove the kernel has stopped using pointers.
-            // Closing a ring may tear it down asynchronously. Leak only active requests
+            // Closing a ring may tear it down asynchronously. Leak only active buffers
             // and file/lock owners rather than risking use-after-free or early reuse.
             // Normal shutdown drains all completions and never takes this path.
             tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
-            for mut request in self.active.iter_mut().filter_map(Option::take) {
-                if let Some(reply) = request.reply.take() {
-                    let _ = reply.send(Err(queue_stopped_error()));
-                }
-                std::mem::forget(request);
+            for request in self.active.iter_mut().filter_map(Option::take) {
+                let _ = request.reply.send(Err(queue_stopped_error()));
+                std::mem::forget(request.buffers);
             }
-            std::mem::forget(self.file.take());
-            std::mem::forget(self.directory_lock.take());
+            std::mem::forget(self.file.clone());
+            std::mem::forget(self.directory_lock.clone());
         }
     }
 }

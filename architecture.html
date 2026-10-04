@@ -359,7 +359,7 @@
               <p>Reads and writes each have a bounded waiting channel, active request slots, an io_uring ring, and a worker thread. Arrival order determines scheduling, not completion order. Neither queue checks for overlapping disk ranges.</p>
               <dl><dt>Active read slots / waiting channel</dt><dd>64 / 64 requests</dd><dt>Active write slots / waiting channel</dt><dd>8 / 8 requests</dd><dt>Maximum bytes per I/O request</dt><dd>1 MiB</dd><dt>Separate I/O-byte budget</dt><dd>None</dd></dl>
               <details class="deeper"><summary>Admission and completion lifetime</summary><div>
-                <p>Normal submissions reserve channel capacity before preparing request buffers. Startup recovery tries to reserve a read-channel slot and retries later if full. A payload read allocates its whole-entry buffer before submitting 1-MiB slices sequentially, so queue slot limits do not cap total read-buffer memory.</p>
+                <p>Normal submissions reserve channel capacity before preparing request buffers. Startup recovery uses the same admission before allocating each metadata-read buffer. A payload read allocates its whole-entry buffer before submitting 1-MiB slices sequentially, so queue slot limits do not cap total read-buffer memory.</p>
                 <p>An eventfd wakes workers for new requests or shutdown; no busy polling or registered buffers are used. Submitted buffers survive caller cancellation. Last-handle drop drains and joins the workers.</p>
                 <p>Abnormal driver failure retains uncertain active buffers and the directory lock until process exit rather than risk unsafe reuse.</p>
               </div></details>

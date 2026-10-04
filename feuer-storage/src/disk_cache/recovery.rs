@@ -113,12 +113,7 @@ fn decode_entry_metadata(bytes: &[u8]) -> Option<EntryMetadata> {
     let range = ByteRange::new(start, start + read_u64(bytes, 24)).ok()?;
     let checksum = read_u64(bytes, 40);
     let start = read_u64(bytes, 32);
-    let payload = start
-        ..start
-            + range
-                .len()
-                .max(BUFFER_ALIGNMENT as u64)
-                .next_multiple_of(BUFFER_ALIGNMENT as u64);
+    let payload = start..start + payload_disk_bytes(range.len());
     Some((key, range, checksum, payload))
 }
 

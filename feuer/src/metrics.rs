@@ -17,14 +17,10 @@ pub(crate) enum LookupOutcome {
     InvalidDownload,
 }
 
-struct LookupOutcomeMetrics {
-    count: BoxedCounter,
-    duration: Option<BoxedHistogram>,
-}
-
 /// Completed public lookups, never keyed by object identity.
 pub(crate) struct LookupMetrics {
-    outcomes: [LookupOutcomeMetrics; 5],
+    outcome_counts: [BoxedCounter; 5],
+    success_durations: [BoxedHistogram; 3],
     served_bytes: [BoxedCounter; 3],
 }
 
@@ -48,26 +44,22 @@ impl LookupMetrics {
             &["source"],
         );
         Self {
-            outcomes: [
+            outcome_counts: [
                 "memory_hit",
                 "disk_hit",
                 "callback",
                 "callback_error",
                 "invalid_download",
             ]
-            .map(|label| LookupOutcomeMetrics {
-                count: count.counter(&[label.into()]),
-                duration: matches!(label, "memory_hit" | "disk_hit" | "callback")
-                    .then(|| duration.histogram(&[label.into()])),
-            }),
+            .map(|label| count.counter(&[label.into()])),
+            success_durations: ["memory_hit", "disk_hit", "callback"].map(|label| duration.histogram(&[label.into()])),
             served_bytes: ["memory", "disk", "callback"].map(|label| served_bytes.counter(&[label.into()])),
         }
     }
 
     pub(crate) fn record(&self, outcome: LookupOutcome, elapsed: Duration, bytes: u64) {
-        let metrics = &self.outcomes[outcome as usize];
-        metrics.count.increase(1);
-        if let Some(duration) = &metrics.duration {
+        self.outcome_counts[outcome as usize].increase(1);
+        if let Some(duration) = self.success_durations.get(outcome as usize) {
             duration.record(elapsed.as_secs_f64());
             self.served_bytes[outcome as usize].increase(bytes);
         }

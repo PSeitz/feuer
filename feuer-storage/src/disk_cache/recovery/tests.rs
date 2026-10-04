@@ -40,7 +40,7 @@ async fn metadata_chains_start_at_each_shards_first_chunk_without_a_sidecar() {
 #[tokio::test]
 async fn recovers_separate_metadata_and_contiguous_multi_chunk_payloads() {
     let (directory, cache) = open_test_cache(12 * CHUNK_BYTES).await;
-    let lengths = [1, 4097, CHUNK_BYTES as usize, 3 * CHUNK_BYTES as usize + 7];
+    let lengths = [0, 1, 4096, 4097, CHUNK_BYTES as usize, 3 * CHUNK_BYTES as usize + 7];
     let entries = lengths
         .iter()
         .enumerate()

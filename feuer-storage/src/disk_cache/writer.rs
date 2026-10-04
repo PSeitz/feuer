@@ -73,7 +73,7 @@ impl DiskCache {
         let disk = &self.disk;
         let shard = &disk.shards[disk.shard_index_for_key(&key)];
         let (object_range, bytes) = download.into_parts();
-        let length = bytes.len().max(BUFFER_ALIGNMENT).next_multiple_of(BUFFER_ALIGNMENT);
+        let length = payload_disk_bytes(object_range.len()) as usize;
         let mut attempt = DiskWriteAttempt::new(disk.metrics.clone());
         if self.covers_range(&key, object_range) {
             attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
@@ -213,13 +213,7 @@ impl DiskCacheShard {
                     eviction_position: 0,
                     object_range: buffered.object_range,
                     payload_checksum: buffered.payload_checksum,
-                    payload_range: start
-                        ..start
-                            + buffered
-                                .object_range
-                                .len()
-                                .max(BUFFER_ALIGNMENT as u64)
-                                .next_multiple_of(BUFFER_ALIGNMENT as u64),
+                    payload_range: start..start + payload_disk_bytes(buffered.object_range.len()),
                     metadata: pages.free_entry_positions.pop().unwrap(),
                 };
                 pages.set_entry_metadata(&buffered.key, &entry);

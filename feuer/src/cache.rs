@@ -147,13 +147,10 @@ impl TieredMemoryDiskCache {
             return Ok(bytes);
         }
 
-        let download = match callback().await {
-            Ok(download) => download,
-            Err(error) => {
-                metrics.record(LookupOutcome::CallbackError, started.elapsed(), 0);
-                return Err(GetOrFetchError::Callback(error));
-            }
-        };
+        let download = callback().await.map_err(|error| {
+            metrics.record(LookupOutcome::CallbackError, started.elapsed(), 0);
+            GetOrFetchError::Callback(error)
+        })?;
         let downloaded_range = download.downloaded_range();
         if !downloaded_range.contains(requested_range) {
             metrics.record(LookupOutcome::InvalidDownload, started.elapsed(), 0);

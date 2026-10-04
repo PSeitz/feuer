@@ -339,42 +339,38 @@ impl MemoryCacheShard {
         access_histories: &ObjectAccessHistories,
     ) -> Option<ReclaimCandidate> {
         let (sample_start, sample_count) = self.candidates.sample(self.reclaim_sample_size);
-        let candidate_count = self.candidates.entries.len();
-        let mut selected_candidate: Option<(&ObjectKeyHash, &MemoryEntry, f64)> = None;
-
-        for offset in 0..sample_count {
-            let candidate = &self.candidates.entries[(sample_start + offset) % candidate_count];
-            let entries = self
-                .entries_by_key
-                .get(&candidate.object_key)
-                .expect("every sampling candidate must have an object index");
-            let entry = entries
-                .by_start
-                .get(&candidate.start)
-                .expect("every sampling candidate must identify an indexed entry");
-            if candidate.object_key == *admitting_key && admitting_range.contains(entry.range) {
-                continue;
-            }
-
-            let retrieval_cost = access_histories.decayed_retrieval_cost(&candidate.object_key, entry.range);
-            if selected_candidate.is_none_or(|(selected_key, selected_entry, selected_cost)| {
-                compare_cost_per_byte(
-                    retrieval_cost,
-                    entry.allocation_charge,
-                    selected_cost,
-                    selected_entry.allocation_charge,
-                )
-                .then_with(|| candidate.object_key.cmp(selected_key))
-                .then_with(|| entry.range.cmp(&selected_entry.range))
-                .is_lt()
-            }) {
-                selected_candidate = Some((&candidate.object_key, entry, retrieval_cost));
-            }
-        }
-        selected_candidate.map(|(object_key, entry, _)| ReclaimCandidate {
-            object_key: *object_key,
-            range: entry.range,
-        })
+        self.candidates
+            .entries
+            .iter()
+            .cycle()
+            .skip(sample_start)
+            .take(sample_count)
+            .map(|candidate| {
+                let entry = self
+                    .entries_by_key
+                    .get(&candidate.object_key)
+                    .and_then(|entries| entries.by_start.get(&candidate.start))
+                    .expect("every sampling candidate must identify an indexed entry");
+                (&candidate.object_key, entry)
+            })
+            .filter(|(key, entry)| **key != *admitting_key || !admitting_range.contains(entry.range))
+            .map(|(key, entry)| (key, entry, access_histories.decayed_retrieval_cost(key, entry.range)))
+            .min_by(
+                |(left_key, left_entry, left_cost), (right_key, right_entry, right_cost)| {
+                    compare_cost_per_byte(
+                        *left_cost,
+                        left_entry.allocation_charge,
+                        *right_cost,
+                        right_entry.allocation_charge,
+                    )
+                    .then_with(|| left_key.cmp(right_key))
+                    .then_with(|| left_entry.range.cmp(&right_entry.range))
+                },
+            )
+            .map(|(object_key, entry, _)| ReclaimCandidate {
+                object_key: *object_key,
+                range: entry.range,
+            })
     }
 
     /// Prepares a range trim by retaining its source bytes and plan after the grace period.
