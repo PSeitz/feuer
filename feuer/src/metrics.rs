@@ -69,9 +69,7 @@ impl LookupMetrics {
         metrics.count.increase(1);
         if let Some(duration) = &metrics.duration {
             duration.record(elapsed.as_secs_f64());
-        }
-        if let Some(counter) = self.served_bytes.get(outcome as usize) {
-            counter.increase(bytes);
+            self.served_bytes[outcome as usize].increase(bytes);
         }
     }
 }

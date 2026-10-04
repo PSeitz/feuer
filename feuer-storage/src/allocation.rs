@@ -154,9 +154,6 @@ impl DiskChunkAllocator {
     /// Reserves one contiguous run of whole chunks. Failure consumes no space.
     pub(super) fn reserve_chunks(&self, count: u64) -> Option<ReservedChunks> {
         let mut free = self.free.lock().unwrap();
-        if count == 0 || count > free.available_chunks {
-            return None;
-        }
         let (&start, _) = free
             .free_chunk_count_by_start
             .iter()

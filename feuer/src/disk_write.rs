@@ -97,12 +97,11 @@ impl DiskWriteQueue {
     pub(crate) fn enqueue_if_space_available(&self, key: ObjectKeyHash, download: Download) {
         let permit = match self.sender.try_reserve() {
             Ok(permit) => permit,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.metrics.record(DiskWriteQueueOutcome::Full);
-                return;
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                self.metrics.record(DiskWriteQueueOutcome::Closed);
+            Err(error) => {
+                self.metrics.record(match error {
+                    mpsc::error::TrySendError::Full(_) => DiskWriteQueueOutcome::Full,
+                    mpsc::error::TrySendError::Closed(_) => DiskWriteQueueOutcome::Closed,
+                });
                 return;
             }
         };

@@ -13,7 +13,7 @@ use crate::ByteRange;
 /// cache-access event.
 #[derive(Clone)]
 pub struct Download {
-    downloaded_start: u64,
+    range: ByteRange,
     bytes: Bytes,
 }
 
@@ -21,27 +21,25 @@ impl Download {
     /// Creates a download whose range starts at `downloaded_start`.
     pub fn new(downloaded_start: u64, bytes: Bytes) -> Result<Self, DownloadError> {
         let payload_bytes = bytes.len() as u64;
-        if downloaded_start.checked_add(payload_bytes).is_none() {
-            return Err(DownloadError::RangeOverflow {
+        let downloaded_end = downloaded_start
+            .checked_add(payload_bytes)
+            .ok_or(DownloadError::RangeOverflow {
                 downloaded_start,
                 payload_bytes,
-            });
-        }
-        Ok(Self {
-            downloaded_start,
-            bytes,
-        })
+            })?;
+        let range =
+            ByteRange::new(downloaded_start, downloaded_end).expect("a payload length produces an ordered range");
+        Ok(Self { range, bytes })
     }
 
     /// Returns the first downloaded object offset.
     pub const fn downloaded_start(&self) -> u64 {
-        self.downloaded_start
+        self.range.start()
     }
 
     /// Returns the exact object range derived from the payload length.
     pub fn downloaded_range(&self) -> ByteRange {
-        ByteRange::new(self.downloaded_start, self.downloaded_start + self.bytes.len() as u64)
-            .expect("a Download always contains a representable range")
+        self.range
     }
 
     /// Returns the contiguous bytes covering the downloaded range.
@@ -51,8 +49,7 @@ impl Download {
 
     /// Decomposes the download into its derived range and payload.
     pub fn into_parts(self) -> (ByteRange, Bytes) {
-        let range = self.downloaded_range();
-        (range, self.bytes)
+        (self.range, self.bytes)
     }
 }
 

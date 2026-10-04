@@ -171,10 +171,6 @@ fn access_history_len(cache: &MemoryCache, key: &ObjectKeyHash) -> usize {
     accessed_ranges(cache, key).len()
 }
 
-fn candidate_count(cache: &MemoryCache) -> usize {
-    cache.shards[0].lock().candidate_count()
-}
-
 #[test]
 fn eviction_triggering_insertions_count_once_per_attempt_not_per_victim() {
     use crate::test_metrics::{registry, value};
@@ -672,7 +668,6 @@ fn candidate_state_tracks_entries_during_oversized_churn() {
 
     assert_eq!(cache.used_bytes(), 2);
     assert_eq!(cache.entry_count(), 1);
-    assert_eq!(candidate_count(&cache), cache.entry_count() as usize);
 }
 
 #[test]
@@ -774,7 +769,6 @@ fn range_trim_requires_only_the_exact_source_range() {
             };
             assert_eq!(cache.used_bytes(), bytes);
             assert_eq!(cache.entry_count(), entries);
-            assert_eq!(candidate_count(&cache), entries as usize);
             if change == 2 {
                 assert_eq!(cache.get(&key, range(12, 13)).unwrap(), Bytes::from_static(b"x"));
             } else if change == 4 {

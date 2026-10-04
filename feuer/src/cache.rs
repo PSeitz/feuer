@@ -163,7 +163,9 @@ impl TieredMemoryDiskCache {
             });
         }
 
-        let requested_bytes = requested_slice(download.bytes(), downloaded_range, requested_range);
+        let start = (requested_range.start() - downloaded_range.start()) as usize;
+        let end = (requested_range.end() - downloaded_range.start()) as usize;
+        let requested_bytes = download.bytes().slice(start..end);
         #[cfg(target_os = "linux")]
         if self.state.disk.covers_range(&object_key, downloaded_range) {
             self.state.disk_write_queue.record_already_covered();
@@ -201,15 +203,6 @@ pub enum GetOrFetchError<E> {
         /// The exact range returned by the callback.
         downloaded_range: ByteRange,
     },
-}
-
-fn requested_slice(bytes: &Bytes, downloaded_range: ByteRange, requested_range: ByteRange) -> Bytes {
-    debug_assert!(downloaded_range.contains(requested_range));
-    let start = usize::try_from(requested_range.start() - downloaded_range.start())
-        .expect("an offset within a callback Bytes payload must fit in usize");
-    let end = usize::try_from(requested_range.end() - downloaded_range.start())
-        .expect("an offset within a callback Bytes payload must fit in usize");
-    bytes.slice(start..end)
 }
 
 /// Copies a disk result only if the destination has smaller backing capacity.

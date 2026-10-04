@@ -3,16 +3,12 @@ mod shard;
 #[cfg(test)]
 mod tests;
 
-use std::{
-    fmt,
-    hash::{Hash, Hasher},
-    sync::Arc,
-};
+use std::{fmt, hash::BuildHasher, sync::Arc};
 
 use bytes::Bytes;
 use feuer_types::{ByteRange, Download, ObjectKeyHash, retention::ObjectAccessHistories};
 use parking_lot::Mutex;
-use rustc_hash::FxHasher;
+use rustc_hash::FxBuildHasher;
 
 use self::shard::{InsertOrReclaimResult, MemoryCacheShard};
 use crate::{BufferPool, MemoryMetrics};
@@ -171,23 +167,7 @@ impl MemoryCache {
     ) -> bool {
         let (downloaded_range, bytes) = download.into_parts();
         assert!(allocation_charge >= bytes.len());
-        self.admit_download(object_key, downloaded_range, bytes, allocation_charge as u64)
-    }
-
-    /// Checks whether the exact key and range are cached, without retaining bytes or recording an access.
-    pub fn contains_entry(&self, object_key: &ObjectKeyHash, range: ByteRange) -> bool {
-        self.shards[self.shard_index(object_key)]
-            .lock()
-            .contains_entry(object_key, range)
-    }
-
-    fn admit_download(
-        &self,
-        object_key: ObjectKeyHash,
-        downloaded_range: ByteRange,
-        bytes: Bytes,
-        allocation_charge: u64,
-    ) -> bool {
+        let allocation_charge = allocation_charge as u64;
         let shard_index = self.shard_index(&object_key);
         let mut allow_range_trim = true;
         let mut evicted_any_entry = false;
@@ -214,17 +194,20 @@ impl MemoryCache {
                     // Publication checks that the exact source range is still cached, not history.
                     let replacement = source.copy_replacement_payloads();
                     let request_count = self.access_histories.request_count();
-                    if !self.shards[shard_index]
+                    // If the source disappeared, fall back to eviction so admission cannot starve.
+                    allow_range_trim = self.shards[shard_index]
                         .lock()
-                        .publish_range_trim(replacement, request_count)
-                    {
-                        // The source was removed or replaced by a different range. Fall back to
-                        // eviction so this admission cannot starve.
-                        allow_range_trim = false;
-                    }
+                        .publish_range_trim(replacement, request_count);
                 }
             }
         }
+    }
+
+    /// Checks whether the exact key and range are cached, without retaining bytes or recording an access.
+    pub fn contains_entry(&self, object_key: &ObjectKeyHash, range: ByteRange) -> bool {
+        self.shards[self.shard_index(object_key)]
+            .lock()
+            .contains_entry(object_key, range)
     }
 
     /// Removes one entry with exactly the supplied key and range.
@@ -237,9 +220,7 @@ impl MemoryCache {
     ///
     /// The shard assignment is process-local and must never be persisted.
     fn shard_index(&self, object_key: &ObjectKeyHash) -> usize {
-        let mut hasher = FxHasher::default();
-        object_key.hash(&mut hasher);
-        (hasher.finish() % self.shards.len() as u64) as usize
+        (FxBuildHasher.hash_one(object_key) % self.shards.len() as u64) as usize
     }
 
     #[cfg(test)]
@@ -255,8 +236,7 @@ fn shard_capacity_for(total_capacity: u64, num_shards: usize, shard_index: usize
 
 fn default_shard_count() -> usize {
     std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
+        .map_or(1, usize::from)
         .saturating_mul(4)
-        .clamp(1, MAX_SHARDS)
+        .min(MAX_SHARDS)
 }

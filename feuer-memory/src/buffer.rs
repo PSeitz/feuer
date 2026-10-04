@@ -48,6 +48,7 @@ pub struct BufferPool {
 }
 
 /// Entry allocation byte counts and idle buffers grouped by size, protected by one lock.
+#[derive(Default)]
 struct EntryAllocationBytesAndIdleBuffers {
     cached_bytes: u64,
     idle_bytes: u64,
@@ -61,11 +62,7 @@ impl BufferPool {
         Arc::new(Self {
             capacity,
             idle_limit,
-            state: Mutex::new(EntryAllocationBytesAndIdleBuffers {
-                cached_bytes: 0,
-                idle_bytes: 0,
-                by_size: std::array::from_fn(|_| Vec::new()),
-            }),
+            state: Mutex::default(),
             metrics,
         })
     }
@@ -77,18 +74,14 @@ impl BufferPool {
 
     /// Backing capacity for a length, without allocating or taking an idle buffer.
     pub fn allocation_capacity(length: usize) -> usize {
-        BUFFER_SIZES
-            .iter()
-            .find(|&&size| length <= size)
-            .copied()
-            .unwrap_or(length)
+        BUFFER_SIZES.into_iter().find(|&size| length <= size).unwrap_or(length)
     }
 
     /// Takes or allocates a buffer. Larger than 64 MiB is exact-size and unpooled.
     /// Reused bytes are initialized, but must be overwritten before returning a read result.
     pub fn allocate(self: &Arc<Self>, length: usize) -> io::Result<AlignedBuffer> {
-        let capacity = Self::allocation_capacity(length);
-        let bucket = BUFFER_SIZES.iter().position(|&size| size == capacity);
+        let bucket = BUFFER_SIZES.iter().position(|&size| length <= size);
+        let capacity = bucket.map_or(length, |index| BUFFER_SIZES[index]);
         let mut buffer = bucket
             .and_then(|index| {
                 let mut state = self.state.lock();
@@ -125,10 +118,9 @@ impl BufferPool {
         let idle_limit = self.capacity.saturating_sub(state.cached_bytes);
         // Cache entries take precedence over idle buffers. Free larger buffers first.
         for index in (0..BUFFER_SIZES.len()).rev() {
-            while state.idle_bytes > idle_limit {
-                let Some(buffer) = state.by_size[index].pop() else {
-                    break;
-                };
+            while state.idle_bytes > idle_limit
+                && let Some(buffer) = state.by_size[index].pop()
+            {
                 let capacity = buffer.capacity() as u64;
                 state.idle_bytes -= capacity;
                 self.decrease_idle_buffer_metrics(index, capacity);
@@ -222,25 +214,24 @@ impl Drop for AlignedBuffer {
     fn drop(&mut self) {
         if let Some(metrics) = self.metrics.take() {
             let index = BUFFER_SIZES.iter().position(|&size| size == self.capacity()).unwrap();
-            metrics.used_buffer_bytes[index].decrease(self.capacity() as u64);
-        }
-        if let Some(pool) = self.pool.upgrade() {
-            let mut state = pool.state.lock();
             let capacity = self.capacity() as u64;
-            let index = BUFFER_SIZES.iter().position(|&size| size == self.capacity()).unwrap();
-            let available = pool.capacity.saturating_sub(state.cached_bytes + state.idle_bytes);
-            if capacity <= available && state.idle_bytes + capacity <= pool.idle_limit {
-                state.by_size[index].push(Self {
-                    ptr: self.ptr,
-                    layout: self.layout,
-                    length: self.length,
-                    pool: Weak::new(),
-                    metrics: None,
-                });
-                state.idle_bytes += capacity;
-                pool.metrics.idle_buffer_bytes[index].increase(capacity);
-                pool.metrics.increase_usage(capacity, 0);
-                return;
+            metrics.used_buffer_bytes[index].decrease(capacity);
+            if let Some(pool) = self.pool.upgrade() {
+                let mut state = pool.state.lock();
+                let idle_limit = pool.idle_limit.min(pool.capacity.saturating_sub(state.cached_bytes));
+                if state.idle_bytes + capacity <= idle_limit {
+                    state.by_size[index].push(Self {
+                        ptr: self.ptr,
+                        layout: self.layout,
+                        length: self.length,
+                        pool: Weak::new(),
+                        metrics: None,
+                    });
+                    state.idle_bytes += capacity;
+                    pool.metrics.idle_buffer_bytes[index].increase(capacity);
+                    pool.metrics.increase_usage(capacity, 0);
+                    return;
+                }
             }
         }
         // SAFETY: this owner holds the allocation made with exactly this layout.

@@ -294,26 +294,22 @@ impl DiskCache {
         // If the initializing caller is canceled, OnceCell lets a waiter take over.
         let result = in_flight_read
             .get_or_init(|| async {
-                match read.read_and_verify_range(&self.disk.file, read.object_range).await {
-                    Ok(Some(bytes)) => Ok(bytes),
-                    result => {
-                        let outcome = match result {
-                            Err(error) => {
-                                tracing::warn!(target: "feuer::storage", %error, "disk read failed; entry invalidated");
-                                DiskLookupOutcome::IoError
-                            }
-                            _ => {
-                                tracing::warn!(target: "feuer::storage", "disk checksum failed; entry invalidated");
-                                DiskLookupOutcome::ChecksumFailed
-                            }
-                        };
-                        let mut index = shard.entry_index.lock().unwrap();
-                        if let Some(entry) = index.remove_entry_matching_read(key, &read) {
-                            shard.release_payload_and_allow_metadata_overwrite(entry);
-                        }
-                        Err(outcome)
+                let outcome = match read.read_and_verify_payload(&self.disk.file).await {
+                    Ok(Some(bytes)) => return Ok(bytes),
+                    Err(error) => {
+                        tracing::warn!(target: "feuer::storage", %error, "disk read failed; entry invalidated");
+                        DiskLookupOutcome::IoError
                     }
+                    Ok(None) => {
+                        tracing::warn!(target: "feuer::storage", "disk checksum failed; entry invalidated");
+                        DiskLookupOutcome::ChecksumFailed
+                    }
+                };
+                let mut index = shard.entry_index.lock().unwrap();
+                if let Some(entry) = index.remove_entry_matching_read(key, &read) {
+                    shard.release_payload_and_allow_metadata_overwrite(entry);
                 }
+                Err(outcome)
             })
             .await;
         match result {
@@ -460,15 +456,11 @@ impl DiskEntryIndex {
     fn remove_entry_matching_read(&mut self, key: &ObjectKeyHash, read: &PayloadRead) -> Option<DiskEntry> {
         let start = read.object_range.start();
         // Preserve different contents. Discarding a newer identical copy is an acceptable miss.
-        if self
-            .entries_by_key
-            .get(key)
-            .and_then(|entries| entries.get(&start))
-            .is_some_and(|entry| entry.payload_checksum == read.payload_checksum)
-        {
-            return self.remove_entry(key, start);
+        let entry = self.entries_by_key.get(key)?.get(&start)?;
+        if entry.payload_checksum != read.payload_checksum {
+            return None;
         }
-        None
+        self.remove_entry(key, start)
     }
 
     /// Finds the entry whose byte range covers the entire request.
@@ -499,20 +491,14 @@ impl DiskCacheInner {
 }
 
 impl PayloadRead {
-    /// Reads the whole entry, verifies its checksum, and returns only the requested byte range.
-    async fn read_and_verify_range(
-        &self,
-        file: &DataFile,
-        requested: ByteRange,
-    ) -> DataFileResult<Option<(Bytes, usize)>> {
-        let start = requested.start() - self.object_range.start();
-        let end = requested.end() - self.object_range.start();
+    /// Reads the whole entry payload and verifies its checksum.
+    async fn read_and_verify_payload(&self, file: &DataFile) -> DataFileResult<Option<(Bytes, usize)>> {
         let (bytes, buffer_capacity) = file
             .read_payload(self.payload_range.clone(), self.object_range.len() as usize)
             .await?;
         if XxHash64::oneshot(0, &bytes) != self.payload_checksum {
             return Ok(None);
         }
-        Ok(Some((bytes.slice(start as usize..end as usize), buffer_capacity)))
+        Ok(Some((bytes, buffer_capacity)))
     }
 }

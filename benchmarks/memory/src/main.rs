@@ -929,13 +929,11 @@ fn find_json_u64(line: &str, field: &str) -> Result<u64, String> {
 /// Returns the line from the named JSON value's starting position, without parsing the value.
 fn line_from_json_value<'a>(line: &'a str, field: &str) -> Result<&'a str, String> {
     let quoted_field_name = format!("\"{field}\"");
-    let after_field = line
-        .find(&quoted_field_name)
-        .map(|index| &line[index + quoted_field_name.len()..])
+    let (_, after_field) = line
+        .split_once(&quoted_field_name)
         .ok_or_else(|| format!("missing field {field:?}"))?;
-    let after_colon = after_field
-        .find(':')
-        .map(|index| &after_field[index + 1..])
+    let (_, after_colon) = after_field
+        .split_once(':')
         .ok_or_else(|| format!("missing colon after field {field:?}"))?;
     Ok(after_colon.trim_start())
 }

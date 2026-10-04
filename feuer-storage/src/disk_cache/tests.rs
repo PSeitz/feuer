@@ -427,12 +427,7 @@ async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
             .unwrap()
     );
     assert!(cache.get(&key, range(3, 4)).await.is_none());
-    assert!(
-        read.read_and_verify_range(&cache.disk.file, range(3, 20))
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(read.read_and_verify_payload(&cache.disk.file).await.unwrap().is_none());
 }
 
 #[tokio::test]

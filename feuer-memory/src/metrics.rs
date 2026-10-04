@@ -93,11 +93,8 @@ impl MemoryMetrics {
     }
 
     pub(crate) fn record_insert(&self, replaced: bool) {
-        if replaced {
-            self.replace.increase(1);
-        } else {
-            self.insert.increase(1);
-        }
+        let counter = if replaced { &self.replace } else { &self.insert };
+        counter.increase(1);
     }
 
     pub(crate) fn record_redundant(&self) {

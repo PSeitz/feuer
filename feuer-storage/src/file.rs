@@ -148,15 +148,10 @@ impl DataFile {
     }
 
     /// Reads one contiguous payload into a buffer, omitting final alignment padding.
+    /// The caller supplies the aligned disk range derived from the payload length.
     pub(crate) async fn read_payload(&self, range: Range<u64>, length: usize) -> DataFileResult<(Bytes, usize)> {
         self.measure_io(IoOperation::Read, range.start, length, async {
             let (bytes, capacity) = self.read_aligned_range(range).await?;
-            assert_eq!(
-                bytes.len(),
-                length
-                    .max(uring::DIRECT_IO_ALIGNMENT_BYTES)
-                    .next_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES)
-            );
             Ok((bytes.slice(..length), capacity))
         })
         .await

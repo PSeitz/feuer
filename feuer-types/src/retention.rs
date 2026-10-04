@@ -3,14 +3,14 @@
 use std::{
     cmp::Ordering,
     collections::VecDeque,
-    hash::{Hash, Hasher},
+    hash::BuildHasher,
     sync::{
         LazyLock, Mutex,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
 };
 
-use rustc_hash::{FxHashMap, FxHasher};
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use crate::{ByteRange, ObjectKeyHash, config::read_env_number};
 
@@ -99,9 +99,7 @@ impl ObjectAccessHistories {
     }
 
     fn shard(&self, key: &ObjectKeyHash) -> &Mutex<FxHashMap<ObjectKeyHash, RangeAccessHistory>> {
-        let mut hasher = FxHasher::default();
-        key.hash(&mut hasher);
-        &self.shards[hasher.finish() as usize % self.shards.len()]
+        &self.shards[FxBuildHasher.hash_one(key) as usize % self.shards.len()]
     }
 }
 
@@ -188,7 +186,6 @@ impl RangeAccessHistory {
         let access_count = &mut self.access_counts[count_index].1;
         access_count.count = access_count.decayed_count(access_clock) + 1.0;
         access_count.observed_at_access = access_clock;
-        self.remove_expired_events(access_clock);
         if self.events.len() == *MAX_ACCESS_EVENTS_PER_KEY {
             self.events.pop_front();
         }
@@ -220,17 +217,6 @@ impl RangeAccessHistory {
             .sum()
     }
 
-    /// Removes expired trimming events without discarding the decayed access counts.
-    fn remove_expired_events(&mut self, access_clock: u64) {
-        while self
-            .events
-            .front()
-            .is_some_and(|event| !is_within_range_trim_age_limit(*event, access_clock))
-        {
-            self.events.pop_front();
-        }
-    }
-
     #[cfg(test)]
     pub(super) fn ranges(&self) -> Vec<ByteRange> {
         self.events.iter().map(|event| event.range).collect()
@@ -256,6 +242,12 @@ mod tests {
         ByteRange::new(start, end).unwrap()
     }
 
+    fn environment_test_command(test: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", &format!("retention::tests::{test}")]);
+        command
+    }
+
     #[test]
     fn fixed_retrieval_cost_environment_override() {
         // Separate processes exercise environment loading without mutating this process's environment.
@@ -273,8 +265,7 @@ mod tests {
             return;
         }
         for fixed_cost in [0, 1_000_000, 10_000_000, u64::MAX] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "retention::tests::fixed_retrieval_cost_environment_override"])
+            let output = environment_test_command("fixed_retrieval_cost_environment_override")
                 .env("FEUER_TEST_FIXED_RETRIEVAL_CHILD", fixed_cost.to_string())
                 .env("FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES", fixed_cost.to_string())
                 .env("FEUER_MAX_ACCESS_EVENTS_PER_KEY", "64")
@@ -301,8 +292,7 @@ mod tests {
             return;
         }
         for limit in [1, 256] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "retention::tests::access_event_limit_environment_override"])
+            let output = environment_test_command("access_event_limit_environment_override")
                 .env("FEUER_TEST_ACCESS_EVENTS_CHILD", limit.to_string())
                 .env("FEUER_MAX_ACCESS_EVENTS_PER_KEY", limit.to_string())
                 .output()
@@ -329,11 +319,7 @@ mod tests {
             ("64KiB", 65_536),
             ("18446744073709551615", u64::MAX),
         ] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "retention::tests::access_count_half_life_environment_override",
-                ])
+            let output = environment_test_command("access_count_half_life_environment_override")
                 .env("FEUER_TEST_HALF_LIFE_CHILD", half_life.to_string())
                 .env("FEUER_ACCESS_COUNT_HALF_LIFE", setting)
                 .output()
@@ -353,11 +339,13 @@ mod tests {
             assert!(history.decayed_retrieval_cost(range(0, 1), 65_537) > 0.0);
             assert_eq!(history.recent_requested_ranges(65_537).count(), 0);
             history.record(range(1, 2), 65_537);
-            assert_eq!(history.ranges(), vec![range(1, 2)]);
+            assert_eq!(
+                history.recent_requested_ranges(65_537).collect::<Vec<_>>(),
+                vec![range(1, 2)]
+            );
             return;
         }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "retention::tests::access_age_environment_override"])
+        let output = environment_test_command("access_age_environment_override")
             .env("FEUER_TEST_ACCESS_AGE_CHILD", "1")
             .env("FEUER_MAX_ACCESS_AGE_ACCESSES", "64KiB")
             .output()
@@ -385,19 +373,16 @@ mod tests {
 
     #[test]
     fn concurrent_recording_deduplicates_ranges_and_counts_every_request() {
-        let histories = std::sync::Arc::new(ObjectAccessHistories::new());
-        let mut threads = Vec::new();
-        for _ in 0..8 {
-            let histories = histories.clone();
-            threads.push(std::thread::spawn(move || {
-                for _ in 0..1000 {
-                    histories.record_access(&ObjectKeyHash::from("object"), range(0, 1));
-                }
-            }));
-        }
-        for thread in threads {
-            thread.join().unwrap();
-        }
+        let histories = ObjectAccessHistories::new();
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..1000 {
+                        histories.record_access(&ObjectKeyHash::from("object"), range(0, 1));
+                    }
+                });
+            }
+        });
         assert_eq!(histories.request_count(), 8000);
         let objects = histories.shard(&ObjectKeyHash::from("object")).lock().unwrap();
         assert_eq!(objects.len(), 1);

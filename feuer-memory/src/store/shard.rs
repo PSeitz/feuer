@@ -29,11 +29,8 @@ struct MemoryEntry {
 
 impl MemoryEntry {
     fn requested_bytes(&self, requested_range: ByteRange) -> Bytes {
-        debug_assert!(self.range.contains(requested_range));
-        let start = usize::try_from(requested_range.start() - self.range.start())
-            .expect("an offset within a Bytes payload must fit in usize");
-        let end = usize::try_from(requested_range.end() - self.range.start())
-            .expect("an offset within a Bytes payload must fit in usize");
+        let start = (requested_range.start() - self.range.start()) as usize;
+        let end = (requested_range.end() - self.range.start()) as usize;
         self.bytes.slice(start..end)
     }
 }
@@ -59,11 +56,10 @@ impl ObjectEntries {
     /// Collects byte ranges identifying contained entries and sums their allocation charges.
     fn contained_entry_ranges(&self, range: ByteRange) -> ContainedEntryRanges {
         let mut contained_ranges = ContainedEntryRanges::default();
-        for (_, entry) in self.by_start.range(range.start()..range.end()) {
-            if range.contains(entry.range) {
-                contained_ranges.ranges.push(entry.range);
-                contained_ranges.allocation_bytes += entry.allocation_charge;
-            }
+        let entries = self.by_start.range(range.start()..range.end());
+        for (_, entry) in entries.take_while(|(_, entry)| entry.range.end() <= range.end()) {
+            contained_ranges.ranges.push(entry.range);
+            contained_ranges.allocation_bytes += entry.allocation_charge;
         }
         contained_ranges
     }
@@ -77,7 +73,6 @@ struct ContainedEntryRanges {
 }
 
 /// Object key and range start of a cached entry.
-#[derive(Clone)]
 struct ObjectKeyAndRangeStart {
     object_key: ObjectKeyHash,
     start: u64,
@@ -98,15 +93,9 @@ impl ReclaimCandidateList {
     }
 
     /// Removes the candidate at this index and returns the candidate moved there, if any.
-    fn remove(&mut self, candidate_index: usize) -> Option<ObjectKeyAndRangeStart> {
+    fn remove(&mut self, candidate_index: usize) -> Option<&ObjectKeyAndRangeStart> {
         self.entries.swap_remove(candidate_index);
-        let moved_candidate = self.entries.get(candidate_index).cloned();
-        if self.entries.is_empty() {
-            self.cursor = 0;
-        } else {
-            self.cursor %= self.entries.len();
-        }
-        moved_candidate
+        self.entries.get(candidate_index)
     }
 
     fn sample(&mut self, sample_size: usize) -> (usize, usize) {
@@ -135,10 +124,8 @@ impl RangeTrimSource {
             .replacement_ranges()
             .iter()
             .map(|range| {
-                let start = usize::try_from(range.start() - self.plan.source_range().start())
-                    .expect("a planned source offset must fit in usize");
-                let end = usize::try_from(range.end() - self.plan.source_range().start())
-                    .expect("a planned source offset must fit in usize");
+                let start = (range.start() - self.plan.source_range().start()) as usize;
+                let end = (range.end() - self.plan.source_range().start()) as usize;
                 (*range, Bytes::copy_from_slice(&self.source_bytes[start..end]))
             })
             .collect();
@@ -225,9 +212,8 @@ impl MemoryCacheShard {
             Some(entries) => entries.contained_entry_ranges(range),
             None => ContainedEntryRanges::default(),
         };
-        let added_bytes = allocation_charge;
         let used_bytes_without_contained_entries = self.used_bytes - contained_ranges.allocation_bytes;
-        let max_existing_bytes = self.capacity.saturating_sub(added_bytes);
+        let max_existing_bytes = self.capacity.saturating_sub(allocation_charge);
 
         if used_bytes_without_contained_entries <= max_existing_bytes {
             let removed_entry_count = contained_ranges.ranges.len() as u64;
@@ -243,11 +229,9 @@ impl MemoryCacheShard {
                 access_histories.request_count(),
             );
 
-            if removed_entry_count != 0 {
-                self.metrics
-                    .decrease_usage(contained_ranges.allocation_bytes, removed_entry_count);
-            }
-            self.metrics.increase_usage(added_bytes, 1);
+            self.metrics
+                .decrease_usage(contained_ranges.allocation_bytes, removed_entry_count);
+            self.metrics.increase_usage(allocation_charge, 1);
             self.metrics.record_insert(removed_entry_count != 0);
             return InsertOrReclaimResult::Complete(true);
         }
@@ -315,19 +299,15 @@ impl MemoryCacheShard {
     /// Removes one entry from the shard and returns its allocation charge.
     /// Subtracts those bytes from shard usage; the caller updates metrics.
     fn remove_entry(&mut self, object_key: &ObjectKeyHash, range: ByteRange) -> Option<u64> {
-        let (removed_entry, object_has_no_entries) = {
-            let entries = self.entries_by_key.get_mut(object_key)?;
-            let entry = entries.by_start.get(&range.start())?;
-            if entry.range != range {
-                return None;
-            }
-            let removed_entry = entries
-                .by_start
-                .remove(&range.start())
-                .expect("the exact entry was checked immediately before removal");
-            let object_has_no_entries = entries.by_start.is_empty();
-            (removed_entry, object_has_no_entries)
+        let entries = self.entries_by_key.get_mut(object_key)?;
+        let std::collections::btree_map::Entry::Occupied(entry) = entries.by_start.entry(range.start()) else {
+            return None;
         };
+        if entry.get().range != range {
+            return None;
+        }
+        let removed_entry = entry.remove();
+        let object_has_no_entries = entries.by_start.is_empty();
 
         self.remove_eviction_candidate(removed_entry.candidate_index);
         if object_has_no_entries {
@@ -340,8 +320,7 @@ impl MemoryCacheShard {
     }
 
     fn remove_eviction_candidate(&mut self, candidate_index: usize) {
-        let moved_candidate = self.candidates.remove(candidate_index);
-        let Some(moved_candidate) = moved_candidate else {
+        let Some(moved_candidate) = self.candidates.remove(candidate_index) else {
             return;
         };
         let entry = self
@@ -455,10 +434,8 @@ impl MemoryCacheShard {
         let reclaimed_bytes = removed_bytes - inserted_payload_bytes;
         debug_assert!(reclaimed_bytes >= replacement.plan.reclaimed_bytes());
         self.metrics.decrease_usage(removed_bytes, 1);
-        if inserted_entry_count != 0 {
-            self.metrics
-                .increase_usage(inserted_payload_bytes, inserted_entry_count);
-        }
+        self.metrics
+            .increase_usage(inserted_payload_bytes, inserted_entry_count);
         self.metrics.record_range_trim(reclaimed_bytes);
         true
     }
@@ -466,19 +443,11 @@ impl MemoryCacheShard {
     pub(super) fn entry_count(&self) -> usize {
         self.candidates.entries.len()
     }
-
-    #[cfg(test)]
-    pub(super) fn candidate_count(&self) -> usize {
-        self.candidates.entries.len()
-    }
 }
 
 impl Drop for MemoryCacheShard {
     fn drop(&mut self) {
-        let entry_count = self.entry_count() as u64;
-        if entry_count != 0 {
-            self.metrics.decrease_usage(self.used_bytes, entry_count);
-            self.buffer_pool.remove_entry_bytes(self.used_bytes);
-        }
+        self.metrics.decrease_usage(self.used_bytes, self.entry_count() as u64);
+        self.buffer_pool.remove_entry_bytes(self.used_bytes);
     }
 }

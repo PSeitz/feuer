@@ -146,16 +146,15 @@
                   <p>Startup recovery uses <code>try_reserve()</code> before allocating each 1-MiB metadata-read buffer. If full, it retries after 1 ms. Opening waits for all shard recovery to finish before serving lookups.</p>
                   <details class="source">
                     <summary>Code · async channel reservation</summary>
-                    <a class="source-label" href="feuer-storage/src/uring.rs#L81">feuer-storage/src/uring.rs:81–89 · reserve_request</a>
+                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · reserve_request</a>
                     <pre><code>self.sender
     .as_ref()
     .unwrap()
     .reserve()
     .await
     .map_err(|_| queue_stopped_error())</code></pre>
-                    <a class="source-label" href="feuer-storage/src/file.rs#L263">feuer-storage/src/file.rs:263–288 · whole-range buffer, sequential I/O slices</a>
-                    <a class="source-label" href="feuer-storage/src/file.rs#L160">Same file:160–184 · recovery retry</a>
-                    <a class="source-label" href="feuer-storage/src/uring.rs#L146">feuer-storage/src/uring.rs:146–163 · recovery admission</a>
+                    <a class="source-label" href="feuer-storage/src/file.rs">feuer-storage/src/file.rs · read_aligned_range / read_recovery_chunk</a>
+                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · try_read_recovery_chunk</a>
                   </details>
                 </div>
               </details>
@@ -166,26 +165,24 @@
                   <p>The worker receives requests in channel order directly into free active slots. When all slots are occupied, requests stay in the channel. Each active slot owns its request and buffers through completion; there is no intermediate pending list.</p>
                   <details class="source">
                     <summary>Code · enqueue and wake the worker</summary>
-                    <a class="source-label" href="feuer-storage/src/uring.rs#L91">feuer-storage/src/uring.rs:91–103 · submit_and_wait</a>
+                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · submit_and_wait</a>
                     <pre><code>let (result_sender, result_receiver) = oneshot::channel();
-permit.send(IoRequest::new(
-    offset, buffers, destination, result_sender
-));
+permit.send(IoRequest::new(offset, buffers, buffer_range, result_sender));
 wake_queue(&amp;self.wake_fd);
 result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
-                    <a class="source-label" href="feuer-storage/src/uring.rs#L438">Same file:438–457 · receive_requests</a>
+                    <a class="source-label" href="feuer-storage/src/uring.rs">Same file · receive_requests</a>
                   </details>
                 </div>
               </details>
               <details class="node">
                 <summary><span class="node-name">Verification → memory promotion</span><span class="node-meta">slice / full buffer</span></summary>
                 <div class="node-body">
-                  <p>The disk cache reads and hashes the <strong>entire covering entry</strong>, excluding alignment padding and without reading metadata or neighboring entries. Concurrent readers of the same stored entry share its I/O and verification.</p>
+                  <p>For a stored entry, the disk cache reads and hashes the <strong>entire covering entry</strong>, excluding alignment padding and without reading metadata or neighboring entries. Concurrent readers of the same stored entry share its I/O and verification. Hits in unfinished small-entry buffers instead copy only the requested bytes without disk I/O.</p>
                   <p>Readers retain an address and expected checksum, not a disk-region guard. Eviction can release chunks for reuse while a read is outstanding. Corrupt or uncertain data becomes a miss and falls through to the callback; validation is subject to checksum collisions. A disk hit does not schedule another disk write.</p>
-                  <p class="note">Only the requested slice is returned and indexed in memory, but it retains the whole rounded read-buffer allocation. Memory admission charges that full capacity: a small request can still cause a large read and retain a large buffer.</p>
-                  <a class="source-label" href="feuer/src/cache.rs#L139">feuer/src/cache.rs:139–147 · disk-hit promotion with backing capacity</a>
-                  <a class="source-label" href="feuer-storage/src/disk_cache.rs#L439">feuer-storage/src/disk_cache.rs:439–512 · shared read and requested slice</a>
-                  <a class="source-label" href="feuer-storage/disk-prototype.md">feuer-storage/disk-prototype.md · Reads and eviction</a>
+                  <p class="note">Only the requested slice is returned and indexed in memory. Promotion copies it when the destination buffer has smaller backing capacity; allocation failure retains the original slice. Memory admission charges the chosen buffer's whole capacity. A small request can still require a large whole-entry read.</p>
+                  <a class="source-label" href="feuer/src/cache.rs">feuer/src/cache.rs · get_or_fetch / shrink_disk_result</a>
+                  <a class="source-label" href="feuer-storage/src/disk_cache.rs">feuer-storage/src/disk_cache.rs · fetch_from_disk</a>
+                  <a class="source-label" href="format.md">format.md · Write ordering and reuse</a>
                 </div>
               </details>
             </div>
@@ -202,15 +199,14 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
                   <p class="note">Queued and active payload bytes are tracked, but have no byte cap or separate memory-cache charge. The queue can keep a payload alive after its memory entry is evicted.</p>
                   <details class="source">
                     <summary>Code · best-effort disk-write admission</summary>
-                    <a class="source-label" href="feuer/src/disk_write.rs#L93">feuer/src/disk_write.rs:93–104 · enqueue_if_capacity (excerpt)</a>
+                    <a class="source-label" href="feuer/src/disk_write.rs">feuer/src/disk_write.rs · enqueue_if_space_available (excerpt)</a>
                     <pre><code>let permit = match self.sender.try_reserve() {
     Ok(permit) =&gt; permit,
-    Err(mpsc::error::TrySendError::Full(_)) =&gt; {
-        self.metrics.record(DiskWriteQueueOutcome::Full);
-        return;
-    }
-    Err(mpsc::error::TrySendError::Closed(_)) =&gt; {
-        self.metrics.record(DiskWriteQueueOutcome::Closed);
+    Err(error) =&gt; {
+        self.metrics.record(match error {
+            mpsc::error::TrySendError::Full(_) =&gt; DiskWriteQueueOutcome::Full,
+            mpsc::error::TrySendError::Closed(_) =&gt; DiskWriteQueueOutcome::Closed,
+        });
         return;
     }
 };</code></pre>
@@ -229,10 +225,10 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
               <details class="node">
                 <summary><span class="node-name">Write completion ≠ publication</span><span class="node-meta">key + range rechecked</span></summary>
                 <div class="node-body">
-                  <p>Payload writes finish before publication and in-memory metadata updates. Dirty metadata pages write every second, independently. No <code>fsync</code> or <code>fdatasync</code> is issued.</p>
-                  <p>Publication rechecks disk containment, not memory residency. The writer retains reservations through I/O. Written chunks cannot be appended to; they become reusable after their last entry is removed, without waiting for readers or metadata writes.</p>
+                  <p>Payload writes finish before publication and in-memory metadata updates. Dirty metadata pages write every second, independently; failed writes are not retried. No <code>fsync</code>, <code>fdatasync</code>, or shutdown metadata flush is issued.</p>
+                  <p>Publication rechecks disk containment, not memory residency. The writer owns reservations while awaiting I/O, but cancellation can release them while submitted writes continue. Written chunks cannot be appended to; they become reusable after their last entry is removed, without waiting for readers or metadata writes. Removal makes metadata slots reusable without invalidating old on-disk records. Late writes to reused chunks can cause checksum misses.</p>
                   <a class="source-label" href="feuer-storage/src/disk_cache/writer.rs">feuer-storage/src/disk_cache/writer.rs · payload then publication</a>
-                  <a class="source-label" href="feuer-storage/src/allocation.rs#L194">feuer-storage/src/allocation.rs:194–214 · payload occupancy and release</a>
+                  <a class="source-label" href="feuer-storage/src/allocation.rs">feuer-storage/src/allocation.rs · hold_chunks_until_payloads_released / release_payload</a>
                 </div>
               </details>
             </div>
@@ -250,11 +246,11 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
                   <a class="source-label" href="benchmarks/ssd/uring-20260928/REPORT.md">benchmarks/ssd/uring-20260928/REPORT.md</a>
                   <details class="source">
                     <summary>Code · current limits</summary>
-                    <a class="source-label" href="feuer-storage/src/uring.rs#L24">feuer-storage/src/uring.rs:24–30 (excerpt)</a>
+                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · request-size and active-slot limits (excerpt)</a>
                     <pre><code>pub(crate) const MAX_IO_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_IN_FLIGHT_READS: usize = 64;
 const MAX_IN_FLIGHT_WRITES: usize = 8;</code></pre>
-                    <a class="source-label" href="feuer-storage/src/uring.rs#L58">Same file:58–65 · channel and active array sizes</a>
+                    <a class="source-label" href="feuer-storage/src/uring.rs">Same file · IoQueueHandle::new</a>
                   </details>
                 </div>
               </details>
@@ -279,7 +275,7 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;</code></pre>
                   <p>New submissions signal the eventfd, so fresh work can wake the worker even while a slow operation is outstanding. It does not continuously spin.</p>
                   <details class="source">
                     <summary>Code · wait for completion or wakeup</summary>
-                    <a class="source-label" href="feuer-storage/src/uring.rs#L476">feuer-storage/src/uring.rs:476–490 (excerpt)</a>
+                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · wait_for_completion_or_wakeup (excerpt)</a>
                     <pre><code>let mut fds = [
     libc::pollfd {
         fd: self.ring.as_raw_fd(),
@@ -306,8 +302,7 @@ let result = unsafe {
                     <li><strong>Interrupted or aligned short I/O:</strong> retry the remaining work. Invalid short completion becomes an error.</li>
                     <li><strong>Normal shutdown:</strong> drain outstanding work, then join the worker.</li>
                   </ul>
-                  <a class="source-label" href="feuer-storage/src/uring.rs#L341">feuer-storage/src/uring.rs:341–362 · apply_completion_result</a>
-                  <a class="source-label" href="feuer-storage/src/uring.rs#L438">feuer-storage/src/uring.rs:438–457 · receive_requests</a>
+                  <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · apply_completion_result / receive_requests</a>
                 </div>
               </details>
             </div>
@@ -457,7 +452,7 @@ let (tx, rx) = mpsc::sync_channel(4096);</code></pre>
       </div>
     </details>
     <footer>
-      <p>Based on local source: Feuer <code>65b3bf1</code> · Foyer <code>14c2d88</code>. Foyer details describe its io_uring backend, not its full storage pipeline. Code excerpts are embedded; file links point into this checkout (line fragments are reader-dependent).</p>
+      <p>Based on local source: Feuer <code>c9c15b8</code> · Foyer <code>14c2d88</code>. Foyer details describe its io_uring backend, not its full storage pipeline. Code excerpts are embedded; file links point into this checkout (line fragments are reader-dependent).</p>
       <p>No dependencies. No network requests.<br>Tab to a section; Enter or Space to expand.</p>
     </footer>
   </main>

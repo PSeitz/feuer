@@ -353,14 +353,12 @@ impl IoRequest {
             return Err(self.incomplete_io_error());
         }
         self.completed_bytes += completion_bytes;
-        if self.completed_bytes != self.buffer_range.len() {
-            // An unaligned remainder cannot be resubmitted with O_DIRECT.
-            if !self.completed_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
-                return Err(self.incomplete_io_error());
-            }
-            return Ok(true);
+        let is_incomplete = self.completed_bytes != self.buffer_range.len();
+        // An unaligned remainder cannot be resubmitted with O_DIRECT.
+        if is_incomplete && !self.completed_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
+            return Err(self.incomplete_io_error());
         }
-        Ok(false)
+        Ok(is_incomplete)
     }
 
     fn incomplete_io_error(&self) -> io::Error {
