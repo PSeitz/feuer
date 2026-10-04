@@ -201,11 +201,19 @@ async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
 #[tokio::test]
 async fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighbors() {
     let (_directory, cache) = open_test_cache(8 * CHUNK_BYTES).await;
-    let inputs: Vec<_> = [600_000, 600_000, CHUNK_BYTES as usize, 1, CHUNK_BYTES as usize + 1, 1]
-        .into_iter()
-        .enumerate()
-        .map(|(i, length)| (ObjectKeyHash(i as u128), download(0, length)))
-        .collect();
+    let inputs: Vec<_> = [
+        600_000,
+        600_000,
+        CHUNK_BYTES as usize,
+        1,
+        CHUNK_BYTES as usize + 1,
+        1,
+        128 * 1024 - 1,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, length)| (ObjectKeyHash(i as u128), download(0, length)))
+    .collect();
     assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
     let index = cache.disk.shards[0].entry_index.lock().unwrap();
     let mut owners = BTreeMap::<u64, Vec<&DiskEntry>>::new();
@@ -218,93 +226,81 @@ async fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_
     }
     for entries in owners.values() {
         if entries.len() > 1 {
-            assert!(entries.iter().all(|entry| entry.single_chunk_start().is_some()));
+            assert!(entries.iter().all(|entry| entry.single_chunk_start().is_some()
+                && entry.payload_range.end - entry.payload_range.start < 128 * 1024));
         }
     }
-    assert_eq!(owners.len(), 5);
+    assert_eq!(owners.len(), 7);
 }
 
 #[tokio::test]
-async fn metadata_growth_does_not_consume_payload_chunk_space() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    let entries_per_page = PAGE_CONTENT_BYTES / page_format::ENTRY_METADATA_BYTES;
-    // Cross a metadata page boundary while still fitting all payloads in one chunk.
-    let inputs = (0..=entries_per_page)
-        .map(|i| {
-            let length = if i == 0 {
-                CHUNK_BYTES as usize - (entries_per_page + 1) * METADATA_PAGE_BYTES
-            } else {
-                1
-            };
-            (ObjectKeyHash(i as u128), download(0, length))
-        })
-        .collect();
-    assert_eq!(cache.insert_batch(inputs).await.unwrap(), entries_per_page + 1);
-    let index = cache.disk.shards[0].entry_index.lock().unwrap();
-    let entries: Vec<_> = index.entries_by_key.values().flat_map(BTreeMap::values).collect();
-    assert!(
-        entries
-            .iter()
-            .all(|entry| entry.single_chunk_start() == Some(CHUNK_BYTES))
-    );
-    assert_eq!(
-        entries.iter().map(|entry| entry.payload_range.end).max(),
-        Some(2 * CHUNK_BYTES - METADATA_PAGE_BYTES as u64)
-    );
+async fn full_and_no_fit_chunks_flush_across_metadata_pages() {
+    for length in [4096, 12 * 1024] {
+        let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+        let mut writer = cache.writer();
+        let count = CHUNK_BYTES as usize / length;
+        let source = download(0, length);
+        let mut published = 0;
+        for i in 0..count {
+            assert!(!cache.covers_range(&ObjectKeyHash(0), range(0, 1)));
+            let key = ObjectKeyHash(i as u128);
+            published += writer.write(key, source.clone(), ()).await.unwrap();
+        }
+        assert_eq!(published, if length == 4096 { count } else { 0 });
+        let next = ObjectKeyHash(count as u128);
+        published += writer.write(next, source.clone(), ()).await.unwrap();
+        assert_eq!(published, count);
+        // A larger entry publishes without flushing the new partial chunk.
+        let large = download(0, 128 * 1024 - 1);
+        assert_eq!(writer.write(ObjectKeyHash(999), large, ()).await.unwrap(), 1);
+        assert!(!cache.covers_range(&next, range(0, 1)));
+        for i in 0..count {
+            let key = ObjectKeyHash(i as u128);
+            let (payload, _) = entry_disk_ranges(&cache, &key).await;
+            assert_eq!(payload[0].start, CHUNK_BYTES + (i * length) as u64);
+            assert_eq!(
+                cache.get(&key, source.downloaded_range()).await.unwrap(),
+                source.bytes()
+            );
+        }
+        drop(writer);
+        assert_eq!(cache.disk.shards[0].allocator.available_bytes(), CHUNK_BYTES);
+    }
 }
 
 #[tokio::test]
 async fn failed_reservation_releases_metadata_without_moving_pending_payloads() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let shard = &cache.disk.shards[0];
-    let mut reserved_chunks = None;
-    let mut remaining_eviction_attempts = 0;
-    let mut remaining_eviction_chunk_budget = MAX_EVICTION_CHUNKS;
-    let first = shard
-        .reserve_entry_space(
-            &download(0, CHUNK_BYTES as usize - METADATA_PAGE_BYTES),
-            &mut reserved_chunks,
-            None,
-            &cache.disk.access_histories,
-            &mut remaining_eviction_attempts,
-            &mut remaining_eviction_chunk_budget,
-        )
-        .unwrap();
+    let mut writer = cache.writer();
+    let source = download(0, 4097);
+    let bytes = source.bytes().clone();
+    assert_eq!(writer.write(ObjectKeyHash(1), source, ()).await.unwrap(), 0);
+    assert!(bytes.is_unique(), "the writer must release the incoming buffer");
     let free_positions = shard.metadata_pages.lock().unwrap().free_entry_positions.len();
-    assert!(
-        shard
-            .reserve_entry_space(
-                &download(0, METADATA_PAGE_BYTES + 1),
-                &mut None,
-                None,
-                &cache.disk.access_histories,
-                &mut remaining_eviction_attempts,
-                &mut remaining_eviction_chunk_budget,
-            )
-            .is_none()
+    assert_eq!(
+        writer
+            .write(ObjectKeyHash(2), download(0, CHUNK_BYTES as usize), ())
+            .await
+            .unwrap(),
+        0
     );
     assert_eq!(
         shard.metadata_pages.lock().unwrap().free_entry_positions.len(),
         free_positions
     );
-    let second = shard
-        .reserve_entry_space(
-            &download(0, 1),
-            &mut reserved_chunks,
-            Some(first.payload_range.end),
-            &cache.disk.access_histories,
-            &mut remaining_eviction_attempts,
-            &mut remaining_eviction_chunk_budget,
-        )
-        .unwrap();
+    assert!(!cache.covers_range(&ObjectKeyHash(1), range(0, 4097)));
+    writer.write(ObjectKeyHash(3), download(0, 1), ()).await.unwrap();
+    assert_eq!(writer.flush().await.unwrap(), 2);
     assert_eq!(
-        first.payload_range,
-        CHUNK_BYTES..2 * CHUNK_BYTES - METADATA_PAGE_BYTES as u64
+        entry_disk_ranges(&cache, &ObjectKeyHash(1)).await.0[0],
+        CHUNK_BYTES..CHUNK_BYTES + 8192
     );
-    assert_eq!(second.payload_range, first.payload_range.end..2 * CHUNK_BYTES);
-    assert_eq!(shard.allocator.available_bytes(), 0);
-    drop(reserved_chunks);
-    assert_eq!(shard.allocator.available_bytes(), CHUNK_BYTES);
+    assert_eq!(
+        entry_disk_ranges(&cache, &ObjectKeyHash(3)).await.0[0].start,
+        CHUNK_BYTES + 8192
+    );
+    assert_eq!(cache.get(&ObjectKeyHash(1), range(0, 4097)).await.unwrap(), bytes);
 }
 
 #[tokio::test]
@@ -606,7 +602,7 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
 }
 
 #[tokio::test]
-async fn per_batch_eviction_limit_does_not_force_out_a_shared_chunks_last_entry() {
+async fn admission_eviction_limit_does_not_force_out_a_shared_chunks_last_entry() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let hot = ObjectKeyHash::from("hot");
     let mut inputs: Vec<_> = (0..MAX_EVICTION_ATTEMPTS)
@@ -995,12 +991,12 @@ async fn publishes_each_region_before_reserving_the_next() {
     let large = ObjectKeyHash::from("large");
     let published = cache
         .insert_batch(vec![
-            (small, download(0, 1)),
+            (small, download(0, 128 * 1024)),
             (large, download(0, CHUNK_BYTES as usize + 1)),
         ])
         .await
         .unwrap();
-    // The small entry must publish first so the larger entry can evict it and reuse its chunk.
+    // Exclusive entries publish immediately, so the next entry can evict them and reuse their chunks.
     assert_eq!(published, 2);
     assert!(!cache.covers_range(&small, range(0, 1)));
     assert_eq!(
@@ -1115,14 +1111,14 @@ async fn a_short_read_is_a_miss_not_unverified_bytes() {
 #[tokio::test]
 async fn failed_multi_chunk_write_keeps_earlier_entries_and_releases_its_storage() {
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
-    // The small entry and the large entry's first chunk succeed; its second chunk is outside the file.
+    // The first exclusive entry succeeds; the large entry's second chunk is outside the file.
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
     disk.shards[0].allocator = DiskChunkAllocator::for_disk_range(0..4 * CHUNK_BYTES).unwrap();
     let cache = DiskCache { disk: Arc::new(disk) };
     assert!(matches!(
         cache
             .insert_batch(vec![
-                (ObjectKeyHash::from("small"), download(0, 1)),
+                (ObjectKeyHash::from("small"), download(0, 128 * 1024)),
                 (ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize + 1)),
             ])
             .await,

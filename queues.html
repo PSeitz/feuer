@@ -218,33 +218,20 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
                 </div>
               </details>
               <details class="node">
-                <summary><span class="node-name">One worker, explicit batches</span><span class="node-meta">up to 64 entries</span></summary>
+                <summary><span class="node-name">One worker, small-entry chunks</span><span class="node-meta">60-second partial flush</span></summary>
                 <div class="node-body">
-                  <p>A Tokio task awaits the first entry, then drains immediately available entries up to 64. There is no batching timer. It awaits that batch before taking another.</p>
-                  <p>Entries without an exact matching memory key and range are discarded; reinsertion of the same key and range is accepted. Remaining payloads are packed into 1-MiB chunks, with each entry occupying one contiguous aligned disk byte range and metadata stored separately.</p>
-                  <details class="source">
-                    <summary>Code · gather a batch</summary>
-                    <a class="source-label" href="feuer/src/disk_write.rs#L126">feuer/src/disk_write.rs:126–169 · write_queued_batches (excerpt)</a>
-                    <pre><code>while let Some(first_write) = receiver.recv().await {
-    let mut pending_writes = vec![first_write];
-    while pending_writes.len() &lt; MAX_BATCH_ENTRIES {
-        let Ok(next_write) = receiver.try_recv() else { break };
-        pending_writes.push(next_write);
-    }
-    // Check exact memory key/range, then await insert_batch_with_publication_check.
-}</code></pre>
-                  </details>
+                  <p>The worker copies entries with aligned size below 128 KiB into one unfinished 1-MiB chunk per shard and releases their incoming bytes. Full/no-fit chunks flush immediately; a 60-second timer flushes partial chunks even when idle. Larger entries write separately. Closing discards partial chunks.</p>
+                  <p>Memory presence is checked on dequeue, not at publication. Every payload occupies one contiguous aligned disk byte range, separate from metadata.</p>
+                  <a class="source-label" href="feuer/src/disk_write.rs">feuer/src/disk_write.rs · queue and timer</a>
+                  <a class="source-label" href="feuer-storage/src/disk_cache/writer.rs">feuer-storage/src/disk_cache/writer.rs · preparation and publication</a>
                 </div>
               </details>
               <details class="node">
                 <summary><span class="node-name">Write completion ≠ publication</span><span class="node-meta">key + range rechecked</span></summary>
                 <div class="node-body">
-                  <p>Payload writes finish before dirty 4-KiB metadata pages are written; metadata updates complete before publication. Metadata chunk initialization also uses the write queue. No <code>fsync</code> or <code>fdatasync</code> is issued, so completion is not a power-loss durability guarantee.</p>
-                  <p>Publication rechecks the exact memory key and range under the memory shard lock—not an original admission identity. A completed but stale write need not become cache-visible.</p>
-                  <p>The detached batch writer retains disk regions during normal writes, even if its caller is canceled. Raw I/O requests retain buffers, not disk space. Payload chunks cannot be appended to; the allocator releases a chunk run after its last entry is removed, without waiting for readers or abandoned I/O. Individual holes are never reused.</p>
-                  <a class="source-label" href="feuer/src/disk_write.rs#L155">feuer/src/disk_write.rs:155–160 · publication callback</a>
-                  <a class="source-label" href="feuer-memory/src/store.rs#L171">feuer-memory/src/store.rs:171–177 · exact key/range check</a>
-                  <a class="source-label" href="feuer-storage/src/disk_cache.rs#L730">feuer-storage/src/disk_cache.rs:730–777 · payload then metadata writes</a>
+                  <p>Payload writes finish before publication and in-memory metadata updates. Dirty metadata pages write every second, independently. No <code>fsync</code> or <code>fdatasync</code> is issued.</p>
+                  <p>Publication rechecks disk containment, not memory residency. The writer retains reservations through I/O. Written chunks cannot be appended to; they become reusable after their last entry is removed, without waiting for readers or metadata writes.</p>
+                  <a class="source-label" href="feuer-storage/src/disk_cache/writer.rs">feuer-storage/src/disk_cache/writer.rs · payload then publication</a>
                   <a class="source-label" href="feuer-storage/src/allocation.rs#L194">feuer-storage/src/allocation.rs:194–214 · payload occupancy and release</a>
                 </div>
               </details>

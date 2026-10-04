@@ -53,7 +53,7 @@ impl DiskMetrics {
         );
         let write_entries = registry.register_counter_vec(
             "feuer_disk_write_entries_total".into(),
-            "Terminal outcomes of entries submitted to disk batch insertion".into(),
+            "Terminal outcomes of entries handled by the disk writer".into(),
             &["outcome"],
         );
         let eviction_triggering_insertions = registry.register_counter_vec(
@@ -63,7 +63,7 @@ impl DiskMetrics {
         );
         let written = registry.register_counter_vec(
             "feuer_disk_written_entries_total".into(),
-            "Entries in successfully written shard batches, whether published or discarded".into(),
+            "Entries in successfully written payload regions, whether published or discarded".into(),
             &[],
         );
         let recovered = registry.register_gauge_vec(
@@ -73,8 +73,7 @@ impl DiskMetrics {
         );
         let chunks = registry.register_gauge_vec(
             "feuer_disk_chunks".into(),
-            "Live allocator capacity in 1-MiB chunks; allocated includes payloads, metadata, and unwritten batches"
-                .into(),
+            "Live 1-MiB chunks; allocated includes payloads, metadata, and unfinished writes".into(),
             &["state"],
         );
         let payload = registry.register_gauge_vec(
@@ -86,7 +85,7 @@ impl DiskMetrics {
             registry.register_gauge_vec("feuer_disk_entries".into(), "Indexed disk range entries".into(), &[]);
         let packed = registry.register_counter_vec(
             "feuer_disk_batch_bytes_total".into(),
-            "Payload and payload-chunk bytes in successfully written shard batches before publication".into(),
+            "Payload and payload-chunk bytes in successfully written regions before publication".into(),
             &["kind"],
         );
         let outcomes = ["hit", "absent", "io_error", "checksum_failed"];
@@ -121,7 +120,7 @@ impl DiskMetrics {
     }
 }
 
-/// Records exactly one terminal outcome even if a batch task is dropped.
+/// Records exactly one terminal outcome even if the writer is dropped.
 pub(crate) struct DiskWriteAttempt {
     metrics: Arc<DiskMetrics>,
     outcome: DiskWriteOutcome,

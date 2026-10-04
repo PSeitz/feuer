@@ -34,7 +34,7 @@ operations. Use the public lookup counters to measure caller-visible behavior.
 | `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`. Each chunk is 1 MiB |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
-| `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`. Payload and payload-chunk bytes of successfully written shard batches, before publication. Metadata writes are included in the raw I/O counters, not this packing counter |
+| `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`. Payload and payload-chunk bytes of successfully written payload regions, before publication. Metadata writes are included in the raw I/O counters, not this packing counter |
 
 Disk read errors and checksum failures still behave as cache misses. Metrics
 make those distinct from absent entries. `covers_range()` does not count as a lookup.
@@ -52,7 +52,7 @@ writes. It is not a pure fragmentation measurement. Indexed payload bytes count 
 entry payloads, not a deduplicated union of overlapping object ranges.
 
 For byte-weighted packing efficiency, divide the rate of batch `payload` bytes
-by the rate of batch `chunk` bytes. Both exclude failed shard batches and include
+by the rate of batch `chunk` bytes. Both exclude failed payload regions and include
 successful writes later discarded at publication. Raw disk-I/O byte counters
 still include successful writes from partially failed batches. Existing read-I/O
 byte counters measure completed DataFile read lengths, not alignment padding or
@@ -115,7 +115,7 @@ Percentage of disk insertion attempts that trigger eviction:
 ```
 
 Both denominators include redundant/already-covered attempts. Disk attempts
-start at batch submission, not queue admission. The percentage is undefined
+start when the writer handles each download, not at queue admission. The percentage is undefined
 when there are no attempts in the window.
 
 ## Disk read sizes
@@ -191,10 +191,10 @@ retains no idle buffers.
 |---|---|---|
 | `feuer_disk_write_queue_total` | Counter | `outcome`: `queued`, `queue_full`, `queue_closed`, `stale`, `canceled`, `already_covered`, `redundant` |
 | `feuer_disk_write_queued_entries` | Gauge | Entries waiting to begin disk writes |
-| `feuer_disk_write_pending_bytes` | Gauge | Queued payload bytes plus batches awaited by the disk-write worker, not limited or charged to the memory-cache capacity |
+| `feuer_disk_write_pending_bytes` | Gauge | Logical payload bytes queued, prepared, or being written; excludes chunk padding and is not charged to memory-cache capacity |
 | `feuer_disk_write_queue_duration_seconds` | Histogram | Queue admission to dequeue, including entries found stale. Excludes entries canceled before dequeue |
-| `feuer_disk_write_entries_total` | Counter | Terminal per-entry batch-insertion outcome: `published`, `already_covered`, `no_capacity`, `failed`, `canceled` |
-| `feuer_disk_written_entries_total` | Counter | Entries in successfully written shard batches, before publication checks |
+| `feuer_disk_write_entries_total` | Counter | Terminal per-entry write outcome: `published`, `already_covered`, `no_capacity`, `failed`, `canceled` |
+| `feuer_disk_written_entries_total` | Counter | Entries in successfully written payload regions, before publication checks |
 
 Queue and storage counters describe different stages: do not sum all their
 values as a total number of disk-write attempts. `queued` is admission, not a
@@ -204,15 +204,14 @@ means the exact key and range are no longer cached in memory before writing.
 Reinsertion of the same immutable range does not make a queued write stale.
 Active writes may publish after memory eviction; storage has no `stale` outcome.
 
-A storage `failed` outcome means its shard batch write failed. Entries abandoned
-before a terminal decision, including later shards skipped after a batch error,
-count as `canceled`. Canceling the caller does not cancel a detached storage
-writer: that writer continues to report its actual terminal outcome.
+A storage `failed` outcome means the entry's payload write failed. Prepared entries discarded
+before completion count as `canceled`; downloads not yet handled have no storage attempt.
+Canceling an `insert_batch` caller does not cancel its detached writer.
 
-Written entries are not necessarily published entries. Successful writes can be
-discarded because another disk entry already covers them. Pending-byte accounting lasts
-until the worker's batch await ends; detached storage writes can continue after worker
-cancellation. Gauges are released on rejection, cancellation, errors, and normal completion.
+Successful writes may be discarded by disk containment checks. Pending-byte accounting lasts
+until each entry completes or is discarded, including its time in a partial chunk. The writer
+releases small incoming buffers after copying; each unfinished chunk has a 1-MiB scratch
+buffer. This gauge measures logical payload, not backing capacity.
 
 ## Existing metrics
 

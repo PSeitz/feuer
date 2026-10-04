@@ -64,11 +64,11 @@ The backing file is exclusively locked while open. Disk
 hits verify the entry's checksum and promote the requested bytes to memory.
 Corrupt or uncertain reads count as misses.
 
-Writes run in the background. The queue holds up to 256 entries and batches up to
-64. Queued and active payload bytes have no byte limit. Queue pressure or memory
-eviction can skip a disk write without failing the lookup.
+Writes run in the background through a 256-entry queue. Entries with aligned size below
+128 KiB share 1-MiB chunks, flushed on full/no-fit or every 60 seconds. Larger entries write
+separately. Closing discards partial chunks. Queue pressure or memory eviction can skip writes.
 
-Batches pack payloads into 1-MiB chunks with metadata stored separately. A payload chunk
+Metadata is stored separately. Queued and active payload bytes have no byte limit. A payload chunk
 can be reused after its last entry is removed; readers verify checksums rather than delay
 reuse. Active writes may publish after memory eviction. Reads and writes use separate I/O
 queues. See the [disk layout](feuer-storage/disk-prototype.md) for details.

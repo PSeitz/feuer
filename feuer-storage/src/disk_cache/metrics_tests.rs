@@ -358,15 +358,19 @@ async fn pressure_eviction_and_partial_write_failure_record_each_entry_outcome()
         value(&registry, "feuer_disk_write_entries_total", &[("outcome", "failed")]),
         1.0
     );
-    assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 3.0);
-    assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
+    assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 2.0);
+    assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
     assert_eq!(
         value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),
-        3.0
+        2.0
     );
-    // Metadata and the successful small entry remain reserved; the failed entry's chunk is free.
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 3.0);
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 2.0);
+    assert_eq!(
+        value(&registry, "feuer_disk_write_entries_total", &[("outcome", "canceled")]),
+        1.0
+    );
+    // Failure discards the unfinished small-entry chunk too; only metadata remains reserved.
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 4.0);
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 1.0);
 }
 
 #[test]

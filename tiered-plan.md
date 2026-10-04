@@ -252,7 +252,7 @@ Disk writes are best-effort and may be skipped when the pending-write queue is f
 The policy may consider pending-write and disk-residency state when choosing victims, but the contract does
 not assign fixed weights to those states.
 
-There is no flush API. Disk writes and persistence are best-effort.
+The tiered cache exposes no flush API. Disk writes and persistence are best-effort.
 
 Disk capacity is fixed at open time and must be respected. Internal allocation, indexing, disk-region layout,
 partial retention, rewriting, checksums, metadata persistence, and submission engines are implementation
@@ -264,8 +264,8 @@ buffers and validate them before use. Readers hold no disk reservation and do no
 overwrite may cause a miss; no global read/write serialization or read guard is required. The I/O layer
 owns submitted buffer lifetime.
 
-Explicit batches pack smaller payloads together into 1-MiB chunks. Later batches cannot append to written
-payload chunks or reuse individual holes. A payload chunk becomes reusable when its last indexed entry is
+The writer packs entries with aligned size below 128 KiB into per-shard 1-MiB chunks, flushing on full/no-fit
+or every 60 seconds. Larger entries write separately. Written chunks and individual holes cannot be appended to. A payload chunk becomes reusable when its last indexed entry is
 removed, without waiting for readers or metadata writes. Partially filled chunks consume their full capacity.
 Payload addresses and storage lengths are rounded to 4 KiB. Each payload is one contiguous disk byte range
 with no metadata gaps. Multi-chunk entries reserve consecutive whole chunks exclusively; their unused tails
@@ -374,7 +374,7 @@ The MVP is complete when tests demonstrate that:
 - queued writes may be skipped after memory eviction; active immutable downloads may publish independently
   of memory residency.
 - failed payload writes do not publish live entries; recovered payloads must pass checksum verification.
-- explicit batches group small entries in immutable 1-MiB chunks with 4-KiB-aligned payload storage.
+- small entries share immutable 1-MiB chunks with 4-KiB-aligned storage; partial chunks flush every minute.
 - shared payload chunks contain each entry's complete aligned payload; multi-chunk entries own consecutive
   chunks exclusively, with metadata stored separately.
 - payload chunks are reused after their last entry is removed; concurrent reads validate checksums instead

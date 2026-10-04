@@ -93,9 +93,11 @@ Payload chunks contain plain bytes, not pages. Payload length equals object rang
 length; disk storage length is rounded up to 4 KiB. Payload addresses are also
 4-KiB-aligned. There are no metadata gaps within a payload.
 
-Small entries may share a chunk within one explicit batch. Entries spanning chunks
-start at a chunk boundary and occupy consecutive whole chunks exclusively. Written
-chunks are not appended to; individual payload holes are not reused.
+Entries with 4-KiB-aligned storage length below 128 KiB share unfinished chunks.
+Larger entries start at a chunk boundary and occupy consecutive whole chunks
+exclusively. Written chunks are not appended to; individual payload holes are not reused.
+The background writer flushes full/no-fit chunks immediately and partial chunks every
+60 seconds. Larger writes do not flush pending small entries. Closing discards partial chunks.
 
 ## Write ordering and reuse
 

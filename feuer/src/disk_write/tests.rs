@@ -87,10 +87,28 @@ async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
         ObjectKeyHash::from("readmitted"),
         Download::new(3, Bytes::from_static(b"abcd")).unwrap(),
     );
+    tokio::time::pause();
+    let writer = tokio::spawn(DiskWriteQueue::write_queued(receiver, memory.clone(), disk.clone()));
+    tokio::task::yield_now().await;
+    assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 12.0);
+    tokio::time::advance(Duration::from_secs(59)).await;
+    for key in ["live-a", "readmitted", "live-b"] {
+        assert!(!disk.covers_range(&ObjectKeyHash::from(key), range));
+        assert!(memory.remove(&ObjectKeyHash::from(key), range));
+    }
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while value(&registry, "feuer_disk_write_pending_bytes", &[]) != 0.0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     drop(disk_write_queue);
-    DiskWriteQueue::write_queued_batches(receiver, memory.clone(), disk.clone()).await;
+    writer.await.unwrap();
     assert!(!disk.covers_range(&ObjectKeyHash::from("evicted"), range));
-    // One metadata chunk leaves one payload chunk; the drained batch must share it.
+    // Admitted entries share the chunk and publish even after memory eviction.
     for key in ["live-a", "readmitted", "live-b"] {
         assert_eq!(
             disk.get(&ObjectKeyHash::from(key), range).await.unwrap(),
@@ -111,9 +129,7 @@ async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
 }
 
 #[tokio::test]
-async fn active_writes_publish_after_memory_eviction() {
-    use std::{future::Future, task::Poll};
-
+async fn closing_queue_discards_partial_chunks() {
     let directory = tempfile::tempdir().unwrap();
     let memory = Arc::new(MemoryCache::new(4096));
     let disk = DiskCache::open(directory.path(), 2 << 20, IoMetrics::noop())
@@ -121,26 +137,10 @@ async fn active_writes_publish_after_memory_eviction() {
         .unwrap();
     let (registry, backend) = registry();
     let (queue, receiver) = DiskWriteQueue::channel_with_metrics(1, DiskWriteQueueMetrics::new(&backend));
-    let key = ObjectKeyHash::from("object");
-    let range = ByteRange::new(3, 7).unwrap();
     enqueue(&queue, &memory, "object");
     drop(queue);
-    let mut writer = Box::pin(DiskWriteQueue::write_queued_batches(
-        receiver,
-        memory.clone(),
-        disk.clone(),
-    ));
-    // The current-thread runtime cannot run storage's detached writer during this poll.
-    // The entry has passed the pre-write check, but no payload has been published.
-    assert!(
-        std::future::poll_fn(|cx| Poll::Ready(writer.as_mut().poll(cx)))
-            .await
-            .is_pending()
-    );
+    DiskWriteQueue::write_queued(receiver, memory, disk.clone()).await;
+    assert!(!disk.covers_range(&ObjectKeyHash::from("object"), ByteRange::new(3, 7).unwrap()));
     assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);
-    assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 4.0);
-    assert!(memory.remove(&key, range));
-    writer.await;
-    assert_eq!(disk.get(&key, range).await.unwrap(), Bytes::from_static(b"abcd"));
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 0.0);
 }

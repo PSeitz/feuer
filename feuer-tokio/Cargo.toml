@@ -45,6 +45,7 @@ rt-multi-thread = ["runtime-tokio?/rt-multi-thread"]
 signal = ["runtime-tokio?/signal"]
 sync = ["runtime-tokio?/sync"]
 time = ["runtime-tokio?/time"]
+test-util = ["runtime-tokio?/test-util"]
 
 [dependencies]
 runtime-madsim-tokio = { workspace = true, optional = true }

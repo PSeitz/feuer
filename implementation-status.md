@@ -7,17 +7,17 @@ contract. This document records what exists and what remains to build.
 
 The public cache now connects **memory → integrity-checked disk → callback**. The fallible asynchronous
 `TieredMemoryDiskCache::open` opens the configured directory using Linux direct I/O and io_uring, with no
-silent fallback. One worker drains a 256-entry queue in batches of at most 64 retained downloads into the
-experimental `DiskCache`. Reopening reads one 1-MiB metadata chunk at a time per shard and waits for
+silent fallback. One worker drains a 256-entry queue into per-shard small-entry chunks, flushing
+on full/no-fit or every minute; larger entries write separately. Reopening reads one 1-MiB metadata chunk at a time per shard and waits for
 all shards to recover before returning.
 The recovery additions cross-compile for Linux; real io_uring execution and device-crash testing remain outstanding.
 
 | Area | Implemented | Remaining |
 | --- | --- | --- |
-| `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, disk writes through a 256-entry queue in batches of at most 64, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
+| `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, disk writes through a 256-entry queue with per-shard small-entry chunks, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
 | `feuer-types` | XXH3-128 object identity, exact non-empty `ByteRange`, keyless `Download` with a derived range, internal shared access evidence and value comparison | None for the current public type boundary |
 | `feuer-memory` | Sharded covering-range index, exact access counts shared with disk, per-object trimming-event limits, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
-| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskCache` with explicit batches packed into immutable 1-MiB chunks, whole-entry checksums, whole-chunk reuse after the last entry is removed and per-batch eviction attempt/chunk limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
+| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskCache` with small entries packed into immutable 1-MiB chunks, whole-entry checksums, whole-chunk reuse and per-admission eviction limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
 
 ## Implemented behavior
@@ -123,11 +123,11 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
 ## In progress: disk-cache prototype
 
 [`format.md`](format.md) describes the experimental disk format;
-[`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) covers runtime behavior and remaining crash testing. `DiskCache::insert_batch` groups smaller entries together within each
-shard, writes payload chunks, and publishes after containment revalidation. A periodic writer persists metadata best-effort. Partial final chunks are finalized too. Later batches cannot fill them. Key hashes and exact
-object ranges map to one contiguous physical range each. Payload bytes have no metadata gaps, including at chunk boundaries. Entry metadata stores
-one XXHash64 checksum per entry, also retained in the in-memory index. `get` reads and hashes the entire covering
-entry while copying only requested bytes into the result. It does not read neighboring entries or metadata.
+[`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) covers runtime behavior and remaining crash testing.
+`DiskWriter` prepares small-entry chunks; `insert_batch` uses it with an explicit final flush.
+Payload completion precedes publication; a separate writer persists metadata every second.
+Each entry has one contiguous payload range and XXHash64 checksum. Reads verify the whole covering entry,
+without reading neighboring entries or metadata.
 
 Independent shards have their own allocator and range-index lock. The allocator tracks coalesced free
 whole-chunk runs; the metadata component reserves entry positions and grows metadata capacity internally.
@@ -135,7 +135,7 @@ Detached payload writers retain reservations through completion despite caller c
 Failed payload writes release their chunk and metadata reservations.
 Publication is not transactional across shards. Callers bound batch memory and concurrency.
 
-Entries within a batch share 1-MiB payload chunks with 4-KiB-aligned storage. Multi-chunk entries own consecutive
+Entries with aligned size below 128 KiB share 1-MiB payload chunks. Larger entries own consecutive
 chunks exclusively, including unused tails. Payload chunks contain no metadata. Removed payload holes cannot be reused individually.
 The v13 format stores fixed 48-byte records with 128-bit key hashes in separate 1-MiB metadata chunks. The first 255
 pages hold up to 21,420 records; the final 4-KiB page stores the next metadata chunk address. Metadata chunks remain
@@ -148,7 +148,7 @@ Pressure eviction samples up to 64 live entries and selects the lowest recent re
 byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.
 Alignment, metadata and chunk overhead do not enter the score. Only selected entries are removed. Neighbors
 remain indexed and may keep a partially empty chunk unavailable. No eviction metadata reads are needed.
-Each shard batch is limited to 64 sampled decisions and 4,096 chunks charged to removed entries. Guarded or active
+Each admission is limited to 64 sampled decisions and 4,096 chunks charged to removed entries. Active
 storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
 disk cache to a memory cache's evidence. Public tier orchestration now uses it.
 Recovery starts at each shard's first chunk and follows last-page links, reading exactly 1 MiB per metadata chunk
@@ -160,7 +160,7 @@ No comparative layout/performance claim is established.
 The disk-cache tests cover persisted key-hash entry metadata and payload checksums, containment races, caller
 cancellation, corruption/reused payload, partial batch failure, metadata-only chunks, disjoint shards,
 mixed-size packing, exclusive multi-chunk ownership, finalized entry metadata, whole-chunk ownership/reuse,
-per-batch eviction attempt and chunk limits, shared evidence across tiers, payload-only scoring, mixed-size churn,
+per-admission eviction limits, shared evidence across tiers, payload-only scoring, mixed-size churn,
 concurrent eviction/reads,
 rejection of scattered free chunks, contiguous payloads across chunk boundaries, and whole-entry
 validation of 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable.
@@ -173,12 +173,12 @@ checks passed for the changed files.
 
 - A nonblocking queue allows at most 256 pending entries. Queued and active payload bytes are tracked
   but not limited or charged to the memory-cache capacity.
-- One worker drains up to 64 entries into an explicit immutable batch. There is no batching timer or flush API.
-  Queue saturation skips candidates without blocking or failing successful lookups.
+- One worker prepares one small-entry chunk per shard, flushing on full/no-fit or every 60 seconds.
+  Larger entries write separately. Queue saturation skips candidates; closing discards partial chunks.
 - Queued writes are discarded if their exact key and range are no longer cached in memory. Reinsertion of
   the same immutable range allows an earlier write to proceed.
-- Active writes own immutable downloads and may publish after memory eviction. The detached storage writer
-  retains its current reservation while awaiting I/O; publication rechecks only disk containment.
+- Small entries release incoming buffers after copying into aligned chunk buffers; larger writes own downloads.
+  Admitted entries may publish after memory eviction; publication rechecks only disk containment.
   Neither publication nor disk eviction takes a memory shard lock.
 - Failed writes are logged and remain invisible. Shared evidence survives queued and active disk writes.
 - Requests record exactly once before lookup, including requests that fail or are later canceled. Callback results already
@@ -192,6 +192,11 @@ added in this slice. Workspace Clippy passed with warnings denied. Formatting ch
 files, and whitespace checks passed.
 The isolated validation checkout is `/mnt/local-ssd/feuer-tiered.iB2JNA`.
 
+Small-entry writer validation: all 219 workspace library tests pass on `m8g-32cpu-local-ssd-2`
+with real direct I/O and io_uring. Coverage includes full/no-fit chunks, the aligned cutoff,
+independent larger writes, 60-second flushing, incoming-buffer release, failure cleanup,
+and discarding partial chunks on close. Linux-target workspace Clippy passes with warnings denied.
+
 ## Implemented: cache metrics
 
 - `open_with_metrics` wires a `mixtrics` registry through public lookups, callbacks, both cache tiers and
@@ -199,8 +204,8 @@ The isolated validation checkout is `/mnt/local-ssd/feuer-tiered.iB2JNA`.
 - Added lookup latency/outcomes and served bytes, callback counts/latency/download bytes, disk read-error
   and integrity outcomes, disk-write admission/skip/terminal outcomes, queue pressure/wait time,
   chunk capacity states, indexed payload/entries, pressure eviction and byte-weighted batch packing.
-- Queue gauges track queued entries and batches awaited by the writer; capacity gauges track metadata
-  and payload reservations, including detached storage writes, write failure, and cache shutdown. See [`metrics.md`](metrics.md) for exact accounting semantics.
+- Queue gauges track entries and logical payload through preparation and completion; capacity gauges track
+  metadata and payload reservations through completion, failure, and discard. See [`metrics.md`](metrics.md) for exact accounting semantics.
 - Validation on macOS: portable Feuer/memory/types tests pass. Linux workspace all-target checks and Clippy
   pass. New Linux metric integration tests are compile-checked but have not been executed on this host.
 

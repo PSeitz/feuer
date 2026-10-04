@@ -21,8 +21,7 @@ records**, shared across payload chunks and write batches. Its last page contain
 chunk address, or `u64::MAX` for the end of the chain. Metadata chunks stay reserved for the cache's
 lifetime. Each active shard needs at least one metadata chunk, charged against its capacity. A one-chunk cache consequently has no room for payloads.
 
-Small payloads share chunks within an explicit batch. Each complete aligned payload must fit inside
-its shared chunk. Larger entries reserve consecutive whole chunks exclusively, including unused
+Payloads with aligned size below 128 KiB share one unfinished chunk per shard and writer. Larger entries reserve consecutive whole chunks exclusively, including unused
 tails. The allocator retains payload reservations; index entries and readers hold only addresses.
 Individual payload holes are never reused. `src/allocation.rs` tracks coalesced free chunk runs;
 each `ReservedChunks` has one owner: a pending write, the allocator, or a metadata chunk. I/O requests carry
@@ -34,22 +33,22 @@ it and the range-index lock never span I/O. Page bytes consume 1 MiB per metadat
 
 ## Writes
 
-`insert_batch` sorts each shard's entries smallest first, then reserves, writes, and publishes one
-shared payload chunk or one multi-chunk entry at a time. Only the current region's entries await
-publication; no whole-shard write plan is retained. Partially filled chunks are finalized too; later
-batches cannot append. Metadata growth never moves payload addresses. Payload writes have no batching delay.
+`DiskWriter` copies small entries into aligned 1-MiB buffers, releasing their incoming bytes.
+Full/no-fit chunks flush immediately; the queue worker also flushes every 60 seconds, even when idle.
+Larger entries write independently without flushing pending small entries. Closing discards partial chunks.
+`insert_batch` uses the same writer and explicitly flushes before returning. Metadata growth never moves payloads.
 
 After a region's payload writes finish, accepted entries update metadata in memory and publish into the index.
 One periodic writer persists dirty metadata pages every second, best-effort; see the
 [write contract](../format.md#write-ordering-and-reuse). Sleeping does not keep the cache open.
 
-Publication rechecks containment, larger entries first within each region: broader entries replace
-contained entries, while partial overlaps coexist. Contained entries and entries that cannot fit are skipped.
+Publication rechecks disk containment: broader entries replace contained entries, while partial overlaps coexist.
+Contained entries and entries that cannot fit are skipped.
 Later writes may replace or evict entries published earlier in the same batch. A write failure releases
 that region without undoing earlier publication. Publication does not check memory residency: the writer
-owns immutable downloaded bytes. Superseded entries release their payload occupancy without invalidation writes.
+owns prepared small-entry buffers or immutable larger downloads. Superseded entries release their payload occupancy without invalidation writes.
 
-The detached writer retains the current region's reservation during normal writes. Queued I/O retains buffers,
+The writer retains payload reservations and metadata positions until completion or discard. Queued I/O retains buffers,
 not disk space: an abandoned write can overwrite a reused payload, producing a checksum miss.
 Failed metadata writes are not retried and neither reject published entries nor prevent payload reuse.
 An abnormal queue failure retains active I/O resources when completion cannot be established.
@@ -70,7 +69,7 @@ checksum still matches the failed read; discarding a newer identical copy remain
 Disk and memory consult standalone access history through `feuer-types::retention`. Public requests
 record accesses before lookup; raw reads and writes do not. Eviction samples live entries and removes
 the lowest recent retrieval value per payload byte. Metadata, alignment, and unused chunk space
-count against capacity but not the score. Each shard batch allows at most 64 eviction attempts and
+count against capacity but not the score. Each admission allows at most 64 eviction attempts and
 charges at most 4,096 chunks to removed entries; admission may be skipped when no contiguous run is free.
 Free capacity in another shard cannot satisfy admission.
 

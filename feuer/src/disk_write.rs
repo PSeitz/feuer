@@ -1,4 +1,4 @@
-//! Best-effort disk writes: at most 256 queued entries, drained by one writer in batches of at most 64.
+//! Best-effort disk writes: 256 queued entries, with small entries packed into per-shard chunks.
 
 mod metrics;
 #[cfg(test)]
@@ -6,7 +6,10 @@ mod tests;
 
 use metrics::{DiskWriteQueueMetrics, DiskWriteQueueOutcome};
 use mixtrics::metrics::BoxedRegistry;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use feuer_memory::MemoryCache;
 use feuer_storage::DiskCache;
@@ -14,7 +17,7 @@ use feuer_types::{ByteRange, Download, ObjectKeyHash};
 use tokio::sync::mpsc;
 
 const MAX_QUEUED_ENTRIES: usize = 256;
-const MAX_BATCH_ENTRIES: usize = 64;
+const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A disk-write queue that skips downloads when its entry capacity is exhausted.
 pub(crate) struct DiskWriteQueue {
@@ -60,8 +63,8 @@ impl DiskWriteQueue {
         let (disk_write_queue, receiver) =
             Self::channel_with_metrics(MAX_QUEUED_ENTRIES, DiskWriteQueueMetrics::new(registry));
         // The worker owns no sender. Dropping the last cache handle closes the queue;
-        // submitted writes still finish under storage's detached reservation owner.
-        tokio::spawn(Self::write_queued_batches(receiver, memory, disk));
+        // active writes finish, but unfinished small-entry chunks are discarded.
+        tokio::spawn(Self::write_queued(receiver, memory, disk));
         disk_write_queue
     }
 
@@ -118,43 +121,28 @@ impl DiskWriteQueue {
         });
     }
 
-    /// Skips evicted queued downloads, then writes admitted batches independently of memory retention.
-    async fn write_queued_batches(
-        mut receiver: mpsc::Receiver<PendingDiskWrite>,
-        memory: Arc<MemoryCache>,
-        disk: DiskCache,
-    ) {
-        while let Some(first_write) = receiver.recv().await {
-            let mut pending_writes = vec![first_write];
-            while pending_writes.len() < MAX_BATCH_ENTRIES {
-                let Ok(next_write) = receiver.try_recv() else { break };
-                pending_writes.push(next_write);
-            }
-            let (downloads, batch_entry_metrics): (Vec<_>, Vec<_>) = pending_writes
-                .into_iter()
-                .filter_map(
-                    |PendingDiskWrite {
-                         download,
-                         mut entry_metrics,
-                     }| {
-                        entry_metrics.finish_queue_wait();
-                        // Avoid starting work already evicted from memory. Once started,
-                        // the owned immutable download remains valid after eviction.
-                        if !memory.contains_entry(&entry_metrics.key, entry_metrics.object_range) {
-                            entry_metrics.metrics.record(DiskWriteQueueOutcome::Stale);
-                            return None;
-                        }
-                        Some(((entry_metrics.key, download), entry_metrics))
-                    },
-                )
-                .unzip();
-            if downloads.is_empty() {
-                continue;
-            }
-            if let Err(error) = disk.insert_batch(downloads).await {
+    /// Checks memory on dequeue; admitted writes finish independently of memory retention.
+    async fn write_queued(mut receiver: mpsc::Receiver<PendingDiskWrite>, memory: Arc<MemoryCache>, disk: DiskCache) {
+        let mut writer = disk.writer();
+        let mut flush = tokio::time::interval_at(tokio::time::Instant::now() + FLUSH_INTERVAL, FLUSH_INTERVAL);
+        flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let result = tokio::select! {
+                biased;
+                _ = flush.tick() => writer.flush().await,
+                next = receiver.recv() => {
+                    let Some(PendingDiskWrite { download, mut entry_metrics }) = next else { break };
+                    entry_metrics.finish_queue_wait();
+                    if !memory.contains_entry(&entry_metrics.key, entry_metrics.object_range) {
+                        entry_metrics.metrics.record(DiskWriteQueueOutcome::Stale);
+                        continue;
+                    }
+                    writer.write(entry_metrics.key, download, entry_metrics).await
+                }
+            };
+            if let Err(error) = result {
                 tracing::warn!(target: "feuer::storage", %error, "disk write failed");
             }
-            drop(batch_entry_metrics);
         }
     }
 }

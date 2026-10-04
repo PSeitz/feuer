@@ -353,6 +353,9 @@ mod tests {
     }
 
     async fn wait_for_disk(cache: &TieredMemoryDiskCache, key: &str, range: ByteRange) {
+        tokio::time::pause();
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        tokio::time::resume();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while !cache.state.disk.covers_range(&ObjectKeyHash::from(key), range) {
                 tokio::task::yield_now().await;

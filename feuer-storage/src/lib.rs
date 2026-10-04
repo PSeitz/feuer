@@ -25,7 +25,7 @@ mod test_metrics;
 mod uring;
 
 #[cfg(target_os = "linux")]
-pub use disk_cache::{DiskCache, DiskCacheError};
+pub use disk_cache::{DiskCache, DiskCacheError, DiskWriter};
 pub use disk_metrics::DiskMetrics;
 pub use error::{DataFileError, DataFileErrorKind, DataFileResult, IoOperation};
 #[cfg(target_os = "linux")]
