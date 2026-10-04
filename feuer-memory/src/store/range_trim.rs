@@ -1,7 +1,7 @@
 use feuer_types::ByteRange;
 
 /// Minimum percentage of source payload bytes that range trimming must save.
-const MIN_RANGE_TRIM_SAVINGS_PERCENT: u64 = 25;
+const MIN_RANGE_TRIM_SAVINGS_PERCENT: u64 = 30;
 
 /// The source range to trim, the ranges that will replace it, and their total byte count.
 #[derive(Clone, Debug, PartialEq, Eq)]
