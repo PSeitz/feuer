@@ -83,14 +83,14 @@ Offsets are relative to the start of the 48-byte record:
 | --- | --- | --- |
 | 0 | 16 | Object key hash; full key is not stored |
 | 16 | 8 | Object range start |
-| 24 | 8 | Object range length, greater than zero |
+| 24 | 8 | Object range length |
 | 32 | 8 | Payload address |
 | 40 | 8 | Seed-zero XXHash64 of payload, excluding alignment padding |
 
 ## Payload chunks
 
 Payload chunks contain plain bytes, not pages. Payload length equals object range
-length; disk storage length is rounded up to 4 KiB. Payload addresses are also
+length; disk storage length is at least 4 KiB and rounded up to 4 KiB. Payload addresses are also
 4-KiB-aligned. There are no metadata gaps within a payload.
 
 Entries with 4-KiB-aligned storage length below 128 KiB share unfinished chunks.
@@ -127,9 +127,9 @@ Corrupt record pages are discarded independently.
 A page's checksum and type/version tag establish the writer's format contract.
 Readers use fixed-size pages and records and do not recheck reserved fields, slot
 counts, padding, range arithmetic, or address alignment. `Download` guarantees a
-non-empty, representable object range; payload packing places its aligned bytes
-inside reserved consecutive chunks, and metadata links use reserved chunk addresses.
-An unused record has zero length.
+representable object range; payload packing places its aligned storage inside
+reserved consecutive chunks, and metadata links use reserved chunk addresses.
+An unused record is all-zero.
 
 Metadata chunks are reserved before decoding entry records and reconstructing payload
 occupancy. Reservations enforce current shard bounds and prevent payloads from claiming

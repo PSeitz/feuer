@@ -44,7 +44,7 @@ pub(super) fn plan_range_trim(
             && requested_range.start() <= previous_range.end()
         {
             *previous_range = ByteRange::new(previous_range.start(), previous_range.end().max(requested_range.end()))
-                .expect("a union of non-empty ranges must remain non-empty");
+                .expect("a union of ordered ranges must remain ordered");
         } else {
             merged_ranges.push(requested_range);
         }

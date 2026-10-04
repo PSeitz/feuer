@@ -21,9 +21,6 @@ impl Download {
     /// Creates a download whose range starts at `downloaded_start`.
     pub fn new(downloaded_start: u64, bytes: Bytes) -> Result<Self, DownloadError> {
         let payload_bytes = bytes.len() as u64;
-        if payload_bytes == 0 {
-            return Err(DownloadError::EmptyPayload);
-        }
         if downloaded_start.checked_add(payload_bytes).is_none() {
             return Err(DownloadError::RangeOverflow {
                 downloaded_start,
@@ -44,7 +41,7 @@ impl Download {
     /// Returns the exact object range derived from the payload length.
     pub fn downloaded_range(&self) -> ByteRange {
         ByteRange::new(self.downloaded_start, self.downloaded_start + self.bytes.len() as u64)
-            .expect("a Download always contains a non-empty representable range")
+            .expect("a Download always contains a representable range")
     }
 
     /// Returns the contiguous bytes covering the downloaded range.
@@ -71,9 +68,6 @@ impl fmt::Debug for Download {
 /// An invalid download callback result.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum DownloadError {
-    /// A downloaded range must contain at least one byte.
-    #[error("download payload must not be empty")]
-    EmptyPayload,
     /// The payload extends beyond the representable object-offset space.
     #[error("download starting at {downloaded_start} with {payload_bytes} bytes exceeds the u64 object-offset space")]
     RangeOverflow {
@@ -103,8 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_or_unrepresentable_ranges() {
-        assert_eq!(Download::new(7, Bytes::new()).unwrap_err(), DownloadError::EmptyPayload);
+    fn rejects_unrepresentable_ranges() {
         assert_eq!(
             Download::new(u64::MAX - 1, Bytes::from_static(b"ab")).unwrap_err(),
             DownloadError::RangeOverflow {

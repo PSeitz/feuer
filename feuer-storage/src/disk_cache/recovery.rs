@@ -103,14 +103,22 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 type EntryMetadata = (ObjectKeyHash, ByteRange, u64, Range<u64>);
 
 /// Decodes a fixed-size record from a validated page. The writer guarantees representable
-/// ranges and aligned payloads; zero-length records are unused.
+/// ranges and aligned payloads; all-zero records are unused.
 fn decode_entry_metadata(bytes: &[u8]) -> Option<EntryMetadata> {
+    if bytes == [0; ENTRY_METADATA_BYTES] {
+        return None;
+    }
     let key = ObjectKeyHash(u128::from_le_bytes(bytes[..16].try_into().unwrap()));
     let start = read_u64(bytes, 16);
     let range = ByteRange::new(start, start + read_u64(bytes, 24)).ok()?;
     let checksum = read_u64(bytes, 40);
     let start = read_u64(bytes, 32);
-    let payload = start..start + range.len().next_multiple_of(BUFFER_ALIGNMENT as u64);
+    let payload = start
+        ..start
+            + range
+                .len()
+                .max(BUFFER_ALIGNMENT as u64)
+                .next_multiple_of(BUFFER_ALIGNMENT as u64);
     Some((key, range, checksum, payload))
 }
 

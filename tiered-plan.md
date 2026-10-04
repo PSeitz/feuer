@@ -36,7 +36,7 @@ before use, subject to the probabilistic key identity and checksum-collision lim
   128-bit identity; full keys are not stored or checked for collisions. Keys must not be adversarial.
 - Callers are responsible for making the key distinguish every object version that can have different bytes,
   including across process restarts and application upgrades.
-- A requested range is an exact, valid, non-empty half-open object byte range supplied to a lookup.
+- A requested range is an exact, valid half-open object byte range supplied to a lookup; it may be empty.
 - A downloaded range is the exact object byte range represented by one callback result.
 - Requested and downloaded ranges may have arbitrary endpoints and lengths. Feuer imposes no source
   alignment and exposes no public cache block size.
@@ -76,7 +76,7 @@ downloaded-range selection, source work, and source-memory bounds. Feuer does no
 callbacks.
 
 `Download::new` derives the downloaded range as
-`downloaded_start..downloaded_start + bytes.len()`, rejecting an empty payload or an end-offset overflow. A
+`downloaded_start..downloaded_start + bytes.len()`, rejecting an end-offset overflow. A
 successful callback result is therefore length-consistent by construction. Feuer only needs to verify that the
 derived range contains that call's requested range. A callback error affects only that lookup.
 
@@ -364,7 +364,7 @@ The MVP is complete when tests demonstrate that:
 - memory hits, disk hits, and callback results obey the same result contract.
 - a miss invokes the callback supplied to that `get_or_fetch` call.
 - the callback may use query-local state and an application download manager may debounce and share work across callbacks.
-- each callback returns one start offset and non-empty `Bytes`, the downloaded range is derived from them, and Feuer rejects a result that does not cover the requested range.
+- each callback returns one start offset and `Bytes`, the downloaded range is derived from them, and Feuer rejects a result that does not cover the requested range.
 - callback errors are returned without Feuer performing source retries.
 - a callback result already contained by cached data is not inserted or written again.
 - every started request records its exact range once before lookup, including failures and cancellation; downloaded-range insertion records nothing.

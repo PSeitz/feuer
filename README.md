@@ -3,7 +3,7 @@
 Scared of burning your S3 budget? Feuer will take care of that.
 
 Feuer is a Rust cache for S3. It checks memory, then disk, and calls your async
-download function on a miss. Requests can cover any non-empty byte range without
+download function on a miss. Requests can cover any byte range without
 alignment requirements.
 
 The disk tier requires Linux, io_uring, and direct I/O. Opening waits for best-effort
@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Replace the callback with your source download. It returns a starting offset and
-non-empty `Bytes` covering at least the requested range. Feuer returns exactly the
+`Bytes` covering at least the requested range. Feuer returns exactly the
 requested bytes as one contiguous `Bytes`.
 
 Keys must identify immutable content. Requested ranges for a key may overlap;

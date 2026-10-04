@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use thiserror::Error;
 
-/// An exact, non-empty, half-open byte range within an immutable object.
+/// An exact half-open byte range within an immutable object.
 ///
 /// Feuer does not align or otherwise normalize either endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -14,7 +14,7 @@ pub struct ByteRange {
 impl ByteRange {
     /// Creates the exact range `start..end`.
     pub const fn new(start: u64, end: u64) -> Result<Self, InvalidByteRange> {
-        if start >= end {
+        if start > end {
             return Err(InvalidByteRange { start, end });
         }
         Ok(Self { start, end })
@@ -35,9 +35,9 @@ impl ByteRange {
         self.end - self.start
     }
 
-    /// Returns `false`; a [`ByteRange`] is non-empty by construction.
+    /// Returns whether the range contains no bytes.
     pub const fn is_empty(self) -> bool {
-        false
+        self.start == self.end
     }
 
     /// Returns whether this range completely covers `other`.
@@ -47,7 +47,7 @@ impl ByteRange {
 
     /// Returns whether this range overlaps `other`.
     pub const fn overlaps(self, other: Self) -> bool {
-        self.start < other.end && other.start < self.end
+        !self.is_empty() && !other.is_empty() && self.start < other.end && other.start < self.end
     }
 }
 
@@ -65,9 +65,9 @@ impl From<ByteRange> for Range<u64> {
     }
 }
 
-/// The error returned for an empty or reversed byte range.
+/// The error returned for a reversed byte range.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
-#[error("byte range must be non-empty and ordered, got {start}..{end}")]
+#[error("byte range must be ordered, got {start}..{end}")]
 pub struct InvalidByteRange {
     start: u64,
     end: u64,
@@ -99,8 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_and_reversed_ranges() {
-        assert_eq!(ByteRange::new(7, 7).unwrap_err(), InvalidByteRange { start: 7, end: 7 });
+    fn rejects_reversed_ranges() {
         assert_eq!(ByteRange::new(8, 7).unwrap_err(), InvalidByteRange { start: 8, end: 7 });
     }
 
