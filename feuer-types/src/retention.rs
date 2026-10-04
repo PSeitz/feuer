@@ -63,7 +63,7 @@ impl ObjectAccessHistories {
 
     /// Records one request when it starts, before any cache lookup or source fetch.
     /// Failed and canceled requests contribute to demand just like successful requests.
-    /// Distinct requested ranges for an object must not overlap; exact repeats update the same counter.
+    /// Exact repeats update the same counter.
     /// Cache insertion and eviction do not record or remove history.
     pub fn record_access(&self, key: &ObjectKeyHash, requested: ByteRange) {
         let mut objects = self.shard(key).lock().unwrap();
@@ -168,13 +168,13 @@ impl DecayedAccessCount {
 
 /// Per-range decayed counts for scoring and recent request events for range trimming.
 /// Trimming events have a per-object count limit and an age limit measured in requests across all keys.
-/// Distinct requested ranges must not overlap; cached ranges may cover several requests.
+/// Cached ranges receive credit only for fully contained requests.
 /// Unlike trimming events, distinct counters are never removed or capped.
 #[derive(Default)]
 struct RangeAccessHistory {
     events: VecDeque<RangeAccess>,
     access_count_indices: FxHashMap<ByteRange, usize>,
-    // Each counter is stored once: indexed for exact matches, scanned for expanded ranges.
+    // Each counter is stored once: indexed for recording, scanned for scoring.
     access_counts: Vec<(ByteRange, DecayedAccessCount)>,
 }
 
@@ -211,11 +211,6 @@ impl RangeAccessHistory {
     /// to select an entry to evict.
     pub fn decayed_retrieval_cost(&self, cached_range: ByteRange, access_clock: u64) -> f64 {
         let fixed_retrieval_cost = *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64;
-        if let Some(&count_index) = self.access_count_indices.get(&cached_range) {
-            // Non-overlapping requests mean an exact match cannot contain another request.
-            return self.access_counts[count_index].1.decayed_count(access_clock)
-                * (fixed_retrieval_cost + cached_range.len() as f64);
-        }
         self.access_counts
             .iter()
             .filter(|(requested_range, _)| cached_range.contains(*requested_range))
@@ -556,10 +551,10 @@ mod tests {
     }
 
     #[test]
-    fn exact_and_expanded_scores_match_non_overlapping_btree_counts() {
+    fn exact_and_expanded_scores_match_btree_counts() {
         let mut history = RangeAccessHistory::default();
         let mut reference = std::collections::BTreeMap::<(u64, u64), DecayedAccessCount>::new();
-        for (index, (start, end)) in [(8, 10), (2, 4), (0, 1), (4, 8), (8, 10), (12, 16), (2, 4)]
+        for (index, (start, end)) in [(8, 10), (2, 4), (0, 8), (4, 8), (8, 10), (6, 10), (2, 8)]
             .into_iter()
             .enumerate()
         {
@@ -580,7 +575,7 @@ mod tests {
                     })
                     .sum();
                 let actual = history.decayed_retrieval_cost(range(start, end), 10_000);
-                // Expanded-range sums follow insertion order rather than sorted range order.
+                // Sums follow insertion order rather than sorted range order.
                 assert!(
                     (actual - expected).abs() <= expected.abs() * 1e-12,
                     "{start}..{end}: {actual} != {expected}"

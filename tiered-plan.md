@@ -158,7 +158,8 @@ cost plus its requested bytes, then divides recent retrieval value by the memory
 payload length. Alignment, metadata and chunk overhead still consume physical disk capacity but do not
 enter the score's denominator. Repeated access must
 increase retention value, stale evidence must eventually expire, and only the exact requested interval receives
-observed-access credit.
+observed-access credit. Requested ranges may overlap. A cached range sums the decayed retrieval credit of every
+distinct requested range it fully contains; partial overlap alone receives no credit. Exact repeats update one counter.
 
 Access evidence is held in a standalone RAM object shared by both tiers. Each request records once before
 lookup, regardless of its eventual outcome. Disk reads and writes do not record additional events.

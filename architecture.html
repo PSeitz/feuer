@@ -187,7 +187,7 @@
               <p>The async callback returns a <code>Download</code>: a starting offset and non-empty <code>Bytes</code> covering at least the requested range. Feuer returns an exact slice.</p>
               <p>If several requests miss the cache at once, each calls its own download function. Feuer does not combine downloads or retry failures; your function must do that if needed.</p>
               <details class="deeper"><summary>Input and error contract</summary><div>
-                <ul><li>Keys identify immutable content and must not be adversarial; hash collisions are not checked.</li><li>Distinct requested ranges for a key must not overlap; exact repeats are allowed. A download can cover several requests.</li><li>Callback errors and downloads that do not cover the request are returned as typed errors.</li><li>Disk read uncertainty becomes a miss, allowing the callback to serve the request.</li></ul>
+                <ul><li>Keys identify immutable content and must not be adversarial; hash collisions are not checked.</li><li>Requested ranges for a key may overlap; exact repeats update the same counter. Cached ranges receive credit for fully contained requests, not partial overlaps.</li><li>Callback errors and downloads that do not cover the request are returned as typed errors.</li><li>Disk read uncertainty becomes a miss, allowing the callback to serve the request.</li></ul>
               </div></details>
               <a class="source" href="feuer/src/cache.rs">feuer/src/cache.rs · get_or_fetch</a>
             </div>
