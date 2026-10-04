@@ -1,5 +1,8 @@
 # Direct io_uring driver smoke benchmark
 
+For the real two-tier cache comparison, use the separate
+[timestamp-paced SSD replay instructions](timed-replay.md).
+
 Implementation: [`feuer-storage/examples/direct_io.rs`](../../feuer-storage/examples/direct_io.rs).
 Initial FIFO-driver results: [`direct-io-20260925.csv`](direct-io-20260925.csv).
 The measurements below predate read-priority scheduling; see the

@@ -11,7 +11,12 @@ obscure it with additional checks, that contradict the contract.
 
 # Linux SSD testing
 
-Machine: `ssh m8g-32cpu-local-ssd`. From the project checkout on that host:
+Machine: `ssh m8g-32cpu-local-ssd-2`. Use this host for SSD tests and benchmarks.
+Replay comparisons must use the same jemalloc version for both revisions.
+Follow [the timed SSD replay instructions](benchmarks/storage/timed-replay.md).
+Use matched 180-second trace prefixes; do not launch full traces or extra repetitions
+without an explicit request. Present the captured metrics, not only runtime/write counts.
+From the project checkout on that host:
 
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" TMPDIR=/mnt/local-ssd cargo test --locked -p feuer-storage --lib
