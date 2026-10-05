@@ -70,9 +70,10 @@ pub struct DiskCache {
     write_sender: mpsc::Sender<PendingDiskWrite>,
 }
 
-/// Shared disk-cache internals: file, shards, access histories, and metrics.
+/// Shared disk-cache internals: file, buffer pool, shards, access histories, and metrics.
 struct DiskCacheInner {
     file: DataFile,
+    buffer_pool: Arc<BufferPool>,
     shards: Box<[DiskCacheShard]>,
     access_histories: Arc<ObjectAccessHistories>,
     metrics: Arc<DiskMetrics>,
@@ -207,7 +208,7 @@ impl DiskCache {
             return Err(DiskCacheError::InvalidCapacity);
         }
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
-        let file = DataFile::open_with_buffer_pool(directory, capacity, io_metrics, buffer_pool).await?;
+        let file = DataFile::open_with_buffer_pool(directory, capacity, io_metrics, buffer_pool.clone()).await?;
         let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
         let shards = (0..num_shards)
             .map(|shard_index| {
@@ -224,6 +225,7 @@ impl DiskCache {
             .collect::<Result<_, DataFileError>>()?;
         let disk = Arc::new(DiskCacheInner {
             file,
+            buffer_pool,
             shards,
             access_histories,
             metrics,
@@ -292,8 +294,9 @@ impl DiskCache {
     }
 
     /// Copies buffered bytes, or reads disk after verifying the whole covering entry's checksum.
-    /// Returns the backing buffer's capacity too: retaining a disk slice retains that whole buffer.
-    /// Concurrent callers share the entry read. Missing entries and read or checksum failures are misses.
+    /// Copies the requested slice if the pool offers a smaller backing allocation; allocation failure keeps the slice.
+    /// Returns the final backing buffer's capacity too. Concurrent callers share the entry read.
+    /// Missing entries and read or checksum failures are misses.
     pub async fn fetch_from_disk(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<(Bytes, usize)> {
         let started = Instant::now();
         let metrics = &self.disk.metrics;
@@ -340,9 +343,11 @@ impl DiskCache {
             .await;
         match result {
             Ok((bytes, buffer_capacity)) => {
-                metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
                 let start = (requested.start() - read.object_range.start()) as usize;
-                Some((bytes.slice(start..start + requested.len() as usize), *buffer_capacity))
+                let bytes = bytes.slice(start..start + requested.len() as usize);
+                let (bytes, buffer_capacity) = shrink_disk_result(&self.disk.buffer_pool, bytes, *buffer_capacity);
+                metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
+                Some((bytes, buffer_capacity))
             }
             Err(outcome) => {
                 metrics.record_lookup(*outcome, started.elapsed());
@@ -350,6 +355,20 @@ impl DiskCache {
             }
         }
     }
+}
+
+/// Copies a disk result only if the destination has smaller backing capacity.
+/// Allocation failure leaves the verified result and its charge unchanged.
+fn shrink_disk_result(pool: &Arc<BufferPool>, bytes: Bytes, capacity: usize) -> (Bytes, usize) {
+    if BufferPool::allocation_capacity(bytes.len()) >= capacity {
+        return (bytes, capacity);
+    }
+    let Ok(mut buffer) = pool.allocate(bytes.len()) else {
+        return (bytes, capacity);
+    };
+    buffer.as_mut_slice().copy_from_slice(&bytes);
+    let capacity = buffer.capacity();
+    (buffer.into_bytes(), capacity)
 }
 
 impl DiskCacheShard {

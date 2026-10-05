@@ -1,9 +1,9 @@
 use std::{fmt, future::Future, sync::Arc, time::Instant};
 
 use bytes::Bytes;
+use feuer_memory::MemoryCache;
 #[cfg(target_os = "linux")]
 use feuer_memory::MemoryMetrics;
-use feuer_memory::{BufferPool, MemoryCache};
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskCache, DiskCacheError, IoMetrics};
 use feuer_types::{ByteRange, Download, ObjectKeyHash, retention::ObjectAccessHistories};
@@ -139,7 +139,6 @@ impl TieredMemoryDiskCache {
         if let Some(disk) = &self.inner.disk
             && let Some((bytes, buffer_capacity)) = disk.fetch_from_disk(&object_key, requested_range).await
         {
-            let (bytes, buffer_capacity) = shrink_disk_result(&self.inner.memory.buffer_pool(), bytes, buffer_capacity);
             self.inner.memory.insert_with_allocation_charge(
                 object_key,
                 Download::new(requested_range.start(), bytes.clone()).expect("disk result covers the request"),
@@ -199,20 +198,6 @@ pub enum GetOrFetchError<E> {
         /// The exact range returned by the callback.
         downloaded_range: ByteRange,
     },
-}
-
-/// Copies a disk result only if the destination has smaller backing capacity.
-/// Allocation failure leaves the verified result and its charge unchanged.
-fn shrink_disk_result(pool: &Arc<BufferPool>, bytes: Bytes, capacity: usize) -> (Bytes, usize) {
-    if BufferPool::allocation_capacity(bytes.len()) >= capacity {
-        return (bytes, capacity);
-    }
-    let Ok(mut buffer) = pool.allocate(bytes.len()) else {
-        return (bytes, capacity);
-    };
-    buffer.as_mut_slice().copy_from_slice(&bytes);
-    let capacity = buffer.capacity();
-    (buffer.into_bytes(), capacity)
 }
 
 #[cfg(all(test, not(target_os = "linux")))]
