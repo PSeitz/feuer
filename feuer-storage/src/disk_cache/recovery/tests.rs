@@ -122,7 +122,7 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 1)).await.unwrap());
     let shard = &cache.disk.shards[0];
-    let entry = shard.entry_index.lock().unwrap().remove_entry(&key, 0).unwrap();
+    let entry = shard.entry_index.lock().unwrap().take_entry(&key, 0).unwrap();
     let address = entry.payload_range.start;
     let (chunk_index, entry_metadata_index) = entry.metadata;
     let metadata = shard.metadata_pages.lock().unwrap();
@@ -278,13 +278,7 @@ async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
         download(0, 1).bytes()
     );
     for i in 0..entries {
-        let entry = shard
-            .entry_index
-            .lock()
-            .unwrap()
-            .remove_entry(&ObjectKeyHash(i as u128), 0)
-            .unwrap();
-        shard.release_payload_and_allow_metadata_overwrite(entry);
+        shard.remove_entry(&ObjectKeyHash(i as u128), 0);
     }
     // Returning slots across multiple pages needs no invalidation writes or metadata retry.
     assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
@@ -375,10 +369,10 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
         .unwrap();
         let shard = &cache.disk.shards[0];
         {
-            let index = shard.entry_index.lock().unwrap();
-            assert_eq!(index.entries_by_key[&key].len(), 1);
-            assert_eq!(index.eviction_candidates, vec![(key, 0)]);
-            assert_eq!(index.entries_by_key[&key][&0].eviction_position, 0);
+            let disk_index = shard.entry_index.lock().unwrap();
+            assert_eq!(disk_index.entries_by_key[&key].len(), 1);
+            assert_eq!(disk_index.eviction_candidates, vec![(key, 0)]);
+            assert_eq!(disk_index.entries_by_key[&key][&0].eviction_position, 0);
         }
         assert_eq!(
             shard.metadata_pages.lock().unwrap().free_entry_positions.len(),
@@ -431,8 +425,7 @@ async fn stale_metadata_after_payload_reuse_recovers_as_a_checksum_miss() {
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 100)).await.unwrap());
     let shard = &cache.disk.shards[0];
-    let entry = shard.entry_index.lock().unwrap().remove_entry(&key, 0).unwrap();
-    shard.allocator.release_payload(entry.payload_range.start);
+    shard.remove_entry(&key, 0);
     let reused = shard.allocator.reserve_chunks(1).unwrap();
     cache
         .disk

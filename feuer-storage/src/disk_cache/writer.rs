@@ -55,7 +55,7 @@ impl DiskCacheShard {
             disk.metrics
                 .packed_chunk_bytes
                 .increase(chunks.chunk_count() * CHUNK_BYTES);
-            let mut index = self.entry_index.lock().unwrap();
+            let mut disk_index = self.entry_index.lock().unwrap();
             let mut pages = self.metadata_pages.lock().unwrap();
             // Other writers may have consumed free positions during I/O. Publish all or discard this run.
             if pages.ensure_free_positions(entries.len(), &self.allocator).is_none() {
@@ -66,7 +66,10 @@ impl DiskCacheShard {
             let mut published = 0;
             for mut buffered in entries.drain(..).rev() {
                 let _completion = buffered.completion;
-                if index.covering_entry(&buffered.key, buffered.object_range).is_some() {
+                if disk_index
+                    .covering_entry(&buffered.key, buffered.object_range)
+                    .is_some()
+                {
                     buffered.attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
                     self.allocator.release_payload(range.start);
                     continue;
@@ -81,7 +84,7 @@ impl DiskCacheShard {
                     metadata: pages.free_entry_positions.pop().unwrap(),
                 };
                 pages.set_entry_metadata(&buffered.key, &entry);
-                for removed in index.insert(buffered.key, entry) {
+                for removed in disk_index.insert(buffered.key, entry) {
                     self.allocator.release_payload(removed.payload_range.start);
                     pages.free_entry_positions.push(removed.metadata);
                 }

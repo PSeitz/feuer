@@ -59,8 +59,8 @@ pub(super) async fn entry_disk_ranges(
     key: &ObjectKeyHash,
 ) -> (std::ops::Range<u64>, std::ops::Range<u64>) {
     let shard = &cache.disk.shards[cache.disk.shard_index_for_key(key)];
-    let index = shard.entry_index.lock().unwrap();
-    let entry = index.entries_by_key[key].first_key_value().unwrap().1;
+    let disk_index = shard.entry_index.lock().unwrap();
+    let entry = disk_index.entries_by_key[key].first_key_value().unwrap().1;
     let (chunk_index, entry_metadata_index) = entry.metadata;
     let pages = shard.metadata_pages.lock().unwrap();
     let address = pages.chunks[chunk_index].reserved_chunk.disk_byte_range().start
@@ -116,8 +116,8 @@ async fn exact_unaligned_reads_containment_and_key_hash_identity() {
     );
     assert!(!cache.insert(key, source).await.unwrap());
     assert!(!cache.insert(key, download(7, 100)).await.unwrap());
-    let index = cache.disk.shards[0].entry_index.lock().unwrap();
-    assert_eq!(index.entries_by_key[&key].len(), 1);
+    let disk_index = cache.disk.shards[0].entry_index.lock().unwrap();
+    assert_eq!(disk_index.entries_by_key[&key].len(), 1);
 }
 
 #[tokio::test]
@@ -214,9 +214,9 @@ async fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_
     .map(|(i, length)| (ObjectKeyHash(i as u128), download(0, length)))
     .collect();
     assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
-    let index = cache.disk.shards[0].entry_index.lock().unwrap();
+    let disk_index = cache.disk.shards[0].entry_index.lock().unwrap();
     let mut owners = BTreeMap::<u64, Vec<&DiskEntry>>::new();
-    for entries in index.entries_by_key.values() {
+    for entries in disk_index.entries_by_key.values() {
         for entry in entries.values() {
             for chunk in entry.payload_range.start / CHUNK_BYTES..entry.payload_range.end.div_ceil(CHUNK_BYTES) {
                 owners.entry(chunk).or_default().push(entry);
@@ -370,13 +370,13 @@ async fn pressure_reclaims_shared_and_exclusive_chunks_during_mixed_size_churn()
                 assert_eq!(bytes, source.bytes());
             }
         }
-        let index = cache.disk.shards[0].entry_index.lock().unwrap();
+        let disk_index = cache.disk.shards[0].entry_index.lock().unwrap();
         assert_eq!(
-            index.eviction_candidates.len(),
-            index.entries_by_key.values().map(BTreeMap::len).sum::<usize>()
+            disk_index.eviction_candidates.len(),
+            disk_index.entries_by_key.values().map(BTreeMap::len).sum::<usize>()
         );
-        for (position, (key, start)) in index.eviction_candidates.iter().enumerate() {
-            assert_eq!(index.entries_by_key[key][start].eviction_position, position);
+        for (position, (key, start)) in disk_index.eviction_candidates.iter().enumerate() {
+            assert_eq!(disk_index.entries_by_key[key][start].eviction_position, position);
         }
     }
 }
@@ -411,8 +411,8 @@ async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
     let source = download(3, CHUNK_BYTES as usize + 17);
     cache.insert(key, source.clone()).await.unwrap();
     let read = {
-        let mut index = cache.disk.shards[0].entry_index.lock().unwrap();
-        let entry = index.covering_entry(&key, source.downloaded_range()).unwrap();
+        let mut disk_index = cache.disk.shards[0].entry_index.lock().unwrap();
+        let entry = disk_index.covering_entry(&key, source.downloaded_range()).unwrap();
         PayloadRead {
             object_range: entry.object_range,
             payload_checksum: entry.payload_checksum,
@@ -638,8 +638,7 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     history.record_access(&hot, range(50, 51));
     assert_eq!(history.request_count(), 6);
     let shard = &cache.disk.shards[0];
-    let entry = shard.entry_index.lock().unwrap().remove_entry(&hot, 0).unwrap();
-    shard.release_payload_and_allow_metadata_overwrite(entry);
+    shard.remove_entry(&hot, 0);
     drop(memory);
     drop(cache);
     assert_eq!(history.recent_requested_ranges(&hot).len(), 5);
@@ -769,8 +768,13 @@ async fn removing_one_shared_payload_does_not_free_its_neighbors_chunks() {
         .await
         .unwrap();
     let shard = &cache.disk.shards[0];
-    let entry = shard.entry_index.lock().unwrap().remove_entry(&first, 3).unwrap();
-    shard.release_payload_and_allow_metadata_overwrite(entry);
+    let free_metadata_slots = shard.metadata_pages.lock().unwrap().free_entry_positions.len();
+    shard.remove_entry(&first, 3);
+    assert!(!cache.covers_range(&first, range(3, 1027)));
+    assert_eq!(
+        shard.metadata_pages.lock().unwrap().free_entry_positions.len(),
+        free_metadata_slots + 1
+    );
     assert!(shard.allocator.reserve_chunks(1).is_none());
     assert_eq!(
         cache
@@ -848,8 +852,7 @@ async fn batch_rejects_fragmented_space_without_consuming_it() {
         source.bytes()
     );
     drop(fourth);
-    let entry = shard.entry_index.lock().unwrap().remove_entry(&key, 0).unwrap();
-    shard.release_payload_and_allow_metadata_overwrite(entry);
+    shard.remove_entry(&key, 0);
     assert_eq!(allocator.available_bytes(), 4 * CHUNK_BYTES);
 }
 
@@ -944,14 +947,8 @@ async fn long_keys_do_not_allocate_extra_metadata_chunks() {
     );
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), CHUNK_BYTES);
     assert_eq!(cache.get(&key, range(0, 1)).await.unwrap(), download(0, 1).bytes());
-    let entry = cache.disk.shards[0]
-        .entry_index
-        .lock()
-        .unwrap()
-        .remove_entry(&key, 0)
-        .unwrap();
-    cache.disk.shards[0].release_payload_and_allow_metadata_overwrite(entry);
     let shard = &cache.disk.shards[0];
+    shard.remove_entry(&key, 0);
     shard.write_dirty_metadata_pages(&cache.disk.file).await.unwrap();
     assert_eq!(shard.allocator.available_bytes(), 2 * CHUNK_BYTES);
 }
@@ -1077,8 +1074,8 @@ async fn read_addresses_and_results_do_not_delay_replaced_payload_reuse() {
     let key = ObjectKeyHash::from("object");
     cache.insert(key, download(5, 100)).await.unwrap();
     let (guard, payload_checksum) = {
-        let mut index = cache.disk.shards[0].entry_index.lock().unwrap();
-        let entry = index.covering_entry(&key, range(6, 7)).unwrap();
+        let mut disk_index = cache.disk.shards[0].entry_index.lock().unwrap();
+        let entry = disk_index.covering_entry(&key, range(6, 7)).unwrap();
         (entry.payload_range.clone(), entry.payload_checksum)
     };
     let result = cache.get(&key, range(6, 7)).await.unwrap();
@@ -1265,7 +1262,7 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
 fn index_insertion_removes_covered_ranges_and_duplicate_starts() {
     let key = ObjectKeyHash::from("object");
     let (registry, backend) = crate::test_metrics::registry();
-    let mut index = DiskEntryIndex::new(DiskMetrics::new(&backend));
+    let mut disk_index = DiskEntryIndex::new(DiskMetrics::new(&backend));
     let entries = [range(10, 20), range(0, 30), range(15, 16), range(0, 30), range(0, 40)].map(|object_range| {
         (
             key,
@@ -1281,7 +1278,7 @@ fn index_insertion_removes_covered_ranges_and_duplicate_starts() {
     });
     let removed: usize = entries
         .into_iter()
-        .map(|(key, entry)| index.insert(key, entry).len())
+        .map(|(key, entry)| disk_index.insert(key, entry).len())
         .sum();
     assert_eq!(removed, 4);
     assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 1.0);
@@ -1289,11 +1286,11 @@ fn index_insertion_removes_covered_ranges_and_duplicate_starts() {
         crate::test_metrics::value(&registry, "feuer_disk_payload_bytes", &[]),
         40.0
     );
-    assert_eq!(index.entries_by_key[&key].len(), 1);
-    assert_eq!(index.entries_by_key[&key][&0].object_range, range(0, 40));
-    assert_eq!(index.eviction_candidates.len(), 1);
-    for (position, (key, start)) in index.eviction_candidates.iter().enumerate() {
-        assert_eq!(index.entries_by_key[key][start].eviction_position, position);
+    assert_eq!(disk_index.entries_by_key[&key].len(), 1);
+    assert_eq!(disk_index.entries_by_key[&key][&0].object_range, range(0, 40));
+    assert_eq!(disk_index.eviction_candidates.len(), 1);
+    for (position, (key, start)) in disk_index.eviction_candidates.iter().enumerate() {
+        assert_eq!(disk_index.entries_by_key[key][start].eviction_position, position);
     }
 }
 

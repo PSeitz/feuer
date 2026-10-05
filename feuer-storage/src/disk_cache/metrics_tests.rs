@@ -150,8 +150,8 @@ async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation()
     // Hold initialization pending so both lookups deterministically join the same read.
     let result = Arc::new(OnceCell::new());
     {
-        let mut index = cache.disk.shards[0].entry_index.lock().unwrap();
-        index
+        let mut disk_index = cache.disk.shards[0].entry_index.lock().unwrap();
+        disk_index
             .entries_by_key
             .get_mut(&key)
             .unwrap()
@@ -342,11 +342,8 @@ async fn pressure_eviction_and_partial_write_failure_record_each_entry_outcome()
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
     // As in the existing write-failure test, let allocation exceed the actual file.
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
-    disk.shards[0]
-        .entry_index
-        .lock()
-        .unwrap()
-        .remove_entry(&ObjectKeyHash::from("second"), 0);
+    let shard = &disk.shards[0];
+    shard.remove_entry(&ObjectKeyHash::from("second"), 0);
     disk.shards[0].allocator =
         DiskChunkAllocator::with_metrics(CHUNK_BYTES..4 * CHUNK_BYTES, disk.metrics.clone()).unwrap();
     let cache = DiskCache {

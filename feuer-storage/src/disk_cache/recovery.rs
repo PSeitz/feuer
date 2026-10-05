@@ -19,7 +19,7 @@ impl DiskCacheInner {
         // Reserve every metadata chunk before accepting any payload addresses from the records.
         shard.load_metadata_chain(&self.file, shard_disk_range.start).await;
         let mut metadata = shard.metadata_pages.lock().unwrap();
-        let mut index = shard.entry_index.lock().unwrap();
+        let mut disk_index = shard.entry_index.lock().unwrap();
         for chunk_index in 0..metadata.chunks.len() {
             for entry_metadata_index in 0..ENTRIES_PER_METADATA_CHUNK {
                 let entry_metadata_bytes = metadata.chunks[chunk_index].entry_metadata_bytes(entry_metadata_index);
@@ -43,7 +43,7 @@ impl DiskCacheInner {
                     metadata: (chunk_index, entry_metadata_index),
                     payload_range,
                 };
-                for entry in index.insert(key, entry) {
+                for entry in disk_index.insert(key, entry) {
                     shard.allocator.release_payload(entry.payload_range.start);
                     metadata.free_entry_positions.push(entry.metadata);
                 }

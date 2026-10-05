@@ -309,8 +309,8 @@ impl DiskCache {
             return Some((bytes, requested.len() as usize));
         }
         let (read, in_flight_read) = {
-            let mut index = shard.entry_index.lock().unwrap();
-            let Some(entry) = index.covering_entry(key, requested) else {
+            let mut disk_index = shard.entry_index.lock().unwrap();
+            let Some(entry) = disk_index.covering_entry(key, requested) else {
                 metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
                 return None;
             };
@@ -333,10 +333,7 @@ impl DiskCache {
             .get_or_init(|| async {
                 let result = read.read_and_verify_payload(&self.disk.file).await;
                 if matches!(result, Err(DiskLookupOutcome::ChecksumFailed)) {
-                    let mut index = shard.entry_index.lock().unwrap();
-                    if let Some(entry) = index.remove_entry(key, read.object_range.start()) {
-                        shard.release_payload_and_allow_metadata_overwrite(entry);
-                    }
+                    shard.remove_entry(key, read.object_range.start());
                 }
                 result
             })
@@ -385,19 +382,22 @@ impl DiskCacheShard {
         if *remaining_eviction_attempts == 0 || *remaining_eviction_chunk_budget == 0 {
             return false;
         }
-        let mut index = self.entry_index.lock().unwrap();
-        let candidate_count = index.eviction_candidates.len();
+        let mut disk_index = self.entry_index.lock().unwrap();
+        let candidate_count = disk_index.eviction_candidates.len();
         if candidate_count == 0 {
             return false;
         }
         *remaining_eviction_attempts -= 1;
-        let (sample_start, sample_count) =
-            sample_candidates(&mut index.next_sample_start, candidate_count, self.reclaim_sample_size);
+        let (sample_start, sample_count) = sample_candidates(
+            &mut disk_index.next_sample_start,
+            candidate_count,
+            self.reclaim_sample_size,
+        );
         let selected_candidate = (0..sample_count)
             .filter_map(|sample_offset| {
                 let position = (sample_start + sample_offset) % candidate_count;
-                let (key, range_start) = &index.eviction_candidates[position];
-                let entry = &index.entries_by_key[key][range_start];
+                let (key, range_start) = &disk_index.eviction_candidates[position];
+                let entry = &disk_index.entries_by_key[key][range_start];
                 (entry.chunk_count() as usize <= *remaining_eviction_chunk_budget).then(|| {
                     let cost = access_histories.decayed_retrieval_cost(key, entry.object_range);
                     (position, cost, entry.object_range.len())
@@ -407,9 +407,9 @@ impl DiskCacheShard {
                 compare_cost_per_byte(*left_cost, *left_bytes, *right_cost, *right_bytes)
             });
         if let Some((position, ..)) = selected_candidate {
-            let (key, start) = index.eviction_candidates[position];
-            *remaining_eviction_chunk_budget -= index.entries_by_key[&key][&start].chunk_count() as usize;
-            self.release_payload_and_allow_metadata_overwrite(index.remove_entry(&key, start).unwrap());
+            let (key, start) = disk_index.eviction_candidates[position];
+            *remaining_eviction_chunk_budget -= disk_index.entries_by_key[&key][&start].chunk_count() as usize;
+            self.remove_entry_from_index(&mut disk_index, &key, start);
         }
         true
     }
@@ -422,9 +422,17 @@ impl DiskEntry {
 }
 
 impl DiskCacheShard {
-    /// Releases the payload's use of its chunks and allows its metadata to be overwritten.
-    /// Neither index removal nor entry destruction has side effects on disk ownership or metadata.
-    fn release_payload_and_allow_metadata_overwrite(&self, entry: DiskEntry) {
+    /// Locks the disk index, removes one entry, releases its payload, and allows its metadata to be overwritten.
+    fn remove_entry(&self, key: &ObjectKeyHash, start: u64) {
+        let mut disk_index = self.entry_index.lock().unwrap();
+        self.remove_entry_from_index(&mut disk_index, key, start);
+    }
+
+    /// Removes and releases one entry while the caller holds the disk-index lock.
+    fn remove_entry_from_index(&self, disk_index: &mut DiskEntryIndex, key: &ObjectKeyHash, start: u64) {
+        let Some(entry) = disk_index.take_entry(key, start) else {
+            return;
+        };
         self.allocator.release_payload(entry.payload_range.start);
         self.metadata_pages
             .lock()
@@ -458,7 +466,7 @@ impl DiskEntryIndex {
             .and_then(|entries| entries.range(object_range.start()..).next())
             && object_range.contains(existing.object_range)
         {
-            removed.push(self.remove_entry(&key, start).unwrap());
+            removed.push(self.take_entry(&key, start).unwrap());
         }
         entry.eviction_position = self.eviction_candidates.len();
         self.metrics.entries.increase(1);
@@ -471,8 +479,8 @@ impl DiskEntryIndex {
         removed
     }
 
-    /// Removes one entry from the index and eviction candidates without releasing its disk space.
-    fn remove_entry(&mut self, key: &ObjectKeyHash, start: u64) -> Option<DiskEntry> {
+    /// Takes one entry out of the index and eviction candidates without releasing its payload or metadata slot.
+    fn take_entry(&mut self, key: &ObjectKeyHash, start: u64) -> Option<DiskEntry> {
         let entries = self.entries_by_key.get_mut(key)?;
         let entry = entries.remove(&start)?;
         self.metrics.entries.decrease(1);
