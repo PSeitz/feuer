@@ -1298,36 +1298,6 @@ fn index_insertion_removes_covered_ranges_and_duplicate_starts() {
 }
 
 #[test]
-fn invalidation_preserves_different_contents_but_may_discard_an_identical_replacement() {
-    let read = PayloadRead {
-        object_range: range(0, 3),
-        payload_checksum: XxHash64::oneshot(0, b"old"),
-        payload_range: 8192..12288,
-    };
-    for replacement in [b"old", b"new"] {
-        let mut index = DiskEntryIndex::new(DiskMetrics::noop());
-        index.insert(
-            ObjectKeyHash::from("object"),
-            DiskEntry {
-                in_flight_read: Weak::new(),
-                eviction_position: 0,
-                object_range: range(0, 3),
-                payload_checksum: XxHash64::oneshot(0, replacement),
-                payload_range: 8192..12288,
-                metadata: (0, 0),
-            },
-        );
-        index.remove_entry_matching_read(&ObjectKeyHash::from("object"), &read);
-        assert_eq!(
-            index
-                .covering_entry(&ObjectKeyHash::from("object"), range(0, 3))
-                .is_some(),
-            replacement != b"old"
-        );
-    }
-}
-
-#[test]
 fn metadata_pages_use_writer_layout_and_validate_checksum_and_tag() {
     let mut page = vec![0xff; METADATA_PAGE_BYTES];
     let tag = page_format::ENTRY_METADATA_PAGE_TAG;

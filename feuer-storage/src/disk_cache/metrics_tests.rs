@@ -288,7 +288,7 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
 }
 
 #[tokio::test]
-async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage() {
+async fn checksum_failures_remove_entries_but_io_errors_preserve_them() {
     let (directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
     let request = ByteRange::new(0, 1).unwrap();
     let key = ObjectKeyHash::from("corrupt");
@@ -308,6 +308,9 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
         1.0
     );
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
+    assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
+    // Only metadata remains reserved; payload reuse does not wait for invalidation writes.
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 1.0);
     cache.insert_batch(vec![(key, download(4))]).await.unwrap();
     std::fs::OpenOptions::new()
         .write(true)
@@ -320,9 +323,10 @@ async fn distinguishes_checksum_failures_from_io_errors_and_removes_index_usage(
         value(&registry, "feuer_disk_lookup_total", &[("outcome", "io_error")]),
         1.0
     );
-    assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
-    // Only metadata remains reserved; payload reuse does not wait for invalidation writes.
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 1.0);
+    assert!(cache.covers_range(&key, request));
+    assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
+    assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 4.0);
+    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 0.0);
 }
 
 #[tokio::test]

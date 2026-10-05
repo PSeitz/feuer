@@ -332,9 +332,9 @@ impl DiskCache {
         let result = in_flight_read
             .get_or_init(|| async {
                 let result = read.read_and_verify_payload(&self.disk.file).await;
-                if result.is_err() {
+                if matches!(result, Err(DiskLookupOutcome::ChecksumFailed)) {
                     let mut index = shard.entry_index.lock().unwrap();
-                    if let Some(entry) = index.remove_entry_matching_read(key, &read) {
+                    if let Some(entry) = index.remove_entry(key, read.object_range.start()) {
                         shard.release_payload_and_allow_metadata_overwrite(entry);
                     }
                 }
@@ -492,17 +492,6 @@ impl DiskEntryIndex {
         Some(entry)
     }
 
-    /// Removes the indexed entry matching the failed read's expected start and checksum.
-    fn remove_entry_matching_read(&mut self, key: &ObjectKeyHash, read: &PayloadRead) -> Option<DiskEntry> {
-        let start = read.object_range.start();
-        // Preserve different contents. Discarding a newer identical copy is an acceptable miss.
-        let entry = self.entries_by_key.get(key)?.get(&start)?;
-        if entry.payload_checksum != read.payload_checksum {
-            return None;
-        }
-        self.remove_entry(key, start)
-    }
-
     /// Finds the entry whose byte range covers the entire request.
     fn covering_entry(&mut self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&mut DiskEntry> {
         // Entry ranges never contain one another, so their ends increase with their starts.
@@ -547,7 +536,7 @@ impl PayloadRead {
             .read_payload(self.payload_range.clone(), self.object_range.len() as usize)
             .await
             .map_err(|error| {
-                tracing::warn!(target: "feuer::storage", %error, "disk read failed; entry invalidated");
+                tracing::warn!(target: "feuer::storage", %error, "disk read failed");
                 DiskLookupOutcome::IoError
             })?;
         if XxHash64::oneshot(0, &bytes) != self.payload_checksum {
