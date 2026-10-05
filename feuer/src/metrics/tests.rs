@@ -20,37 +20,48 @@ fn memory_operations_exclude_access_hit_miss_and_victim_counters() {
 }
 
 #[test]
-fn lookup_latency_and_served_bytes_only_record_successes() {
+fn lookup_bytes_record_all_successes_but_latency_excludes_memory_hits() {
     let (registry, backend) = registry();
     let metrics = LookupMetrics::new(&backend);
-    for (outcome, label) in [
-        (LookupOutcome::MemoryHit, "memory_hit"),
-        (LookupOutcome::Callback, "callback"),
-        (LookupOutcome::CallbackError, "callback_error"),
-        (LookupOutcome::InvalidDownload, "invalid_download"),
+    for (outcome, label, elapsed) in [
+        (LookupOutcome::MemoryHit, "memory_hit", None),
+        #[cfg(target_os = "linux")]
+        (LookupOutcome::DiskHit, "disk_hit", Some(Duration::from_micros(10))),
+        (LookupOutcome::Callback, "callback", Some(Duration::from_micros(10))),
+        (LookupOutcome::CallbackError, "callback_error", None),
+        (LookupOutcome::InvalidDownload, "invalid_download", None),
     ] {
-        metrics.record(outcome, Duration::from_micros(10), 7);
+        metrics.record(outcome, elapsed, 7);
         assert_eq!(value(&registry, "feuer_lookup_total", &[("outcome", label)]), 1.0);
     }
-    for (outcome, source) in [("memory_hit", "memory"), ("callback", "callback")] {
+    for source in ["memory", "callback"] {
+        assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", source)]), 7.0);
+    }
+    assert_eq!(
+        value(&registry, "feuer_lookup_duration_seconds", &[("outcome", "callback")]),
+        1.0
+    );
+    #[cfg(target_os = "linux")]
+    {
         assert_eq!(
-            value(&registry, "feuer_lookup_duration_seconds", &[("outcome", outcome)]),
+            value(&registry, "feuer_lookup_duration_seconds", &[("outcome", "disk_hit")]),
             1.0
         );
-        assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", source)]), 7.0);
+        assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", "disk")]), 7.0);
     }
     let families = registry.gather();
     let durations = families
         .iter()
         .find(|family| family.name() == "feuer_lookup_duration_seconds")
         .unwrap();
-    assert_eq!(durations.get_metric().len(), 3);
+    assert_eq!(durations.get_metric().len(), 2);
     assert!(durations.get_metric().iter().all(|metric| {
         metric
             .get_label()
             .iter()
-            .all(|label| label.name() != "outcome" || matches!(label.value(), "memory_hit" | "disk_hit" | "callback"))
+            .all(|label| label.name() != "outcome" || matches!(label.value(), "disk_hit" | "callback"))
     }));
+    #[cfg(not(target_os = "linux"))]
     assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", "disk")]), 0.0);
     assert!(registry.gather().iter().all(|family| {
         !matches!(

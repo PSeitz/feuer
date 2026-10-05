@@ -5,7 +5,7 @@ use std::task::Poll;
 
 #[tokio::test]
 async fn records_each_started_request_before_any_result() {
-    let (_, registry) = crate::test_metrics::registry();
+    let (metrics_registry, registry) = crate::test_metrics::registry();
     let history = Arc::new(ObjectAccessHistories::new());
     let cache = TieredMemoryDiskCache {
         inner: Arc::new(TieredMemoryDiskCacheInner {
@@ -72,6 +72,14 @@ async fn records_each_started_request_before_any_result() {
         .await
         .unwrap();
     assert_eq!(history.request_count(), 5, "success paths do not double-count");
+    assert_eq!(
+        crate::test_metrics::value(&metrics_registry, "feuer_lookup_total", &[("outcome", "memory_hit")]),
+        1.0
+    );
+    assert_eq!(
+        crate::test_metrics::value(&metrics_registry, "feuer_lookup_bytes_total", &[("source", "memory")]),
+        1.0
+    );
     assert_eq!(
         history.recent_requested_ranges(&ObjectKeyHash::from(key)),
         vec![requested; 5]

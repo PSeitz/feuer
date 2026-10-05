@@ -126,15 +126,15 @@ impl TieredMemoryDiskCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Download, E>>,
     {
-        let started = Instant::now();
         let object_key = ObjectKeyHash::from(object_key);
         self.inner.access_histories.record_access(&object_key, requested_range);
         let metrics = &self.inner.metrics;
         if let Some(bytes) = self.inner.memory.get(&object_key, requested_range) {
-            metrics.record(LookupOutcome::MemoryHit, started.elapsed(), requested_range.len());
+            metrics.record(LookupOutcome::MemoryHit, None, requested_range.len());
             return Ok(bytes);
         }
 
+        let started = Instant::now();
         #[cfg(target_os = "linux")]
         if let Some(disk) = &self.inner.disk
             && let Some((bytes, buffer_capacity)) = disk.fetch_from_disk(&object_key, requested_range).await
@@ -145,17 +145,17 @@ impl TieredMemoryDiskCache {
                 Download::new(requested_range.start(), bytes.clone()).expect("disk result covers the request"),
                 buffer_capacity,
             );
-            metrics.record(LookupOutcome::DiskHit, started.elapsed(), requested_range.len());
+            metrics.record(LookupOutcome::DiskHit, Some(started.elapsed()), requested_range.len());
             return Ok(bytes);
         }
 
         let download = callback().await.map_err(|error| {
-            metrics.record(LookupOutcome::CallbackError, started.elapsed(), 0);
+            metrics.record(LookupOutcome::CallbackError, None, 0);
             GetOrFetchError::Callback(error)
         })?;
         let downloaded_range = download.downloaded_range();
         if !downloaded_range.contains(requested_range) {
-            metrics.record(LookupOutcome::InvalidDownload, started.elapsed(), 0);
+            metrics.record(LookupOutcome::InvalidDownload, None, 0);
             return Err(GetOrFetchError::DownloadDoesNotCover {
                 requested_range,
                 downloaded_range,
@@ -180,7 +180,7 @@ impl TieredMemoryDiskCache {
         #[cfg(not(target_os = "linux"))]
         self.inner.memory.insert(object_key, download);
 
-        metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
+        metrics.record(LookupOutcome::Callback, Some(started.elapsed()), requested_range.len());
         Ok(requested_bytes)
     }
 }
@@ -291,7 +291,7 @@ mod tests {
         ] {
             assert_eq!(value(&registry, "feuer_lookup_total", &[("outcome", outcome)]), 1.0);
         }
-        for outcome in ["memory_hit", "disk_hit", "callback"] {
+        for outcome in ["disk_hit", "callback"] {
             assert_eq!(
                 value(&registry, "feuer_lookup_duration_seconds", &[("outcome", outcome)]),
                 1.0

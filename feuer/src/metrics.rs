@@ -20,7 +20,7 @@ pub(crate) enum LookupOutcome {
 /// Completed public lookups, never keyed by object identity.
 pub(crate) struct LookupMetrics {
     outcome_counts: [BoxedCounter; 5],
-    success_durations: [BoxedHistogram; 3],
+    success_durations: [BoxedHistogram; 2],
     served_bytes: [BoxedCounter; 3],
     #[cfg(target_os = "linux")]
     pub(crate) disk_write_already_covered: BoxedCounter,
@@ -38,7 +38,7 @@ impl LookupMetrics {
         );
         let duration = registry.register_histogram_vec_with_buckets(
             "feuer_lookup_duration_seconds".into(),
-            "Completed successful Feuer lookup duration, including callback work".into(),
+            "Successful Feuer lookup duration after a memory miss, including callback work".into(),
             &["outcome"],
             Buckets::exponential(0.000_001, 2.0, 30),
         );
@@ -66,16 +66,19 @@ impl LookupMetrics {
                 "invalid_download",
             ]
             .map(|label| count.counter(&[label.into()])),
-            success_durations: ["memory_hit", "disk_hit", "callback"].map(|label| duration.histogram(&[label.into()])),
+            success_durations: ["disk_hit", "callback"].map(|label| duration.histogram(&[label.into()])),
             served_bytes: ["memory", "disk", "callback"].map(|label| served_bytes.counter(&[label.into()])),
         }
     }
 
-    pub(crate) fn record(&self, outcome: LookupOutcome, elapsed: Duration, bytes: u64) {
+    /// Only successful disk hits and callbacks may supply `elapsed`.
+    pub(crate) fn record(&self, outcome: LookupOutcome, elapsed: Option<Duration>, bytes: u64) {
         self.outcome_counts[outcome as usize].increase(1);
-        if let Some(duration) = self.success_durations.get(outcome as usize) {
-            duration.record(elapsed.as_secs_f64());
-            self.served_bytes[outcome as usize].increase(bytes);
+        if let Some(served_bytes) = self.served_bytes.get(outcome as usize) {
+            served_bytes.increase(bytes);
+        }
+        if let Some(elapsed) = elapsed {
+            self.success_durations[outcome as usize - 1].record(elapsed.as_secs_f64());
         }
     }
 }

@@ -14,12 +14,14 @@ counters and gauges. Use separate registries if they must be distinguished.
 | Metric | Type | Labels / meaning |
 |---|---|---|
 | `feuer_lookup_total` | Counter | `outcome`: `memory_hit`, `disk_hit`, `callback`, `callback_error`, `invalid_download` |
-| `feuer_lookup_duration_seconds` | Histogram | `outcome`: `memory_hit`, `disk_hit`, `callback`. Entire successful lookup, including callback work and synchronous disk-write scheduling |
+| `feuer_lookup_duration_seconds` | Histogram | `outcome`: `disk_hit`, `callback`. Successful lookup after a memory miss, including callback work and synchronous disk-write scheduling |
 | `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`. Exact requested bytes successfully returned |
 
 Lookup outcomes count completed operations, not canceled futures. Duration
-histograms record successful lookups only. A non-covering callback result is an
-`invalid_download` lookup and does not record a duration.
+histograms record successful disk hits and callbacks only, starting after the
+memory lookup. Memory hits do not read the clock or record a duration; their
+outcome and served-byte counters still increase. A non-covering callback result
+is an `invalid_download` lookup and does not record a duration.
 
 Use lookup counters for request-weighted hit ratios and lookup byte counters for
 byte-weighted hit ratios. Memory-tier counters also include internal memory
