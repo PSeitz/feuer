@@ -190,7 +190,7 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
           <details class="node">
             <summary><span class="node-name">Disk-write queue</span><span class="node-meta">256 entries · skip if full</span></summary>
             <div class="node-body">
-              <p>After a callback download is admitted to memory, Feuer attempts to schedule a disk copy. This is a separate queue <strong>above</strong> the raw write-I/O queue.</p>
+              <p>After a callback download is admitted to memory, Feuer attempts to schedule a disk copy. <code>DiskCache</code> owns this queue <strong>above</strong> the raw write-I/O queue.</p>
               <div class="flow"><span>Download admitted to memory</span><span class="arrow">→</span><span>try_reserve</span><span class="arrow">→</span><span>Disk-write worker</span></div>
               <details class="node">
                 <summary><span class="node-name">Full means skip, not wait</span><span class="node-meta">Tokio mpsc</span></summary>
@@ -199,11 +199,11 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
                   <p class="note">Queued and active payload bytes are tracked, but have no byte cap or separate memory-cache charge. The queue can keep a payload alive after its memory entry is evicted.</p>
                   <details class="source">
                     <summary>Code · best-effort disk-write admission</summary>
-                    <a class="source-label" href="feuer/src/disk_write.rs">feuer/src/disk_write.rs · enqueue_if_space_available (excerpt)</a>
-                    <pre><code>let permit = match self.sender.try_reserve() {
+                    <a class="source-label" href="feuer-storage/src/disk_cache/write_queue.rs">feuer-storage/src/disk_cache/write_queue.rs · enqueue_if_space_available (excerpt)</a>
+                    <pre><code>let permit = match self.write_sender.try_reserve() {
     Ok(permit) =&gt; permit,
     Err(error) =&gt; {
-        self.metrics.record(match error {
+        metrics.record_queue(match error {
             mpsc::error::TrySendError::Full(_) =&gt; DiskWriteQueueOutcome::Full,
             mpsc::error::TrySendError::Closed(_) =&gt; DiskWriteQueueOutcome::Closed,
         });
@@ -216,10 +216,10 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
               <details class="node">
                 <summary><span class="node-name">One worker, small-entry chunks</span><span class="node-meta">60-second partial flush</span></summary>
                 <div class="node-body">
-                  <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by queued writes and explicit batches. Copying releases incoming bytes. Flushing reserves payload chunks; metadata positions are taken only at publication. Full/no-fit chunks flush immediately; the worker drives a 60-second flush timer even when idle. Larger entries write separately. Closing discards partial chunks.</p>
+                  <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by queued writes and explicit batches. Copying releases incoming bytes. Flushing reserves payload chunks; metadata positions are taken only at publication. Full/no-fit chunks flush immediately; the disk writer owns an independent 60-second flush timer for direct and queued writes. Larger entries write separately. Closing discards partial chunks.</p>
                   <p>Lookups can copy requested bytes from buffered entries after memory eviction. Busy/flushing chunks may miss until publication. Queued and active writes proceed independently of memory retention; payloads occupy contiguous aligned disk byte ranges, separate from metadata.</p>
-                  <a class="source-label" href="feuer/src/disk_write.rs">feuer/src/disk_write.rs · queue and timer</a>
-                  <a class="source-label" href="feuer-storage/src/disk_cache/writer.rs">feuer-storage/src/disk_cache/writer.rs · preparation and publication</a>
+                  <a class="source-label" href="feuer-storage/src/disk_cache/write_queue.rs">feuer-storage/src/disk_cache/write_queue.rs · background writes</a>
+                  <a class="source-label" href="feuer-storage/src/disk_cache/writer.rs">feuer-storage/src/disk_cache/writer.rs · buffering, timer, and publication</a>
                 </div>
               </details>
               <details class="node">

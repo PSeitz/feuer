@@ -1,6 +1,6 @@
 # Disk-cache prototype
 
-Experimental `DiskCache`, connected to public tiered lookup and background disk writes through a
+Experimental `DiskCache`, connected to public tiered lookup and owning background disk writes through a
 256-entry queue.
 [tiered-plan.md](../tiered-plan.md) remains authoritative.
 
@@ -36,7 +36,7 @@ it and the range-index lock never span I/O. Page bytes consume 1 MiB per metadat
 Each shard always owns an initialized 1-MiB small-entry buffer. `DiskCache::write` copies bytes into it and releases incoming buffers.
 Buffered entries reserve no disk space or metadata positions. Flushing replaces the buffer with an empty one,
 then attempts admission for the whole flush. Empty entry lists skip flushing.
-The queue worker submits downloads and calls `flush` every 60 seconds; full/no-fit chunks flush immediately.
+The disk writer flushes buffers every 60 seconds for direct and queued writes; full/no-fit chunks flush immediately.
 Larger entries write independently without flushing pending small entries. Closing discards partial chunks.
 `insert_batch` shares those chunks and flushes them before returning; its publication count can include other callers' entries.
 

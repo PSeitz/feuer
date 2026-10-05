@@ -2,8 +2,10 @@
 
 use super::*;
 use feuer_memory::AlignedBuffer;
+use std::time::Duration;
 
 const SMALL_ENTRY_BYTES: usize = 128 * 1024;
+const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// One chunk of small-entry bytes and their descriptions, with an aligned append offset.
 pub(super) struct BufferedSmallEntryChunk {
@@ -25,16 +27,7 @@ pub(super) struct BufferedEntry {
 impl DiskCache {
     /// Flushes shared buffers. Returns the number of entries published by this call.
     pub async fn flush(&self) -> Result<usize, DiskCacheError> {
-        let mut published = 0;
-        for shard in &self.disk.shards {
-            published += shard
-                .buffered_small_entry_chunk
-                .lock()
-                .await
-                .flush(shard, &self.disk)
-                .await?;
-        }
-        Ok(published)
+        self.disk.flush().await
     }
 
     /// Discards buffered entries without writing them; retains each shard's initialized buffer.
@@ -70,7 +63,39 @@ impl DiskCache {
         download: Download,
         completion: impl Send + 'static,
     ) -> Result<usize, DiskCacheError> {
-        let disk = &self.disk;
+        self.disk.write(key, download, completion).await
+    }
+}
+
+impl DiskCacheInner {
+    /// Keeps the disk alive only while flushing; direct and queued writes share this timer.
+    pub(super) async fn flush_payload_periodically(disk: Weak<Self>) {
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + FLUSH_INTERVAL, FLUSH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let Some(disk) = disk.upgrade() else { return };
+            if let Err(error) = disk.flush().await {
+                tracing::warn!(target: "feuer::storage", %error, "payload flush failed");
+            }
+        }
+    }
+
+    async fn flush(&self) -> Result<usize, DiskCacheError> {
+        let mut published = 0;
+        for shard in &self.shards {
+            published += shard.buffered_small_entry_chunk.lock().await.flush(shard, self).await?;
+        }
+        Ok(published)
+    }
+
+    pub(super) async fn write(
+        &self,
+        key: ObjectKeyHash,
+        download: Download,
+        completion: impl Send + 'static,
+    ) -> Result<usize, DiskCacheError> {
+        let disk = self;
         let shard = &disk.shards[disk.shard_index_for_key(&key)];
         let (object_range, bytes) = download.into_parts();
         let length = payload_disk_bytes(object_range.len()) as usize;

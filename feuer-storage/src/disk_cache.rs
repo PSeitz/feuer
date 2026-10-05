@@ -1,7 +1,9 @@
 //! Cache object bytes on disk, looked up by object key and byte range.
 
 mod metadata;
+mod write_queue;
 mod writer;
+use write_queue::PendingDiskWrite;
 use writer::BufferedSmallEntryChunk;
 #[cfg(test)]
 mod metrics_tests;
@@ -26,7 +28,7 @@ use feuer_types::{
     retention::{ObjectAccessHistories, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates},
 };
 use rustc_hash::FxHashMap;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, mpsc};
 use twox_hash::XxHash64;
 
 use crate::{
@@ -50,6 +52,8 @@ fn payload_disk_bytes(length: u64) -> u64 {
 
 /// Caches object bytes on disk, looked up by object key and byte range.
 ///
+/// Background writes use a nonblocking 256-entry queue. Partial small-entry buffers flush every 60 seconds.
+/// Closing finishes queued writes and discards remaining partial chunks.
 /// Small entries share immutable 1-MiB payload chunks. Separate mutable metadata chunks
 /// hold entry records and links between metadata chunks. Each shard's chain starts at its first chunk.
 /// Entries have plain payload bytes, 4-KiB-aligned storage, and a checksum in their entry metadata.
@@ -62,6 +66,7 @@ fn payload_disk_bytes(length: u64) -> u64 {
 #[derive(Clone)]
 pub struct DiskCache {
     disk: Arc<DiskCacheInner>,
+    write_sender: mpsc::Sender<PendingDiskWrite>,
 }
 
 /// Shared disk-cache internals: file, shards, access histories, and metrics.
@@ -235,7 +240,10 @@ impl DiskCache {
         recovery_tasks.join_all().await;
         tracing::info!(target: "feuer::storage", elapsed_seconds = started.elapsed().as_secs_f64(), "disk cache recovery finished");
         tokio::spawn(DiskCacheInner::write_metadata_periodically(Arc::downgrade(&disk)));
-        Ok(Self { disk })
+        tokio::spawn(DiskCacheInner::flush_payload_periodically(Arc::downgrade(&disk)));
+        let (write_sender, receiver) = mpsc::channel(write_queue::MAX_QUEUED_ENTRIES);
+        tokio::spawn(Self::write_queued(receiver));
+        Ok(Self { disk, write_sender })
     }
 
     /// Shared history for recording requests once, before lookup and outside raw storage operations.
@@ -245,12 +253,7 @@ impl DiskCache {
 
     /// Checks for one covering buffered or disk entry, without reading payload or recording an access.
     pub fn covers_range(&self, key: &ObjectKeyHash, range: ByteRange) -> bool {
-        let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
-        shard
-            .buffered_small_entry_chunk
-            .try_lock()
-            .is_ok_and(|pending| pending.covering_entry(key, range).is_some())
-            || shard.entry_index.lock().unwrap().covering_entry(key, range).is_some()
+        self.disk.covers_range(key, range)
     }
 
     /// Returns exactly requested bytes from one covering entry, or a miss on any I/O/integrity uncertainty.
@@ -476,6 +479,15 @@ impl Drop for DiskEntryIndex {
 }
 
 impl DiskCacheInner {
+    fn covers_range(&self, key: &ObjectKeyHash, range: ByteRange) -> bool {
+        let shard = &self.shards[self.shard_index_for_key(key)];
+        shard
+            .buffered_small_entry_chunk
+            .try_lock()
+            .is_ok_and(|pending| pending.covering_entry(key, range).is_some())
+            || shard.entry_index.lock().unwrap().covering_entry(key, range).is_some()
+    }
+
     fn shard_index_for_key(&self, key: &ObjectKeyHash) -> usize {
         (key.0 % self.shards.len() as u128) as usize
     }

@@ -70,8 +70,8 @@ The backing file is exclusively locked while open. Lookups first check the shard
 then read disk and verify the covering entry's checksum. Both promote requested bytes to memory.
 Busy/flushing chunks may miss until publication; corrupt or uncertain disk reads are misses.
 
-Writes run in the background through a 256-entry queue. Entries with aligned size below
-128 KiB share 1-MiB chunks, flushed on full/no-fit or every 60 seconds. Each shard always holds
+`DiskCache` owns the 256-entry background-write queue and its buffer-flush timer. Entries below
+128 KiB aligned size share 1-MiB chunks, flushed on full/no-fit or every 60 seconds. Each shard always holds
 an initialized 1-MiB buffer; disk space is reserved only when flushing. Larger entries write
 separately. Closing discards partial chunks. Queue pressure can skip writes; memory eviction does not.
 

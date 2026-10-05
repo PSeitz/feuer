@@ -8,8 +8,6 @@
 
 mod cache;
 mod config;
-#[cfg(target_os = "linux")]
-mod disk_write;
 mod metrics;
 #[cfg(test)]
 #[path = "../../test_support/metrics.rs"]

@@ -369,7 +369,6 @@ dependencies = [
  "prometheus",
  "tempfile",
  "thiserror",
- "tracing",
 ]
 
 [[package]]

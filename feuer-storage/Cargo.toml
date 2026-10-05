@@ -37,7 +37,7 @@ blake3 = "1"
 mixtrics = { workspace = true, features = ["prometheus"] }
 prometheus = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 
 [lints]

@@ -40,10 +40,11 @@ pub(super) async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskCa
     (directory, with_manual_metadata_writes(cache))
 }
 
-/// Detach a freshly opened cache from the writer's weak reference so tests can drive writes themselves.
+/// Detach a freshly opened cache from periodic writers so tests can drive writes themselves.
 pub(super) fn with_manual_metadata_writes(cache: DiskCache) -> DiskCache {
     DiskCache {
         disk: Arc::new(Arc::try_unwrap(cache.disk).ok().unwrap()),
+        write_sender: cache.write_sender,
     }
 }
 
@@ -1154,7 +1155,10 @@ async fn failed_multi_chunk_write_keeps_earlier_entries_and_releases_its_storage
     // The first exclusive entry succeeds; the large entry's second chunk is outside the file.
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
     disk.shards[0].allocator = DiskChunkAllocator::for_disk_range(0..4 * CHUNK_BYTES).unwrap();
-    let cache = DiskCache { disk: Arc::new(disk) };
+    let cache = DiskCache {
+        disk: Arc::new(disk),
+        write_sender: cache.write_sender,
+    };
     assert!(matches!(
         cache
             .insert_batch(vec![

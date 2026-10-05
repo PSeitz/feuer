@@ -1,7 +1,5 @@
 use std::{fmt, future::Future, sync::Arc, time::Instant};
 
-#[cfg(target_os = "linux")]
-use crate::disk_write::DiskWriteQueue;
 use bytes::Bytes;
 #[cfg(target_os = "linux")]
 use feuer_memory::MemoryMetrics;
@@ -25,7 +23,7 @@ struct TieredMemoryDiskCacheInner {
     access_histories: Arc<ObjectAccessHistories>,
     metrics: LookupMetrics,
     #[cfg(target_os = "linux")]
-    disk: Option<(DiskCache, DiskWriteQueue)>,
+    disk: Option<DiskCache>,
 }
 
 /// A cloneable handle to one Feuer cache.
@@ -74,18 +72,18 @@ impl TieredMemoryDiskCache {
         let disk = if config.disk_capacity() == 0 {
             None
         } else {
-            let cache = DiskCache::open_with_buffer_pool(
-                config.directory(),
-                config.disk_capacity(),
-                IoMetrics::new(registry),
-                access_histories.clone(),
-                feuer_storage::DiskMetrics::new(registry),
-                config.reclaim_sample_size(),
-                memory.buffer_pool(),
+            Some(
+                DiskCache::open_with_buffer_pool(
+                    config.directory(),
+                    config.disk_capacity(),
+                    IoMetrics::new(registry),
+                    access_histories.clone(),
+                    feuer_storage::DiskMetrics::new(registry),
+                    config.reclaim_sample_size(),
+                    memory.buffer_pool(),
+                )
+                .await?,
             )
-            .await?;
-            let write_queue = DiskWriteQueue::with_metrics(cache.clone(), registry);
-            Some((cache, write_queue))
         };
         Ok(Self {
             inner: Arc::new(TieredMemoryDiskCacheInner {
@@ -138,7 +136,7 @@ impl TieredMemoryDiskCache {
         }
 
         #[cfg(target_os = "linux")]
-        if let Some((disk, _)) = &self.inner.disk
+        if let Some(disk) = &self.inner.disk
             && let Some((bytes, buffer_capacity)) = disk.fetch_from_disk(&object_key, requested_range).await
         {
             let (bytes, buffer_capacity) = shrink_disk_result(&self.inner.memory.buffer_pool(), bytes, buffer_capacity);
@@ -168,13 +166,13 @@ impl TieredMemoryDiskCache {
         let end = (requested_range.end() - downloaded_range.start()) as usize;
         let requested_bytes = download.bytes().slice(start..end);
         #[cfg(target_os = "linux")]
-        if let Some((disk, queue)) = &self.inner.disk {
+        if let Some(disk) = &self.inner.disk {
             if disk.covers_range(&object_key, downloaded_range) {
-                queue.record_already_covered();
+                metrics.disk_write_already_covered.increase(1);
             } else if self.inner.memory.insert(object_key, download.clone()) {
-                queue.enqueue_if_space_available(object_key, download);
+                disk.enqueue_if_space_available(object_key, download);
             } else {
-                queue.record_already_in_memory();
+                metrics.disk_write_redundant.increase(1);
             }
         } else {
             self.inner.memory.insert(object_key, download);
@@ -267,7 +265,7 @@ mod tests {
             .await
             .unwrap();
         wait_for_buffered(&cache, &key, range(0, 4)).await;
-        cache.inner.disk.as_ref().unwrap().0.flush().await.unwrap();
+        cache.inner.disk.as_ref().unwrap().flush().await.unwrap();
         cache
             .get_or_fetch(key.clone(), range(0, 2), || async {
                 Err::<Download, _>("memory hit must not fetch")
@@ -361,7 +359,7 @@ mod tests {
     }
 
     async fn wait_for_buffered(cache: &TieredMemoryDiskCache, key: &str, range: ByteRange) {
-        let (disk, _) = cache.inner.disk.as_ref().unwrap();
+        let disk = cache.inner.disk.as_ref().unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while !disk.covers_range(&ObjectKeyHash::from(key), range) {
                 tokio::task::yield_now().await;
@@ -417,7 +415,7 @@ mod tests {
     async fn disk_promotion_charges_the_smaller_allocation_for_a_small_slice() {
         let (_directory, cache) = cache(32).await;
         let key = "large-entry".to_owned();
-        let (disk, _) = cache.inner.disk.as_ref().unwrap();
+        let disk = cache.inner.disk.as_ref().unwrap();
         disk.insert_batch(vec![(
             ObjectKeyHash::from(key.as_str()),
             Download::new(0, Bytes::from(vec![0x77; 40 * 1024])).unwrap(),
@@ -457,7 +455,7 @@ mod tests {
         let hash = ObjectKeyHash::from(key.as_str());
         let mut payload = vec![0x77; 40 * 1024];
         payload[13..21].copy_from_slice(b"abcdefgh");
-        let (disk, _) = cache.inner.disk.as_ref().unwrap();
+        let disk = cache.inner.disk.as_ref().unwrap();
         disk.insert_batch(vec![(hash, Download::new(0, Bytes::from(payload)).unwrap())])
             .await
             .unwrap();
@@ -491,7 +489,7 @@ mod tests {
         let bytes = cache
             .get_or_fetch(key.clone(), range(2, 4), || async {
                 // Simulate another disk write finishing while this callback is pending.
-                let (disk, _) = cache.inner.disk.as_ref().unwrap();
+                let disk = cache.inner.disk.as_ref().unwrap();
                 disk.insert_batch(vec![(
                     ObjectKeyHash::from(key.as_str()),
                     Download::new(0, Bytes::from_static(b"abcdefgh")).unwrap(),
@@ -537,7 +535,7 @@ mod tests {
                 .get(&ObjectKeyHash::from(key.as_str()), range(0, 1))
                 .is_none()
         );
-        let (disk, _) = cache.inner.disk.as_ref().unwrap();
+        let disk = cache.inner.disk.as_ref().unwrap();
         assert!(!disk.covers_range(&ObjectKeyHash::from(key.as_str()), range(0, 1)));
         assert_eq!(history.request_count(), 1);
     }

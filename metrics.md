@@ -201,8 +201,8 @@ retains no idle buffers.
 
 Queue and storage counters describe different stages: do not sum all their
 values as a total number of disk-write attempts. `queued` is admission, not a
-terminal outcome. Queue `already_covered` means disk already covers the callback
-download. `redundant` means memory declined a contained download.
+terminal outcome. The tiered layer records `already_covered` when disk covers the callback
+download, and `redundant` when memory declined a contained download.
 Queued and active writes proceed independently of memory retention.
 
 A storage `failed` outcome means the entry's payload write failed. `no_capacity` can also mean

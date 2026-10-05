@@ -193,16 +193,16 @@
             </div>
           </details>
           <details class="branch">
-            <summary><code>DiskWriteQueue</code><small>Writes downloads to disk in the background</small></summary>
+            <summary><code>DiskCache</code> background writes<small>Queues downloads without delaying lookups</small></summary>
             <div class="content">
-              <p><code>DiskWriteQueue</code> accepts entries without waiting for queue space. A full or closed queue skips the write, not the successful lookup.</p>
+              <p><code>DiskCache</code> owns the background-write queue and accepts entries without waiting for queue space. A full or closed queue skips the write, not the successful lookup.</p>
               <dl><dt>Pending entry limit</dt><dd>256</dd><dt>Small-entry cutoff</dt><dd>Aligned size &lt;128 KiB</dd><dt>Workers</dt><dd>1</dd><dt>Queued + active payload byte cap</dt><dd>None</dd></dl>
-              <details class="deeper"><summary>Stale entries, publication, and cancellation</summary><div>
+              <details class="deeper"><summary>Buffering, publication, and cancellation</summary><div>
                 <p>Each queued write carries its download and key hash. Queued and active writes proceed independently of memory retention. Publication rechecks disk containment under the disk index lock.</p>
                 <p>Writers own reserved chunks while awaiting payload I/O. Canceling a writer can release those chunks while submitted I/O continues; late writes can cause checksum misses after reuse.</p>
-                <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by all insertion paths and readable before flushing. Payload chunks are reserved at flush time; metadata positions are taken only at publication. Insufficient metadata capacity discards the whole written payload. Busy/flushing chunks may miss until publication. Full/no-fit chunks and the 60-second timer trigger flushing. Larger entries write separately; closing discards pending chunks.</p>
+                <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by all insertion paths and readable before flushing. Payload chunks are reserved at flush time; metadata positions are taken only at publication. Insufficient metadata capacity discards the whole written payload. Busy/flushing chunks may miss until publication. Full/no-fit chunks and the disk writer's independent 60-second timer trigger flushing for all insertion paths. Larger entries write separately; closing discards pending chunks.</p>
               </div></details>
-              <a class="source" href="feuer/src/disk_write.rs">feuer/src/disk_write.rs · DiskWriteQueue</a>
+              <a class="source" href="feuer-storage/src/disk_cache/write_queue.rs">feuer-storage/src/disk_cache/write_queue.rs · background writes</a>
             </div>
           </details>
         </div>

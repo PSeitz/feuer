@@ -345,7 +345,10 @@ async fn pressure_eviction_and_partial_write_failure_record_each_entry_outcome()
         .remove_entry(&ObjectKeyHash::from("second"), 0);
     disk.shards[0].allocator =
         DiskChunkAllocator::with_metrics(CHUNK_BYTES..4 * CHUNK_BYTES, disk.metrics.clone()).unwrap();
-    let cache = DiskCache { disk: Arc::new(disk) };
+    let cache = DiskCache {
+        disk: Arc::new(disk),
+        write_sender: cache.write_sender,
+    };
     assert!(
         cache
             .insert_batch(vec![

@@ -19,13 +19,25 @@ pub(crate) enum DiskWriteOutcome {
     Canceled,
 }
 
-/// Disk range lookup, payload writes and whole-chunk capacity metrics.
+#[derive(Clone, Copy)]
+pub(crate) enum DiskWriteQueueOutcome {
+    Queued,
+    Full,
+    Closed,
+    Canceled,
+}
+
+/// Disk range lookup, write queue, payload writes and whole-chunk capacity metrics.
 /// All labels have fixed values; gauges aggregate caches sharing a registry.
 #[derive(Debug)]
 pub struct DiskMetrics {
     lookup_count: [BoxedCounter; 4],
     hit_duration: BoxedHistogram,
     write_entries: [BoxedCounter; 5],
+    queue_outcomes: [BoxedCounter; 4],
+    pub(crate) queued_entries: BoxedGauge,
+    pub(crate) pending_bytes: BoxedGauge,
+    pub(crate) queue_duration: BoxedHistogram,
     eviction_triggering_insertions: BoxedCounter,
     pub(crate) written_entries: BoxedCounter,
     pub(crate) recovered_chunks: BoxedGauge,
@@ -55,6 +67,27 @@ impl DiskMetrics {
             "feuer_disk_write_entries_total".into(),
             "Terminal outcomes of entries handled by the disk writer".into(),
             &["outcome"],
+        );
+        let queue = registry.register_counter_vec(
+            "feuer_disk_write_queue_total".into(),
+            "Disk-write queue admissions, rejections and pre-write discards; queued is not a terminal outcome".into(),
+            &["outcome"],
+        );
+        let queued = registry.register_gauge_vec(
+            "feuer_disk_write_queued_entries".into(),
+            "Entries waiting to start disk writes".into(),
+            &[],
+        );
+        let pending = registry.register_gauge_vec(
+            "feuer_disk_write_pending_bytes".into(),
+            "Logical payload bytes queued, prepared, or being written".into(),
+            &[],
+        );
+        let queue_duration = registry.register_histogram_vec_with_buckets(
+            "feuer_disk_write_queue_duration_seconds".into(),
+            "Time from queue admission to dequeue".into(),
+            &[],
+            Buckets::exponential(0.000_001, 2.0, 25),
         );
         let eviction_triggering_insertions = registry.register_counter_vec(
             "feuer_disk_eviction_triggering_insertions_total".into(),
@@ -94,6 +127,11 @@ impl DiskMetrics {
             hit_duration: duration.histogram(&["hit".into()]),
             write_entries: ["published", "already_covered", "no_capacity", "failed", "canceled"]
                 .map(|label| write_entries.counter(&[label.into()])),
+            queue_outcomes: ["queued", "queue_full", "queue_closed", "canceled"]
+                .map(|label| queue.counter(&[label.into()])),
+            queued_entries: queued.gauge(&[]),
+            pending_bytes: pending.gauge(&[]),
+            queue_duration: queue_duration.histogram(&[]),
             eviction_triggering_insertions: eviction_triggering_insertions.counter(&[]),
             written_entries: written.counter(&[]),
             recovered_chunks: recovered.gauge(&[]),
@@ -110,6 +148,10 @@ impl DiskMetrics {
     pub fn noop() -> Arc<Self> {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         Self::new(&registry)
+    }
+
+    pub(crate) fn record_queue(&self, outcome: DiskWriteQueueOutcome) {
+        self.queue_outcomes[outcome as usize].increase(1);
     }
 
     pub(crate) fn record_lookup(&self, outcome: DiskLookupOutcome, elapsed: Duration) {

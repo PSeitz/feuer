@@ -21,8 +21,6 @@ thiserror = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 feuer-storage = { path = "../feuer-storage" }
-tokio = { workspace = true, features = ["rt", "sync"] }
-tracing = { workspace = true }
 
 [dev-dependencies]
 mixtrics = { workspace = true, features = ["prometheus"] }

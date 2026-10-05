@@ -236,7 +236,7 @@ Access history is only policy input: newer accesses do not invalidate a trimming
 
 ## 7. Best-effort disk writes
 
-Disk writes are best-effort and may be skipped when the pending-write queue is full.
+`DiskCache` owns the best-effort write queue and buffer-flush timer; a full queue skips new writes.
 
 - A download admitted to memory may be scheduled for a disk write.
 - The pending-write queue holds at most 256 entries. Queued and active payload bytes have no byte limit
