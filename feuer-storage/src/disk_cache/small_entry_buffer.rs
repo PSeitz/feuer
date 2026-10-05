@@ -119,7 +119,8 @@ impl BufferedSmallEntryChunk {
             .find(|entry| &entry.key == key && entry.object_range.contains(requested))
     }
 
-    /// Copies requested bytes from the newest covering entry so buffer reuse cannot change the result.
+    /// Checks if a buffered entry covers the requested range, returning its bytes if so.
+    /// We buffer for 60 seconds, so reads may miss during payload I/O. 
     pub(super) fn get(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<Bytes> {
         let entry = self.covering_entry(key, requested)?;
         let start = entry.offset + (requested.start() - entry.object_range.start()) as usize;
