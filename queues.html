@@ -216,10 +216,10 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
               <details class="node">
                 <summary><span class="node-name">One worker, small-entry chunks</span><span class="node-meta">60-second partial flush</span></summary>
                 <div class="node-body">
-                  <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by queued writes and explicit batches. Copying releases incoming bytes. Flushing reserves payload chunks; metadata positions are taken only at publication. Full/no-fit chunks flush immediately; the disk writer owns an independent 60-second flush timer for direct and queued writes. Larger entries write separately. Closing discards partial chunks.</p>
+                  <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by queued writes and explicit batches. Copying releases incoming bytes. Flushing reserves payload chunks; metadata positions are taken only at publication. Full/no-fit chunks flush immediately; the small-entry buffer component drives an independent 60-second flush timer for direct and queued writes. Larger entries write separately. Closing discards partial chunks.</p>
                   <p>Lookups can copy requested bytes from buffered entries after memory eviction. Busy/flushing chunks may miss until publication. Queued and active writes proceed independently of memory retention; payloads occupy contiguous aligned disk byte ranges, separate from metadata.</p>
                   <a class="source-label" href="feuer-storage/src/disk_cache/write_queue.rs">feuer-storage/src/disk_cache/write_queue.rs · background writes</a>
-                  <a class="source-label" href="feuer-storage/src/disk_cache/writer.rs">feuer-storage/src/disk_cache/writer.rs · buffering, timer, and publication</a>
+                  <a class="source-label" href="feuer-storage/src/disk_cache/small_entry_buffer.rs">feuer-storage/src/disk_cache/small_entry_buffer.rs · buffering and timer</a>
                 </div>
               </details>
               <details class="node">

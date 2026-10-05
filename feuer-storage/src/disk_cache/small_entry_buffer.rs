@@ -1,0 +1,137 @@
+//! Each shard owns an initialized small-entry buffer; disk space is reserved only when writing.
+
+use super::{writer::BufferedEntry, *};
+use feuer_memory::AlignedBuffer;
+use std::time::Duration;
+
+// Pack entries below this aligned size so they share a payload chunk.
+const SMALL_ENTRY_BYTES: usize = 128 * 1024;
+// Flush partial chunks even when no later writes arrive.
+const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
+
+/// One chunk of small-entry bytes and their descriptions, with an aligned append offset.
+pub(super) struct BufferedSmallEntryChunk {
+    /// Aligned 1-MiB payload storage for packed writes and pre-flush reads.
+    buffer: AlignedBuffer,
+    /// Next append offset, including padding; keeps entries aligned and detects full/no-fit chunks.
+    used_bytes: usize,
+    /// Entry descriptions and completion state for buffered lookups, publication, and discard.
+    entries: Vec<BufferedEntry>,
+}
+
+impl DiskCache {
+    /// Flushes shared buffers. Returns the number of entries published by this call.
+    pub async fn flush(&self) -> Result<usize, DiskCacheError> {
+        self.disk.flush().await
+    }
+
+    /// Discards buffered entries without writing them; retains each shard's initialized buffer.
+    pub async fn discard_pending(&self) {
+        for shard in &self.disk.shards {
+            let mut buffer = shard.buffered_small_entry_chunk.lock().await;
+            buffer.entries.clear();
+            buffer.used_bytes = 0;
+        }
+    }
+}
+
+impl DiskCacheInner {
+    /// Keeps the disk alive only while flushing; direct and queued writes share this timer.
+    pub(super) async fn flush_payload_periodically(disk: Weak<Self>) {
+        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + FLUSH_INTERVAL, FLUSH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let Some(disk) = disk.upgrade() else { return };
+            if let Err(error) = disk.flush().await {
+                tracing::warn!(target: "feuer::storage", %error, "payload flush failed");
+            }
+        }
+    }
+
+    async fn flush(&self) -> Result<usize, DiskCacheError> {
+        let mut published = 0;
+        for shard in &self.shards {
+            published += shard.buffered_small_entry_chunk.lock().await.flush(shard, self).await?;
+        }
+        Ok(published)
+    }
+
+    pub(super) async fn write(
+        &self,
+        key: ObjectKeyHash,
+        download: Download,
+        completion: impl Send + 'static,
+    ) -> Result<usize, DiskCacheError> {
+        let shard = &self.shards[self.shard_index_for_key(&key)];
+        let (object_range, bytes) = download.into_parts();
+        let length = payload_disk_bytes(object_range.len()) as usize;
+        let mut attempt = DiskWriteAttempt::new(self.metrics.clone());
+        if self.covers_range(&key, object_range) {
+            attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
+            return Ok(0);
+        }
+        let mut entry = BufferedEntry {
+            key,
+            object_range,
+            payload_checksum: XxHash64::oneshot(0, &bytes),
+            offset: 0,
+            attempt,
+            completion: Box::new(completion),
+        };
+        if length >= SMALL_ENTRY_BYTES {
+            return shard.write_payload(self, bytes, vec![entry]).await;
+        }
+        let mut buffer = shard.buffered_small_entry_chunk.lock().await;
+        let mut published = 0;
+        if buffer.used_bytes + length > CHUNK_BYTES as usize {
+            published += buffer.flush(shard, self).await?;
+        }
+        entry.offset = buffer.used_bytes;
+        buffer.buffer.as_mut_slice()[entry.offset..entry.offset + bytes.len()].copy_from_slice(&bytes);
+        drop(bytes);
+        buffer.used_bytes += length;
+        buffer.entries.push(entry);
+        if buffer.used_bytes == CHUNK_BYTES as usize {
+            published += buffer.flush(shard, self).await?;
+        }
+        Ok(published)
+    }
+}
+
+impl BufferedSmallEntryChunk {
+    pub(super) fn new() -> Result<Self, DataFileError> {
+        Ok(Self {
+            buffer: AlignedBuffer::allocate_zeroed(CHUNK_BYTES as usize).map_err(|source| DataFileError::Task {
+                operation: crate::IoOperation::Write,
+                source: Box::new(source),
+            })?,
+            used_bytes: 0,
+            entries: Vec::new(),
+        })
+    }
+
+    /// Copies requested bytes from the newest covering entry so buffer reuse cannot change the result.
+    pub(super) fn get(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<Bytes> {
+        let entry = self
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| &entry.key == key && entry.object_range.contains(requested))?;
+        let start = entry.offset + (requested.start() - entry.object_range.start()) as usize;
+        Some(Bytes::copy_from_slice(
+            &self.buffer.as_ref()[start..start + requested.len() as usize],
+        ))
+    }
+
+    async fn flush(&mut self, shard: &DiskCacheShard, disk: &DiskCacheInner) -> Result<usize, DiskCacheError> {
+        if self.entries.is_empty() {
+            return Ok(0);
+        }
+        // Detached chunks are not lookup-visible until publication. Reads may miss during payload I/O.
+        let buffered = std::mem::replace(self, Self::new()?);
+        shard
+            .write_payload(disk, buffered.buffer.into_bytes(), buffered.entries)
+            .await
+    }
+}

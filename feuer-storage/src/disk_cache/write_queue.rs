@@ -5,7 +5,6 @@ mod tests;
 
 use super::*;
 use crate::disk_metrics::DiskWriteQueueOutcome;
-use tokio::sync::mpsc;
 
 pub(super) const MAX_QUEUED_ENTRIES: usize = 256;
 

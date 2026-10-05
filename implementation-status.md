@@ -126,7 +126,7 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
 
 [`format.md`](format.md) describes the experimental disk format;
 [`feuer-storage/disk-prototype.md`](feuer-storage/disk-prototype.md) covers runtime behavior and remaining crash testing.
-Each shard owns an initialized 1-MiB buffer shared by all insertion paths; the disk writer owns its flush timer.
+Each shard owns an initialized 1-MiB buffer shared by all insertion paths; the buffer component drives its flush timer.
 Buffering reserves no disk space. A flush reserves payload chunks; metadata positions remain free until publication.
 Payload completion precedes publication; a separate writer persists metadata every second.
 Reads first copy requested bytes from buffered entries; busy/flushing chunks may miss until publication.

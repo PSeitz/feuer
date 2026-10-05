@@ -1,10 +1,11 @@
 //! Cache object bytes on disk, looked up by object key and byte range.
 
 mod metadata;
+mod small_entry_buffer;
 mod write_queue;
 mod writer;
+use small_entry_buffer::BufferedSmallEntryChunk;
 use write_queue::PendingDiskWrite;
-use writer::BufferedSmallEntryChunk;
 #[cfg(test)]
 mod metrics_tests;
 mod page_format;
@@ -246,12 +247,39 @@ impl DiskCache {
         Ok(Self { disk, write_sender })
     }
 
+    /// Inserts a batch and flushes shared buffers. Counts entries published by this call, including neighbors.
+    /// Earlier publication survives later failure. Dropping this future does not abort its detached writer.
+    pub async fn insert_batch(&self, mut downloads: Vec<(ObjectKeyHash, Download)>) -> Result<usize, DiskCacheError> {
+        let cache = self.clone();
+        downloads.sort_by_key(|(_, download)| download.bytes().len());
+        tokio::spawn(async move {
+            let mut published = 0;
+            for (key, download) in downloads {
+                published += cache.write(key, download, ()).await?;
+            }
+            Ok(published + cache.flush().await?)
+        })
+        .await
+        .map_err(DiskCacheError::WriteTaskFailed)?
+    }
+
+    /// Buffers small entries; full/no-fit chunks and larger entries write immediately.
+    /// Holds completion state until publication or discard. Cancellation may leave submitted I/O running.
+    pub async fn write(
+        &self,
+        key: ObjectKeyHash,
+        download: Download,
+        completion: impl Send + 'static,
+    ) -> Result<usize, DiskCacheError> {
+        self.disk.write(key, download, completion).await
+    }
+
     /// Shared history for recording requests once, before lookup and outside raw storage operations.
     pub fn access_histories(&self) -> Arc<ObjectAccessHistories> {
         self.disk.access_histories.clone()
     }
 
-    /// Checks for one covering buffered or disk entry, without reading payload or recording an access.
+    /// Checks for one covering buffered or disk entry, without disk I/O or recording an access.
     pub fn covers_range(&self, key: &ObjectKeyHash, range: ByteRange) -> bool {
         self.disk.covers_range(key, range)
     }
@@ -484,7 +512,7 @@ impl DiskCacheInner {
         shard
             .buffered_small_entry_chunk
             .try_lock()
-            .is_ok_and(|pending| pending.covering_entry(key, range).is_some())
+            .is_ok_and(|pending| pending.get(key, range).is_some())
             || shard.entry_index.lock().unwrap().covering_entry(key, range).is_some()
     }
 

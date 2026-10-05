@@ -200,7 +200,7 @@
               <details class="deeper"><summary>Buffering, publication, and cancellation</summary><div>
                 <p>Each queued write carries its download and key hash. Queued and active writes proceed independently of memory retention. Publication rechecks disk containment under the disk index lock.</p>
                 <p>Writers own reserved chunks while awaiting payload I/O. Canceling a writer can release those chunks while submitted I/O continues; late writes can cause checksum misses after reuse.</p>
-                <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by all insertion paths and readable before flushing. Payload chunks are reserved at flush time; metadata positions are taken only at publication. Insufficient metadata capacity discards the whole written payload. Busy/flushing chunks may miss until publication. Full/no-fit chunks and the disk writer's independent 60-second timer trigger flushing for all insertion paths. Larger entries write separately; closing discards pending chunks.</p>
+                <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by all insertion paths and readable before flushing. Payload chunks are reserved at flush time; metadata positions are taken only at publication. Insufficient metadata capacity discards the whole written payload. Busy/flushing chunks may miss until publication. Full/no-fit chunks and the buffer component's independent 60-second timer trigger flushing for all insertion paths. Larger entries write separately; closing discards pending chunks.</p>
               </div></details>
               <a class="source" href="feuer-storage/src/disk_cache/write_queue.rs">feuer-storage/src/disk_cache/write_queue.rs · background writes</a>
             </div>
@@ -316,7 +316,7 @@
               </div></details>
               <a class="source" href="format.md">format.md · disk format v13</a>
               <a class="source" href="feuer-storage/src/disk_cache/metadata.rs">feuer-storage/src/disk_cache/metadata.rs · periodic metadata writes</a>
-              <a class="source" href="feuer-storage/src/disk_cache/writer.rs">feuer-storage/src/disk_cache/writer.rs · buffering and publication</a>
+              <a class="source" href="feuer-storage/src/disk_cache/small_entry_buffer.rs">feuer-storage/src/disk_cache/small_entry_buffer.rs · buffering and flushing</a>
             </div>
           </details>
           <details class="branch">
