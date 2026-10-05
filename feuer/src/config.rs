@@ -5,7 +5,8 @@ use thiserror::Error;
 
 /// Explicit capacities and location for one Feuer cache.
 ///
-/// `disk_capacity` includes metadata and alignment overhead.
+/// `disk_capacity` includes metadata and alignment overhead; zero disables the disk tier.
+/// When disk is disabled, `directory` is unused.
 /// `memory_capacity` is a soft eviction target divided among the in-memory shards; oversized entries
 /// can make entry allocation charges exceed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,9 +28,6 @@ impl CacheConfig {
         disk_capacity: u64,
         memory_capacity: u64,
     ) -> Result<Self, CacheConfigError> {
-        if disk_capacity == 0 {
-            return Err(CacheConfigError::InvalidDiskCapacity);
-        }
         if memory_capacity == 0 {
             return Err(CacheConfigError::InvalidMemoryCapacity);
         }
@@ -63,7 +61,7 @@ impl CacheConfig {
         &self.directory
     }
 
-    /// Returns the configured disk capacity in bytes.
+    /// Returns the configured disk capacity in bytes; zero disables the disk tier.
     pub const fn disk_capacity(&self) -> u64 {
         self.disk_capacity
     }
@@ -77,9 +75,6 @@ impl CacheConfig {
 /// An invalid Feuer configuration.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum CacheConfigError {
-    /// A fixed data file cannot have zero capacity.
-    #[error("disk capacity must be greater than zero")]
-    InvalidDiskCapacity,
     /// The configured memory eviction target must be positive.
     #[error("memory capacity must be greater than zero")]
     InvalidMemoryCapacity,
@@ -127,7 +122,7 @@ mod tests {
 
     #[test]
     fn requires_both_capacity_roles_to_be_explicit() {
-        for (disk_capacity, memory_capacity) in [(1 << 40, 256 << 20), (4 * (1 << 40), 1)] {
+        for (disk_capacity, memory_capacity) in [(0, 256 << 20), (1 << 40, 256 << 20), (4 * (1 << 40), 1)] {
             let config = CacheConfig::new("cache", disk_capacity, memory_capacity).unwrap();
 
             assert_eq!(config.directory(), Path::new("cache"));
@@ -137,12 +132,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_capacities() {
-        for (disk_capacity, memory_capacity, error) in [
-            (0, 1, CacheConfigError::InvalidDiskCapacity),
-            (1, 0, CacheConfigError::InvalidMemoryCapacity),
-        ] {
-            assert_eq!(CacheConfig::new("cache", disk_capacity, memory_capacity), Err(error));
+    fn rejects_zero_memory_capacity() {
+        for disk_capacity in [0, 1] {
+            assert_eq!(
+                CacheConfig::new("cache", disk_capacity, 0),
+                Err(CacheConfigError::InvalidMemoryCapacity)
+            );
         }
     }
 }

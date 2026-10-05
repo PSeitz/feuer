@@ -12,8 +12,9 @@ hit rate is guaranteed.
 
 ## Usage
 
-Configure a cache directory, disk capacity, and memory target. Opening requires a
-Tokio runtime. Cache handles are cloneable.
+Configure a cache directory, disk capacity, and memory target. Zero disk capacity
+uses only memory and ignores the directory. Opening is Linux-only and requires Tokio
+when disk is enabled. Cache handles are cloneable.
 
 ```rust
 use bytes::Bytes;

@@ -18,41 +18,39 @@ use crate::{
     metrics::{LookupMetrics, LookupOutcome},
 };
 
-/// Configuration and both tiers shared by cloned cache handles.
-struct CacheState {
+/// Configuration and cache tiers shared by cloned handles.
+struct TieredMemoryDiskCacheInner {
     config: CacheConfig,
     memory: Arc<MemoryCache>,
     access_histories: Arc<ObjectAccessHistories>,
     metrics: LookupMetrics,
     #[cfg(target_os = "linux")]
-    disk: DiskCache,
-    #[cfg(target_os = "linux")]
-    disk_write_queue: DiskWriteQueue,
+    disk: Option<(DiskCache, DiskWriteQueue)>,
 }
 
 /// A cloneable handle to one Feuer cache.
 ///
 /// Lookups check memory, then integrity-checked disk, then the per-call callback.
-/// Disk writes are best-effort; a full 256-entry queue skips new writes. Opening requires Linux direct I/O
-/// and io_uring, and waits for every shard's metadata recovery before returning.
+/// Disk writes are best-effort; a full 256-entry queue skips new writes. Zero disk capacity disables disk;
+/// otherwise opening requires Linux direct I/O and io_uring, and waits for metadata recovery.
 #[derive(Clone)]
 pub struct TieredMemoryDiskCache {
-    state: Arc<CacheState>,
+    inner: Arc<TieredMemoryDiskCacheInner>,
 }
 
 impl fmt::Debug for TieredMemoryDiskCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TieredMemoryDiskCache")
-            .field("memory_capacity", &self.state.config.memory_capacity())
-            .field("disk_capacity", &self.state.config.disk_capacity())
+            .field("memory_capacity", &self.inner.config.memory_capacity())
+            .field("disk_capacity", &self.inner.config.disk_capacity())
             .finish_non_exhaustive()
     }
 }
 
 impl TieredMemoryDiskCache {
-    /// Opens an exclusively locked disk cache and starts its best-effort writer.
-    /// Requires a Tokio runtime, usable io_uring and direct I/O; no memory-only or buffered fallback is used.
-    /// Waits for every shard's metadata recovery before returning the cache.
+    /// Opens a cache, using only memory when disk capacity is zero.
+    /// Otherwise requires Tokio, io_uring and direct I/O, locks the directory,
+    /// and waits for metadata recovery. Disk failures never fall back to memory.
     #[cfg(target_os = "linux")]
     pub async fn open(config: CacheConfig) -> Result<Self, DiskCacheError> {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
@@ -73,32 +71,36 @@ impl TieredMemoryDiskCache {
             )
             .with_reclaim_sample_size(config.reclaim_sample_size()),
         );
-        let disk = DiskCache::open_with_buffer_pool(
-            config.directory(),
-            config.disk_capacity(),
-            IoMetrics::new(registry),
-            access_histories.clone(),
-            feuer_storage::DiskMetrics::new(registry),
-            config.reclaim_sample_size(),
-            memory.buffer_pool(),
-        )
-        .await?;
-        let disk_write_queue = DiskWriteQueue::with_metrics(memory.clone(), disk.clone(), registry);
+        let disk = if config.disk_capacity() == 0 {
+            None
+        } else {
+            let cache = DiskCache::open_with_buffer_pool(
+                config.directory(),
+                config.disk_capacity(),
+                IoMetrics::new(registry),
+                access_histories.clone(),
+                feuer_storage::DiskMetrics::new(registry),
+                config.reclaim_sample_size(),
+                memory.buffer_pool(),
+            )
+            .await?;
+            let write_queue = DiskWriteQueue::with_metrics(memory.clone(), cache.clone(), registry);
+            Some((cache, write_queue))
+        };
         Ok(Self {
-            state: Arc::new(CacheState {
+            inner: Arc::new(TieredMemoryDiskCacheInner {
                 config,
                 memory,
                 access_histories,
                 metrics: LookupMetrics::new(registry),
                 disk,
-                disk_write_queue,
             }),
         })
     }
 
     /// Returns this cache's configuration.
     pub fn config(&self) -> &CacheConfig {
-        &self.state.config
+        &self.inner.config
     }
 
     /// Returns the requested bytes from memory, disk, or this call's callback.
@@ -128,17 +130,19 @@ impl TieredMemoryDiskCache {
     {
         let started = Instant::now();
         let object_key = ObjectKeyHash::from(object_key);
-        self.state.access_histories.record_access(&object_key, requested_range);
-        let metrics = &self.state.metrics;
-        if let Some(bytes) = self.state.memory.get(&object_key, requested_range) {
+        self.inner.access_histories.record_access(&object_key, requested_range);
+        let metrics = &self.inner.metrics;
+        if let Some(bytes) = self.inner.memory.get(&object_key, requested_range) {
             metrics.record(LookupOutcome::MemoryHit, started.elapsed(), requested_range.len());
             return Ok(bytes);
         }
 
         #[cfg(target_os = "linux")]
-        if let Some((bytes, buffer_capacity)) = self.state.disk.fetch_from_disk(&object_key, requested_range).await {
-            let (bytes, buffer_capacity) = shrink_disk_result(&self.state.memory.buffer_pool(), bytes, buffer_capacity);
-            self.state.memory.insert_with_allocation_charge(
+        if let Some((disk, _)) = &self.inner.disk
+            && let Some((bytes, buffer_capacity)) = disk.fetch_from_disk(&object_key, requested_range).await
+        {
+            let (bytes, buffer_capacity) = shrink_disk_result(&self.inner.memory.buffer_pool(), bytes, buffer_capacity);
+            self.inner.memory.insert_with_allocation_charge(
                 object_key,
                 Download::new(requested_range.start(), bytes.clone()).expect("disk result covers the request"),
                 buffer_capacity,
@@ -164,17 +168,19 @@ impl TieredMemoryDiskCache {
         let end = (requested_range.end() - downloaded_range.start()) as usize;
         let requested_bytes = download.bytes().slice(start..end);
         #[cfg(target_os = "linux")]
-        if self.state.disk.covers_range(&object_key, downloaded_range) {
-            self.state.disk_write_queue.record_already_covered();
-        } else if self.state.memory.insert(object_key, download.clone()) {
-            self.state
-                .disk_write_queue
-                .enqueue_if_space_available(object_key, download);
+        if let Some((disk, queue)) = &self.inner.disk {
+            if disk.covers_range(&object_key, downloaded_range) {
+                queue.record_already_covered();
+            } else if self.inner.memory.insert(object_key, download.clone()) {
+                queue.enqueue_if_space_available(object_key, download);
+            } else {
+                queue.record_already_in_memory();
+            }
         } else {
-            self.state.disk_write_queue.record_already_in_memory();
+            self.inner.memory.insert(object_key, download);
         }
         #[cfg(not(target_os = "linux"))]
-        self.state.memory.insert(object_key, download);
+        self.inner.memory.insert(object_key, download);
 
         metrics.record(LookupOutcome::Callback, started.elapsed(), requested_range.len());
         Ok(requested_bytes)
@@ -261,14 +267,14 @@ mod tests {
             .await
             .unwrap();
         wait_for_buffered(&cache, &key, range(0, 4)).await;
-        cache.state.disk.flush().await.unwrap();
+        cache.inner.disk.as_ref().unwrap().0.flush().await.unwrap();
         cache
             .get_or_fetch(key.clone(), range(0, 2), || async {
                 Err::<Download, _>("memory hit must not fetch")
             })
             .await
             .unwrap();
-        cache.state.memory.insert(
+        cache.inner.memory.insert(
             ObjectKeyHash::from(key.as_str()),
             Download::new(100, Bytes::from(vec![0; 64])).unwrap(),
         );
@@ -323,7 +329,7 @@ mod tests {
             1.0
         );
         assert_eq!(
-            cache.state.access_histories.request_count(),
+            cache.inner.access_histories.request_count(),
             5,
             "every request is recorded, including errors and invalid downloads"
         );
@@ -355,8 +361,9 @@ mod tests {
     }
 
     async fn wait_for_buffered(cache: &TieredMemoryDiskCache, key: &str, range: ByteRange) {
+        let (disk, _) = cache.inner.disk.as_ref().unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !cache.state.disk.covers_range(&ObjectKeyHash::from(key), range) {
+            while !disk.covers_range(&ObjectKeyHash::from(key), range) {
                 tokio::task::yield_now().await;
             }
         })
@@ -368,7 +375,7 @@ mod tests {
     async fn buffered_hit_after_memory_pressure_promotes_only_request_and_records_once() {
         let (_directory, cache) = cache(32).await;
         let key = String::from("object");
-        let history = &cache.state.access_histories;
+        let history = &cache.inner.access_histories;
         let source = Download::new(10, Bytes::from_static(b"abcdefghij")).unwrap();
         let result = cache
             .get_or_fetch(key.clone(), range(13, 17), || async {
@@ -382,13 +389,13 @@ mod tests {
 
         // The same key selects the same memory shard; an oversized disjoint range
         // forces the original download out without contributing an access.
-        cache.state.memory.insert(
+        cache.inner.memory.insert(
             ObjectKeyHash::from(key.as_str()),
             Download::new(100, Bytes::from(vec![0; 64])).unwrap(),
         );
         assert!(
             cache
-                .state
+                .inner
                 .memory
                 .get(&ObjectKeyHash::from(key.as_str()), range(13, 17))
                 .is_none()
@@ -403,22 +410,20 @@ mod tests {
             assert_eq!(hit, result);
             assert_eq!(history.request_count(), accesses);
         }
-        assert_eq!(cache.state.memory.used_bytes(), 4);
+        assert_eq!(cache.inner.memory.used_bytes(), 4);
     }
 
     #[tokio::test]
     async fn disk_promotion_charges_the_smaller_allocation_for_a_small_slice() {
         let (_directory, cache) = cache(32).await;
         let key = "large-entry".to_owned();
-        cache
-            .state
-            .disk
-            .insert_batch(vec![(
-                ObjectKeyHash::from(key.as_str()),
-                Download::new(0, Bytes::from(vec![0x77; 40 * 1024])).unwrap(),
-            )])
-            .await
-            .unwrap();
+        let (disk, _) = cache.inner.disk.as_ref().unwrap();
+        disk.insert_batch(vec![(
+            ObjectKeyHash::from(key.as_str()),
+            Download::new(0, Bytes::from(vec![0x77; 40 * 1024])).unwrap(),
+        )])
+        .await
+        .unwrap();
         let bytes = cache
             .get_or_fetch(key.clone(), range(5, 9), || async {
                 Err::<Download, _>("disk hit must not fetch")
@@ -426,22 +431,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&bytes[..], &[0x77; 4]);
-        assert_eq!(cache.state.memory.used_bytes(), 32 * 1024);
+        assert_eq!(cache.inner.memory.used_bytes(), 32 * 1024);
         assert_eq!(
             cache
-                .state
+                .inner
                 .memory
                 .get(&ObjectKeyHash::from(key.as_str()), range(5, 9))
                 .unwrap()
                 .as_ptr(),
             bytes.as_ptr()
         );
-        assert_eq!(cache.state.memory.buffer_pool().idle_bytes(), 0);
+        assert_eq!(cache.inner.memory.buffer_pool().idle_bytes(), 0);
         cache
-            .state
+            .inner
             .memory
             .remove(&ObjectKeyHash::from(key.as_str()), range(5, 9));
-        assert_eq!(cache.state.memory.used_bytes(), 0);
+        assert_eq!(cache.inner.memory.used_bytes(), 0);
         assert_eq!(&bytes[..], &[0x77; 4]);
     }
 
@@ -452,13 +457,11 @@ mod tests {
         let hash = ObjectKeyHash::from(key.as_str());
         let mut payload = vec![0x77; 40 * 1024];
         payload[13..21].copy_from_slice(b"abcdefgh");
-        cache
-            .state
-            .disk
-            .insert_batch(vec![(hash, Download::new(0, Bytes::from(payload)).unwrap())])
+        let (disk, _) = cache.inner.disk.as_ref().unwrap();
+        disk.insert_batch(vec![(hash, Download::new(0, Bytes::from(payload)).unwrap())])
             .await
             .unwrap();
-        cache.state.disk.flush().await.unwrap();
+        disk.flush().await.unwrap();
         let (first, second) = tokio::join!(
             cache.get_or_fetch(key.clone(), range(13, 17), || async {
                 Err::<Download, _>("disk hit must not fetch")
@@ -472,11 +475,11 @@ mod tests {
         assert_eq!(&first[..], b"abcd");
         assert_eq!(&second[..], b"efgh");
         for (range, bytes) in [(range(13, 17), &first), (range(17, 21), &second)] {
-            assert_eq!(cache.state.memory.get(&hash, range).unwrap().as_ptr(), bytes.as_ptr());
+            assert_eq!(cache.inner.memory.get(&hash, range).unwrap().as_ptr(), bytes.as_ptr());
         }
         assert_eq!(
-            cache.state.memory.used_bytes(),
-            cache.state.memory.buffer_pool().idle_bytes() + 2 * 32 * 1024
+            cache.inner.memory.used_bytes(),
+            cache.inner.memory.buffer_pool().idle_bytes() + 2 * 32 * 1024
         );
     }
 
@@ -484,25 +487,23 @@ mod tests {
     async fn callback_covered_by_a_racing_disk_write_is_not_inserted_again() {
         let (_directory, cache) = cache(32).await;
         let key = String::from("object");
-        let history = &cache.state.access_histories;
+        let history = &cache.inner.access_histories;
         let bytes = cache
             .get_or_fetch(key.clone(), range(2, 4), || async {
                 // Simulate another disk write finishing while this callback is pending.
-                cache
-                    .state
-                    .disk
-                    .insert_batch(vec![(
-                        ObjectKeyHash::from(key.as_str()),
-                        Download::new(0, Bytes::from_static(b"abcdefgh")).unwrap(),
-                    )])
-                    .await
-                    .unwrap();
+                let (disk, _) = cache.inner.disk.as_ref().unwrap();
+                disk.insert_batch(vec![(
+                    ObjectKeyHash::from(key.as_str()),
+                    Download::new(0, Bytes::from_static(b"abcdefgh")).unwrap(),
+                )])
+                .await
+                .unwrap();
                 Ok::<_, Infallible>(Download::new(2, Bytes::from_static(b"cd")).unwrap())
             })
             .await
             .unwrap();
         assert_eq!(bytes, Bytes::from_static(b"cd"));
-        assert_eq!(cache.state.memory.used_bytes(), 0);
+        assert_eq!(cache.inner.memory.used_bytes(), 0);
         assert_eq!(history.request_count(), 1);
     }
 
@@ -510,7 +511,7 @@ mod tests {
     async fn callback_cancellation_keeps_the_recorded_request_without_inserting() {
         let (_directory, cache) = cache(32).await;
         let key = String::from("canceled");
-        let history = &cache.state.access_histories;
+        let history = &cache.inner.access_histories;
         let entered = Arc::new(Notify::new());
         let task = {
             let cache = cache.clone();
@@ -531,17 +532,13 @@ mod tests {
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(
             cache
-                .state
+                .inner
                 .memory
                 .get(&ObjectKeyHash::from(key.as_str()), range(0, 1))
                 .is_none()
         );
-        assert!(
-            !cache
-                .state
-                .disk
-                .covers_range(&ObjectKeyHash::from(key.as_str()), range(0, 1))
-        );
+        let (disk, _) = cache.inner.disk.as_ref().unwrap();
+        assert!(!disk.covers_range(&ObjectKeyHash::from(key.as_str()), range(0, 1)));
         assert_eq!(history.request_count(), 1);
     }
 
@@ -564,7 +561,11 @@ mod tests {
 
     #[tokio::test]
     async fn callback_result_and_covering_memory_hit_return_the_exact_request() {
-        let (_directory, cache) = cache(32).await;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("unused");
+        let cache = TieredMemoryDiskCache::open(CacheConfig::new(&path, 0, 32).unwrap())
+            .await
+            .unwrap();
         let key = String::from("object");
         let payload = Bytes::from_static(b"abcdefghij");
         let result = cache
@@ -583,6 +584,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"bcdefghi"));
+        assert!(cache.inner.disk.is_none());
+        assert!(!path.exists());
     }
 
     #[tokio::test]

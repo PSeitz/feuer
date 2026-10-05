@@ -8,7 +8,7 @@ async fn records_each_started_request_before_any_result() {
     let (_, registry) = crate::test_metrics::registry();
     let history = Arc::new(ObjectAccessHistories::new());
     let cache = TieredMemoryDiskCache {
-        state: Arc::new(CacheState {
+        inner: Arc::new(TieredMemoryDiskCacheInner {
             config: CacheConfig::new("cache", 4 << 20, 1024).unwrap(),
             memory: Arc::new(MemoryCache::with_access_histories(
                 1024,
