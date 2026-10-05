@@ -8,7 +8,6 @@ pub(super) enum DiskWriteQueueOutcome {
     Queued,
     Full,
     Closed,
-    Stale,
     Canceled,
     AlreadyCovered,
     Redundant,
@@ -16,7 +15,7 @@ pub(super) enum DiskWriteQueueOutcome {
 
 /// Metrics for disk-write queue admission, waiting entries, and pending bytes.
 pub(super) struct DiskWriteQueueMetrics {
-    outcomes: [BoxedCounter; 7],
+    outcomes: [BoxedCounter; 6],
     pub(super) queued_entries: BoxedGauge,
     pub(super) pending_bytes: BoxedGauge,
     pub(super) queue_duration: BoxedHistogram,
@@ -41,7 +40,7 @@ impl DiskWriteQueueMetrics {
         );
         let duration = registry.register_histogram_vec_with_buckets(
             "feuer_disk_write_queue_duration_seconds".into(),
-            "Time from queue admission to dequeue, including stale entries".into(),
+            "Time from queue admission to dequeue".into(),
             &[],
             Buckets::exponential(0.000_001, 2.0, 25),
         );
@@ -50,7 +49,6 @@ impl DiskWriteQueueMetrics {
                 "queued",
                 "queue_full",
                 "queue_closed",
-                "stale",
                 "canceled",
                 "already_covered",
                 "redundant",

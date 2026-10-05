@@ -243,9 +243,7 @@ Disk writes are best-effort and may be skipped when the pending-write queue is f
   and are outside the memory-cache capacity.
 - Under queue pressure, the internal policy may skip or replace a disk-write candidate. This never fails
   an otherwise successful lookup.
-- If the exact key and range are no longer cached in memory when a queued write starts, that write is
-  canceled or discarded. Reinsertion of the same immutable range allows an earlier write to proceed.
-- Once started, a write owns its immutable download and may publish after memory eviction or caller
+- A queued write owns its immutable download and may publish after memory eviction or caller
   cancellation. Publication rechecks disk containment, not memory residency. The detached writer retains
   its current payload reservation while awaiting I/O. An abandoned or failed write may leave late I/O
   that overwrites a reused payload; checksum mismatches become misses. Kernel I/O buffers must still
@@ -379,8 +377,7 @@ The MVP is complete when tests demonstrate that:
 - pressure-driven in-memory compaction can release unrequested cached payload without changing results, and
   normal access and victim selection avoid full scans of all live shard entries.
 - the disk-write queue enforces its entry-count limit; queue pressure does not block or fail successful lookups.
-- queued writes may be skipped after memory eviction; active immutable downloads may publish independently
-  of memory residency.
+- queued and active writes may publish independently of memory residency.
 - failed payload writes do not publish live entries; recovered payloads must pass checksum verification.
 - small entries share immutable 1-MiB chunks with 4-KiB-aligned storage; partial chunks flush every minute.
 - shared payload chunks contain each entry's complete aligned payload; multi-chunk entries own consecutive

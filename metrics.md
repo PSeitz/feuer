@@ -192,20 +192,18 @@ retains no idle buffers.
 
 | Metric | Type | Labels / meaning |
 |---|---|---|
-| `feuer_disk_write_queue_total` | Counter | `outcome`: `queued`, `queue_full`, `queue_closed`, `stale`, `canceled`, `already_covered`, `redundant` |
+| `feuer_disk_write_queue_total` | Counter | `outcome`: `queued`, `queue_full`, `queue_closed`, `canceled`, `already_covered`, `redundant` |
 | `feuer_disk_write_queued_entries` | Gauge | Entries waiting to begin disk writes |
 | `feuer_disk_write_pending_bytes` | Gauge | Logical payload bytes queued, prepared, or being written; excludes chunk padding and is not charged to memory-cache capacity |
-| `feuer_disk_write_queue_duration_seconds` | Histogram | Queue admission to dequeue, including entries found stale. Excludes entries canceled before dequeue |
+| `feuer_disk_write_queue_duration_seconds` | Histogram | Queue admission to dequeue. Excludes entries canceled before dequeue |
 | `feuer_disk_write_entries_total` | Counter | Terminal per-entry write outcome: `published`, `already_covered`, `no_capacity`, `failed`, `canceled` |
 | `feuer_disk_written_entries_total` | Counter | Entries in successfully written payload regions, before publication checks |
 
 Queue and storage counters describe different stages: do not sum all their
 values as a total number of disk-write attempts. `queued` is admission, not a
 terminal outcome. Queue `already_covered` means disk already covers the callback
-download. `redundant` means memory declined a contained download. Queue `stale`
-means the exact key and range are no longer cached in memory before writing.
-Reinsertion of the same immutable range does not make a queued write stale.
-Active writes may publish after memory eviction; storage has no `stale` outcome.
+download. `redundant` means memory declined a contained download.
+Queued and active writes proceed independently of memory retention.
 
 A storage `failed` outcome means the entry's payload write failed. `no_capacity` can also mean
 metadata capacity was unavailable after successful payload I/O; the whole flush is then discarded.

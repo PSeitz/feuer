@@ -11,9 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use feuer_memory::MemoryCache;
 use feuer_storage::DiskCache;
-use feuer_types::{ByteRange, Download, ObjectKeyHash};
+use feuer_types::{Download, ObjectKeyHash};
 use tokio::sync::mpsc;
 
 const MAX_QUEUED_ENTRIES: usize = 256;
@@ -26,15 +25,14 @@ pub(crate) struct DiskWriteQueue {
 }
 
 /// Measures a disk-write queue entry's wait and keeps its payload bytes counted as pending until dropped.
-/// The object key and range also identify the source entry for memory-presence checks.
 struct DiskWriteQueueEntryMetrics {
-    key: ObjectKeyHash,
-    object_range: ByteRange,
+    payload_bytes: u64,
     queued_at: Option<Instant>,
     metrics: Arc<DiskWriteQueueMetrics>,
 }
 
 struct PendingDiskWrite {
+    key: ObjectKeyHash,
     download: Download,
     entry_metrics: DiskWriteQueueEntryMetrics,
 }
@@ -50,7 +48,7 @@ impl DiskWriteQueueEntryMetrics {
 
 impl Drop for DiskWriteQueueEntryMetrics {
     fn drop(&mut self) {
-        self.metrics.pending_bytes.decrease(self.object_range.len());
+        self.metrics.pending_bytes.decrease(self.payload_bytes);
         if self.queued_at.is_some() {
             self.metrics.queued_entries.decrease(1);
             self.metrics.record(DiskWriteQueueOutcome::Canceled);
@@ -59,12 +57,12 @@ impl Drop for DiskWriteQueueEntryMetrics {
 }
 
 impl DiskWriteQueue {
-    pub(crate) fn with_metrics(memory: Arc<MemoryCache>, disk: DiskCache, registry: &BoxedRegistry) -> Self {
+    pub(crate) fn with_metrics(disk: DiskCache, registry: &BoxedRegistry) -> Self {
         let (disk_write_queue, receiver) =
             Self::channel_with_metrics(MAX_QUEUED_ENTRIES, DiskWriteQueueMetrics::new(registry));
         // The worker owns no sender. Dropping the last cache handle closes the queue;
         // active writes finish, but unfinished small-entry chunks are discarded.
-        tokio::spawn(Self::write_queued(receiver, memory, disk));
+        tokio::spawn(Self::write_queued(receiver, disk));
         disk_write_queue
     }
 
@@ -109,19 +107,19 @@ impl DiskWriteQueue {
         self.metrics.queued_entries.increase(1);
         self.metrics.pending_bytes.increase(download.downloaded_range().len());
         let entry_metrics = DiskWriteQueueEntryMetrics {
-            key,
-            object_range: download.downloaded_range(),
+            payload_bytes: download.downloaded_range().len(),
             queued_at: Some(Instant::now()),
             metrics: self.metrics.clone(),
         };
         permit.send(PendingDiskWrite {
+            key,
             download,
             entry_metrics,
         });
     }
 
-    /// Checks memory on dequeue; admitted writes finish independently of memory retention.
-    async fn write_queued(mut receiver: mpsc::Receiver<PendingDiskWrite>, memory: Arc<MemoryCache>, disk: DiskCache) {
+    /// Processes queued writes independently of memory retention.
+    async fn write_queued(mut receiver: mpsc::Receiver<PendingDiskWrite>, disk: DiskCache) {
         let mut flush = tokio::time::interval_at(tokio::time::Instant::now() + FLUSH_INTERVAL, FLUSH_INTERVAL);
         flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -129,13 +127,9 @@ impl DiskWriteQueue {
                 biased;
                 _ = flush.tick() => disk.flush().await,
                 next = receiver.recv() => {
-                    let Some(PendingDiskWrite { download, mut entry_metrics }) = next else { break };
+                    let Some(PendingDiskWrite { key, download, mut entry_metrics }) = next else { break };
                     entry_metrics.finish_queue_wait();
-                    if !memory.contains_entry(&entry_metrics.key, entry_metrics.object_range) {
-                        entry_metrics.metrics.record(DiskWriteQueueOutcome::Stale);
-                        continue;
-                    }
-                    disk.write(entry_metrics.key, download, entry_metrics).await
+                    disk.write(key, download, entry_metrics).await
                 }
             };
             if let Err(error) = result {

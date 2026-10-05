@@ -73,7 +73,7 @@ Busy/flushing chunks may miss until publication; corrupt or uncertain disk reads
 Writes run in the background through a 256-entry queue. Entries with aligned size below
 128 KiB share 1-MiB chunks, flushed on full/no-fit or every 60 seconds. Each shard always holds
 an initialized 1-MiB buffer; disk space is reserved only when flushing. Larger entries write
-separately. Closing discards partial chunks. Queue pressure or memory eviction can skip writes.
+separately. Closing discards partial chunks. Queue pressure can skip writes; memory eviction does not.
 
 Metadata is stored separately. Queued and active payload bytes have no byte limit. A payload chunk
 can be reused after its last entry is removed; readers verify checksums rather than delay

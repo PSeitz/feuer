@@ -198,8 +198,8 @@
               <p><code>DiskWriteQueue</code> accepts entries without waiting for queue space. A full or closed queue skips the write, not the successful lookup.</p>
               <dl><dt>Pending entry limit</dt><dd>256</dd><dt>Small-entry cutoff</dt><dd>Aligned size &lt;128 KiB</dd><dt>Workers</dt><dd>1</dd><dt>Queued + active payload byte cap</dt><dd>None</dd></dl>
               <details class="deeper"><summary>Stale entries, publication, and cancellation</summary><div>
-                <p>Each queued write carries its download, key hash, and exact range. The worker checks memory presence on dequeue. Publication rechecks only disk containment under the disk index lock; admitted writes may finish after memory eviction.</p>
-                <p>Eviction, replacement by a different range, or trimming can make a candidate stale. Reinserting the same immutable range allows an earlier write to proceed. Writers own reserved chunks while awaiting payload I/O. Canceling a writer can release those chunks while submitted I/O continues; late writes can cause checksum misses after reuse.</p>
+                <p>Each queued write carries its download and key hash. Queued and active writes proceed independently of memory retention. Publication rechecks disk containment under the disk index lock.</p>
+                <p>Writers own reserved chunks while awaiting payload I/O. Canceling a writer can release those chunks while submitted I/O continues; late writes can cause checksum misses after reuse.</p>
                 <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by all insertion paths and readable before flushing. Payload chunks are reserved at flush time; metadata positions are taken only at publication. Insufficient metadata capacity discards the whole written payload. Busy/flushing chunks may miss until publication. Full/no-fit chunks and the 60-second timer trigger flushing. Larger entries write separately; closing discards pending chunks.</p>
               </div></details>
               <a class="source" href="feuer/src/disk_write.rs">feuer/src/disk_write.rs · DiskWriteQueue</a>

@@ -84,7 +84,7 @@ impl TieredMemoryDiskCache {
                 memory.buffer_pool(),
             )
             .await?;
-            let write_queue = DiskWriteQueue::with_metrics(memory.clone(), cache.clone(), registry);
+            let write_queue = DiskWriteQueue::with_metrics(cache.clone(), registry);
             Some((cache, write_queue))
         };
         Ok(Self {

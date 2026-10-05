@@ -1,7 +1,9 @@
 use super::*;
 use crate::test_metrics::{registry, value};
 use bytes::Bytes;
+use feuer_memory::MemoryCache;
 use feuer_storage::IoMetrics;
+use feuer_types::ByteRange;
 
 #[test]
 fn queue_metrics_cover_enqueue_pressure_dequeue_and_cancellation() {
@@ -69,7 +71,7 @@ fn full_queue_skips_writes_without_waiting_or_rejecting_memory_admission() {
 }
 
 #[tokio::test]
-async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
+async fn queued_writes_persist_after_memory_eviction() {
     let directory = tempfile::tempdir().unwrap();
     let memory = Arc::new(MemoryCache::new(4096));
     let disk = DiskCache::open(directory.path(), 256 << 20, IoMetrics::noop())
@@ -78,22 +80,17 @@ async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
     let (registry, backend) = registry();
     let (disk_write_queue, receiver) = DiskWriteQueue::channel_with_metrics(8, DiskWriteQueueMetrics::new(&backend));
     let range = ByteRange::new(3, 7).unwrap();
-    for key in ["live-a", "evicted", "readmitted", "live-b"] {
+    for key in ["live", "evicted"] {
         enqueue(&disk_write_queue, &memory, key);
     }
     assert!(memory.remove(&ObjectKeyHash::from("evicted"), range));
-    assert!(memory.remove(&ObjectKeyHash::from("readmitted"), range));
-    memory.insert(
-        ObjectKeyHash::from("readmitted"),
-        Download::new(3, Bytes::from_static(b"abcd")).unwrap(),
-    );
+    drop(memory);
     tokio::time::pause();
-    let writer = tokio::spawn(DiskWriteQueue::write_queued(receiver, memory.clone(), disk.clone()));
+    let writer = tokio::spawn(DiskWriteQueue::write_queued(receiver, disk.clone()));
     tokio::task::yield_now().await;
-    assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 12.0);
+    assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 8.0);
     tokio::time::advance(Duration::from_secs(59)).await;
-    for key in ["live-a", "readmitted", "live-b"] {
-        assert!(memory.remove(&ObjectKeyHash::from(key), range));
+    for key in ["live", "evicted"] {
         assert_eq!(disk.get(&ObjectKeyHash::from(key), range).await.unwrap(), b"abcd"[..]);
     }
     tokio::time::advance(Duration::from_secs(1)).await;
@@ -107,9 +104,8 @@ async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
     .unwrap();
     drop(disk_write_queue);
     writer.await.unwrap();
-    assert!(!disk.covers_range(&ObjectKeyHash::from("evicted"), range));
-    // The timer flushes both shards, even after memory eviction.
-    for key in ["live-a", "readmitted", "live-b"] {
+    // The timer flushes the buffered entries without retaining the memory cache.
+    for key in ["live", "evicted"] {
         assert_eq!(
             disk.get(&ObjectKeyHash::from(key), range).await.unwrap(),
             Bytes::from_static(b"abcd")
@@ -120,10 +116,6 @@ async fn queued_writes_skip_evicted_ranges_but_accept_reinsertions() {
             "queue operations do not record requests"
         );
     }
-    assert_eq!(
-        value(&registry, "feuer_disk_write_queue_total", &[("outcome", "stale")]),
-        1.0
-    );
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 0.0);
     assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);
 }
@@ -139,7 +131,7 @@ async fn closing_queue_discards_partial_chunks() {
     let (queue, receiver) = DiskWriteQueue::channel_with_metrics(1, DiskWriteQueueMetrics::new(&backend));
     enqueue(&queue, &memory, "object");
     drop(queue);
-    DiskWriteQueue::write_queued(receiver, memory, disk.clone()).await;
+    DiskWriteQueue::write_queued(receiver, disk.clone()).await;
     assert!(!disk.covers_range(&ObjectKeyHash::from("object"), ByteRange::new(3, 7).unwrap()));
     assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);
     assert_eq!(value(&registry, "feuer_disk_write_pending_bytes", &[]), 0.0);
