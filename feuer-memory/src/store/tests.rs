@@ -180,6 +180,8 @@ fn eviction_triggering_insertions_count_once_per_attempt_not_per_victim() {
     // Both residents must be evicted, but only one insertion triggered them.
     cache.insert("large".into(), Download::new(0, Bytes::from_static(b"abcd")).unwrap());
     assert_eq!(cache.entry_count(), 1);
+    assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 4.0);
+    assert_eq!(value(&registry, "feuer_memory_entries", &[]), 1.0);
     assert_eq!(triggering(), 1.0);
     // Containment and replacement are not pressure evictions.
     cache.insert("large".into(), Download::new(0, Bytes::from_static(b"ab")).unwrap());
@@ -341,6 +343,55 @@ fn a_larger_download_replaces_contained_entries_but_not_partial_overlaps() {
     );
     assert_eq!(cache.get(&key, range(12, 15)).unwrap(), Bytes::from_static(b"mno"));
     assert!(cache.get(&key, range(9, 13)).is_none());
+}
+
+#[test]
+fn replacement_releases_contained_charges_including_an_empty_entry_at_the_end() {
+    use crate::test_metrics::{registry, value};
+
+    for (capacity, replacement_charge) in [(16, 3), (13, 11)] {
+        let (registry, backend) = registry();
+        let cache = cache_with_metrics(capacity, MemoryMetrics::new(&backend));
+        let key = ObjectKeyHash::from("object");
+        for (start, bytes, charge) in [
+            (0, Bytes::from_static(b"a"), 4),
+            (1, Bytes::from_static(b"b"), 4),
+            (3, Bytes::new(), 3),
+            (4, Bytes::from_static(b"ef"), 2),
+        ] {
+            assert!(cache.insert_with_allocation_charge(key, Download::new(start, bytes).unwrap(), charge));
+        }
+        assert_eq!(cache.used_bytes(), 13);
+        assert!(cache.insert_with_allocation_charge(
+            key,
+            Download::new(0, Bytes::from_static(b"abc")).unwrap(),
+            replacement_charge,
+        ));
+        assert_eq!(cache.used_bytes(), replacement_charge as u64 + 2);
+        assert_eq!(cache.entry_count(), 2);
+        assert!(!cache.contains_entry(&key, range(3, 3)));
+        assert_eq!(cache.get(&key, range(4, 6)).unwrap(), Bytes::from_static(b"ef"));
+        assert!(!cache.remove(&key, range(0, 1))); // Exact-range removal must not remove the replacement.
+        assert_eq!(
+            value(&registry, "feuer_memory_used_bytes", &[]),
+            replacement_charge as f64 + 2.0
+        );
+        assert_eq!(value(&registry, "feuer_memory_entries", &[]), 2.0);
+        assert_eq!(
+            value(&registry, "feuer_memory_operations_total", &[("operation", "replace")]),
+            1.0
+        );
+        assert_eq!(
+            value(&registry, "feuer_memory_eviction_triggering_insertions_total", &[]),
+            0.0
+        );
+        assert!(cache.remove(&key, range(0, 3)));
+        assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 2.0);
+        assert_eq!(value(&registry, "feuer_memory_entries", &[]), 1.0);
+        drop(cache);
+        assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 0.0);
+        assert_eq!(value(&registry, "feuer_memory_entries", &[]), 0.0);
+    }
 }
 
 #[test]
@@ -599,7 +650,8 @@ fn range_trim_requires_only_the_exact_source_range() {
         (4, true, 9, 1, range(2, 11), Some(b"cdefghijk".as_slice())),
         (5, true, 2, 1, range(2, 4), Some(b"cd".as_slice())),
     ] {
-        let cache = cache(20);
+        let (registry, backend) = crate::test_metrics::registry();
+        let cache = cache_with_metrics(20, MemoryMetrics::new(&backend));
         let key = ObjectKeyHash::from("source");
         let source = download(range(0, 10), Bytes::from_static(b"abcdefghij"));
         cache.insert(key, source.clone());
@@ -654,6 +706,14 @@ fn range_trim_requires_only_the_exact_source_range() {
         assert!(accessed_ranges(&cache, &key).contains(&range(6, 8)));
         assert_eq!(cache.used_bytes(), expected_bytes);
         assert_eq!(cache.entry_count(), expected_entries);
+        assert_eq!(
+            crate::test_metrics::value(&registry, "feuer_memory_used_bytes", &[]),
+            expected_bytes as f64
+        );
+        assert_eq!(
+            crate::test_metrics::value(&registry, "feuer_memory_entries", &[]),
+            expected_entries as f64
+        );
         assert_eq!(cache.get(&key, requested_range).as_deref(), expected_payload);
         if published {
             assert_eq!(cache.get(&key, range(2, 4)).unwrap(), Bytes::from_static(b"cd"));

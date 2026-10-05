@@ -53,23 +53,13 @@ impl ObjectEntries {
         entry.range.contains(range).then_some(entry)
     }
 
-    /// Collects byte ranges identifying contained entries and sums their allocation charges.
-    fn contained_entry_ranges(&self, range: ByteRange) -> ContainedEntryRanges {
-        let mut contained_ranges = ContainedEntryRanges::default();
-        let entries = self.by_start.range(range.start()..range.end());
-        for (_, entry) in entries.take_while(|(_, entry)| entry.range.end() <= range.end()) {
-            contained_ranges.ranges.push(entry.range);
-            contained_ranges.allocation_bytes += entry.allocation_charge;
-        }
-        contained_ranges
+    /// Iterates contained entries, including empty entries at the range's end.
+    fn contained_entries(&self, range: ByteRange) -> impl Iterator<Item = &MemoryEntry> {
+        self.by_start
+            .range(range.start()..)
+            .map(|(_, entry)| entry)
+            .take_while(move |entry| range.contains(entry.range))
     }
-}
-
-/// Byte ranges identifying contained entries, plus their total allocation charge.
-#[derive(Default)]
-struct ContainedEntryRanges {
-    ranges: Vec<ByteRange>,
-    allocation_bytes: u64,
 }
 
 /// Object key and range start of a cached entry.
@@ -198,22 +188,30 @@ impl MemoryCacheShard {
         access_histories: &ObjectAccessHistories,
         allow_range_trim: bool,
     ) -> InsertOrReclaimResult {
-        let contained_ranges = match self.entries_by_key.get(object_key) {
+        let contained_allocation_bytes: u64 = match self.entries_by_key.get(object_key) {
             Some(entries) if entries.covering_entry(range).is_some() => {
                 self.metrics.record_redundant();
                 return InsertOrReclaimResult::Complete(false);
             }
-            Some(entries) => entries.contained_entry_ranges(range),
-            None => ContainedEntryRanges::default(),
+            Some(entries) => entries
+                .contained_entries(range)
+                .map(|entry| entry.allocation_charge)
+                .sum(),
+            None => 0,
         };
-        let used_bytes_without_contained_entries = self.used_bytes - contained_ranges.allocation_bytes;
+        let used_bytes_without_contained_entries = self.used_bytes - contained_allocation_bytes;
         let max_existing_bytes = self.capacity.saturating_sub(allocation_charge);
 
         if used_bytes_without_contained_entries <= max_existing_bytes {
-            let removed_entry_count = contained_ranges.ranges.len() as u64;
-            for &range in &contained_ranges.ranges {
-                self.remove_entry(object_key, range)
+            let mut replaced = false;
+            while let Some(contained_range) = self
+                .entries_by_key
+                .get(object_key)
+                .and_then(|entries| entries.contained_entries(range).next().map(|entry| entry.range))
+            {
+                self.remove_entry(object_key, contained_range)
                     .expect("the contained entry was just found");
+                replaced = true;
             }
             self.insert_entry(
                 *object_key,
@@ -223,10 +221,7 @@ impl MemoryCacheShard {
                 access_histories.request_count(),
             );
 
-            self.metrics
-                .decrease_usage(contained_ranges.allocation_bytes, removed_entry_count);
-            self.metrics.increase_usage(allocation_charge, 1);
-            self.metrics.record_insert(removed_entry_count != 0);
+            self.metrics.record_insert(replaced);
             return InsertOrReclaimResult::Complete(true);
         }
 
@@ -240,14 +235,12 @@ impl MemoryCacheShard {
         }
 
         let range = entry.range;
-        let removed_bytes = self
-            .remove_entry(&key, range)
+        self.remove_entry(&key, range)
             .expect("an entry selected for eviction cannot disappear while its shard is locked");
-        self.metrics.decrease_usage(removed_bytes, 1);
         InsertOrReclaimResult::Evicted
     }
 
-    /// Inserts an entry and charges its allocation bytes to the shard and buffer pool.
+    /// Inserts an entry and updates shard, buffer-pool, and metric usage.
     fn insert_entry(
         &mut self,
         object_key: ObjectKeyHash,
@@ -258,6 +251,7 @@ impl MemoryCacheShard {
     ) {
         self.used_bytes += allocation_charge;
         self.buffer_pool.add_entry_bytes(allocation_charge);
+        self.metrics.increase_usage(allocation_charge, 1);
         let candidate_index = self.candidates.register(ObjectKeyAndRangeStart {
             object_key,
             start: range.start(),
@@ -283,15 +277,13 @@ impl MemoryCacheShard {
     }
 
     pub(super) fn remove(&mut self, object_key: &ObjectKeyHash, range: ByteRange) -> bool {
-        self.remove_entry(object_key, range).is_some_and(|removed_bytes| {
-            self.metrics.decrease_usage(removed_bytes, 1);
+        self.remove_entry(object_key, range).is_some_and(|_| {
             self.metrics.record_remove();
             true
         })
     }
 
-    /// Removes one entry from the shard and returns its allocation charge.
-    /// Subtracts those bytes from shard usage; the caller updates metrics.
+    /// Removes one entry, updates shard, buffer-pool, and metric usage, and returns its allocation charge.
     fn remove_entry(&mut self, object_key: &ObjectKeyHash, range: ByteRange) -> Option<u64> {
         let entries = self.entries_by_key.get_mut(object_key)?;
         let std::collections::btree_map::Entry::Occupied(entry) = entries.by_start.entry(range.start()) else {
@@ -310,6 +302,7 @@ impl MemoryCacheShard {
         let removed_bytes = removed_entry.allocation_charge;
         self.used_bytes -= removed_bytes;
         self.buffer_pool.remove_entry_bytes(removed_bytes);
+        self.metrics.decrease_usage(removed_bytes, 1);
         Some(removed_bytes)
     }
 
@@ -390,7 +383,6 @@ impl MemoryCacheShard {
             return false;
         };
         let mut inserted_payload_bytes = 0_u64;
-        let mut inserted_entry_count = 0_u64;
 
         for (range, bytes) in replacement.payloads {
             if self
@@ -403,15 +395,11 @@ impl MemoryCacheShard {
             }
             let allocation_charge = bytes.len() as u64;
             inserted_payload_bytes += allocation_charge;
-            inserted_entry_count += 1;
             self.insert_entry(replacement.object_key, range, bytes, allocation_charge, request_count);
         }
 
         let reclaimed_bytes = removed_bytes - inserted_payload_bytes;
         debug_assert!(reclaimed_bytes >= replacement.plan.reclaimed_bytes());
-        self.metrics.decrease_usage(removed_bytes, 1);
-        self.metrics
-            .increase_usage(inserted_payload_bytes, inserted_entry_count);
         self.metrics.record_range_trim(reclaimed_bytes);
         true
     }
