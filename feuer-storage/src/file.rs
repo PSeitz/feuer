@@ -16,7 +16,7 @@ use fs4::fs_std::FileExt as LockFileExt;
 use tokio::runtime::Handle;
 use tracing::{Instrument, Span, field};
 
-use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, uring};
+use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, allocation::CHUNK_BYTES, uring};
 
 const DATA_FILE_NAME: &str = "data";
 const LOCK_FILE_NAME: &str = ".feuer.lock";
@@ -160,7 +160,7 @@ impl DataFile {
     /// Reads a complete metadata chunk, waiting for read-channel capacity before allocating.
     /// Recovery finishes before any writes begin.
     pub(crate) async fn read_recovery_chunk(&self, address: u64) -> DataFileResult<Bytes> {
-        let length = uring::MAX_IO_REQUEST_BYTES;
+        let length = CHUNK_BYTES as usize;
         self.measure_io(IoOperation::Read, address, length, async {
             self.state
                 .read_queue
@@ -439,6 +439,22 @@ mod tests {
             std::fs::metadata(directory.join(DATA_FILE_NAME)).unwrap().len(),
             CAPACITY
         );
+    }
+
+    #[tokio::test]
+    async fn recovery_reads_one_metadata_chunk_without_neighbors() {
+        let temp = tempdir().unwrap();
+        let file = DataFile::open(temp.path(), 2 * CHUNK_BYTES, IoMetrics::noop())
+            .await
+            .unwrap();
+        let metadata = Bytes::from(vec![0x55; CHUNK_BYTES as usize]);
+        file.write_at(0, &metadata).await.unwrap();
+        file.write_at(CHUNK_BYTES, &Bytes::from(vec![0x99; CHUNK_BYTES as usize]))
+            .await
+            .unwrap();
+        let recovered = file.read_recovery_chunk(0).await.unwrap();
+        assert_eq!(recovered.len(), metadata.len());
+        assert_eq!(recovered, metadata);
     }
 
     #[tokio::test]
