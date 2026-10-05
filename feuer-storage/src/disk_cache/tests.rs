@@ -278,6 +278,9 @@ async fn failed_large_reservation_leaves_buffered_entries_and_metadata_positions
     assert!(bytes.is_unique(), "the writer must release the incoming buffer");
     assert_eq!(shard.allocator.available_bytes(), 2 * CHUNK_BYTES);
     assert!(shard.metadata_pages.lock().unwrap().chunks.is_empty());
+    assert!(cache.covers_range(&ObjectKeyHash(1), range(1, 4097)));
+    assert!(!cache.covers_range(&ObjectKeyHash(1), range(0, 4098)));
+    assert!(!cache.covers_range(&ObjectKeyHash(2), range(0, 1)));
     assert_eq!(
         cache
             .write(ObjectKeyHash(2), download(0, 2 * CHUNK_BYTES as usize), ())
@@ -1258,29 +1261,44 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
     assert_eq!(returned, download(0, 100).bytes());
 }
 
-#[test]
-fn index_insertion_removes_covered_ranges_and_duplicate_starts() {
+#[tokio::test]
+async fn insertion_releases_contained_entries_and_preserves_covering_entries() {
     let key = ObjectKeyHash::from("object");
     let (registry, backend) = crate::test_metrics::registry();
-    let mut disk_index = DiskEntryIndex::new(DiskMetrics::new(&backend));
-    let entries = [range(10, 20), range(0, 30), range(15, 16), range(0, 30), range(0, 40)].map(|object_range| {
-        (
-            key,
-            DiskEntry {
-                in_flight_read: Weak::new(),
-                eviction_position: 0,
-                object_range,
-                payload_checksum: 0,
-                payload_range: 0..4096,
-                metadata: (0, 0),
-            },
-        )
-    });
-    let removed: usize = entries
-        .into_iter()
-        .map(|(key, entry)| disk_index.insert(key, entry).len())
-        .sum();
-    assert_eq!(removed, 4);
+    let directory = tempfile::tempdir().unwrap();
+    let cache = DiskCache::open_with_metrics(
+        directory.path(),
+        3 * CHUNK_BYTES,
+        IoMetrics::noop(),
+        Arc::new(ObjectAccessHistories::new()),
+        DiskMetrics::new(&backend),
+        RECLAIM_SAMPLE_SIZE,
+    )
+    .await
+    .unwrap();
+    let cache = with_manual_metadata_writes(cache);
+    for (object_range, inserted) in [
+        (range(10, 20), true),
+        (range(0, 30), true),
+        (range(15, 16), false),
+        (range(0, 30), false),
+        (range(0, 40), true),
+    ] {
+        assert_eq!(
+            cache
+                .insert(key, download(object_range.start(), object_range.len() as usize))
+                .await
+                .unwrap(),
+            inserted
+        );
+        let shard = &cache.disk.shards[0];
+        assert_eq!(shard.allocator.available_bytes(), CHUNK_BYTES);
+        assert_eq!(
+            shard.metadata_pages.lock().unwrap().free_entry_positions.len(),
+            page_format::ENTRIES_PER_METADATA_CHUNK - 1
+        );
+    }
+    let disk_index = cache.disk.shards[0].entry_index.lock().unwrap();
     assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 1.0);
     assert_eq!(
         crate::test_metrics::value(&registry, "feuer_disk_payload_bytes", &[]),

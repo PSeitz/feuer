@@ -43,9 +43,10 @@ impl DiskCacheInner {
                     metadata: (chunk_index, entry_metadata_index),
                     payload_range,
                 };
-                for entry in disk_index.insert(key, entry) {
-                    shard.allocator.release_payload(entry.payload_range.start);
-                    metadata.free_entry_positions.push(entry.metadata);
+                if disk_index.covering_entry(&key, object_range).is_some() {
+                    shard.release_entry(entry, &mut metadata);
+                } else {
+                    shard.insert_entry(&mut disk_index, &mut metadata, key, entry);
                 }
             }
         }

@@ -433,12 +433,43 @@ impl DiskCacheShard {
         let Some(entry) = disk_index.take_entry(key, start) else {
             return;
         };
+        self.release_entry(entry, &mut self.metadata_pages.lock().unwrap());
+    }
+
+    /// Releases one held payload and allows its metadata slot to be overwritten.
+    fn release_entry(&self, entry: DiskEntry, metadata: &mut metadata::MetadataPages) {
         self.allocator.release_payload(entry.payload_range.start);
-        self.metadata_pages
-            .lock()
-            .unwrap()
-            .free_entry_positions
-            .push(entry.metadata);
+        metadata.free_entry_positions.push(entry.metadata);
+    }
+
+    /// Inserts an entry not already covered and releases entries it contains.
+    /// The caller holds both locks and has reserved the payload and metadata slot.
+    fn insert_entry(
+        &self,
+        disk_index: &mut DiskEntryIndex,
+        metadata: &mut metadata::MetadataPages,
+        key: ObjectKeyHash,
+        mut entry: DiskEntry,
+    ) {
+        let object_range = entry.object_range;
+        // Entry ranges have increasing ends, so stop at the first range not contained.
+        while let Some((&start, existing)) = disk_index
+            .entries_by_key
+            .get(&key)
+            .and_then(|entries| entries.range(object_range.start()..).next())
+            && object_range.contains(existing.object_range)
+        {
+            self.release_entry(disk_index.take_entry(&key, start).unwrap(), metadata);
+        }
+        entry.eviction_position = disk_index.eviction_candidates.len();
+        disk_index.metrics.entries.increase(1);
+        disk_index.metrics.payload_bytes.increase(object_range.len());
+        disk_index.eviction_candidates.push((key, object_range.start()));
+        disk_index
+            .entries_by_key
+            .entry(key)
+            .or_default()
+            .insert(object_range.start(), entry);
     }
 }
 
@@ -450,33 +481,6 @@ impl DiskEntryIndex {
             next_sample_start: 0,
             metrics,
         }
-    }
-
-    /// Inserts one range and returns entries displaced or rejected by containment.
-    fn insert(&mut self, key: ObjectKeyHash, mut entry: DiskEntry) -> Vec<DiskEntry> {
-        let object_range = entry.object_range;
-        if self.covering_entry(&key, object_range).is_some() {
-            return vec![entry];
-        }
-        let mut removed = Vec::new();
-        // Entry ranges have increasing ends, so stop at the first range not contained.
-        while let Some((&start, existing)) = self
-            .entries_by_key
-            .get(&key)
-            .and_then(|entries| entries.range(object_range.start()..).next())
-            && object_range.contains(existing.object_range)
-        {
-            removed.push(self.take_entry(&key, start).unwrap());
-        }
-        entry.eviction_position = self.eviction_candidates.len();
-        self.metrics.entries.increase(1);
-        self.metrics.payload_bytes.increase(object_range.len());
-        self.eviction_candidates.push((key, object_range.start()));
-        self.entries_by_key
-            .entry(key)
-            .or_default()
-            .insert(object_range.start(), entry);
-        removed
     }
 
     /// Takes one entry out of the index and eviction candidates without releasing its payload or metadata slot.
@@ -528,7 +532,7 @@ impl DiskCacheInner {
         shard
             .buffered_small_entry_chunk
             .try_lock()
-            .is_ok_and(|pending| pending.get(key, range).is_some())
+            .is_ok_and(|pending| pending.covering_entry(key, range).is_some())
             || shard.entry_index.lock().unwrap().covering_entry(key, range).is_some()
     }
 

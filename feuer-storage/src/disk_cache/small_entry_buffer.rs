@@ -111,13 +111,17 @@ impl BufferedSmallEntryChunk {
         })
     }
 
-    /// Copies requested bytes from the newest covering entry so buffer reuse cannot change the result.
-    pub(super) fn get(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<Bytes> {
-        let entry = self
-            .entries
+    /// Finds the newest buffered entry covering the requested range without copying its payload.
+    pub(super) fn covering_entry(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&BufferedEntry> {
+        self.entries
             .iter()
             .rev()
-            .find(|entry| &entry.key == key && entry.object_range.contains(requested))?;
+            .find(|entry| &entry.key == key && entry.object_range.contains(requested))
+    }
+
+    /// Copies requested bytes from the newest covering entry so buffer reuse cannot change the result.
+    pub(super) fn get(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<Bytes> {
+        let entry = self.covering_entry(key, requested)?;
         let start = entry.offset + (requested.start() - entry.object_range.start()) as usize;
         Some(Bytes::copy_from_slice(
             &self.buffer.as_ref()[start..start + requested.len() as usize],

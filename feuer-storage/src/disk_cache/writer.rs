@@ -84,10 +84,7 @@ impl DiskCacheShard {
                     metadata: pages.free_entry_positions.pop().unwrap(),
                 };
                 pages.set_entry_metadata(&buffered.key, &entry);
-                for removed in disk_index.insert(buffered.key, entry) {
-                    self.allocator.release_payload(removed.payload_range.start);
-                    pages.free_entry_positions.push(removed.metadata);
-                }
+                self.insert_entry(&mut disk_index, &mut pages, buffered.key, entry);
                 published += 1;
                 buffered.attempt.set_outcome(DiskWriteOutcome::Published);
             }
