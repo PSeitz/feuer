@@ -60,7 +60,7 @@ impl DiskMetrics {
         let duration = registry.register_histogram_vec_with_buckets(
             "feuer_disk_lookup_duration_seconds".into(),
             "Completed disk-tier hit duration, including buffered copies or verified reads".into(),
-            &["outcome"],
+            &[],
             Buckets::exponential(0.000_001, 2.0, 25),
         );
         let write_entries = registry.register_counter_vec(
@@ -124,7 +124,7 @@ impl DiskMetrics {
         let outcomes = ["hit", "absent", "io_error", "checksum_failed"];
         Arc::new(Self {
             lookup_count: outcomes.map(|label| lookups.counter(&[label.into()])),
-            hit_duration: duration.histogram(&["hit".into()]),
+            hit_duration: duration.histogram(&[]),
             write_entries: ["published", "already_covered", "no_capacity", "failed", "canceled"]
                 .map(|label| write_entries.counter(&[label.into()])),
             queue_outcomes: ["queued", "queue_full", "queue_closed", "canceled"]
@@ -212,9 +212,7 @@ mod tests {
             .find(|family| family.name() == "feuer_disk_lookup_duration_seconds")
             .unwrap();
         assert_eq!(family.get_metric().len(), 1);
-        assert_eq!(
-            value(&registry, "feuer_disk_lookup_duration_seconds", &[("outcome", "hit")]),
-            1.0
-        );
+        assert!(family.get_metric()[0].get_label().is_empty());
+        assert_eq!(value(&registry, "feuer_disk_lookup_duration_seconds", &[]), 1.0);
     }
 }
