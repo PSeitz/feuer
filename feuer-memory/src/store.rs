@@ -145,15 +145,14 @@ impl MemoryCache {
         self.shards[shard_index].lock().get(object_key, requested_range)
     }
 
-    /// Caches one downloaded range without creating an access, charging its payload length.
-    /// Use [`Self::insert_with_allocation_charge`] when the backing allocation capacity is known.
+    /// Caches one downloaded range without creating an access, using its allocation charge.
     ///
     /// If an existing entry contains the download, the supplied payload is
     /// discarded. A larger download replaces entries it fully contains, while
     /// partial overlaps coexist.
     /// Returns whether the download was inserted rather than already covered.
     pub fn insert(&self, object_key: ObjectKeyHash, download: Download) -> bool {
-        let allocation_charge = download.bytes().len();
+        let allocation_charge = download.allocation_charge();
         self.insert_with_allocation_charge(object_key, download, allocation_charge)
     }
 

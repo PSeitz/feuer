@@ -60,7 +60,9 @@ Disk promotions copy the requested slice into a pooled buffer when its allocatio
 smaller than the original backing allocation. Otherwise, or if allocation fails,
 they retain the original slice. Both the cached and returned bytes use the chosen allocation;
 memory is charged its whole capacity. Whole-entry disk reads and checksum verification are unchanged.
-Callback downloads are charged by payload length because `Bytes` does not expose capacity.
+Callback downloads default to payload-length charges because `Bytes` does not expose capacity.
+Downloads created with `AlignedBuffer::into_download` charge the buffer's whole capacity;
+other downloaders can supply a known capacity with `Download::with_allocation_charge`.
 Entry targets remain split across shards; an oversized entry empties its shard and remains cached.
 Active reads and caller-only results are outside the budget. Metadata and pending disk writes
 can also keep additional memory alive.
@@ -82,10 +84,17 @@ queues. See the [disk layout](feuer-storage/disk-prototype.md) for details.
 
 ## Download buffers and allocator retention
 
-Your downloader allocates the `Bytes` returned by the callback; Feuer does not choose
-those buffers' alignment, backing size, or reuse policy. No alignment is required.
-Page-aligned buffers can avoid some disk-write scratch copies, though partial writes
-and padding can still require scratch buffers.
+Downloaders can acquire a buffer with `cache.allocate_buffer(length)`, fill
+`buffer.as_mut_slice()` from their response stream, then return `buffer.into_download(start)`.
+Acquisition uses the same aligned, bucketed pool as disk reads. Converting the buffer
+into a download does not copy its payload and preserves its backing-capacity charge.
+The caller, memory cache, and disk-write queue share the allocation. It becomes available
+for reuse only after its last owner releases it, subject to the idle capacity limit.
+Acquire after finalizing any coalesced range to avoid allocating one buffer per waiter.
+
+Downloaders may still supply their own `Bytes`; no alignment is required.
+Page-aligned buffers can avoid some disk-write scratch copies, though small-entry
+packing, partial writes, and padding can still require copies.
 
 In SSD replays, glibc did not return substantial freed memory to the OS, making RSS
 much larger than live cache memory. Jemalloc avoided that retention in the tested
@@ -148,6 +157,7 @@ readers. Allocation sizes are 32 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB,
 Aligned read lengths round up to the smallest fitting size; callers receive only the
 requested bytes. Larger allocations are exact-size and unpooled.
 
+Disk reads and downloads acquired through `cache.allocate_buffer` share this pool.
 Cached entries and idle buffers share the configured memory capacity. The idle pool is
 capped at 7% of that capacity by default. All size buckets share this limit;
 there are no per-bucket caps or reservations. Cached entries can use the full capacity.

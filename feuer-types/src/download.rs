@@ -15,6 +15,7 @@ use crate::ByteRange;
 pub struct Download {
     start: u64,
     bytes: Bytes,
+    allocation_charge: usize,
 }
 
 impl Download {
@@ -25,7 +26,30 @@ impl Download {
             downloaded_start: start,
             payload_bytes,
         })?;
-        Ok(Self { start, bytes })
+        let allocation_charge = bytes.len();
+        Ok(Self {
+            start,
+            bytes,
+            allocation_charge,
+        })
+    }
+
+    /// Charges the known backing allocation capacity rather than just the payload length.
+    /// Shared allocations are conservatively charged once per cached entry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `allocation_charge` is smaller than the payload length.
+    pub fn with_allocation_charge(mut self, allocation_charge: usize) -> Self {
+        assert!(allocation_charge >= self.bytes.len());
+        self.allocation_charge = allocation_charge;
+        self
+    }
+
+    /// Returns the backing allocation charge used by the memory cache.
+    /// Defaults to payload length when the allocation capacity is unknown.
+    pub const fn allocation_charge(&self) -> usize {
+        self.allocation_charge
     }
 
     /// Returns the first downloaded object offset.

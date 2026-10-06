@@ -92,6 +92,14 @@ impl TieredMemoryDiskCache {
         &self.inner.config
     }
 
+    /// Acquires an aligned buffer from the same pool used by disk reads.
+    /// Fill its exposed slice, then call [`feuer_memory::AlignedBuffer::into_download`]
+    /// to hand it to [`Self::get_or_fetch`] without copying. It returns to the pool
+    /// after its last owner releases it, subject to the idle capacity limit.
+    pub fn allocate_buffer(&self, length: usize) -> std::io::Result<feuer_memory::AlignedBuffer> {
+        self.inner.memory.buffer_pool().allocate(length)
+    }
+
     /// Returns the requested bytes from memory, disk, or this call's callback.
     ///
     /// A covering memory range is checked first, then disk. A disk hit promotes
@@ -189,6 +197,9 @@ pub enum GetOrFetchError<E> {
         downloaded_range: ByteRange,
     },
 }
+
+#[cfg(test)]
+mod download_buffer_tests;
 
 #[cfg(all(test, not(target_os = "linux")))]
 mod request_history_tests;

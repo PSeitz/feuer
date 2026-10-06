@@ -195,6 +195,12 @@ impl AlignedBuffer {
         Bytes::from_owner(self)
     }
 
+    /// Transfers this allocation into a download without copying, preserving its capacity charge.
+    pub fn into_download(self, start: u64) -> Result<feuer_types::Download, feuer_types::DownloadError> {
+        let capacity = self.capacity();
+        Ok(feuer_types::Download::new(start, self.into_bytes())?.with_allocation_charge(capacity))
+    }
+
     /// Exclusively accesses the requested bytes, never spare capacity.
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: this initialized allocation is exclusively owned by self.

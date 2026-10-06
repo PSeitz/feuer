@@ -22,6 +22,31 @@ fn size_boundaries_round_up_without_exposing_spare_capacity() {
 }
 
 #[test]
+fn download_preserves_capacity_and_returns_only_after_the_last_owner() {
+    let pool = BufferPool::new(100 * BUFFER_SIZES[0] as u64, MemoryMetrics::noop());
+    let mut buffer = pool.allocate(4).unwrap();
+    buffer.as_mut_slice().copy_from_slice(b"abcd");
+    let address = buffer.as_ref().as_ptr();
+    let download = buffer.into_download(10).unwrap();
+    assert_eq!(download.allocation_charge(), BUFFER_SIZES[0]);
+    assert_eq!(download.bytes().as_ptr(), address);
+    assert_eq!(download.bytes().as_ref(), b"abcd");
+    let queued = download.clone();
+    let caller = download.bytes_in_range(feuer_types::ByteRange::new(11, 13).unwrap());
+    drop(download);
+    drop(queued);
+    assert_eq!(pool.idle_bytes(), 0);
+    assert_eq!(caller.as_ref(), b"bc");
+    drop(caller);
+    assert_eq!(pool.idle_bytes(), BUFFER_SIZES[0] as u64);
+    assert_eq!(pool.allocate(4).unwrap().as_ref().as_ptr(), address);
+
+    // Invalid downloads also release their destination back to the pool.
+    assert!(pool.allocate(4).unwrap().into_download(u64::MAX).is_err());
+    assert_eq!(pool.idle_bytes(), BUFFER_SIZES[0] as u64);
+}
+
+#[test]
 fn cache_pressure_frees_larger_idle_buffers_and_updates_bucket_gauges() {
     let (registry, backend) = registry();
     let capacity = 100 * BUFFER_SIZES[2] as u64;
