@@ -56,8 +56,8 @@ full keys are not stored or checked for collisions. Keys must not be adversarial
 ## Capacity and disk writes
 
 Memory capacity covers cached allocation charges and idle read buffers in one cache instance.
-Disk promotions copy the requested slice into a pooled buffer when its allocation capacity is
-smaller than the original backing allocation. Otherwise, or if allocation fails,
+Disk promotions copy the requested slice into an aligned buffer only when its allocation capacity is
+at least 25% smaller than the original backing allocation. Otherwise, or if allocation fails,
 they retain the original slice. Both the cached and returned bytes use the chosen allocation;
 memory is charged its whole capacity. Whole-entry disk reads and checksum verification are unchanged.
 Callback downloads default to payload-length charges because `Bytes` does not expose capacity.

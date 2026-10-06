@@ -15,10 +15,8 @@ pub(super) const MIN_REQUESTS_BEFORE_RANGE_TRIM: u64 = 64;
 
 /// An entry's payload bytes, object range, allocation charge, candidate index, and request count at insertion.
 struct MemoryEntry {
-    /// Exact object interval and payload; lookup results share slices of this allocation.
+    /// Exact object interval, payload, and allocation charge; lookup results share this allocation.
     download: Download,
-    /// Allocation bytes charged to this entry, possibly larger than the visible payload.
-    allocation_charge: u64,
     /// Index of this entry's candidate in the list sampled for trimming or eviction.
     candidate_index: usize,
     /// Total request count when this entry was inserted.
@@ -143,7 +141,6 @@ impl MemoryCacheShard {
         &mut self,
         object_key: &ObjectKeyHash,
         download: &Download,
-        allocation_charge: u64,
         cache: &MemoryCache,
         allow_range_trim: bool,
     ) -> InsertOrReclaimResult {
@@ -155,20 +152,15 @@ impl MemoryCacheShard {
             }
             Some(entries) => entries
                 .contained_entries(range)
-                .map(|entry| entry.allocation_charge)
+                .map(|entry| entry.download.allocation_charge() as u64)
                 .sum(),
             None => 0,
         };
         let used_bytes_without_contained_entries = self.used_bytes - contained_allocation_bytes;
-        let max_existing_bytes = self.capacity.saturating_sub(allocation_charge);
+        let max_existing_bytes = self.capacity.saturating_sub(download.allocation_charge() as u64);
 
         if used_bytes_without_contained_entries <= max_existing_bytes {
-            let replaced = self.insert_entry(
-                *object_key,
-                download.clone(),
-                allocation_charge,
-                cache.access_histories.request_count(),
-            );
+            let replaced = self.insert_entry(*object_key, download.clone(), cache.access_histories.request_count());
 
             self.buffer_pool.metrics.record_insert(replaced);
             return InsertOrReclaimResult::Complete(true);
@@ -189,14 +181,9 @@ impl MemoryCacheShard {
     }
 
     /// Inserts an entry not already covered, removes entries it contains, and returns whether any were replaced.
-    fn insert_entry(
-        &mut self,
-        object_key: ObjectKeyHash,
-        download: Download,
-        allocation_charge: u64,
-        request_count: u64,
-    ) -> bool {
+    fn insert_entry(&mut self, object_key: ObjectKeyHash, download: Download, request_count: u64) -> bool {
         let range = download.downloaded_range();
+        let allocation_charge = download.allocation_charge() as u64;
         let mut replaced = false;
         while let Some(contained_range) = self
             .entries_by_key
@@ -214,7 +201,6 @@ impl MemoryCacheShard {
         let entries = self.entries_by_key.entry(object_key).or_default();
         let entry = MemoryEntry {
             download,
-            allocation_charge,
             candidate_index,
             request_count_at_insertion: request_count,
         };
@@ -256,7 +242,7 @@ impl MemoryCacheShard {
                 .unwrap()
                 .candidate_index = removed_entry.candidate_index;
         }
-        let removed_bytes = removed_entry.allocation_charge;
+        let removed_bytes = removed_entry.download.allocation_charge() as u64;
         self.used_bytes -= removed_bytes;
         self.buffer_pool.remove_entry_bytes(removed_bytes);
         self.buffer_pool.metrics.entries.decrease(1);
@@ -282,9 +268,9 @@ impl MemoryCacheShard {
             |(left_key, left_entry, left_cost), (right_key, right_entry, right_cost)| {
                 compare_cost_per_byte(
                     *left_cost,
-                    left_entry.allocation_charge,
+                    left_entry.download.allocation_charge() as u64,
                     *right_cost,
-                    right_entry.allocation_charge,
+                    right_entry.download.allocation_charge() as u64,
                 )
                 .then_with(|| left_key.cmp(right_key))
                 .then_with(|| left_entry.range().cmp(&right_entry.range()))
@@ -330,8 +316,7 @@ impl MemoryCacheShard {
             {
                 continue;
             }
-            let allocation_charge = download.bytes().len() as u64;
-            self.insert_entry(replacement.object_key, download, allocation_charge, request_count);
+            self.insert_entry(replacement.object_key, download, request_count);
         }
 
         let reclaimed_bytes = used_bytes_before_trim - self.used_bytes;

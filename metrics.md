@@ -160,8 +160,9 @@ Gauge values remain in bytes. Update filters using the former numeric bucket lab
 `feuer_memory_used_bytes` replaces `feuer_memory_payload_bytes`; the separate
 `feuer_io_buffer_pool_capacity_bytes` gauge has been removed. Update dashboards.
 Disk promotions charge the retained allocation's whole capacity, including padding and unused
-bytes. If the pooled buffer for the slice has smaller backing capacity, the charge is the
-destination buffer's capacity; allocation failure retains the original buffer.
+bytes. If copying the slice into an aligned buffer saves at least 25% of backing capacity,
+the charge is the destination buffer's capacity. Otherwise, or if allocation fails,
+the original buffer and its charge are retained.
 Callback downloads without capacity metadata use their payload length.
 Shared allocations are conservatively charged per cached entry. The existing oversized-entry
 exception can still make cached charges exceed the target.

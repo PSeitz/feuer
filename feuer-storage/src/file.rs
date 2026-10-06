@@ -152,12 +152,12 @@ impl DataFile {
             .await
     }
 
-    /// Copies a payload read result only if it saves at least 25% of backing capacity and at least 32 KiB.
+    /// Copies a payload read result only if it saves at least 25% of backing capacity.
     /// Derives read capacity from the whole payload length. Allocation failure leaves the result unchanged.
     pub(crate) fn shrink_read_buffer(&self, bytes: Bytes, payload_length: u64) -> (Bytes, usize) {
         let capacity = BufferPool::allocation_capacity(payload_disk_bytes(payload_length) as usize);
         let saved_bytes = capacity - BufferPool::allocation_capacity(bytes.len());
-        if saved_bytes < 32 * 1024 || saved_bytes < capacity.div_ceil(4) {
+        if saved_bytes < capacity.div_ceil(4) {
             return (bytes, capacity);
         }
         let Ok(mut buffer) = self.state.read_queue.allocate_buffer(bytes.len()) else {

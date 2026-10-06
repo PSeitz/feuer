@@ -152,31 +152,14 @@ impl MemoryCache {
     /// partial overlaps coexist.
     /// Returns whether the download was inserted rather than already covered.
     pub fn insert(&self, object_key: ObjectKeyHash, download: Download) -> bool {
-        let allocation_charge = download.allocation_charge();
-        self.insert_with_allocation_charge(object_key, download, allocation_charge)
-    }
-
-    /// Inserts downloaded bytes using the supplied allocation-byte charge, even if they are a smaller slice.
-    /// Shared allocations are conservatively charged once per cached entry.
-    pub fn insert_with_allocation_charge(
-        &self,
-        object_key: ObjectKeyHash,
-        download: Download,
-        allocation_charge: usize,
-    ) -> bool {
-        assert!(allocation_charge >= download.bytes().len());
-        let allocation_charge = allocation_charge as u64;
         let shard_index = self.shard_index(&object_key);
         let mut allow_range_trim = true;
         let mut evicted_any_entry = false;
         loop {
-            let insert_or_reclaim_result = self.shards[shard_index].lock().try_admit_or_reclaim(
-                &object_key,
-                &download,
-                allocation_charge,
-                self,
-                allow_range_trim,
-            );
+            let insert_or_reclaim_result =
+                self.shards[shard_index]
+                    .lock()
+                    .try_admit_or_reclaim(&object_key, &download, self, allow_range_trim);
             match insert_or_reclaim_result {
                 InsertOrReclaimResult::Complete(inserted) => {
                     if evicted_any_entry {
@@ -197,6 +180,17 @@ impl MemoryCache {
                 }
             }
         }
+    }
+
+    /// Inserts downloaded bytes using the supplied allocation-byte charge, even if they are a smaller slice.
+    /// Shared allocations are conservatively charged once per cached entry.
+    pub fn insert_with_allocation_charge(
+        &self,
+        object_key: ObjectKeyHash,
+        download: Download,
+        allocation_charge: usize,
+    ) -> bool {
+        self.insert(object_key, download.with_allocation_charge(allocation_charge))
     }
 
     /// Checks whether the exact key and range are cached, without retaining bytes or recording an access.

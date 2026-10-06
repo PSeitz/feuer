@@ -103,8 +103,9 @@ impl TieredMemoryDiskCache {
     /// Returns the requested bytes from memory, disk, or this call's callback.
     ///
     /// A covering memory range is checked first, then disk. A disk hit promotes
-    /// only the requested bytes to memory, copying if the pool offers a smaller
-    /// backing allocation. On a miss in both tiers, `callback` is
+    /// only the requested bytes to memory, copying if the destination allocation
+    /// saves at least 25% of backing capacity. Otherwise, or if allocation fails,
+    /// it retains the original slice. On a miss in both tiers, `callback` is
     /// invoked exactly once by this call; Feuer performs no leader election,
     /// waiter coordination, or source retry. A successful callback must return
     /// one valid [`Download`] covering `requested_range`. The memory target is

@@ -445,6 +445,20 @@ impl IoQueue {
         };
     }
 
+    /// Retains active slots at their original addresses after failure and notifies their callers.
+    fn retain_active_requests(&mut self) -> &'static [Option<IoRequest>] {
+        // This failure path does not drain outstanding requests. Ring close does not
+        // wait for teardown. Leak the fixed active slots and their file owner rather
+        // than risk use-after-free or early reuse.
+        tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
+        let requests = Box::leak(std::mem::take(&mut self.active));
+        for request in requests.iter_mut().flatten() {
+            let _ = request.reply.take().unwrap().send(Err(queue_stopped_error()));
+        }
+        std::mem::forget(self.files.clone());
+        requests
+    }
+
     /// Waits for a ring completion or an eventfd wakeup for new requests or shutdown.
     fn wait_for_completion_or_wakeup(&self, timeout_millis: i32) -> io::Result<()> {
         let mut fds = [
@@ -488,15 +502,8 @@ impl Drop for IoQueue {
     fn drop(&mut self) {
         self.receiver.close();
         if self.active.iter().any(Option::is_some) {
-            // This failure path does not drain outstanding requests. Ring close does not
-            // wait for teardown. Leak the fixed active slots and their file owner rather
-            // than risk use-after-free or early reuse.
             // Normal shutdown drains all completions and never takes this path.
-            tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
-            for request in Box::leak(std::mem::take(&mut self.active)).iter_mut().flatten() {
-                let _ = request.reply.take().unwrap().send(Err(queue_stopped_error()));
-            }
-            std::mem::forget(self.files.clone());
+            self.retain_active_requests();
         }
     }
 }

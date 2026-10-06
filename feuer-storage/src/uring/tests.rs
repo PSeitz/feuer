@@ -276,6 +276,57 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
 }
 
 #[test]
+fn queue_failure_retains_write_descriptors_and_files() {
+    let (mut queue, sender) = queue();
+    let pool = buffer_pool();
+    let page = DIRECT_IO_ALIGNMENT_BYTES;
+    let mut buffer = pool.allocate(page + 17).unwrap();
+    buffer.as_mut_slice().fill(0x77);
+    let payload_address = buffer.as_ref().as_ptr();
+    let buffers = IoBuffers::from_write_bytes(2 * page, buffer.into_bytes()).unwrap();
+    let (reply, mut receive) = oneshot::channel();
+    sender.try_send(IoRequest::new(0, buffers, 0..2 * page, reply)).unwrap();
+    drop(sender);
+    queue.receive_requests();
+    let slots_address = queue.active.as_ptr();
+    let IoBuffers::Write { vectors, .. } = &queue.active[0].as_ref().unwrap().buffers else {
+        unreachable!()
+    };
+    let descriptors_address = vectors.as_ptr();
+    let files = Arc::downgrade(&queue.files);
+
+    let error = queue
+        .process_requests_with_submit(|ring| {
+            assert_eq!(ring.submit()?, 1);
+            // Fail immediately after acceptance, without waiting for or processing a CQE.
+            Err(io::Error::from_raw_os_error(libc::EIO))
+        })
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EIO));
+    assert!(matches!(receive.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+
+    let retained = queue.retain_active_requests();
+    assert!(queue.active.is_empty());
+    drop(queue);
+    assert_eq!(
+        receive.try_recv().unwrap().err().unwrap().kind(),
+        io::ErrorKind::BrokenPipe
+    );
+    assert!(files.upgrade().unwrap()._directory_lock.is_some());
+    assert_eq!(retained.as_ptr(), slots_address);
+    let IoBuffers::Write { bytes, vectors } = &retained[0].as_ref().unwrap().buffers else {
+        unreachable!()
+    };
+    assert_eq!(vectors.as_ptr(), descriptors_address);
+    assert_eq!(bytes[0].as_ptr(), payload_address);
+    for (bytes, vector) in bytes.iter().zip(vectors) {
+        assert_eq!(vector.iov_base.cast_const().cast::<u8>(), bytes.as_ptr());
+        assert_eq!(vector.iov_len, page);
+    }
+    assert_eq!(pool.idle_bytes(), 0);
+}
+
+#[test]
 fn canceled_submitted_write_retains_buffers_on_queue_failure() {
     let (mut queue, sender) = queue();
     let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_REQUEST_BYTES as u64);

@@ -179,8 +179,8 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
                 <div class="node-body">
                   <p>For a stored entry, the disk cache reads and hashes the <strong>entire covering entry</strong>, excluding alignment padding and without reading metadata or neighboring entries. Concurrent readers of the same stored entry share its I/O and verification. Hits in unfinished small-entry buffers instead copy only the requested bytes without disk I/O.</p>
                   <p>Readers retain an address and expected checksum, not a disk-region guard. Eviction can release chunks for reuse while a read is outstanding. Corrupt or uncertain data becomes a miss and falls through to the callback; validation is subject to checksum collisions. A disk hit does not schedule another disk write.</p>
-                  <p class="note">Only the requested slice is returned and indexed in memory. Promotion copies it when the destination buffer has smaller backing capacity; allocation failure retains the original slice. Memory admission charges the chosen buffer's whole capacity. A small request can still require a large whole-entry read.</p>
-                  <a class="source-label" href="feuer/src/cache.rs">feuer/src/cache.rs · get_or_fetch / shrink_disk_result</a>
+                  <p class="note">Only the requested slice is returned and indexed in memory. Promotion copies it only when the destination buffer saves at least 25% of backing capacity; otherwise, or if allocation fails, it retains the original slice. Memory admission charges the chosen buffer's whole capacity. A small request can still require a large whole-entry read.</p>
+                  <a class="source-label" href="feuer/src/cache.rs">feuer/src/cache.rs · get_or_fetch / feuer-storage/src/file.rs · shrink_read_buffer</a>
                   <a class="source-label" href="feuer-storage/src/disk_cache.rs">feuer-storage/src/disk_cache.rs · fetch_from_disk</a>
                   <a class="source-label" href="format.md">format.md · Write ordering and reuse</a>
                 </div>

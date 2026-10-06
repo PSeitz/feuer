@@ -49,18 +49,30 @@ fn cached_slices_and_idle_buffers_share_allocation_accounting() {
 
 #[test]
 fn cached_capacity_drives_eviction_not_slice_length() {
-    let cache = cache(32 * 1024);
-    for key in ["first", "second"] {
-        let buffer = cache.buffer_pool().allocate(1).unwrap();
-        let capacity = buffer.capacity();
-        cache.insert_with_allocation_charge(key.into(), Download::new(0, buffer.into_bytes()).unwrap(), capacity);
+    for override_charge in [false, true] {
+        let cache = cache(32 * 1024);
+        for key in ["first", "second"] {
+            let buffer = cache.buffer_pool().allocate(1).unwrap();
+            let capacity = buffer.capacity();
+            let download = buffer.into_download(0).unwrap();
+            if override_charge {
+                // The explicit charge replaces an existing download charge, not just the default.
+                cache.insert_with_allocation_charge(
+                    key.into(),
+                    download.with_allocation_charge(capacity / 2),
+                    capacity,
+                );
+            } else {
+                cache.insert(key.into(), download);
+            }
+        }
+        assert!(cache.get(&"first".into(), range(0, 1)).is_none());
+        assert!(cache.get(&"second".into(), range(0, 1)).is_some());
+        assert_eq!(cache.used_bytes(), 32 * 1024);
+        assert_eq!(cache.buffer_pool().idle_bytes(), 0);
+        cache.remove(&"second".into(), range(0, 1));
+        assert_eq!(cache.used_bytes(), 0); // even one idle buffer exceeds the pool's limit
     }
-    assert!(cache.get(&"first".into(), range(0, 1)).is_none());
-    assert!(cache.get(&"second".into(), range(0, 1)).is_some());
-    assert_eq!(cache.used_bytes(), 32 * 1024);
-    assert_eq!(cache.buffer_pool().idle_bytes(), 0);
-    cache.remove(&"second".into(), range(0, 1));
-    assert_eq!(cache.used_bytes(), 0); // even one idle buffer exceeds the pool's limit
 }
 
 #[test]
@@ -228,14 +240,14 @@ fn reclaim_sampling_advances_past_contained_ranges() {
     let replacement = Download::new(0, Bytes::from_static(b"abc")).unwrap();
     for (expected_entries, evicted) in [(3, false), (3, false), (2, true)] {
         assert!(matches!(
-            shard.try_admit_or_reclaim(&key, &replacement, 3, &cache, false),
+            shard.try_admit_or_reclaim(&key, &replacement, &cache, false),
             InsertOrReclaimResult::Retry { evicted: removed } if removed == evicted
         ));
         assert_eq!(shard.entry_count(), expected_entries);
     }
     // The partial overlap is eligible; the two ranges fully contained in the incoming download were skipped.
     assert!(matches!(
-        shard.try_admit_or_reclaim(&key, &replacement, 3, &cache, false),
+        shard.try_admit_or_reclaim(&key, &replacement, &cache, false),
         InsertOrReclaimResult::Complete(true)
     ));
     assert_eq!(shard.entry_count(), 1);
@@ -673,7 +685,6 @@ fn range_trim_requires_only_the_exact_source_range() {
             let InsertOrReclaimResult::Trim(source) = shard.try_admit_or_reclaim(
                 &ObjectKeyHash::from("incoming"),
                 &Download::new(0, Bytes::from_static(b"01234567890")).unwrap(),
-                11,
                 &cache,
                 true,
             ) else {
