@@ -283,7 +283,8 @@ impl DiskCache {
     }
 
     /// Copies buffered bytes, or reads disk after verifying the whole covering entry's checksum.
-    /// Copies the requested slice if the pool offers a smaller backing allocation; allocation failure keeps the slice.
+    /// Copies a disk-read slice only if it saves at least 25% of backing capacity and at least 32 KiB.
+    /// Allocation failure keeps the original slice.
     /// Returns the final backing buffer's capacity too. Concurrent callers share the entry read.
     /// Missing entries and read or checksum failures are misses.
     pub async fn fetch_from_disk(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<(Bytes, usize)> {

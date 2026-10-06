@@ -152,11 +152,12 @@ impl DataFile {
             .await
     }
 
-    /// Copies a payload read result only if the destination has smaller backing capacity.
-    /// Derives read capacity from the whole payload length; allocation failure leaves the result unchanged.
+    /// Copies a payload read result only if it saves at least 25% of backing capacity and at least 32 KiB.
+    /// Derives read capacity from the whole payload length. Allocation failure leaves the result unchanged.
     pub(crate) fn shrink_read_buffer(&self, bytes: Bytes, payload_length: u64) -> (Bytes, usize) {
         let capacity = BufferPool::allocation_capacity(payload_disk_bytes(payload_length) as usize);
-        if BufferPool::allocation_capacity(bytes.len()) >= capacity {
+        let saved_bytes = capacity - BufferPool::allocation_capacity(bytes.len());
+        if saved_bytes < 32 * 1024 || saved_bytes < capacity.div_ceil(4) {
             return (bytes, capacity);
         }
         let Ok(mut buffer) = self.state.read_queue.allocate_buffer(bytes.len()) else {
@@ -430,6 +431,30 @@ mod tests {
             std::fs::metadata(directory.join(DATA_FILE_NAME)).unwrap().len(),
             CAPACITY
         );
+    }
+
+    #[tokio::test]
+    async fn read_buffer_copy_requires_minimum_savings() {
+        let temp = tempdir().unwrap();
+        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
+        file.write_at(0, &Bytes::from(vec![0x55; CAPACITY as usize]))
+            .await
+            .unwrap();
+        let mib = CHUNK_BYTES as usize;
+        for (payload_length, slice_length, expected_capacity, copied) in [
+            (3 * mib, 2 * mib, 2 * mib, true),
+            (4 * mib, 2 * mib, 2 * mib, true),
+            (4 * mib, 2 * mib + 1, 3 * mib, true),
+            (4 * mib, 4 * mib - 1, 4 * mib, false),
+            (3 * mib, mib, mib, true),
+        ] {
+            let source = file.read_payload(0, payload_length).await.unwrap();
+            let slice = source.slice(..slice_length);
+            let (bytes, capacity) = file.shrink_read_buffer(slice.clone(), payload_length as u64);
+            assert_eq!(bytes, slice);
+            assert_eq!(capacity, expected_capacity);
+            assert_eq!(bytes.as_ptr() != source.as_ptr(), copied);
+        }
     }
 
     #[tokio::test]

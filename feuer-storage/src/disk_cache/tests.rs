@@ -1223,7 +1223,12 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
     assert!(cache.insert(key, source.clone()).await.unwrap());
     let boundary = 3 + CHUNK_BYTES - entry_disk_ranges(&cache, &key).await.0.start % CHUNK_BYTES;
     for (request, capacity) in [
-        (source.downloaded_range(), source.bytes().len()),
+        (source.downloaded_range(), 100 * CHUNK_BYTES as usize + BUFFER_ALIGNMENT),
+        (
+            range(3, 3 + 80 * CHUNK_BYTES),
+            100 * CHUNK_BYTES as usize + BUFFER_ALIGNMENT,
+        ),
+        (range(3, 3 + 75 * CHUNK_BYTES), 75 * CHUNK_BYTES as usize),
         (range(7, 33), 32 * 1024),
         (range(boundary - 3, boundary + 13), 32 * 1024),
         (
