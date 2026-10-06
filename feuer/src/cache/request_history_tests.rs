@@ -12,6 +12,7 @@ async fn records_each_started_request_before_any_result() {
             memory: MemoryCache::with_metrics(1024, feuer_memory::MemoryMetrics::new(&registry)),
             metrics: LookupMetrics::new(&registry),
         }),
+        trace: None,
     };
     let history = cache.inner.memory.access_histories();
     let key = "object".to_owned();

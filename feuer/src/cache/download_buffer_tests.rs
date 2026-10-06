@@ -3,6 +3,7 @@ use super::*;
 #[tokio::test]
 async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
     let (registry, backend) = crate::test_metrics::registry();
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let cache = TieredMemoryDiskCache {
         inner: Arc::new(TieredMemoryDiskCacheInner {
             config: CacheConfig::new("cache", 0, 8 << 20).unwrap(),
@@ -11,7 +12,9 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
             #[cfg(target_os = "linux")]
             disk: None,
         }),
-    };
+        trace: None,
+    }
+    .with_trace(move |package| std::future::ready(sender.send(package).map_err(std::io::Error::other)));
     // Seed an idle disk-read buffer to verify downloads acquire from that same pool.
     let pool = cache.inner.memory.buffer_pool();
     let idle = pool.allocate(4).unwrap();
@@ -43,4 +46,9 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
         .unwrap();
     assert_eq!(hit.as_ref(), b"abcd");
     assert_eq!(hit.as_ptr(), address);
+    drop(cache);
+    let bytes = receiver.recv().await.unwrap();
+    assert_eq!(&bytes[..8], b"FETR\x01\0\0\0");
+    assert_eq!(bytes.len(), 8 + 4 * 65);
+    assert_eq!([bytes[8], bytes[73], bytes[138], bytes[203]], [0, 3, 0, 1]);
 }

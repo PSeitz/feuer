@@ -185,6 +185,13 @@ Use `TieredMemoryDiskCache::open_with_metrics(config, &registry).await` with a
 metrics. Your application handles export. `open(config)` disables metrics.
 See the [metric reference](metrics.md) for names and accounting rules.
 
+## Access tracing
+
+Register an async callback with `cache.with_trace(callback)`.
+Feuer delivers ready-to-persist binary packages; the receiver owns persistence.
+Dropping the last cache handle delivers the tail asynchronously, without waiting.
+See the [format and contract](access-trace.md) and [file receiver](feuer/examples/trace_to_disk.rs).
+
 ## Development
 
 ```console

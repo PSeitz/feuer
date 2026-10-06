@@ -18,6 +18,10 @@ feuer-memory = { workspace = true }
 feuer-types = { workspace = true }
 mixtrics = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[features]
+default = ["tokio/runtime-tokio"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 feuer-storage = { path = "../feuer-storage" }

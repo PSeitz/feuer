@@ -13,6 +13,7 @@ use thiserror::Error;
 
 use crate::{
     CacheConfig,
+    access_trace::Trace,
     metrics::{LookupMetrics, LookupOutcome},
 };
 
@@ -33,6 +34,7 @@ struct TieredMemoryDiskCacheInner {
 #[derive(Clone)]
 pub struct TieredMemoryDiskCache {
     inner: Arc<TieredMemoryDiskCacheInner>,
+    trace: Option<Trace>,
 }
 
 impl fmt::Debug for TieredMemoryDiskCache {
@@ -84,7 +86,19 @@ impl TieredMemoryDiskCache {
                 metrics: LookupMetrics::new(registry),
                 disk,
             }),
+            trace: None,
         })
+    }
+
+    /// Delivers complete, uncompressed binary trace packages as [`Bytes`] for this handle and its clones.
+    /// Requires Tokio. Persist bytes unchanged; the receiver owns retries and error reporting.
+    pub fn with_trace<F, Fut>(mut self, callback: F) -> Self
+    where
+        F: FnMut(Bytes) -> Fut + Send + 'static,
+        Fut: Future<Output = std::io::Result<()>> + Send + 'static,
+    {
+        self.trace = Some(Trace::new(callback));
+        self
     }
 
     /// Returns this cache's configuration.
@@ -116,6 +130,8 @@ impl TieredMemoryDiskCache {
     /// insertion is separate and creates no access.
     /// The returned [`Bytes`] contains exactly the request and may share the
     /// download's allocation.
+    ///
+    /// Tracing can backpressure lookups but never changes their results.
     pub async fn get_or_fetch<F, Fut, E>(
         &self,
         object_key: crate::ObjectKey,
@@ -129,9 +145,17 @@ impl TieredMemoryDiskCache {
         let object_key = ObjectKeyHash::from(object_key);
         let history = self.inner.memory.access_histories();
         history.record_access(&object_key, requested_range);
+        let access = if let Some(trace) = &self.trace {
+            Some(trace.send_request_start(object_key, requested_range).await)
+        } else {
+            None
+        };
         let metrics = &self.inner.metrics;
         if let Some(bytes) = self.inner.memory.get(&object_key, requested_range) {
             metrics.record(LookupOutcome::MemoryHit, None, requested_range.len());
+            if let Some(access) = access {
+                access.send_outcome(LookupOutcome::MemoryHit, None).await;
+            }
             return Ok(bytes);
         }
 
@@ -146,16 +170,30 @@ impl TieredMemoryDiskCache {
                 buffer_capacity,
             );
             metrics.record(LookupOutcome::DiskHit, Some(started.elapsed()), requested_range.len());
+            if let Some(access) = access {
+                access.send_outcome(LookupOutcome::DiskHit, None).await;
+            }
             return Ok(bytes);
         }
 
-        let download = callback().await.map_err(|error| {
-            metrics.record(LookupOutcome::CallbackError, None, 0);
-            GetOrFetchError::Callback(error)
-        })?;
+        let download = match callback().await {
+            Ok(download) => download,
+            Err(error) => {
+                metrics.record(LookupOutcome::CallbackError, None, 0);
+                if let Some(access) = access {
+                    access.send_outcome(LookupOutcome::CallbackError, None).await;
+                }
+                return Err(GetOrFetchError::Callback(error));
+            }
+        };
         let downloaded_range = download.downloaded_range();
         if !downloaded_range.contains(requested_range) {
             metrics.record(LookupOutcome::InvalidDownload, None, 0);
+            if let Some(access) = access {
+                access
+                    .send_outcome(LookupOutcome::InvalidDownload, Some(downloaded_range))
+                    .await;
+            }
             return Err(GetOrFetchError::DownloadDoesNotCover {
                 requested_range,
                 downloaded_range,
@@ -179,6 +217,11 @@ impl TieredMemoryDiskCache {
         self.inner.memory.insert(object_key, download);
 
         metrics.record(LookupOutcome::Callback, Some(started.elapsed()), requested_range.len());
+        if let Some(access) = access {
+            access
+                .send_outcome(LookupOutcome::Callback, Some(downloaded_range))
+                .await;
+        }
         Ok(requested_bytes)
     }
 }

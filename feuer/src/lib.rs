@@ -6,6 +6,7 @@
 //! Zero disk capacity disables the disk tier. With disk enabled, opening requires
 //! Linux direct I/O and io_uring, and waits for every disk shard's metadata recovery.
 
+mod access_trace;
 mod cache;
 mod config;
 mod metrics;
