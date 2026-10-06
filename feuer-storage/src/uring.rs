@@ -1,5 +1,19 @@
 //! Separate single-owner rings for reads and writes. Only this module hands buffer pointers to the kernel.
 //! Requests must be nonempty, with offsets and lengths aligned to DIRECT_IO_ALIGNMENT_BYTES.
+//!
+//! # Kernel pointer lifetime
+//!
+//! Active slots keep payload buffers and write descriptors alive at stable addresses until the
+//! request's completion queue entry (CQE), including an error CQE. An error from submit() or poll()
+//! does not prove the kernel has stopped using those buffers.
+//!
+//! EAGAIN retries pending submissions after a timed wait because no accepted I/O may exist to wake us.
+//!
+//! If the queue fails before we observe completion, we don't know whether the kernel still uses
+//! the buffers. Drop leaks active slots rather than risk use-after-free.
+//!
+//! See <https://man7.org/linux/man-pages/man2/io_uring_enter.2.html> and
+//! <https://man7.org/linux/man-pages/man7/io_uring_cancelation.7.html>.
 
 use std::{
     fs::File,
@@ -351,6 +365,14 @@ struct IoQueue {
 impl IoQueue {
     /// Processes requests until the sender disconnects and all queued and active I/O drains.
     fn process_requests_until_disconnected(&mut self) -> io::Result<()> {
+        self.process_requests_with_submit(|ring| ring.submit())
+    }
+
+    /// Uses the supplied submission function so tests can inject resource pressure and partial acceptance.
+    fn process_requests_with_submit(
+        &mut self,
+        mut submit: impl FnMut(&mut IoUring) -> io::Result<usize>,
+    ) -> io::Result<()> {
         loop {
             // Release the completion-queue borrow before retrying a short request.
             while let Some(completion) = { self.ring.completion().next() } {
@@ -369,9 +391,15 @@ impl IoQueue {
             }
             // submit() never waits for a completion. poll watches BOTH completions and
             // new requests, so an outstanding slow read cannot stall fresh submissions.
-            match self.ring.submit() {
+            match submit(&mut self.ring) {
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    // EAGAIN leaves requests owned by their slots. Avoid spinning, but retry
+                    // after 1 ms even if no request was accepted and no completion can wake us.
+                    self.wait_for_completion_or_wakeup(1)?;
+                    continue;
+                }
                 Err(error) => return Err(error),
             }
             // A short submission must be retried before sleeping; queued SQEs might
@@ -379,7 +407,7 @@ impl IoQueue {
             if !self.ring.submission().is_empty() {
                 continue;
             }
-            self.wait_for_completion_or_wakeup()?;
+            self.wait_for_completion_or_wakeup(-1)?;
         }
     }
 
@@ -418,7 +446,7 @@ impl IoQueue {
     }
 
     /// Waits for a ring completion or an eventfd wakeup for new requests or shutdown.
-    fn wait_for_completion_or_wakeup(&self) -> io::Result<()> {
+    fn wait_for_completion_or_wakeup(&self, timeout_millis: i32) -> io::Result<()> {
         let mut fds = [
             libc::pollfd {
                 fd: self.ring.as_raw_fd(),
@@ -432,7 +460,7 @@ impl IoQueue {
             },
         ];
         // SAFETY: fds describes two valid pollfd values, and both fds remain owned.
-        let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_millis) };
         if result < 0 {
             let error = io::Error::last_os_error();
             return if error.kind() == io::ErrorKind::Interrupted {

@@ -134,6 +134,51 @@ fn full_ring_does_not_block_the_other_direction() {
     }
 }
 
+#[test]
+fn resource_pressure_retries_pending_submissions() {
+    for operation in [IoOperation::Read, IoOperation::Write] {
+        let (mut queue, sender) = queue();
+        let mut replies = Vec::new();
+        for page in 0..3 {
+            let (request, reply) = request(
+                operation,
+                (page * DIRECT_IO_ALIGNMENT_BYTES) as u64,
+                DIRECT_IO_ALIGNMENT_BYTES,
+            );
+            sender.try_send(request).unwrap();
+            replies.push(reply);
+        }
+        drop(sender);
+        let mut submissions = 0;
+        queue
+            .process_requests_with_submit(|ring| {
+                submissions += 1;
+                match submissions {
+                    1 | 4 => {
+                        assert!(!ring.submission().is_empty());
+                        Err(io::Error::from_raw_os_error(libc::EAGAIN))
+                    }
+                    2 => Err(io::Error::from_raw_os_error(libc::EINTR)),
+                    // Accept only one request so EAGAIN also occurs with a partially consumed SQ.
+                    // SAFETY: active slots own all SQE pointers; this submits one ordinary request.
+                    3 => unsafe { ring.submitter().enter::<libc::sigset_t>(1, 0, 0, None) },
+                    _ => ring.submit(),
+                }
+            })
+            .unwrap();
+        assert!(submissions >= 5);
+        assert!(queue.active.iter().all(Option::is_none));
+        assert!(queue.ring.submission().is_empty());
+        for mut reply in replies {
+            let buffer = reply.try_recv().unwrap().unwrap();
+            assert_eq!(buffer.is_some(), operation == IoOperation::Read);
+            if let Some(buffer) = buffer {
+                assert_eq!(buffer.as_ref(), &[0; DIRECT_IO_ALIGNMENT_BYTES]);
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn active_request_limit_keeps_channel_full_until_completion() {
     let (mut queue, sender) = queue();
@@ -401,6 +446,39 @@ fn finished_read_transfers_buffer_ownership() {
     drop(bytes);
     assert_eq!(slice.as_ptr(), ptr.wrapping_add(1));
     assert_eq!(&slice[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES - 1]);
+}
+
+#[test]
+fn error_completion_releases_the_read_buffer() {
+    let (mut queue, sender) = queue();
+    let pool = buffer_pool();
+    let mut buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
+    buffer.as_mut_slice().fill(0x99);
+    let address = buffer.as_ref().as_ptr();
+    let (mut read, mut reply) = request(IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
+    read.buffers = IoBuffers::Read(buffer);
+    let temporary = tempfile::NamedTempFile::new().unwrap();
+    // Reading a write-only file produces -EBADF in the CQE, not a submission error.
+    Arc::get_mut(&mut queue.files).unwrap().file = OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_DIRECT)
+        .open(temporary.path())
+        .unwrap();
+    sender.try_send(read).unwrap();
+    drop(sender);
+    queue.process_requests_until_disconnected().unwrap();
+    assert_eq!(
+        reply.try_recv().unwrap().err().unwrap().raw_os_error(),
+        Some(libc::EBADF)
+    );
+    assert!(queue.active.iter().all(Option::is_none));
+    assert_eq!(
+        pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap().as_ref().as_ptr(),
+        address
+    );
+    let files = Arc::downgrade(&queue.files);
+    drop(queue);
+    assert!(files.upgrade().is_none());
 }
 
 #[tokio::test]

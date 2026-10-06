@@ -55,8 +55,12 @@ struct DataFileState {
 ///
 /// Capacity must be a positive multiple of 4096. Opening fails
 /// if io_uring or verified O_DIRECT alignment is unavailable; there is no fallback.
-/// Dropping the last handle drains submitted I/O and joins both queue threads,
-/// which can block. Returned Bytes never retain the file or queue.
+/// Normal last-handle drop drains submitted I/O and joins both queue threads, which can block.
+/// Temporary submission resource pressure (EAGAIN) is retried. A queue-level error is not a
+/// completion for outstanding requests: on unrecoverable queue failure or thread unwind, their
+/// backing allocations and the file/directory lock are retained until process exit to prevent
+/// use-after-free and late writes into a reopened cache. Per-request error completions release
+/// buffers normally. Returned Bytes never retain the file or queue.
 #[derive(Clone)]
 pub struct DataFile {
     state: Arc<DataFileState>,
