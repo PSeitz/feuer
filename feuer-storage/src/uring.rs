@@ -9,8 +9,8 @@
 //!
 //! EAGAIN retries pending submissions after a timed wait because no accepted I/O may exist to wake us.
 //!
-//! If the queue fails before we observe completion, we don't know whether the kernel still uses
-//! the buffers. Drop leaks active slots rather than risk use-after-free.
+//! We do not drain outstanding requests after queue failure. Closing the ring does not wait for
+//! them, so Drop leaks active slots rather than risk use-after-free.
 //!
 //! See <https://man7.org/linux/man-pages/man2/io_uring_enter.2.html> and
 //! <https://man7.org/linux/man-pages/man7/io_uring_cancelation.7.html>.
@@ -488,9 +488,9 @@ impl Drop for IoQueue {
     fn drop(&mut self) {
         self.receiver.close();
         if self.active.iter().any(Option::is_some) {
-            // An abnormal queue exit cannot prove the kernel has stopped using pointers.
-            // Closing a ring may tear it down asynchronously. Leak the fixed active slots
-            // and their file owner rather than risking use-after-free or early reuse.
+            // This failure path does not drain outstanding requests. Ring close does not
+            // wait for teardown. Leak the fixed active slots and their file owner rather
+            // than risk use-after-free or early reuse.
             // Normal shutdown drains all completions and never takes this path.
             tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
             for request in Box::leak(std::mem::take(&mut self.active)).iter_mut().flatten() {
