@@ -28,6 +28,7 @@ fn enqueue(disk: &DiskCache, key: &str) {
 #[tokio::test]
 async fn queue_metrics_cover_pressure_dequeue_and_cancellation() {
     let (_directory, mut disk, registry) = measured_disk().await;
+    assert_eq!(disk.write_sender.max_capacity(), 512);
     let (sender, mut receiver) = mpsc::channel(1);
     disk.write_sender = sender;
     enqueue(&disk, "queued");
@@ -114,7 +115,7 @@ async fn closing_disk_drains_writes_and_discards_partial_chunks() {
     disk.write_sender = sender;
     disk.enqueue_if_space_available(
         ObjectKeyHash::from("large"),
-        Download::new(0, Bytes::from(vec![7; 128 * 1024])).unwrap(),
+        Download::new(0, Bytes::from(vec![7; 512 * 1024])).unwrap(),
     );
     enqueue(&disk, "small");
     let weak = Arc::downgrade(&disk.disk);

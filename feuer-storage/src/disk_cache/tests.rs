@@ -215,7 +215,8 @@ async fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_
         0,
         CHUNK_BYTES as usize + 1,
         1,
-        128 * 1024 - 1,
+        512 * 1024 - BUFFER_ALIGNMENT,
+        512 * 1024 - 1,
     ]
     .into_iter()
     .enumerate()
@@ -238,7 +239,7 @@ async fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_
     for entries in owners.values() {
         if entries.len() > 1 {
             assert!(entries.iter().all(|entry| entry.single_chunk_start().is_some()
-                && payload_disk_bytes(entry.object_range.len()) < 128 * 1024));
+                && payload_disk_bytes(entry.object_range.len()) < 512 * 1024));
         }
     }
     assert_eq!(owners.len(), 7);
@@ -261,7 +262,7 @@ async fn full_and_no_fit_chunks_flush_across_metadata_pages() {
         published += cache.write(next, source.clone(), ()).await.unwrap();
         assert_eq!(published, count);
         // A larger entry publishes without flushing the new partial chunk.
-        let large = download(0, 128 * 1024 - 1);
+        let large = download(0, 512 * 1024 - 1);
         assert_eq!(cache.write(ObjectKeyHash(999), large, ()).await.unwrap(), 1);
         let buffered = cache.get(&next, range(1, 17)).await.unwrap();
         for i in 0..count {
@@ -1049,7 +1050,7 @@ async fn publishes_each_region_before_reserving_the_next() {
     let large = ObjectKeyHash::from("large");
     let published = cache
         .insert_batch(vec![
-            (small, download(0, 128 * 1024)),
+            (small, download(0, 512 * 1024)),
             (large, download(0, CHUNK_BYTES as usize + 1)),
         ])
         .await
@@ -1180,7 +1181,7 @@ async fn failed_multi_chunk_write_keeps_earlier_entries_and_releases_its_storage
     assert!(matches!(
         cache
             .insert_batch(vec![
-                (ObjectKeyHash::from("small"), download(0, 128 * 1024)),
+                (ObjectKeyHash::from("small"), download(0, 512 * 1024)),
                 (ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize + 1)),
             ])
             .await,

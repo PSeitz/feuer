@@ -7,14 +7,14 @@ contract. This document records what exists and what remains to build.
 
 The public cache now connects **memory → integrity-checked disk → callback**. The fallible asynchronous
 `TieredMemoryDiskCache::open` opens the configured directory using Linux direct I/O and io_uring, with no
-silent fallback. One worker drains a 256-entry queue into per-shard small-entry chunks, flushing
+silent fallback. One worker drains a 512-entry queue into per-shard small-entry chunks, flushing
 on full/no-fit or every minute; larger entries write separately. Reopening reads one 1-MiB metadata chunk at a time per shard and waits for
 all shards to recover before returning.
 The recovery additions cross-compile for Linux; real io_uring execution and device-crash testing remain outstanding.
 
 | Area | Implemented | Remaining |
 | --- | --- | --- |
-| `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, disk writes through a 256-entry queue with per-shard small-entry chunks, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
+| `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, disk writes through a 512-entry queue with per-shard small-entry chunks, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
 | `feuer-types` | XXH3-128 object identity, exact non-empty `ByteRange`, keyless `Download` with a derived range, internal shared access evidence and value comparison | None for the current public type boundary |
 | `feuer-memory` | Sharded covering-range index, exact access counts shared with disk, per-object trimming-event limits, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
 | `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskCache` with small entries packed into immutable 1-MiB chunks, whole-entry checksums, whole-chunk reuse and per-admission eviction limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
@@ -138,7 +138,7 @@ Detached payload writers retain reservations through completion despite caller c
 Failed payload writes release their chunks without metadata rollback. Insufficient metadata capacity at publication discards the whole written payload.
 Publication is not transactional across shards. Callers bound batch memory and concurrency.
 
-Entries with aligned size below 128 KiB share 1-MiB payload chunks. Larger entries own consecutive
+Entries with aligned size below 512 KiB share 1-MiB payload chunks. Larger entries own consecutive
 chunks exclusively, including unused tails. Payload chunks contain no metadata. Removed payload holes cannot be reused individually.
 The v13 format stores fixed 48-byte records with 128-bit key hashes in separate 1-MiB metadata chunks. The first 255
 pages hold up to 21,420 records; the final 4-KiB page stores the next metadata chunk address. Metadata chunks remain

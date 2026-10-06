@@ -46,7 +46,7 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 
 /// Caches object bytes on disk, looked up by object key and byte range.
 ///
-/// Background writes use a nonblocking 256-entry queue. Partial small-entry buffers flush every 60 seconds.
+/// Background writes use a nonblocking 512-entry queue. Partial small-entry buffers flush every 60 seconds.
 /// Closing finishes queued writes and discards remaining partial chunks.
 /// Small entries share immutable 1-MiB payload chunks. Separate mutable metadata chunks
 /// hold entry records and links between metadata chunks. Each shard's chain starts at its first chunk.

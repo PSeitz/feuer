@@ -5,7 +5,7 @@ use feuer_memory::AlignedBuffer;
 use std::time::Duration;
 
 // Pack entries below this aligned size so they share a payload chunk.
-const SMALL_ENTRY_BYTES: usize = 128 * 1024;
+const SMALL_ENTRY_BYTES: usize = 512 * 1024;
 // Flush partial chunks even when no later writes arrive.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 

@@ -29,7 +29,7 @@ struct TieredMemoryDiskCacheInner {
 /// A cloneable handle to one Feuer cache.
 ///
 /// Lookups check memory, then integrity-checked disk, then the per-call callback.
-/// Disk writes are best-effort; a full 256-entry queue skips new writes. Zero disk capacity disables disk;
+/// Disk writes are best-effort; a full 512-entry queue skips new writes. Zero disk capacity disables disk;
 /// otherwise opening requires Linux direct I/O and io_uring, and waits for metadata recovery.
 #[derive(Clone)]
 pub struct TieredMemoryDiskCache {

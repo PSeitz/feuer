@@ -1,7 +1,7 @@
 # Disk-cache prototype
 
 Experimental `DiskCache`, connected to public tiered lookup and owning background disk writes through a
-256-entry queue.
+512-entry queue.
 [tiered-plan.md](../tiered-plan.md) remains authoritative.
 
 **Open waits for recovery to finish.** Every shard's metadata is scanned before the cache becomes
@@ -21,7 +21,7 @@ records**, shared across payload chunks and write batches. Its last page contain
 chunk address, or `u64::MAX` for the end of the chain. Metadata chunks stay reserved for the cache's
 lifetime. Each active shard needs at least one metadata chunk, charged against its capacity. A one-chunk cache consequently has no room for payloads.
 
-Payloads with aligned size below 128 KiB share one unfinished chunk owned by their shard. Larger entries reserve consecutive whole chunks exclusively, including unused
+Payloads with aligned size below 512 KiB share one unfinished chunk owned by their shard. Larger entries reserve consecutive whole chunks exclusively, including unused
 tails. The allocator retains payload reservations; index entries and readers hold only addresses.
 Individual payload holes are never reused. `src/allocation.rs` tracks coalesced free chunk runs;
 each `ReservedChunks` has one owner: a pending write, the allocator, or a metadata chunk. I/O requests carry

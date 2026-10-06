@@ -239,7 +239,7 @@ Access history is only policy input: newer accesses do not invalidate a trimming
 `DiskCache` owns the best-effort write queue and buffer-flush timer; a full queue skips new writes.
 
 - A download admitted to memory may be scheduled for a disk write.
-- The pending-write queue holds at most 256 entries. Queued and active payload bytes have no byte limit
+- The pending-write queue holds at most 512 entries. Queued and active payload bytes have no byte limit
   and are outside the memory-cache capacity.
 - Under queue pressure, the internal policy may skip or replace a disk-write candidate. This never fails
   an otherwise successful lookup.
@@ -266,7 +266,7 @@ buffers and validate them before use. Readers hold no disk reservation and do no
 overwrite may cause a miss; no global read/write serialization or read guard is required. The I/O layer
 owns submitted buffer lifetime.
 
-Each shard always owns an initialized 1-MiB buffer for entries with aligned size below 128 KiB, flushing on
+Each shard always owns an initialized 1-MiB buffer for entries with aligned size below 512 KiB, flushing on
 full/no-fit or every 60 seconds. Buffering consumes no disk capacity. A flush reserves payload chunks with one
 eviction budget; metadata positions are taken only during publication after successful I/O. If metadata capacity
 is then insufficient for the whole flush, discard the written payload. Queued writes and explicit batches share that buffer. After a memory miss, lookups may
