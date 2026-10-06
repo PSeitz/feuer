@@ -7,7 +7,7 @@ use super::*;
 #[test]
 #[ignore = "manual throughput benchmark; run in release mode with --nocapture"]
 fn history_recording_contention() {
-    let requests = load_trace().unwrap();
+    let requests = load_trace(None).unwrap();
     assert!(!requests.is_empty());
     let keys: HashSet<_> = requests.iter().map(|request| &request.object_key).collect();
     let ranges: HashSet<_> = requests

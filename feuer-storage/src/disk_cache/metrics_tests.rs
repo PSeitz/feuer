@@ -109,6 +109,18 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
         (ObjectKeyHash::from("large"), download(2 * CHUNK_BYTES as usize + 17)),
     ];
     cache.insert_batch(inputs.clone()).await.unwrap();
+    assert_eq!(
+        value(
+            &registry,
+            "feuer_disk_io_total",
+            &[("operation", "write"), ("outcome", "success")]
+        ),
+        2.0 // One shared payload run and one three-chunk payload run.
+    );
+    assert_eq!(
+        value(&registry, "feuer_disk_io_bytes_total", &[("operation", "write")]),
+        (4 * CHUNK_BYTES) as f64
+    );
     assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), 0.0);
     let written_chunks = value(&registry, "feuer_disk_chunks", &[("state", "allocated")]);
     assert_eq!(written_chunks, 5.0); // Metadata, one shared payload chunk, and three large-entry chunks.
@@ -148,18 +160,14 @@ async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation()
     cache.insert_batch(vec![(key, source)]).await.unwrap();
 
     // Hold initialization pending so both lookups deterministically join the same read.
-    let result = Arc::new(OnceCell::new());
-    {
-        let mut disk_index = cache.disk.shards[0].entry_index.lock().unwrap();
-        disk_index
-            .entries_by_key
-            .get_mut(&key)
-            .unwrap()
-            .get_mut(&10)
-            .unwrap()
-            .in_flight_read = Arc::downgrade(&result);
-    }
-    let mut initializer = Box::pin(result.get_or_init(std::future::pending));
+    let read = cache.disk.shards[0]
+        .entry_index
+        .lock()
+        .unwrap()
+        .covering_entry(&key, ByteRange::new(10, 18).unwrap())
+        .unwrap()
+        .share_payload_read();
+    let mut initializer = Box::pin(read.result.get_or_init(std::future::pending));
     assert!(
         std::future::poll_fn(|cx| Poll::Ready(initializer.as_mut().poll(cx)))
             .await
@@ -177,10 +185,10 @@ async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation()
             .await
             .is_pending()
     );
-    assert_eq!(Arc::strong_count(&result), 3);
-    let weak = Arc::downgrade(&result);
+    assert_eq!(Arc::strong_count(&read), 3);
+    let weak = Arc::downgrade(&read);
     drop(initializer);
-    drop(result);
+    drop(read);
 
     let (first, second) = tokio::join!(first, second);
     assert_eq!(first.unwrap(), Bytes::from_static(b"bcd"));
@@ -293,9 +301,7 @@ async fn checksum_failures_remove_entries_but_io_errors_preserve_them() {
     let request = ByteRange::new(0, 1).unwrap();
     let key = ObjectKeyHash::from("corrupt");
     cache.insert_batch(vec![(key, download(4))]).await.unwrap();
-    let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&0]
-        .payload_range
-        .start;
+    let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&0].payload_address;
     cache
         .disk
         .file
@@ -330,7 +336,7 @@ async fn checksum_failures_remove_entries_but_io_errors_preserve_them() {
 }
 
 #[tokio::test]
-async fn pressure_eviction_and_partial_write_failure_record_each_entry_outcome() {
+async fn pressure_eviction_and_write_failure_record_each_entry_outcome() {
     let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
     let outcome = |label| value(&registry, "feuer_disk_write_entries_total", &[("outcome", label)]);
     cache.insert_batch(vec![("first".into(), download(4))]).await.unwrap();
@@ -344,8 +350,7 @@ async fn pressure_eviction_and_partial_write_failure_record_each_entry_outcome()
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
     let shard = &disk.shards[0];
     shard.remove_entry(&ObjectKeyHash::from("second"), 0);
-    disk.shards[0].allocator =
-        DiskChunkAllocator::with_metrics(CHUNK_BYTES..4 * CHUNK_BYTES, disk.metrics.clone()).unwrap();
+    disk.shards[0].allocator = DiskChunkAllocator::with_metrics(CHUNK_BYTES..4 * CHUNK_BYTES, disk.metrics.clone());
     let cache = DiskCache {
         disk: Arc::new(disk),
         write_sender: cache.write_sender,
@@ -413,7 +418,7 @@ fn abandoned_write_attempts_count_once_as_canceled() {
         1.0
     );
     let mut finished = DiskWriteAttempt::new(metrics);
-    finished.set_outcome(DiskWriteOutcome::Published);
+    finished.outcome = DiskWriteOutcome::Published;
     drop(finished);
     assert_eq!(
         value(&registry, "feuer_disk_write_entries_total", &[("outcome", "canceled")]),

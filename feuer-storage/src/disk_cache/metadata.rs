@@ -17,7 +17,7 @@ pub(super) struct MetadataPages {
 /// One reserved metadata chunk and its independently checksummed pages.
 pub(super) struct MetadataChunk {
     pub(super) reserved_chunk: ReservedChunks,
-    pub(super) bytes: Vec<u8>,
+    pub(super) bytes: Box<[u8]>,
 }
 
 /// Byte offset of one entry's metadata within a chunk, skipping metadata page headers.
@@ -31,10 +31,12 @@ impl MetadataChunk {
     pub(super) fn empty(reserved_chunk: ReservedChunks) -> Self {
         let mut chunk = Self {
             reserved_chunk,
-            bytes: vec![0; CHUNK_BYTES as usize],
+            bytes: vec![0; CHUNK_BYTES as usize].into_boxed_slice(),
         };
-        for page in 0..ENTRY_METADATA_PAGES_PER_CHUNK {
-            chunk.clear_entry_metadata_page(page);
+        chunk.clear_entry_metadata_page(0);
+        let bytes = &mut chunk.bytes;
+        for page in 1..ENTRY_METADATA_PAGES_PER_CHUNK {
+            bytes.copy_within(..METADATA_PAGE_BYTES, page * METADATA_PAGE_BYTES);
         }
         chunk.set_next_chunk_address(NO_CHUNK);
         chunk
@@ -94,15 +96,9 @@ impl MetadataPages {
     /// Updates an entry's reserved metadata bytes and marks its page for writing.
     pub(super) fn set_entry_metadata(&mut self, key: &ObjectKeyHash, entry: &DiskEntry) {
         let (chunk_index, entry_metadata_index) = entry.metadata;
-        let entry_metadata = encode_entry_metadata(
-            key,
-            entry.object_range,
-            entry.payload_range.start,
-            entry.payload_checksum,
-        );
         let offset = entry_metadata_offset(entry_metadata_index);
-        let bytes = &mut self.chunks[chunk_index].bytes;
-        bytes[offset..offset + ENTRY_METADATA_BYTES].copy_from_slice(&entry_metadata);
+        let bytes = &mut self.chunks[chunk_index].bytes[offset..offset + ENTRY_METADATA_BYTES];
+        encode_entry_metadata(bytes, key, entry);
         let page = entry_metadata_index / ENTRIES_PER_METADATA_PAGE;
         self.dirty_pages.insert((chunk_index, page));
     }
@@ -137,7 +133,7 @@ impl DiskCacheShard {
     /// Writes dirty metadata pages without syncing them to stable storage.
     /// Called only by the periodic writer. Never holds the metadata mutex while waiting for I/O.
     pub(super) async fn write_dirty_metadata_pages(&self, file: &DataFile) -> DataFileResult<()> {
-        let writes: Vec<_> = {
+        let writes: Box<[(u64, Box<[u8]>)]> = {
             let mut pages = self.metadata_pages.lock().unwrap();
             std::mem::take(&mut pages.dirty_pages)
                 .into_iter()
@@ -146,7 +142,7 @@ impl DiskCacheShard {
                     let chunk = &pages.chunks[chunk];
                     let offset = page * METADATA_PAGE_BYTES;
                     let start = chunk.reserved_chunk.disk_byte_range().start + offset as u64;
-                    (start, chunk.bytes[offset..offset + METADATA_PAGE_BYTES].to_vec())
+                    (start, chunk.bytes[offset..offset + METADATA_PAGE_BYTES].into())
                 })
                 .collect()
         };

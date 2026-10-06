@@ -42,6 +42,7 @@ fn cache_pressure_frees_larger_idle_buffers_and_updates_bucket_gauges() {
     }
     pool.add_entry_bytes(capacity - BUFFER_SIZES[0] as u64);
     assert_eq!(pool.used_bytes(), capacity);
+    assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), capacity as f64);
     assert_eq!(pool.idle_bytes(), BUFFER_SIZES[0] as u64);
     assert_eq!(pool.state.lock().by_size[0].len(), 1);
     for (index, &size) in BUFFER_SIZES.iter().enumerate() {
@@ -50,9 +51,11 @@ fn cache_pressure_frees_larger_idle_buffers_and_updates_bucket_gauges() {
     pool.add_entry_bytes(BUFFER_SIZES[0] as u64);
     assert_eq!(pool.idle_bytes(), 0);
     assert_eq!(pool.used_bytes(), capacity);
+    assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), capacity as f64);
     drop(pool.allocate(BUFFER_SIZES[2]).unwrap());
     assert_eq!(pool.idle_bytes(), 0);
     pool.remove_entry_bytes(capacity);
+    assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 0.0);
     drop(pool.allocate(BUFFER_SIZES[2]).unwrap());
     assert_eq!(pool.idle_bytes(), BUFFER_SIZES[2] as u64);
     drop(pool);
@@ -84,12 +87,12 @@ fn oversized_and_write_scratch_allocations_are_not_pooled() {
     let buffer = pool.allocate(length).unwrap();
     assert_eq!(buffer.capacity(), length);
     assert_eq!(buffer.as_ref().len(), length);
-    assert!(buffer.pool.upgrade().is_none());
+    assert!(buffer.pool.is_none());
     drop(buffer);
     assert_eq!(pool.used_bytes(), 0);
     let scratch = AlignedBuffer::allocate_zeroed(BUFFER_ALIGNMENT).unwrap();
     assert_eq!(scratch.capacity(), BUFFER_ALIGNMENT);
-    assert!(scratch.pool.upgrade().is_none());
+    assert!(scratch.pool.is_none());
     assert!(scratch.as_ref().iter().all(|byte| *byte == 0));
     assert_eq!(
         pool.allocate(usize::MAX).err().unwrap().kind(),

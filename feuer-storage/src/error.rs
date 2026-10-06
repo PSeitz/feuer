@@ -1,4 +1,4 @@
-use std::{collections::TryReserveError, fmt, io, path::PathBuf};
+use std::{fmt, io, path::PathBuf};
 
 /// The directory or data-file operation being performed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -52,8 +52,6 @@ pub enum DataFileErrorKind {
     AlreadyOpen,
     /// The requested byte range exceeds capacity, including lengths too large to represent.
     RangeExceedsCapacity,
-    /// A request-sized read buffer could not be allocated.
-    Allocation,
     /// An operating-system file operation failed.
     Io,
     /// The blocking I/O task failed before returning its result.
@@ -67,7 +65,6 @@ impl DataFileErrorKind {
             Self::InvalidConfiguration => "invalid_configuration",
             Self::AlreadyOpen => "already_open",
             Self::RangeExceedsCapacity => "range_exceeds_capacity",
-            Self::Allocation => "allocation",
             Self::Io => "io",
             Self::Task => "task",
         }
@@ -119,15 +116,6 @@ pub enum DataFileError {
         /// The platform buffer length.
         length: usize,
     },
-    /// Allocation of an exact read result failed.
-    #[error("failed to allocate {length} bytes for positional read: {source}")]
-    Allocation {
-        /// The requested result length.
-        length: usize,
-        /// The allocation failure.
-        #[source]
-        source: TryReserveError,
-    },
     /// An operating-system file operation failed.
     #[error("{operation} failed for {}: {source}", .path.display())]
     Io {
@@ -160,7 +148,6 @@ impl DataFileError {
             Self::InvalidCapacity | Self::InvalidDataFile { .. } => DataFileErrorKind::InvalidConfiguration,
             Self::AlreadyOpen { .. } => DataFileErrorKind::AlreadyOpen,
             Self::RangeExceedsCapacity { .. } | Self::LengthOverflow { .. } => DataFileErrorKind::RangeExceedsCapacity,
-            Self::Allocation { .. } => DataFileErrorKind::Allocation,
             Self::Io { .. } => DataFileErrorKind::Io,
             Self::RuntimeUnavailable | Self::Task { .. } => DataFileErrorKind::Task,
         }
@@ -177,7 +164,6 @@ impl DataFileError {
             | Self::LengthOverflow { operation, .. }
             | Self::Io { operation, .. }
             | Self::Task { operation, .. } => *operation,
-            Self::Allocation { .. } => IoOperation::Read,
         }
     }
 }

@@ -142,7 +142,7 @@
                 <div class="node-body">
                   <p>A Tokio <code>mpsc::channel(64)</code> reserves waiting-channel capacity with <code>reserve().await</code>. A full channel yields the submitting task rather than blocking its executor thread.</p>
                   <p>Reserved capacity for preparing requests and queued requests share the channel's 64-position limit. The worker has <strong>64 additional active slots</strong>; receiving a request frees channel capacity, not completing it. Callers waiting to reserve are outside these counts.</p>
-                  <p class="note">There is no raw-I/O byte budget. A payload read allocates its whole aligned entry buffer before reserving channel capacity for each physical read of at most 1 MiB, so request counts do not cap read-buffer memory.</p>
+                  <p class="note">There is no raw-I/O byte budget. Reads reserve initial channel capacity before allocating the whole aligned entry buffer, then reserve again for each subsequent request of at most 1 MiB. Request counts do not cap read-buffer memory.</p>
                   <p>Startup recovery uses the same <code>reserve().await</code> admission before allocating each 1-MiB metadata-read buffer. Opening waits for all shard recovery to finish before serving lookups.</p>
                   <details class="source">
                     <summary>Code · async channel reservation</summary>
@@ -153,7 +153,7 @@
     .reserve()
     .await
     .map_err(|_| queue_stopped_error())</code></pre>
-                    <a class="source-label" href="feuer-storage/src/file.rs">feuer-storage/src/file.rs · read_aligned_range / read_recovery_chunk</a>
+                    <a class="source-label" href="feuer-storage/src/file.rs">feuer-storage/src/file.rs · read_at / read_slice</a>
                     <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · ReadQueue::read</a>
                   </details>
                 </div>

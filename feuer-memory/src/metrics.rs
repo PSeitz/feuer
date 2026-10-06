@@ -18,11 +18,11 @@ pub struct MemoryMetrics {
     pub(crate) eviction_triggering_insertions: BoxedCounter,
     trim: BoxedCounter,
     trimmed_payload_bytes: BoxedCounter,
-    used_bytes: BoxedGauge,
+    pub(crate) used_bytes: BoxedGauge,
     pub(crate) capacity_bytes: BoxedGauge,
     pub(crate) idle_buffer_bytes: [BoxedGauge; BUFFER_SIZES.len()],
     pub(crate) used_buffer_bytes: [BoxedGauge; BUFFER_SIZES.len()],
-    entries: BoxedGauge,
+    pub(crate) entries: BoxedGauge,
 }
 
 impl MemoryMetrics {
@@ -103,16 +103,6 @@ impl MemoryMetrics {
     pub(crate) fn record_range_trim(&self, reclaimed_bytes: u64) {
         self.trim.increase(1);
         self.trimmed_payload_bytes.increase(reclaimed_bytes);
-    }
-
-    pub(crate) fn increase_usage(&self, allocation_bytes: u64, entry_count: u64) {
-        self.used_bytes.increase(allocation_bytes);
-        self.entries.increase(entry_count);
-    }
-
-    pub(crate) fn decrease_usage(&self, allocation_bytes: u64, entry_count: u64) {
-        self.used_bytes.decrease(allocation_bytes);
-        self.entries.decrease(entry_count);
     }
 
     pub(crate) fn noop() -> Arc<Self> {

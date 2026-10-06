@@ -6,6 +6,7 @@ mod tests;
 use std::{fmt, hash::BuildHasher, sync::Arc};
 
 use bytes::Bytes;
+use feuer_types::retention::RECLAIM_SAMPLE_SIZE;
 use feuer_types::{ByteRange, Download, ObjectKeyHash, retention::ObjectAccessHistories};
 use parking_lot::Mutex;
 use rustc_hash::FxBuildHasher;
@@ -35,19 +36,17 @@ const MAX_SHARDS: usize = 64;
 /// if its observed requests form a useful smaller payload, Feuer trims that victim
 /// outside the shard lock.
 pub struct MemoryCache {
-    /// Total soft target divided among the shards.
-    capacity: u64,
     /// Independently locked partitions selected by complete object identity.
     shards: Box<[Mutex<MemoryCacheShard>]>,
     access_histories: Arc<ObjectAccessHistories>,
-    metrics: Arc<MemoryMetrics>,
+    reclaim_sample_size: usize,
     buffer_pool: Arc<BufferPool>,
 }
 
 impl fmt::Debug for MemoryCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MemoryCache")
-            .field("capacity", &self.capacity)
+            .field("capacity", &self.capacity())
             .field("used_bytes", &self.used_bytes())
             .field("shards", &self.shards.len())
             .finish_non_exhaustive()
@@ -95,21 +94,19 @@ impl MemoryCache {
         access_histories: Arc<ObjectAccessHistories>,
     ) -> Self {
         assert!(num_shards > 0, "memory cache requires at least one shard");
-        let buffer_pool = BufferPool::new(capacity, metrics.clone());
+        let buffer_pool = BufferPool::new(capacity, metrics);
         let shards = (0..num_shards)
             .map(|shard_index| {
                 Mutex::new(MemoryCacheShard::new(
                     shard_capacity_for(capacity, num_shards, shard_index),
-                    metrics.clone(),
                     buffer_pool.clone(),
                 ))
             })
             .collect();
         Self {
-            capacity,
             shards,
             access_histories,
-            metrics,
+            reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             buffer_pool,
         }
     }
@@ -117,21 +114,24 @@ impl MemoryCache {
     /// Sets the maximum candidates inspected per decision. Panics if zero.
     pub fn with_reclaim_sample_size(mut self, sample_size: usize) -> Self {
         assert!(sample_size > 0, "reclaim sample size must be greater than zero");
-        for shard in &mut self.shards {
-            shard.get_mut().reclaim_sample_size = sample_size;
-        }
+        self.reclaim_sample_size = sample_size;
         self
     }
 
     /// Returns the shared capacity for cached allocations and idle buffers.
-    pub const fn capacity(&self) -> u64 {
-        self.capacity
+    pub fn capacity(&self) -> u64 {
+        self.buffer_pool.capacity
     }
 
     /// Returns cached allocation capacity plus idle buffer capacity.
     /// Active reads and caller-only results are excluded.
     pub fn used_bytes(&self) -> u64 {
         self.buffer_pool.used_bytes()
+    }
+
+    /// The request history consulted by this cache for retention decisions.
+    pub fn access_histories(&self) -> &Arc<ObjectAccessHistories> {
+        &self.access_histories
     }
 
     /// The aligned buffer pool shared by this cache's storage readers.
@@ -165,8 +165,7 @@ impl MemoryCache {
         download: Download,
         allocation_charge: usize,
     ) -> bool {
-        let (downloaded_range, bytes) = download.into_parts();
-        assert!(allocation_charge >= bytes.len());
+        assert!(allocation_charge >= download.bytes().len());
         let allocation_charge = allocation_charge as u64;
         let shard_index = self.shard_index(&object_key);
         let mut allow_range_trim = true;
@@ -174,21 +173,19 @@ impl MemoryCache {
         loop {
             let insert_or_reclaim_result = self.shards[shard_index].lock().try_admit_or_reclaim(
                 &object_key,
-                downloaded_range,
-                &bytes,
+                &download,
                 allocation_charge,
-                &self.access_histories,
+                self,
                 allow_range_trim,
             );
             match insert_or_reclaim_result {
                 InsertOrReclaimResult::Complete(inserted) => {
                     if evicted_any_entry {
-                        self.metrics.eviction_triggering_insertions.increase(1);
+                        self.buffer_pool.metrics.eviction_triggering_insertions.increase(1);
                     }
                     return inserted;
                 }
-                InsertOrReclaimResult::Evicted => evicted_any_entry = true,
-                InsertOrReclaimResult::Retry => continue,
+                InsertOrReclaimResult::Retry { evicted } => evicted_any_entry |= evicted,
                 InsertOrReclaimResult::Trim(source) => {
                     // Payload copying is deliberately outside the shard lock.
                     // Publication checks that the exact source range is still cached, not history.

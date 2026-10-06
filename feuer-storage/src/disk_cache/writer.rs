@@ -9,7 +9,7 @@ pub(super) struct BufferedEntry {
     pub(super) payload_checksum: u64,
     pub(super) offset: usize,
     pub(super) attempt: DiskWriteAttempt,
-    pub(super) completion: Box<dyn Send>,
+    pub(super) _completion: Box<dyn Send>,
 }
 
 impl DiskCacheShard {
@@ -34,20 +34,15 @@ impl DiskCacheShard {
                 if let Some(chunks) = chunks {
                     break chunks;
                 }
-                if count > capacity || !self.sample_and_evict_entry(&disk.access_histories, &mut attempts, &mut budget)
-                {
+                if count > capacity || !self.sample_and_evict_entry(disk, &mut attempts, &mut budget) {
                     return Ok(0);
                 }
                 entries[0].attempt.evicted = budget != MAX_EVICTION_CHUNKS;
             };
             let range = chunks.disk_byte_range();
-            for address in range.clone().step_by(CHUNK_BYTES as usize) {
-                let start = (address - range.start) as usize;
-                let end = (start + CHUNK_BYTES as usize).min(bytes.len());
-                disk.file
-                    .write_padded(address..address + CHUNK_BYTES, &bytes.slice(start..end))
-                    .await?;
-            }
+            disk.file
+                .write_padded(range.start, (range.end - range.start) as usize, &bytes)
+                .await?;
             disk.metrics.written_entries.increase(entries.len() as u64);
             disk.metrics
                 .packed_payload_bytes
@@ -65,38 +60,36 @@ impl DiskCacheShard {
                 .hold_chunks_until_payloads_released(chunks, entries.len());
             let mut published = 0;
             for mut buffered in entries.drain(..).rev() {
-                let _completion = buffered.completion;
                 if disk_index
                     .covering_entry(&buffered.key, buffered.object_range)
                     .is_some()
                 {
-                    buffered.attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
+                    buffered.attempt.outcome = DiskWriteOutcome::AlreadyCovered;
                     self.allocator.release_payload(range.start);
                     continue;
                 }
-                let start = range.start + buffered.offset as u64;
                 let entry = DiskEntry {
                     in_flight_read: Weak::new(),
                     eviction_position: 0,
                     object_range: buffered.object_range,
                     payload_checksum: buffered.payload_checksum,
-                    payload_range: start..start + payload_disk_bytes(buffered.object_range.len()),
+                    payload_address: range.start + buffered.offset as u64,
                     metadata: pages.free_entry_positions.pop().unwrap(),
                 };
                 pages.set_entry_metadata(&buffered.key, &entry);
                 self.insert_entry(&mut disk_index, &mut pages, buffered.key, entry);
                 published += 1;
-                buffered.attempt.set_outcome(DiskWriteOutcome::Published);
+                buffered.attempt.outcome = DiskWriteOutcome::Published;
             }
             Ok(published)
         }
         .await;
-        for mut entry in entries {
-            entry.attempt.set_outcome(if result.is_err() {
+        for entry in &mut entries {
+            entry.attempt.outcome = if result.is_err() {
                 DiskWriteOutcome::Failed
             } else {
                 DiskWriteOutcome::NoCapacity
-            });
+            };
         }
         result
     }

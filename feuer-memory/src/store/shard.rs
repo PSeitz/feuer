@@ -2,23 +2,21 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use bytes::Bytes;
 use feuer_types::{
-    ByteRange, ObjectKeyHash,
-    retention::{ObjectAccessHistories, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates},
+    ByteRange, Download, ObjectKeyHash,
+    retention::{ObjectAccessHistories, compare_cost_per_byte, sample_candidates},
 };
 use rustc_hash::FxHashMap;
 
-use super::range_trim::{RangeTrimPlan, plan_range_trim};
-use crate::{BufferPool, MemoryMetrics};
+use super::{MemoryCache, range_trim::plan_range_trim};
+use crate::BufferPool;
 
 /// Minimum requests across all keys since admission before trimming a range.
 pub(super) const MIN_REQUESTS_BEFORE_RANGE_TRIM: u64 = 64;
 
 /// An entry's payload bytes, object range, allocation charge, candidate index, and request count at insertion.
 struct MemoryEntry {
-    /// Exact object interval represented by `bytes`.
-    range: ByteRange,
-    /// Entry payload; lookup results share slices of this allocation.
-    bytes: Bytes,
+    /// Exact object interval and payload; lookup results share slices of this allocation.
+    download: Download,
     /// Allocation bytes charged to this entry, possibly larger than the visible payload.
     allocation_charge: u64,
     /// Index of this entry's candidate in the list sampled for trimming or eviction.
@@ -28,10 +26,8 @@ struct MemoryEntry {
 }
 
 impl MemoryEntry {
-    fn requested_bytes(&self, requested_range: ByteRange) -> Bytes {
-        let start = (requested_range.start() - self.range.start()) as usize;
-        let end = (requested_range.end() - self.range.start()) as usize;
-        self.bytes.slice(start..end)
+    fn range(&self) -> ByteRange {
+        self.download.downloaded_range()
     }
 }
 
@@ -50,7 +46,7 @@ impl ObjectEntries {
     /// Finds the entry whose byte range covers the entire request.
     fn covering_entry(&self, range: ByteRange) -> Option<&MemoryEntry> {
         let (_, entry) = self.by_start.range(..=range.start()).next_back()?;
-        entry.range.contains(range).then_some(entry)
+        entry.range().contains(range).then_some(entry)
     }
 
     /// Iterates contained entries, including empty entries at the range's end.
@@ -58,64 +54,31 @@ impl ObjectEntries {
         self.by_start
             .range(range.start()..)
             .map(|(_, entry)| entry)
-            .take_while(move |entry| range.contains(entry.range))
+            .take_while(move |entry| range.contains(entry.range()))
     }
 }
 
-/// Object key and range start of a cached entry.
-struct ObjectKeyAndRangeStart {
-    object_key: ObjectKeyHash,
-    start: u64,
-}
-
-/// A list of entry keys and range starts, sampled in rotation to choose an entry to trim or evict.
-#[derive(Default)]
-struct ReclaimCandidateList {
-    entries: Vec<ObjectKeyAndRangeStart>,
-    cursor: usize,
-}
-
-impl ReclaimCandidateList {
-    fn register(&mut self, candidate: ObjectKeyAndRangeStart) -> usize {
-        let candidate_index = self.entries.len();
-        self.entries.push(candidate);
-        candidate_index
-    }
-
-    /// Removes the candidate at this index and returns the candidate moved there, if any.
-    fn remove(&mut self, candidate_index: usize) -> Option<&ObjectKeyAndRangeStart> {
-        self.entries.swap_remove(candidate_index);
-        self.entries.get(candidate_index)
-    }
-
-    fn sample(&mut self, sample_size: usize) -> (usize, usize) {
-        sample_candidates(&mut self.cursor, self.entries.len(), sample_size)
-    }
-}
-
-/// Source payload and plan for trimming a cached range outside the shard lock.
+/// Source download and replacement ranges for trimming outside the shard lock.
 pub(super) struct RangeTrimSource {
     object_key: ObjectKeyHash,
-    plan: RangeTrimPlan,
-    source_bytes: Bytes,
+    download: Download,
+    replacement_ranges: Box<[ByteRange]>,
 }
 
 impl RangeTrimSource {
     /// Copies payloads for the replacement ranges into separate allocations outside the shard metadata lock.
     pub(super) fn copy_replacement_payloads(self) -> RangeTrimReplacement {
         let payloads = self
-            .plan
-            .replacement_ranges()
+            .replacement_ranges
             .iter()
             .map(|range| {
-                let start = (range.start() - self.plan.source_range().start()) as usize;
-                let end = (range.end() - self.plan.source_range().start()) as usize;
-                (*range, Bytes::copy_from_slice(&self.source_bytes[start..end]))
+                let bytes = Bytes::copy_from_slice(&self.download.bytes_in_range(*range));
+                Download::new(range.start(), bytes).expect("trimmed range is contained in the source")
             })
             .collect();
         RangeTrimReplacement {
             object_key: self.object_key,
-            plan: self.plan,
+            source_range: self.download.downloaded_range(),
             payloads,
         }
     }
@@ -124,40 +87,37 @@ impl RangeTrimSource {
 /// Replacement payloads from trimming a cached range, awaiting the source-range check.
 pub(super) struct RangeTrimReplacement {
     object_key: ObjectKeyHash,
-    plan: RangeTrimPlan,
-    payloads: Vec<(ByteRange, Bytes)>,
+    source_range: ByteRange,
+    payloads: Box<[Download]>,
 }
 
 /// Result of trying to insert a download or reclaim space:
-/// finished, evicted an entry, retry, or trim a range.
+/// finished, retry with eviction accounting, or trim a range.
 pub(super) enum InsertOrReclaimResult {
     Complete(bool),
-    Evicted,
-    Retry,
+    Retry { evicted: bool },
     Trim(RangeTrimSource),
 }
 
 /// One memory-cache shard's range indexes and allocation accounting.
 pub(super) struct MemoryCacheShard {
     capacity: u64,
-    pub(super) reclaim_sample_size: usize,
     used_bytes: u64,
     entries_by_key: FxHashMap<ObjectKeyHash, ObjectEntries>,
-    /// Object keys and range starts, sampled in rotation to choose a range to trim or evict.
-    candidates: ReclaimCandidateList,
-    metrics: Arc<MemoryMetrics>,
+    /// One key and range start per indexed entry, sampled in rotation for trimming or eviction.
+    reclaim_candidates: Vec<(ObjectKeyHash, u64)>,
+    next_sample_start: usize,
     buffer_pool: Arc<BufferPool>,
 }
 
 impl MemoryCacheShard {
-    pub(super) fn new(capacity: u64, metrics: Arc<MemoryMetrics>, buffer_pool: Arc<BufferPool>) -> Self {
+    pub(super) fn new(capacity: u64, buffer_pool: Arc<BufferPool>) -> Self {
         Self {
             capacity,
-            reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             used_bytes: 0,
             entries_by_key: FxHashMap::default(),
-            candidates: ReclaimCandidateList::default(),
-            metrics,
+            reclaim_candidates: Vec::new(),
+            next_sample_start: 0,
             buffer_pool,
         }
     }
@@ -171,10 +131,10 @@ impl MemoryCacheShard {
         self.entries_by_key
             .get(object_key)?
             .covering_entry(requested_range)
-            .map(|entry| entry.requested_bytes(requested_range))
+            .map(|entry| entry.download.bytes_in_range(requested_range))
     }
 
-    /// Tries to admit the download or reclaim space by evicting one entry or preparing a trim.
+    /// Tries to admit the download or reclaim space using the cache's access history and sample size.
     /// Entries whose ranges are fully contained in the incoming download will be replaced on insertion.
     /// Their bytes are already subtracted when checking capacity, so eviction sampling skips them.
     /// If a sample has no eligible victim, the caller releases the lock before trying the next sample
@@ -182,15 +142,15 @@ impl MemoryCacheShard {
     pub(super) fn try_admit_or_reclaim(
         &mut self,
         object_key: &ObjectKeyHash,
-        range: ByteRange,
-        bytes: &Bytes,
+        download: &Download,
         allocation_charge: u64,
-        access_histories: &ObjectAccessHistories,
+        cache: &MemoryCache,
         allow_range_trim: bool,
     ) -> InsertOrReclaimResult {
+        let range = download.downloaded_range();
         let contained_allocation_bytes: u64 = match self.entries_by_key.get(object_key) {
             Some(entries) if entries.covering_entry(range).is_some() => {
-                self.metrics.record_redundant();
+                self.buffer_pool.metrics.record_redundant();
                 return InsertOrReclaimResult::Complete(false);
             }
             Some(entries) => entries
@@ -203,158 +163,134 @@ impl MemoryCacheShard {
         let max_existing_bytes = self.capacity.saturating_sub(allocation_charge);
 
         if used_bytes_without_contained_entries <= max_existing_bytes {
-            let mut replaced = false;
-            while let Some(contained_range) = self
-                .entries_by_key
-                .get(object_key)
-                .and_then(|entries| entries.contained_entries(range).next().map(|entry| entry.range))
-            {
-                self.remove_entry(object_key, contained_range)
-                    .expect("the contained entry was just found");
-                replaced = true;
-            }
-            self.insert_entry(
+            let replaced = self.insert_entry(
                 *object_key,
-                range,
-                bytes.clone(),
+                download.clone(),
                 allocation_charge,
-                access_histories.request_count(),
+                cache.access_histories.request_count(),
             );
 
-            self.metrics.record_insert(replaced);
+            self.buffer_pool.metrics.record_insert(replaced);
             return InsertOrReclaimResult::Complete(true);
         }
 
-        let Some((key, entry)) = self.select_reclaim_candidate(object_key, range, access_histories) else {
+        let Some((key, entry)) = self.select_reclaim_candidate(object_key, range, cache) else {
             // The sample cursor advanced, but no eligible victim was found.
             // Return to the caller so it can release the lock before sampling again.
-            return InsertOrReclaimResult::Retry;
+            return InsertOrReclaimResult::Retry { evicted: false };
         };
-        if allow_range_trim && let Some(source) = Self::prepare_range_trim(key, entry, access_histories) {
+        if allow_range_trim && let Some(source) = Self::prepare_range_trim(key, entry, &cache.access_histories) {
             return InsertOrReclaimResult::Trim(source);
         }
 
-        let range = entry.range;
-        self.remove_entry(&key, range)
-            .expect("an entry selected for eviction cannot disappear while its shard is locked");
-        InsertOrReclaimResult::Evicted
+        let range = entry.range();
+        self.remove_entry(&key, range.start());
+        InsertOrReclaimResult::Retry { evicted: true }
     }
 
-    /// Inserts an entry and updates shard, buffer-pool, and metric usage.
+    /// Inserts an entry not already covered, removes entries it contains, and returns whether any were replaced.
     fn insert_entry(
         &mut self,
         object_key: ObjectKeyHash,
-        range: ByteRange,
-        bytes: Bytes,
+        download: Download,
         allocation_charge: u64,
         request_count: u64,
-    ) {
+    ) -> bool {
+        let range = download.downloaded_range();
+        let mut replaced = false;
+        while let Some(contained_range) = self
+            .entries_by_key
+            .get(&object_key)
+            .and_then(|entries| entries.contained_entries(range).next().map(|entry| entry.range()))
+        {
+            self.remove_entry(&object_key, contained_range.start());
+            replaced = true;
+        }
         self.used_bytes += allocation_charge;
         self.buffer_pool.add_entry_bytes(allocation_charge);
-        self.metrics.increase_usage(allocation_charge, 1);
-        let candidate_index = self.candidates.register(ObjectKeyAndRangeStart {
-            object_key,
-            start: range.start(),
-        });
+        self.buffer_pool.metrics.entries.increase(1);
+        let candidate_index = self.reclaim_candidates.len();
+        self.reclaim_candidates.push((object_key, range.start()));
         let entries = self.entries_by_key.entry(object_key).or_default();
         let entry = MemoryEntry {
-            range,
-            bytes,
+            download,
             allocation_charge,
             candidate_index,
             request_count_at_insertion: request_count,
         };
 
-        let replaced = entries.by_start.insert(range.start(), entry);
-        debug_assert!(replaced.is_none());
+        entries.by_start.insert(range.start(), entry);
+        replaced
     }
 
     pub(super) fn contains_entry(&self, key: &ObjectKeyHash, range: ByteRange) -> bool {
         self.entries_by_key
             .get(key)
             .and_then(|entries| entries.by_start.get(&range.start()))
-            .is_some_and(|entry| entry.range == range)
+            .is_some_and(|entry| entry.range() == range)
     }
 
     pub(super) fn remove(&mut self, object_key: &ObjectKeyHash, range: ByteRange) -> bool {
-        self.remove_entry(object_key, range).is_some_and(|_| {
-            self.metrics.record_remove();
-            true
-        })
+        if !self.contains_entry(object_key, range) {
+            return false;
+        }
+        self.remove_entry(object_key, range.start());
+        self.buffer_pool.metrics.record_remove();
+        true
     }
 
-    /// Removes one entry, updates shard, buffer-pool, and metric usage, and returns its allocation charge.
-    fn remove_entry(&mut self, object_key: &ObjectKeyHash, range: ByteRange) -> Option<u64> {
-        let entries = self.entries_by_key.get_mut(object_key)?;
-        let std::collections::btree_map::Entry::Occupied(entry) = entries.by_start.entry(range.start()) else {
-            return None;
-        };
-        if entry.get().range != range {
-            return None;
-        }
-        let removed_entry = entry.remove();
-        let object_has_no_entries = entries.by_start.is_empty();
-
-        self.remove_eviction_candidate(removed_entry.candidate_index);
-        if object_has_no_entries {
+    /// Removes an entry known to exist at this key and start, updating shard, buffer-pool, and metric usage.
+    fn remove_entry(&mut self, object_key: &ObjectKeyHash, start: u64) {
+        let entries = self.entries_by_key.get_mut(object_key).unwrap();
+        let removed_entry = entries.by_start.remove(&start).unwrap();
+        if entries.by_start.is_empty() {
             self.entries_by_key.remove(object_key);
+        }
+        self.reclaim_candidates.swap_remove(removed_entry.candidate_index);
+        if let Some((key, start)) = self.reclaim_candidates.get(removed_entry.candidate_index) {
+            self.entries_by_key
+                .get_mut(key)
+                .unwrap()
+                .by_start
+                .get_mut(start)
+                .unwrap()
+                .candidate_index = removed_entry.candidate_index;
         }
         let removed_bytes = removed_entry.allocation_charge;
         self.used_bytes -= removed_bytes;
         self.buffer_pool.remove_entry_bytes(removed_bytes);
-        self.metrics.decrease_usage(removed_bytes, 1);
-        Some(removed_bytes)
+        self.buffer_pool.metrics.entries.decrease(1);
     }
 
-    fn remove_eviction_candidate(&mut self, candidate_index: usize) {
-        let Some(moved_candidate) = self.candidates.remove(candidate_index) else {
-            return;
-        };
-        let entry = self
-            .entries_by_key
-            .get_mut(&moved_candidate.object_key)
-            .and_then(|entries| entries.by_start.get_mut(&moved_candidate.start))
-            .expect("a moved sampling candidate must still refer to an indexed entry");
-        entry.candidate_index = candidate_index;
-    }
-
-    /// Samples up to `reclaim_sample_size` entries and selects the lowest retrieval cost per charged allocation byte.
+    /// Samples entries using the cache's sample size and selects the lowest retrieval cost per charged allocation byte.
     fn select_reclaim_candidate(
         &mut self,
         admitting_key: &ObjectKeyHash,
         admitting_range: ByteRange,
-        access_histories: &ObjectAccessHistories,
+        cache: &MemoryCache,
     ) -> Option<(ObjectKeyHash, &MemoryEntry)> {
-        let (sample_start, sample_count) = self.candidates.sample(self.reclaim_sample_size);
-        self.candidates
-            .entries
-            .iter()
-            .cycle()
-            .skip(sample_start)
-            .take(sample_count)
-            .map(|candidate| {
-                let entry = self
-                    .entries_by_key
-                    .get(&candidate.object_key)
-                    .and_then(|entries| entries.by_start.get(&candidate.start))
-                    .expect("every sampling candidate must identify an indexed entry");
-                (&candidate.object_key, entry)
-            })
-            .filter(|(key, entry)| **key != *admitting_key || !admitting_range.contains(entry.range))
-            .map(|(key, entry)| (key, entry, access_histories.decayed_retrieval_cost(key, entry.range)))
-            .min_by(
-                |(left_key, left_entry, left_cost), (right_key, right_entry, right_cost)| {
-                    compare_cost_per_byte(
-                        *left_cost,
-                        left_entry.allocation_charge,
-                        *right_cost,
-                        right_entry.allocation_charge,
-                    )
-                    .then_with(|| left_key.cmp(right_key))
-                    .then_with(|| left_entry.range.cmp(&right_entry.range))
-                },
-            )
-            .map(|(object_key, entry, _)| (*object_key, entry))
+        let access_histories = &cache.access_histories;
+        sample_candidates(
+            &mut self.next_sample_start,
+            &self.reclaim_candidates,
+            cache.reclaim_sample_size,
+        )
+        .map(|(key, start)| (key, &self.entries_by_key[key].by_start[start]))
+        .filter(|(key, entry)| **key != *admitting_key || !admitting_range.contains(entry.range()))
+        .map(|(key, entry)| (key, entry, access_histories.decayed_retrieval_cost(key, entry.range())))
+        .min_by(
+            |(left_key, left_entry, left_cost), (right_key, right_entry, right_cost)| {
+                compare_cost_per_byte(
+                    *left_cost,
+                    left_entry.allocation_charge,
+                    *right_cost,
+                    right_entry.allocation_charge,
+                )
+                .then_with(|| left_key.cmp(right_key))
+                .then_with(|| left_entry.range().cmp(&right_entry.range()))
+            },
+        )
+        .map(|(object_key, entry, _)| (*object_key, entry))
     }
 
     /// Prepares a range trim by retaining its source bytes and plan after the grace period.
@@ -367,11 +303,11 @@ impl MemoryCacheShard {
         if request_count.saturating_sub(entry.request_count_at_insertion) < MIN_REQUESTS_BEFORE_RANGE_TRIM {
             return None;
         }
-        let plan = plan_range_trim(entry.range, access_histories.recent_requested_ranges(&object_key))?;
+        let replacement_ranges = plan_range_trim(entry.range(), access_histories.recent_requested_ranges(&object_key))?;
         Some(RangeTrimSource {
             object_key,
-            plan,
-            source_bytes: entry.bytes.clone(),
+            download: entry.download.clone(),
+            replacement_ranges,
         })
     }
 
@@ -379,39 +315,38 @@ impl MemoryCacheShard {
     pub(super) fn publish_range_trim(&mut self, replacement: RangeTrimReplacement, request_count: u64) -> bool {
         // Objects are immutable: reinsertion and neighboring-range changes do not invalidate the bytes.
         // New requests may change the desirability of the plan, but do not invalidate it.
-        let Some(removed_bytes) = self.remove_entry(&replacement.object_key, replacement.plan.source_range()) else {
+        let used_bytes_before_trim = self.used_bytes;
+        if !self.contains_entry(&replacement.object_key, replacement.source_range) {
             return false;
-        };
-        let mut inserted_payload_bytes = 0_u64;
+        }
+        self.remove_entry(&replacement.object_key, replacement.source_range.start());
 
-        for (range, bytes) in replacement.payloads {
+        for download in replacement.payloads {
             if self
                 .entries_by_key
                 .get(&replacement.object_key)
-                .and_then(|entries| entries.covering_entry(range))
+                .and_then(|entries| entries.covering_entry(download.downloaded_range()))
                 .is_some()
             {
                 continue;
             }
-            let allocation_charge = bytes.len() as u64;
-            inserted_payload_bytes += allocation_charge;
-            self.insert_entry(replacement.object_key, range, bytes, allocation_charge, request_count);
+            let allocation_charge = download.bytes().len() as u64;
+            self.insert_entry(replacement.object_key, download, allocation_charge, request_count);
         }
 
-        let reclaimed_bytes = removed_bytes - inserted_payload_bytes;
-        debug_assert!(reclaimed_bytes >= replacement.plan.reclaimed_bytes());
-        self.metrics.record_range_trim(reclaimed_bytes);
+        let reclaimed_bytes = used_bytes_before_trim - self.used_bytes;
+        self.buffer_pool.metrics.record_range_trim(reclaimed_bytes);
         true
     }
 
     pub(super) fn entry_count(&self) -> usize {
-        self.candidates.entries.len()
+        self.reclaim_candidates.len()
     }
 }
 
 impl Drop for MemoryCacheShard {
     fn drop(&mut self) {
-        self.metrics.decrease_usage(self.used_bytes, self.entry_count() as u64);
+        self.buffer_pool.metrics.entries.decrease(self.entry_count() as u64);
         self.buffer_pool.remove_entry_bytes(self.used_bytes);
     }
 }

@@ -9,12 +9,10 @@ const SMALL_ENTRY_BYTES: usize = 128 * 1024;
 // Flush partial chunks even when no later writes arrive.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 
-/// One chunk of small-entry bytes and their descriptions, with an aligned append offset.
+/// One chunk of small-entry bytes and their descriptions, including aligned payload offsets.
 pub(super) struct BufferedSmallEntryChunk {
     /// Aligned 1-MiB payload storage for packed writes and pre-flush reads.
     buffer: AlignedBuffer,
-    /// Next append offset, including padding; keeps entries aligned and detects full/no-fit chunks.
-    used_bytes: usize,
     /// Entry descriptions and completion state for buffered lookups, publication, and discard.
     entries: Vec<BufferedEntry>,
 }
@@ -28,9 +26,7 @@ impl DiskCache {
     /// Discards buffered entries without writing them; retains each shard's initialized buffer.
     pub async fn discard_pending(&self) {
         for shard in &self.disk.shards {
-            let mut buffer = shard.buffered_small_entry_chunk.lock().await;
-            buffer.entries.clear();
-            buffer.used_bytes = 0;
+            shard.buffered_small_entry_chunk.lock().await.entries.clear();
         }
     }
 }
@@ -49,7 +45,7 @@ impl DiskCacheInner {
         }
     }
 
-    async fn flush(&self) -> Result<usize, DiskCacheError> {
+    pub(super) async fn flush(&self) -> Result<usize, DiskCacheError> {
         let mut published = 0;
         for shard in &self.shards {
             published += shard.buffered_small_entry_chunk.lock().await.flush(shard, self).await?;
@@ -67,8 +63,8 @@ impl DiskCacheInner {
         let (object_range, bytes) = download.into_parts();
         let length = payload_disk_bytes(object_range.len()) as usize;
         let mut attempt = DiskWriteAttempt::new(self.metrics.clone());
-        if self.covers_range(&key, object_range) {
-            attempt.set_outcome(DiskWriteOutcome::AlreadyCovered);
+        if shard.covers_range(&key, object_range) {
+            attempt.outcome = DiskWriteOutcome::AlreadyCovered;
             return Ok(0);
         }
         let mut entry = BufferedEntry {
@@ -77,22 +73,25 @@ impl DiskCacheInner {
             payload_checksum: XxHash64::oneshot(0, &bytes),
             offset: 0,
             attempt,
-            completion: Box::new(completion),
+            _completion: Box::new(completion),
         };
         if length >= SMALL_ENTRY_BYTES {
             return shard.write_payload(self, bytes, vec![entry]).await;
         }
         let mut buffer = shard.buffered_small_entry_chunk.lock().await;
         let mut published = 0;
-        if buffer.used_bytes + length > CHUNK_BYTES as usize {
+        let mut offset = buffer.entries.last().map_or(0, |entry| {
+            entry.offset + payload_disk_bytes(entry.object_range.len()) as usize
+        });
+        if offset + length > CHUNK_BYTES as usize {
             published += buffer.flush(shard, self).await?;
+            offset = 0;
         }
-        entry.offset = buffer.used_bytes;
-        buffer.buffer.as_mut_slice()[entry.offset..entry.offset + bytes.len()].copy_from_slice(&bytes);
+        entry.offset = offset;
+        buffer.buffer.as_mut_slice()[offset..offset + bytes.len()].copy_from_slice(&bytes);
         drop(bytes);
-        buffer.used_bytes += length;
         buffer.entries.push(entry);
-        if buffer.used_bytes == CHUNK_BYTES as usize {
+        if offset + length == CHUNK_BYTES as usize {
             published += buffer.flush(shard, self).await?;
         }
         Ok(published)
@@ -106,7 +105,6 @@ impl BufferedSmallEntryChunk {
                 operation: crate::IoOperation::Write,
                 source: Box::new(source),
             })?,
-            used_bytes: 0,
             entries: Vec::new(),
         })
     }
@@ -120,7 +118,7 @@ impl BufferedSmallEntryChunk {
     }
 
     /// Checks if a buffered entry covers the requested range, returning its bytes if so.
-    /// We buffer for 60 seconds, so reads may miss during payload I/O. 
+    /// We buffer for 60 seconds, so reads may miss during payload I/O.
     pub(super) fn get(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<Bytes> {
         let entry = self.covering_entry(key, requested)?;
         let start = entry.offset + (requested.start() - entry.object_range.start()) as usize;
@@ -134,9 +132,7 @@ impl BufferedSmallEntryChunk {
             return Ok(0);
         }
         // Detached chunks are not lookup-visible until publication. Reads may miss during payload I/O.
-        let buffered = std::mem::replace(self, Self::new()?);
-        shard
-            .write_payload(disk, buffered.buffer.into_bytes(), buffered.entries)
-            .await
+        let Self { buffer, entries, .. } = std::mem::replace(self, Self::new()?);
+        shard.write_payload(disk, buffer.into_bytes(), entries).await
     }
 }

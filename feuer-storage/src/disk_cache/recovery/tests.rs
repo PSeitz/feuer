@@ -56,7 +56,9 @@ async fn recovers_separate_metadata_and_contiguous_multi_chunk_payloads() {
                 .unwrap(),
             download(u64::MAX - length as u64, length).bytes()
         );
+        cache.disk.shards[0].remove_entry(&ObjectKeyHash(i as u128), u64::MAX - length as u64);
     }
+    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 12 * CHUNK_BYTES);
     assert_eq!(cache.disk.shards[0].metadata_pages.lock().unwrap().chunks.len(), 1);
 }
 
@@ -123,7 +125,7 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     assert!(cache.insert(key, download(0, 1)).await.unwrap());
     let shard = &cache.disk.shards[0];
     let entry = shard.entry_index.lock().unwrap().take_entry(&key, 0).unwrap();
-    let address = entry.payload_range.start;
+    let address = entry.payload_address;
     let (chunk_index, entry_metadata_index) = entry.metadata;
     let metadata = shard.metadata_pages.lock().unwrap();
     let entry_metadata_bytes = metadata.chunks[chunk_index]
@@ -237,13 +239,11 @@ async fn payload_corruption_remains_a_checksum_miss() {
     let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 1)).await.unwrap());
-    let payload = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&0]
-        .payload_range
-        .clone();
+    let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&0].payload_address;
     cache
         .disk
         .file
-        .write_at(payload.start, &Bytes::from(vec![99; 4096]))
+        .write_at(address, &Bytes::from(vec![99; 4096]))
         .await
         .unwrap();
     let cache = reopen(directory.path(), cache).await;
@@ -333,7 +333,8 @@ async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
 
 #[tokio::test]
 async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
-    for second_length in [100, 200, CHUNK_BYTES as usize + 1] {
+    for second_length in [50, 100, 200, CHUNK_BYTES as usize + 1] {
+        let retained_length = second_length.max(100);
         let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
         let key = ObjectKeyHash(1);
         cache
@@ -381,13 +382,13 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
         assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 1.0);
         assert_eq!(
             crate::test_metrics::value(&registry, "feuer_disk_payload_bytes", &[]),
-            second_length as f64
+            retained_length as f64
         );
         assert_eq!(
-            cache.get(&key, range(0, second_length as u64)).await.unwrap(),
-            download(0, second_length).bytes()
+            cache.get(&key, range(0, retained_length as u64)).await.unwrap(),
+            download(0, retained_length).bytes()
         );
-        let recovered_chunks = if second_length <= CHUNK_BYTES as usize {
+        let recovered_chunks = if retained_length <= CHUNK_BYTES as usize {
             2.0
         } else {
             3.0
@@ -430,7 +431,10 @@ async fn stale_metadata_after_payload_reuse_recovers_as_a_checksum_miss() {
     cache
         .disk
         .file
-        .write_padded(reused.disk_byte_range(), &Bytes::from(vec![99; CHUNK_BYTES as usize]))
+        .write_at(
+            reused.disk_byte_range().start,
+            &Bytes::from(vec![99; CHUNK_BYTES as usize]),
+        )
         .await
         .unwrap();
     drop(reused);

@@ -3,7 +3,6 @@ use std::{
     fs::{File, OpenOptions, create_dir_all},
     future::Future,
     io,
-    ops::Range,
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
     sync::Arc,
@@ -16,17 +15,23 @@ use fs4::fs_std::FileExt as LockFileExt;
 use tokio::runtime::Handle;
 use tracing::{Instrument, Span, field};
 
-use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, allocation::CHUNK_BYTES, uring};
+use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, uring};
 
 const DATA_FILE_NAME: &str = "data";
 const LOCK_FILE_NAME: &str = ".feuer.lock";
 
-/// Queues, path, and capacity state shared by cloned data-file handles.
+/// Disk byte count for a payload, including alignment padding and a 4-KiB minimum.
+pub(crate) fn payload_disk_bytes(length: u64) -> u64 {
+    length.max(1).next_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64)
+}
+
+/// Queues, path, capacity, and metrics shared by cloned data-file handles.
 struct DataFileState {
     read_queue: uring::ReadQueue,
     write_queue: uring::WriteQueue,
     data_path: PathBuf,
     capacity: u64,
+    metrics: Arc<IoMetrics>,
 }
 
 /// One exclusively owned, fixed-capacity Linux direct-I/O payload file.
@@ -55,7 +60,6 @@ struct DataFileState {
 #[derive(Clone)]
 pub struct DataFile {
     state: Arc<DataFileState>,
-    metrics: Arc<IoMetrics>,
 }
 
 impl fmt::Debug for DataFile {
@@ -96,26 +100,20 @@ impl DataFile {
         );
         let result = async {
             let state = runtime
-                .spawn_blocking(move || open_file_state(directory, capacity, buffer_pool))
+                .spawn_blocking(move || open_file_state(directory, capacity, buffer_pool, metrics))
                 .await
                 .map_err(|source| DataFileError::Task {
                     operation: IoOperation::OpenDataFile,
                     source: Box::new(source),
                 })??;
+            let file = Self { state: Arc::new(state) };
             // Exercise an actual aligned direct read before claiming open succeeded.
-            state
+            file.state
                 .read_queue
                 .read(0, uring::DIRECT_IO_ALIGNMENT_BYTES)
                 .await
-                .map_err(|source| DataFileError::Io {
-                    operation: IoOperation::OpenDataFile,
-                    path: state.data_path.clone(),
-                    source,
-                })?;
-            Ok(Self {
-                state: Arc::new(state),
-                metrics,
-            })
+                .map_err(|source| file.io_error(IoOperation::OpenDataFile, source))?;
+            Ok(file)
         }
         .instrument(span.clone())
         .await;
@@ -138,37 +136,31 @@ impl DataFile {
             if length == 0 {
                 return Ok(Bytes::new());
             }
-            let alignment = uring::DIRECT_IO_ALIGNMENT_BYTES as u64;
-            let leading_padding_bytes = offset % alignment;
-            let aligned_range = offset - leading_padding_bytes..(offset + length as u64).next_multiple_of(alignment);
-            let (bytes, _) = self.read_aligned_range(aligned_range).await?;
-            Ok(bytes.slice(leading_padding_bytes as usize..leading_padding_bytes as usize + length))
+            self.read_slice(offset, length).await
         })
         .await
     }
 
     /// Reads one contiguous payload into a buffer, omitting final alignment padding.
-    /// The caller supplies the aligned disk range derived from the payload length.
-    pub(crate) async fn read_payload(&self, range: Range<u64>, length: usize) -> DataFileResult<(Bytes, usize)> {
-        self.measure_io(IoOperation::Read, range.start, length, async {
-            let (bytes, capacity) = self.read_aligned_range(range).await?;
-            Ok((bytes.slice(..length), capacity))
-        })
-        .await
+    /// The caller supplies the aligned payload address; even empty payloads occupy one alignment page.
+    pub(crate) async fn read_payload(&self, address: u64, length: usize) -> DataFileResult<Bytes> {
+        self.measure_io(IoOperation::Read, address, length, self.read_slice(address, length))
+            .await
     }
 
-    /// Reads a complete metadata chunk, waiting for read-channel capacity before allocating.
-    /// Recovery finishes before any writes begin.
-    pub(crate) async fn read_recovery_chunk(&self, address: u64) -> DataFileResult<Bytes> {
-        let length = CHUNK_BYTES as usize;
-        self.measure_io(IoOperation::Read, address, length, async {
-            self.state
-                .read_queue
-                .read(address, length)
-                .await
-                .map_err(|source| self.io_error(IoOperation::Read, source))
-        })
-        .await
+    /// Copies a payload read result only if the destination has smaller backing capacity.
+    /// Derives read capacity from the whole payload length; allocation failure leaves the result unchanged.
+    pub(crate) fn shrink_read_buffer(&self, bytes: Bytes, payload_length: u64) -> (Bytes, usize) {
+        let capacity = BufferPool::allocation_capacity(payload_disk_bytes(payload_length) as usize);
+        if BufferPool::allocation_capacity(bytes.len()) >= capacity {
+            return (bytes, capacity);
+        }
+        let Ok(mut buffer) = self.state.read_queue.allocate_buffer(bytes.len()) else {
+            return (bytes, capacity);
+        };
+        buffer.as_mut_slice().copy_from_slice(&bytes);
+        let capacity = buffer.capacity();
+        (buffer.into_bytes(), capacity)
     }
 
     /// Writes bytes at a 4096-byte-aligned offset; the byte count must also be a multiple of 4096.
@@ -184,26 +176,12 @@ impl DataFile {
     pub async fn write_at(&self, offset: u64, bytes: &Bytes) -> DataFileResult<()> {
         assert!(offset.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64));
         assert!(bytes.len().is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
-        self.measure_io(IoOperation::Write, offset, bytes.len(), async {
-            check_range_fits_file(IoOperation::Write, offset, bytes.len() as u64, self.state.capacity)?;
-            for start in (0..bytes.len()).step_by(uring::MAX_IO_REQUEST_BYTES) {
-                let end = (start + uring::MAX_IO_REQUEST_BYTES).min(bytes.len());
-                self.state
-                    .write_queue
-                    .write_padded(offset + start as u64, end - start, &bytes.slice(start..end))
-                    .await
-                    .map_err(|source| self.io_error(IoOperation::Write, source))?;
-            }
-            Ok(())
-        })
-        .await
+        self.write_padded(offset, bytes.len(), bytes).await
     }
 
-    /// Writes bytes with zero padding to fill an aligned region of at most 1 MiB,
-    /// without an intermediate region buffer. The queue retains only I/O buffers.
-    pub(crate) async fn write_padded(&self, range: Range<u64>, bytes: &Bytes) -> DataFileResult<()> {
-        let offset = range.start;
-        let length = (range.end - range.start) as usize;
+    /// Writes bytes with zero padding to fill an aligned disk byte range without an intermediate buffer.
+    /// The queue splits requests at 1 MiB and retains only I/O buffers.
+    pub(crate) async fn write_padded(&self, offset: u64, length: usize, bytes: &Bytes) -> DataFileResult<()> {
         self.measure_io(IoOperation::Write, offset, length, async {
             check_range_fits_file(IoOperation::Write, offset, length as u64, self.state.capacity)?;
             self.state
@@ -244,35 +222,39 @@ impl DataFile {
         );
         let result = execute.instrument(span.clone()).await;
         let elapsed = started.elapsed();
-        self.metrics.record(operation, observed_bytes, elapsed, result.is_ok());
+        self.state
+            .metrics
+            .record(operation, observed_bytes, elapsed, result.is_ok());
         record_span_outcome(&span, elapsed, &result);
         result
     }
 
-    async fn read_aligned_range(&self, range: Range<u64>) -> DataFileResult<(Bytes, usize)> {
+    /// Reads exact bytes through aligned I/O, omitting padding.
+    async fn read_slice(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
         let operation = IoOperation::Read;
-        let buffer_length = usize::try_from(range.end - range.start).map_err(|_| DataFileError::LengthOverflow {
-            operation,
-            length: usize::MAX,
+        let padding = offset % uring::DIRECT_IO_ALIGNMENT_BYTES as u64;
+        let buffer_length = usize::try_from(payload_disk_bytes(padding + length as u64)).map_err(|_| {
+            DataFileError::LengthOverflow {
+                operation,
+                length: usize::MAX,
+            }
         })?;
-        let io_error = |source| self.io_error(operation, source);
-        let mut buffer = self.state.read_queue.allocate_buffer(buffer_length).map_err(io_error)?;
-        for offset in (range.start..range.end).step_by(uring::MAX_IO_REQUEST_BYTES) {
-            let destination_offset = (offset - range.start) as usize;
-            let read_length = (range.end - offset).min(uring::MAX_IO_REQUEST_BYTES as u64) as usize;
-            buffer = self
-                .state
-                .read_queue
-                .read_into(offset, buffer, destination_offset..destination_offset + read_length)
-                .await
-                .map_err(io_error)?;
-        }
-        let capacity = buffer.capacity();
-        Ok((buffer.into_bytes(), capacity))
+        let bytes = self
+            .state
+            .read_queue
+            .read(offset - padding, buffer_length)
+            .await
+            .map_err(|source| self.io_error(operation, source))?;
+        Ok(bytes.slice(padding as usize..padding as usize + length))
     }
 }
 
-fn open_file_state(directory: PathBuf, capacity: u64, buffer_pool: Arc<BufferPool>) -> DataFileResult<DataFileState> {
+fn open_file_state(
+    directory: PathBuf,
+    capacity: u64,
+    buffer_pool: Arc<BufferPool>,
+    metrics: Arc<IoMetrics>,
+) -> DataFileResult<DataFileState> {
     if capacity == 0 || capacity > i64::MAX as u64 || !capacity.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64)
     {
         return Err(DataFileError::InvalidCapacity);
@@ -325,19 +307,24 @@ fn open_file_state(directory: PathBuf, capacity: u64, buffer_pool: Arc<BufferPoo
     }
     check_direct_io_alignment(&file).map_err(|source| error(IoOperation::InspectDataFile, source))?;
     // Construct both rings before resizing, so unavailable io_uring does not resize an existing cache.
-    let file = Arc::new(file);
-    let lock_file = Arc::new(lock_file);
-    let read_queue = uring::ReadQueue::new(file.clone(), lock_file.clone(), buffer_pool)
-        .map_err(|source| error(IoOperation::OpenDataFile, source))?;
+    let files = Arc::new(uring::DataFileAndDirectoryLock {
+        file,
+        _directory_lock: Some(lock_file),
+    });
+    let read_queue =
+        uring::ReadQueue::new(files.clone(), buffer_pool).map_err(|source| error(IoOperation::OpenDataFile, source))?;
     let write_queue =
-        uring::WriteQueue::new(file.clone(), lock_file).map_err(|source| error(IoOperation::OpenDataFile, source))?;
-    file.set_len(capacity)
+        uring::WriteQueue::new(files.clone()).map_err(|source| error(IoOperation::OpenDataFile, source))?;
+    files
+        .file
+        .set_len(capacity)
         .map_err(|source| error(IoOperation::ResizeDataFile, source))?;
     Ok(DataFileState {
         read_queue,
         write_queue,
         data_path,
         capacity,
+        metrics,
     })
 }
 
@@ -394,7 +381,7 @@ fn record_span_outcome<T>(span: &Span, elapsed: std::time::Duration, result: &Da
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DataFileErrorKind;
+    use crate::{DataFileErrorKind, allocation::CHUNK_BYTES};
     use tempfile::tempdir;
 
     const CAPACITY: u64 = 4 * uring::MAX_IO_REQUEST_BYTES as u64;
@@ -452,7 +439,7 @@ mod tests {
         file.write_at(CHUNK_BYTES, &Bytes::from(vec![0x99; CHUNK_BYTES as usize]))
             .await
             .unwrap();
-        let recovered = file.read_recovery_chunk(0).await.unwrap();
+        let recovered = file.read_at(0, CHUNK_BYTES as usize).await.unwrap();
         assert_eq!(recovered.len(), metadata.len());
         assert_eq!(recovered, metadata);
     }
@@ -484,14 +471,16 @@ mod tests {
             file.read_at(CAPACITY - 1, 2).await.unwrap_err().kind(),
             DataFileErrorKind::RangeExceedsCapacity
         );
-        assert_eq!(
-            file.write_at(u64::MAX - 4095, &Bytes::from(vec![0; 4096]))
-                .await
-                .unwrap_err()
-                .kind(),
-            DataFileErrorKind::RangeExceedsCapacity
-        );
+        let bytes = Bytes::from(vec![0; 4096]);
+        for result in [
+            file.write_at(u64::MAX - 4095, &bytes).await,
+            file.write_padded(u64::MAX - 4095, bytes.len(), &bytes).await,
+        ] {
+            assert_eq!(result.unwrap_err().kind(), DataFileErrorKind::RangeExceedsCapacity);
+        }
         assert!(file.read_at(CAPACITY, 0).await.unwrap().is_empty());
+        assert!(file.read_payload(0, 0).await.unwrap().is_empty());
+        assert!(file.read_payload(CAPACITY, 0).await.is_err());
         file.write_at(CAPACITY, &Bytes::new()).await.unwrap();
     }
 

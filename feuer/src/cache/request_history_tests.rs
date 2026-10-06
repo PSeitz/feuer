@@ -6,19 +6,14 @@ use std::task::Poll;
 #[tokio::test]
 async fn records_each_started_request_before_any_result() {
     let (metrics_registry, registry) = crate::test_metrics::registry();
-    let history = Arc::new(ObjectAccessHistories::new());
     let cache = TieredMemoryDiskCache {
         inner: Arc::new(TieredMemoryDiskCacheInner {
             config: CacheConfig::new("cache", 4 << 20, 1024).unwrap(),
-            memory: Arc::new(MemoryCache::with_access_histories(
-                1024,
-                feuer_memory::MemoryMetrics::new(&registry),
-                history.clone(),
-            )),
-            access_histories: history.clone(),
+            memory: MemoryCache::with_metrics(1024, feuer_memory::MemoryMetrics::new(&registry)),
             metrics: LookupMetrics::new(&registry),
         }),
     };
+    let history = cache.inner.memory.access_histories();
     let key = "object".to_owned();
     let requested = ByteRange::new(0, 1).unwrap();
     let result = cache

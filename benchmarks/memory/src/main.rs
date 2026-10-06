@@ -134,8 +134,8 @@ impl TraceRequest {
 
 struct ReplayWorkload {
     name: &'static str,
-    requests: Vec<TraceRequest>,
-    expanded_downloads: Vec<ByteRange>,
+    requests: Box<[TraceRequest]>,
+    expanded_downloads: Box<[ByteRange]>,
 }
 
 /// A cache receiving insertions and lookups while replaying a workload.
@@ -155,15 +155,13 @@ trait ReplayCache {
 /// Feuer's memory cache used for workload replay.
 struct FeuerReplayCache {
     cache: MemoryCache,
-    access_histories: Arc<ObjectAccessHistories>,
 }
 
 impl FeuerReplayCache {
     fn new(capacity: usize, num_shards: usize) -> Self {
         let access_histories = Arc::new(ObjectAccessHistories::new());
         Self {
-            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards, access_histories.clone()),
-            access_histories,
+            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards, access_histories),
         }
     }
 }
@@ -175,7 +173,8 @@ impl ReplayCache for FeuerReplayCache {
 
     /// Looks up the requested bytes in Feuer and reports whether the lookup hit.
     fn lookup_hit(&mut self, request: &TraceRequest, _downloaded_range: ByteRange) -> bool {
-        self.access_histories
+        self.cache
+            .access_histories()
             .record_access(&request.object_key, request.requested_range);
         self.cache.get(&request.object_key, request.requested_range).is_some()
     }
@@ -406,10 +405,7 @@ fn main() -> Result<(), String> {
 
 /// Loads the validated trace, checks request order, and precomputes download ranges.
 fn load_trace_workload(args: &ReplayArgs, download_config: DownloadExpansionConfig) -> Result<ReplayWorkload, String> {
-    let mut requests = load_trace()?;
-    if let Some(operations) = args.operations {
-        requests.truncate(operations);
-    }
+    let requests = load_trace(args.operations)?;
     if requests.is_empty() {
         return Err("trace is empty".to_owned());
     }
@@ -434,13 +430,11 @@ fn replay_cache(
     source_payload: &Bytes,
 ) -> ReplayReport {
     for _ in 0..warmup_iterations {
-        let mut warmup_traffic = ReplayTraffic::default();
-        replay_pass(&mut *cache, workload, downloader, source_payload, &mut warmup_traffic);
+        replay_pass(&mut *cache, workload, downloader, source_payload);
     }
 
-    let mut traffic = ReplayTraffic::default();
     let started = Instant::now();
-    replay_pass(&mut *cache, workload, downloader, source_payload, &mut traffic);
+    let traffic = replay_pass(&mut *cache, workload, downloader, source_payload);
     let elapsed = started.elapsed();
 
     ReplayReport {
@@ -455,12 +449,7 @@ fn replay_cache(
     }
 }
 
-struct CoalescedDownload {
-    downloaded_range: ByteRange,
-    request_indices: Vec<usize>,
-}
-
-fn expanded_download_ranges(workload: &[TraceRequest], config: DownloadExpansionConfig) -> Vec<ByteRange> {
+fn expanded_download_ranges(workload: &[TraceRequest], config: DownloadExpansionConfig) -> Box<[ByteRange]> {
     let mut request_indices_by_object: HashMap<(&ObjectKeyHash, u64), Vec<usize>> = HashMap::new();
     for (request_index, request) in workload.iter().enumerate() {
         request_indices_by_object
@@ -482,19 +471,17 @@ fn expanded_download_ranges(workload: &[TraceRequest], config: DownloadExpansion
             let coalescing_deadline_millis = workload[request_index]
                 .timestamp_millis
                 .saturating_add(COALESCING_WINDOW_MILLIS);
-            let pending_downloads = request_indices[object_request_index..]
+            let mut pending_downloads = request_indices[object_request_index..]
                 .iter()
                 .copied()
                 .take_while(|&candidate_index| workload[candidate_index].timestamp_millis <= coalescing_deadline_millis)
                 .filter(|&candidate_index| expanded_ranges[candidate_index].is_none())
                 .map(|index| (workload[index].expanded_download_range(config), index))
-                .collect();
-            let download = coalesced_downloads(pending_downloads, config.coalescing_distance_bytes)
-                .into_iter()
-                .find(|download| download.request_indices.contains(&request_index))
-                .expect("the current request must belong to one coalesced download");
-            for member_index in download.request_indices {
-                expanded_ranges[member_index] = Some(download.downloaded_range);
+                .collect::<Vec<_>>();
+            let (downloaded_range, members) =
+                coalesced_download(&mut pending_downloads, config.coalescing_distance_bytes, request_index);
+            for &(_, member_index) in members {
+                expanded_ranges[member_index] = Some(downloaded_range);
             }
         }
     }
@@ -511,8 +498,8 @@ fn replay_pass<C: ReplayCache + ?Sized>(
     workload: &ReplayWorkload,
     downloader: DownloadRangePolicy,
     source_payload: &Bytes,
-    traffic: &mut ReplayTraffic,
-) {
+) -> ReplayTraffic {
+    let mut traffic = ReplayTraffic::default();
     for (request, downloaded_range) in workload.requests.iter().zip(downloader.ranges(workload)) {
         let hit = cache.lookup_hit(request, downloaded_range);
         traffic.requests += 1;
@@ -527,34 +514,32 @@ fn replay_pass<C: ReplayCache + ?Sized>(
         cache.insert(request, downloaded_range, payload);
         traffic.source_bytes += downloaded_range.len();
     }
+    traffic
 }
 
-/// Coalesces download ranges and trace indices already grouped by object key and size.
-fn coalesced_downloads(
-    mut pending_downloads: Vec<(ByteRange, usize)>,
+/// Returns the coalesced range and member requests containing this request.
+/// Inputs include this request and share an object key and size.
+fn coalesced_download(
+    pending_downloads: &mut [(ByteRange, usize)],
     coalescing_distance_bytes: u64,
-) -> Vec<CoalescedDownload> {
+    request_index: usize,
+) -> (ByteRange, &[(ByteRange, usize)]) {
     pending_downloads.sort_unstable();
-
-    let mut downloads: Vec<CoalescedDownload> = Vec::new();
-    for (downloaded_range, trace_index) in pending_downloads {
-        if let Some(download) = downloads.last_mut()
-            && downloaded_range.start().saturating_sub(download.downloaded_range.end()) < coalescing_distance_bytes
+    let mut remaining = &*pending_downloads;
+    loop {
+        let mut range = remaining[0].0;
+        let mut end = 1;
+        while end < remaining.len() && remaining[end].0.start().saturating_sub(range.end()) < coalescing_distance_bytes
         {
-            download.downloaded_range = ByteRange::new(
-                download.downloaded_range.start(),
-                download.downloaded_range.end().max(downloaded_range.end()),
-            )
-            .expect("the union of coalesced non-empty ranges must be non-empty");
-            download.request_indices.push(trace_index);
-        } else {
-            downloads.push(CoalescedDownload {
-                downloaded_range,
-                request_indices: vec![trace_index],
-            });
+            range = ByteRange::new(range.start(), range.end().max(remaining[end].0.end())).unwrap();
+            end += 1;
         }
+        let (members, rest) = remaining.split_at(end);
+        if members.iter().any(|&(_, index)| index == request_index) {
+            return (range, members);
+        }
+        remaining = rest;
     }
-    downloads
 }
 
 /// Slices a download from the source buffer sized to the largest download, whose length fits usize.
@@ -672,13 +657,14 @@ fn print_csv_report(report: &ReplayReport) {
     );
 }
 
-fn load_trace() -> Result<Vec<TraceRequest>, String> {
+fn load_trace(operation_limit: Option<usize>) -> Result<Box<[TraceRequest]>, String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(TRACE_FILE);
     let content = fs::read_to_string(&path).map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     content
         .lines()
         .enumerate()
         .filter(|(_, line)| !line.trim().is_empty())
+        .take(operation_limit.unwrap_or(usize::MAX))
         .map(|(index, line)| {
             parse_trace_line(line).map_err(|error| format!("{}:{}: {error}", path.display(), index + 1))
         })
@@ -841,16 +827,16 @@ mod tests {
             let requested_range = ByteRange::new(0, payload_bytes).unwrap();
             let workload = ReplayWorkload {
                 name: "test",
-                requests: vec![TraceRequest {
+                requests: Box::new([TraceRequest {
                     object_key: "object".into(),
                     object_size: 1,
                     requested_range,
                     timestamp_millis: 0,
-                }],
-                expanded_downloads: vec![requested_range],
+                }]),
+                expanded_downloads: Box::new([requested_range]),
             };
             let report = replay_cache(
-                Box::new(CoveringRangeTestCache::default()),
+                Box::new(FeuerReplayCache::new(1, 1)),
                 &workload,
                 DownloadRangePolicy::Exact,
                 1,
@@ -913,7 +899,7 @@ mod tests {
         let expanded_downloads = expanded_download_ranges(&requests, download_config);
         let workload = ReplayWorkload {
             name: "test",
-            requests,
+            requests: requests.into_boxed_slice(),
             expanded_downloads,
         };
         assert_eq!(&workload.expanded_downloads[..3], &[ByteRange::new(0, 30).unwrap(); 3]);
@@ -958,7 +944,7 @@ mod tests {
             },
         );
         assert_eq!(
-            ranges,
+            *ranges,
             [(0, 30), (5, 15), (0, 10), (0, 30)].map(|(start, end)| ByteRange::new(start, end).unwrap())
         );
     }
@@ -967,7 +953,7 @@ mod tests {
     fn coalescing_distance_parameter_is_a_strict_upper_bound() {
         let distance = DEFAULT_COALESCING_DISTANCE_BYTES;
         let ranges_for_gap = |gap| {
-            let requests = [(0, 1, 0), (1 + gap, 2 + gap, 1)].map(|(start, end, timestamp_millis)| TraceRequest {
+            let requests = [(1 + gap, 2 + gap, 0), (0, 1, 1)].map(|(start, end, timestamp_millis)| TraceRequest {
                 object_key: "object".into(),
                 object_size: 2 * distance,
                 requested_range: ByteRange::new(start, end).unwrap(),
@@ -983,10 +969,13 @@ mod tests {
         };
 
         assert_eq!(
-            ranges_for_gap(distance - 1)[0],
-            ByteRange::new(0, distance + 1).unwrap()
+            *ranges_for_gap(distance - 1),
+            [ByteRange::new(0, distance + 1).unwrap(); 2]
         );
-        assert_eq!(ranges_for_gap(distance)[0], ByteRange::new(0, 1).unwrap());
+        assert_eq!(
+            *ranges_for_gap(distance),
+            [(distance + 1, distance + 2), (0, 1)].map(|(start, end)| ByteRange::new(start, end).unwrap())
+        );
     }
 
     #[test]

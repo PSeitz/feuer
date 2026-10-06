@@ -124,10 +124,12 @@ fn entry_presence_check_accepts_reinsertion_but_rejects_removal_and_replacement(
     let key = ObjectKeyHash::from("disk-source");
     let payload = Download::new(10, Bytes::from_static(b"abcd")).unwrap();
     let range = payload.downloaded_range();
+    assert!(!cache.remove(&key, range));
     assert!(cache.insert(key, payload.clone()));
     assert!(cache.contains_entry(&key, range));
     assert!(!cache.insert(key, payload.clone()));
     assert!(cache.remove(&key, range));
+    assert!(!cache.remove(&key, range));
     assert!(!cache.contains_entry(&key, range));
     assert!(cache.insert(key, payload));
     assert!(cache.contains_entry(&key, range));
@@ -205,7 +207,10 @@ fn equal_cost_eviction_uses_key_order_not_sample_order() {
     assert!(cache.get(&ObjectKeyHash(1), range).is_none());
     for key in [2, 3, 4] {
         assert!(cache.get(&ObjectKeyHash(key), range).is_some());
+        assert!(cache.remove(&ObjectKeyHash(key), range));
     }
+    assert_eq!(cache.entry_count(), 0);
+    assert_eq!(cache.used_bytes(), 0);
 }
 
 #[test]
@@ -220,17 +225,17 @@ fn reclaim_sampling_advances_past_contained_ranges() {
         cache.insert(key, Download::new(start, bytes).unwrap());
     }
     let mut shard = cache.shards[0].lock();
-    let replacement = Bytes::from_static(b"abc");
-    for expected_entries in [3, 3, 2] {
+    let replacement = Download::new(0, Bytes::from_static(b"abc")).unwrap();
+    for (expected_entries, evicted) in [(3, false), (3, false), (2, true)] {
         assert!(matches!(
-            shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, 3, &cache.access_histories, false),
-            InsertOrReclaimResult::Retry | InsertOrReclaimResult::Evicted
+            shard.try_admit_or_reclaim(&key, &replacement, 3, &cache, false),
+            InsertOrReclaimResult::Retry { evicted: removed } if removed == evicted
         ));
         assert_eq!(shard.entry_count(), expected_entries);
     }
     // The partial overlap is eligible; the two ranges fully contained in the incoming download were skipped.
     assert!(matches!(
-        shard.try_admit_or_reclaim(&key, range(0, 3), &replacement, 3, &cache.access_histories, false),
+        shard.try_admit_or_reclaim(&key, &replacement, 3, &cache, false),
         InsertOrReclaimResult::Complete(true)
     ));
     assert_eq!(shard.entry_count(), 1);
@@ -242,18 +247,19 @@ fn covering_lookup_returns_only_requested_bytes_and_shares_the_allocation() {
     let cache = cache(16);
     let key = ObjectKeyHash::from("object");
     let value = Bytes::from_static(b"abcdefghij");
+    for start in [10, u64::MAX - 10] {
+        insert(&cache, key, download(range(start, start + 10), value.clone()));
+        let result = cache.get(&key, range(start + 3, start + 7)).unwrap();
 
-    insert(&cache, key, download(range(10, 20), value.clone()));
-    let result = cache.get(&key, range(13, 17)).unwrap();
+        assert_eq!(result, Bytes::from_static(b"defg"));
+        assert_eq!(result.as_ptr(), value.slice(3..).as_ptr());
+        assert_eq!(result.len(), 4);
+        assert_eq!(cache.used_bytes(), 10);
 
-    assert_eq!(result, Bytes::from_static(b"defg"));
-    assert_eq!(result.as_ptr(), value.slice(3..).as_ptr());
-    assert_eq!(result.len(), 4);
-    assert_eq!(cache.used_bytes(), 10);
-
-    assert!(cache.remove(&key, range(10, 20)));
-    assert_eq!(cache.used_bytes(), 0);
-    assert_eq!(result, Bytes::from_static(b"defg"));
+        assert!(cache.remove(&key, range(start, start + 10)));
+        assert_eq!(cache.used_bytes(), 0);
+        assert_eq!(result, Bytes::from_static(b"defg"));
+    }
 }
 
 #[test]
@@ -371,7 +377,9 @@ fn replacement_releases_contained_charges_including_an_empty_entry_at_the_end() 
         assert_eq!(cache.entry_count(), 2);
         assert!(!cache.contains_entry(&key, range(3, 3)));
         assert_eq!(cache.get(&key, range(4, 6)).unwrap(), Bytes::from_static(b"ef"));
-        assert!(!cache.remove(&key, range(0, 1))); // Exact-range removal must not remove the replacement.
+        for rejected in [range(0, 1), range(0, 4), range(3, 3)] {
+            assert!(!cache.remove(&key, rejected));
+        }
         assert_eq!(
             value(&registry, "feuer_memory_used_bytes", &[]),
             replacement_charge as f64 + 2.0
@@ -388,7 +396,9 @@ fn replacement_releases_contained_charges_including_an_empty_entry_at_the_end() 
         assert!(cache.remove(&key, range(0, 3)));
         assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 2.0);
         assert_eq!(value(&registry, "feuer_memory_entries", &[]), 1.0);
+        let pool = cache.buffer_pool();
         drop(cache);
+        assert_eq!(pool.used_bytes(), 0);
         assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 0.0);
         assert_eq!(value(&registry, "feuer_memory_entries", &[]), 0.0);
     }
@@ -608,11 +618,11 @@ fn range_trim_waits_for_grace_and_pressure_without_recording_accesses() {
 fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
     let cache = cache(10);
     let key = ObjectKeyHash::from("download");
-    insert(&cache, key, download(range(0, 10), Bytes::from_static(b"abcdefghij")));
-    cache.access_histories.record_access(&key, range(1, 3));
-    cache.access_histories.record_access(&key, range(7, 9));
+    insert(&cache, key, download(range(10, 20), Bytes::from_static(b"abcdefghij")));
+    cache.access_histories.record_access(&key, range(11, 13));
+    cache.access_histories.record_access(&key, range(17, 19));
     for _ in 2..MIN_REQUESTS_BEFORE_RANGE_TRIM {
-        cache.access_histories.record_access(&key, range(1, 3));
+        cache.access_histories.record_access(&key, range(11, 13));
     }
 
     insert(
@@ -622,9 +632,9 @@ fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
     );
 
     assert_eq!(cache.used_bytes(), 6);
-    assert_eq!(cache.get(&key, range(1, 3)).unwrap(), Bytes::from_static(b"bc"));
-    assert_eq!(cache.get(&key, range(7, 9)).unwrap(), Bytes::from_static(b"hi"));
-    assert!(cache.get(&key, range(3, 7)).is_none());
+    assert_eq!(cache.get(&key, range(11, 13)).unwrap(), Bytes::from_static(b"bc"));
+    assert_eq!(cache.get(&key, range(17, 19)).unwrap(), Bytes::from_static(b"hi"));
+    assert!(cache.get(&key, range(13, 17)).is_none());
 }
 
 #[test]
@@ -662,10 +672,9 @@ fn range_trim_requires_only_the_exact_source_range() {
             let mut shard = cache.shards[0].lock();
             let InsertOrReclaimResult::Trim(source) = shard.try_admit_or_reclaim(
                 &ObjectKeyHash::from("incoming"),
-                range(0, 11),
-                &Bytes::from_static(b"01234567890"),
+                &Download::new(0, Bytes::from_static(b"01234567890")).unwrap(),
                 11,
-                &cache.access_histories,
+                &cache,
                 true,
             ) else {
                 panic!("expected a trim");
@@ -698,6 +707,7 @@ fn range_trim_requires_only_the_exact_source_range() {
         let mut shard = cache.shards[0].lock();
         // A request recorded after copying does not invalidate the plan or need the shard lock.
         cache.access_histories.record_access(&key, range(6, 8));
+        let used_bytes_before_trim = shard.used_bytes();
         assert_eq!(
             shard.publish_range_trim(replacement, cache.access_histories.request_count()),
             published
@@ -706,14 +716,16 @@ fn range_trim_requires_only_the_exact_source_range() {
         assert!(accessed_ranges(&cache, &key).contains(&range(6, 8)));
         assert_eq!(cache.used_bytes(), expected_bytes);
         assert_eq!(cache.entry_count(), expected_entries);
-        assert_eq!(
-            crate::test_metrics::value(&registry, "feuer_memory_used_bytes", &[]),
-            expected_bytes as f64
-        );
-        assert_eq!(
-            crate::test_metrics::value(&registry, "feuer_memory_entries", &[]),
-            expected_entries as f64
-        );
+        for (name, expected) in [
+            ("feuer_memory_used_bytes", expected_bytes),
+            ("feuer_memory_entries", expected_entries),
+            (
+                "feuer_memory_compacted_payload_bytes_total",
+                used_bytes_before_trim - expected_bytes,
+            ),
+        ] {
+            assert_eq!(crate::test_metrics::value(&registry, name, &[]), expected as f64);
+        }
         assert_eq!(cache.get(&key, requested_range).as_deref(), expected_payload);
         if published {
             assert_eq!(cache.get(&key, range(2, 4)).unwrap(), Bytes::from_static(b"cd"));

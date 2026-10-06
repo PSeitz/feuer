@@ -165,7 +165,7 @@ impl DiskMetrics {
 /// Records exactly one terminal outcome even if the writer is dropped.
 pub(crate) struct DiskWriteAttempt {
     metrics: Arc<DiskMetrics>,
-    outcome: DiskWriteOutcome,
+    pub(crate) outcome: DiskWriteOutcome,
     pub(crate) evicted: bool,
 }
 
@@ -176,10 +176,6 @@ impl DiskWriteAttempt {
             outcome: DiskWriteOutcome::Canceled,
             evicted: false,
         }
-    }
-
-    pub(crate) fn set_outcome(&mut self, outcome: DiskWriteOutcome) {
-        self.outcome = outcome;
     }
 }
 

@@ -16,14 +16,13 @@ mod tests;
 use std::{
     collections::BTreeMap,
     fmt,
-    ops::Range,
     path::Path,
     sync::{Arc, Mutex, Weak},
     time::Instant,
 };
 
 use bytes::Bytes;
-use feuer_memory::{BUFFER_ALIGNMENT, BufferPool};
+use feuer_memory::BufferPool;
 use feuer_types::{
     ByteRange, Download, ObjectKeyHash,
     retention::{ObjectAccessHistories, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates},
@@ -36,6 +35,7 @@ use crate::{
     DataFile, DataFileError, DataFileResult, DiskMetrics, IoMetrics,
     allocation::{CHUNK_BYTES, DiskChunkAllocator, ReservedChunks},
     disk_metrics::{DiskLookupOutcome, DiskWriteAttempt, DiskWriteOutcome},
+    file::payload_disk_bytes,
 };
 #[cfg(test)]
 use page_format::METADATA_PAGE_BYTES;
@@ -43,13 +43,6 @@ use page_format::METADATA_PAGE_BYTES;
 // Per admission: limit sampled eviction decisions and removal work, including multi-chunk entries.
 const MAX_EVICTION_ATTEMPTS: usize = 64;
 const MAX_EVICTION_CHUNKS: usize = 4096;
-
-/// Disk byte count for a payload, including alignment padding and a 4-KiB minimum.
-fn payload_disk_bytes(length: u64) -> u64 {
-    length
-        .max(BUFFER_ALIGNMENT as u64)
-        .next_multiple_of(BUFFER_ALIGNMENT as u64)
-}
 
 /// Caches object bytes on disk, looked up by object key and byte range.
 ///
@@ -70,18 +63,17 @@ pub struct DiskCache {
     write_sender: mpsc::Sender<PendingDiskWrite>,
 }
 
-/// Shared disk-cache internals: file, buffer pool, shards, access histories, and metrics.
+/// Shared disk-cache internals: file, shards, access histories, and metrics.
 struct DiskCacheInner {
     file: DataFile,
-    buffer_pool: Arc<BufferPool>,
     shards: Box<[DiskCacheShard]>,
     access_histories: Arc<ObjectAccessHistories>,
     metrics: Arc<DiskMetrics>,
+    reclaim_sample_size: usize,
 }
 
 /// One shard's small-entry buffer, allocator, published entry index, and metadata pages.
 struct DiskCacheShard {
-    reclaim_sample_size: usize,
     allocator: DiskChunkAllocator,
     entry_index: Mutex<DiskEntryIndex>,
     metadata_pages: Mutex<metadata::MetadataPages>,
@@ -97,27 +89,25 @@ struct DiskEntryIndex {
     metrics: Arc<DiskMetrics>,
 }
 
-/// Verified bytes or failure shared by concurrent reads of one stored entry.
-type EntryReadResult = OnceCell<Result<(Bytes, usize), DiskLookupOutcome>>;
-
-/// One entry's object range, payload disk range and checksum, metadata, eviction position, and shared read.
+/// One entry's object range, payload disk address and checksum, metadata, eviction position, and shared read.
 struct DiskEntry {
     // In-flight deduplication: concurrent readers share one disk read and checksum verification.
     // Only concurrent callers retain the result; the index must not cache payload bytes.
-    in_flight_read: Weak<EntryReadResult>,
+    in_flight_read: Weak<PayloadRead>,
     eviction_position: usize,
     object_range: ByteRange,
     payload_checksum: u64,
-    payload_range: Range<u64>,
+    payload_address: u64,
     /// Metadata chunk and entry metadata indexes identifying this entry's 48-byte disk metadata.
     metadata: (usize, usize),
 }
 
-/// The disk address, object range, and expected checksum for one payload read.
+/// One payload read's disk address, object range, checksum, and result shared by concurrent readers.
 struct PayloadRead {
     object_range: ByteRange,
     payload_checksum: u64,
-    payload_range: Range<u64>,
+    payload_address: u64,
+    result: OnceCell<Result<Bytes, DiskLookupOutcome>>,
 }
 
 /// An error opening or writing the disk cache. Read uncertainty becomes a miss.
@@ -208,14 +198,13 @@ impl DiskCache {
             return Err(DiskCacheError::InvalidCapacity);
         }
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
-        let file = DataFile::open_with_buffer_pool(directory, capacity, io_metrics, buffer_pool.clone()).await?;
+        let file = DataFile::open_with_buffer_pool(directory, capacity, io_metrics, buffer_pool).await?;
         let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
         let shards = (0..num_shards)
             .map(|shard_index| {
                 let range = recovery::shard_disk_range(capacity, num_shards, shard_index);
-                let allocator = DiskChunkAllocator::with_metrics(range, metrics.clone()).unwrap();
+                let allocator = DiskChunkAllocator::with_metrics(range, metrics.clone());
                 Ok(DiskCacheShard {
-                    reclaim_sample_size,
                     allocator,
                     entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
                     buffered_small_entry_chunk: tokio::sync::Mutex::new(BufferedSmallEntryChunk::new()?),
@@ -225,10 +214,10 @@ impl DiskCache {
             .collect::<Result<_, DataFileError>>()?;
         let disk = Arc::new(DiskCacheInner {
             file,
-            buffer_pool,
             shards,
             access_histories,
             metrics,
+            reclaim_sample_size,
         });
         let started = Instant::now();
         tracing::info!(target: "feuer::storage", "starting disk cache recovery");
@@ -252,14 +241,14 @@ impl DiskCache {
     /// Inserts a batch and flushes shared buffers. Counts entries published by this call, including neighbors.
     /// Earlier publication survives later failure. Dropping this future does not abort its detached writer.
     pub async fn insert_batch(&self, mut downloads: Vec<(ObjectKeyHash, Download)>) -> Result<usize, DiskCacheError> {
-        let cache = self.clone();
-        downloads.sort_by_key(|(_, download)| download.bytes().len());
+        let disk = self.disk.clone();
+        downloads.sort_unstable_by_key(|(_, download)| download.bytes().len());
         tokio::spawn(async move {
             let mut published = 0;
             for (key, download) in downloads {
-                published += cache.write(key, download, ()).await?;
+                published += disk.write(key, download, ()).await?;
             }
-            Ok(published + cache.flush().await?)
+            Ok(published + disk.flush().await?)
         })
         .await
         .map_err(DiskCacheError::WriteTaskFailed)?
@@ -283,7 +272,7 @@ impl DiskCache {
 
     /// Checks for one covering buffered or disk entry, without disk I/O or recording an access.
     pub fn covers_range(&self, key: &ObjectKeyHash, range: ByteRange) -> bool {
-        self.disk.covers_range(key, range)
+        self.disk.shards[self.disk.shard_index_for_key(key)].covers_range(key, range)
     }
 
     /// Returns exactly requested bytes from one covering entry, or a miss on any I/O/integrity uncertainty.
@@ -308,28 +297,18 @@ impl DiskCache {
             metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
             return Some((bytes, requested.len() as usize));
         }
-        let (read, in_flight_read) = {
+        let read = {
             let mut disk_index = shard.entry_index.lock().unwrap();
             let Some(entry) = disk_index.covering_entry(key, requested) else {
+                drop(disk_index);
                 metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
                 return None;
             };
-            let in_flight_read = entry.in_flight_read.upgrade().unwrap_or_else(|| {
-                let result = Arc::new(OnceCell::new());
-                entry.in_flight_read = Arc::downgrade(&result);
-                result
-            });
-            (
-                PayloadRead {
-                    object_range: entry.object_range,
-                    payload_checksum: entry.payload_checksum,
-                    payload_range: entry.payload_range.clone(),
-                },
-                in_flight_read,
-            )
+            entry.share_payload_read()
         };
         // If the initializing caller is canceled, OnceCell lets a waiter take over.
-        let result = in_flight_read
+        let result = read
+            .result
             .get_or_init(|| async {
                 let result = read.read_and_verify_payload(&self.disk.file).await;
                 if matches!(result, Err(DiskLookupOutcome::ChecksumFailed)) {
@@ -339,10 +318,10 @@ impl DiskCache {
             })
             .await;
         match result {
-            Ok((bytes, buffer_capacity)) => {
+            Ok(bytes) => {
                 let start = (requested.start() - read.object_range.start()) as usize;
                 let bytes = bytes.slice(start..start + requested.len() as usize);
-                let (bytes, buffer_capacity) = shrink_disk_result(&self.disk.buffer_pool, bytes, *buffer_capacity);
+                let (bytes, buffer_capacity) = self.disk.file.shrink_read_buffer(bytes, read.object_range.len());
                 metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
                 Some((bytes, buffer_capacity))
             }
@@ -354,28 +333,22 @@ impl DiskCache {
     }
 }
 
-/// Copies a disk result only if the destination has smaller backing capacity.
-/// Allocation failure leaves the verified result and its charge unchanged.
-fn shrink_disk_result(pool: &Arc<BufferPool>, bytes: Bytes, capacity: usize) -> (Bytes, usize) {
-    if BufferPool::allocation_capacity(bytes.len()) >= capacity {
-        return (bytes, capacity);
-    }
-    let Ok(mut buffer) = pool.allocate(bytes.len()) else {
-        return (bytes, capacity);
-    };
-    buffer.as_mut_slice().copy_from_slice(&bytes);
-    let capacity = buffer.capacity();
-    (buffer.into_bytes(), capacity)
-}
-
 impl DiskCacheShard {
+    /// Checks for a covering buffered or disk entry without copying payload bytes.
+    fn covers_range(&self, key: &ObjectKeyHash, range: ByteRange) -> bool {
+        self.buffered_small_entry_chunk
+            .try_lock()
+            .is_ok_and(|pending| pending.covering_entry(key, range).is_some())
+            || self.entry_index.lock().unwrap().covering_entry(key, range).is_some()
+    }
+
     /// Samples up to `reclaim_sample_size` entries and evicts at most one that fits the remaining chunk budget.
     /// Returns whether sampling occurred, even if no entry was evicted.
     /// Consumes one attempt when sampling; removed entries consume their chunk count. Neighbors are not evicted.
     /// The allocator releases removed payloads without waiting for metadata writes or readers.
     fn sample_and_evict_entry(
         &self,
-        access_histories: &ObjectAccessHistories,
+        disk: &DiskCacheInner,
         remaining_eviction_attempts: &mut usize,
         remaining_eviction_chunk_budget: &mut usize,
     ) -> bool {
@@ -383,49 +356,60 @@ impl DiskCacheShard {
             return false;
         }
         let mut disk_index = self.entry_index.lock().unwrap();
-        let candidate_count = disk_index.eviction_candidates.len();
-        if candidate_count == 0 {
+        if disk_index.eviction_candidates.is_empty() {
             return false;
         }
         *remaining_eviction_attempts -= 1;
-        let (sample_start, sample_count) = sample_candidates(
+        let disk_index = &mut *disk_index;
+        let selected_candidate = sample_candidates(
             &mut disk_index.next_sample_start,
-            candidate_count,
-            self.reclaim_sample_size,
-        );
-        let selected_candidate = (0..sample_count)
-            .filter_map(|sample_offset| {
-                let position = (sample_start + sample_offset) % candidate_count;
-                let (key, range_start) = &disk_index.eviction_candidates[position];
-                let entry = &disk_index.entries_by_key[key][range_start];
-                (entry.chunk_count() as usize <= *remaining_eviction_chunk_budget).then(|| {
-                    let cost = access_histories.decayed_retrieval_cost(key, entry.object_range);
-                    (position, cost, entry.object_range.len())
-                })
+            &disk_index.eviction_candidates,
+            disk.reclaim_sample_size,
+        )
+        .filter_map(|candidate @ (key, range_start)| {
+            let entry = &disk_index.entries_by_key[key][range_start];
+            let chunk_count = entry.chunk_count() as usize;
+            (chunk_count <= *remaining_eviction_chunk_budget).then(|| {
+                let cost = disk.access_histories.decayed_retrieval_cost(key, entry.object_range);
+                (candidate, cost, entry.object_range.len(), chunk_count)
             })
-            .min_by(|(_, left_cost, left_bytes), (_, right_cost, right_bytes)| {
-                compare_cost_per_byte(*left_cost, *left_bytes, *right_cost, *right_bytes)
-            });
-        if let Some((position, ..)) = selected_candidate {
-            let (key, start) = disk_index.eviction_candidates[position];
-            *remaining_eviction_chunk_budget -= disk_index.entries_by_key[&key][&start].chunk_count() as usize;
-            self.remove_entry_from_index(&mut disk_index, &key, start);
+        })
+        .min_by(|(_, left_cost, left_bytes, _), (_, right_cost, right_bytes, _)| {
+            compare_cost_per_byte(*left_cost, *left_bytes, *right_cost, *right_bytes)
+        });
+        if let Some((&(key, start), _, _, chunk_count)) = selected_candidate {
+            *remaining_eviction_chunk_budget -= chunk_count;
+            self.remove_entry_from_index(disk_index, &key, start);
         }
         true
     }
 }
 
 impl DiskEntry {
+    /// Shares the payload read, creating one from this entry's metadata when no readers remain.
+    fn share_payload_read(&mut self) -> Arc<PayloadRead> {
+        self.in_flight_read.upgrade().unwrap_or_else(|| {
+            let read = Arc::new(PayloadRead {
+                object_range: self.object_range,
+                payload_checksum: self.payload_checksum,
+                payload_address: self.payload_address,
+                result: OnceCell::new(),
+            });
+            self.in_flight_read = Arc::downgrade(&read);
+            read
+        })
+    }
+
     fn chunk_count(&self) -> u64 {
-        self.payload_range.end.div_ceil(CHUNK_BYTES) - self.payload_range.start / CHUNK_BYTES
+        // Small payloads stay within one chunk; larger payloads start at a chunk boundary.
+        self.object_range.len().max(1).div_ceil(CHUNK_BYTES)
     }
 }
 
 impl DiskCacheShard {
     /// Locks the disk index, removes one entry, releases its payload, and allows its metadata to be overwritten.
     fn remove_entry(&self, key: &ObjectKeyHash, start: u64) {
-        let mut disk_index = self.entry_index.lock().unwrap();
-        self.remove_entry_from_index(&mut disk_index, key, start);
+        self.remove_entry_from_index(&mut self.entry_index.lock().unwrap(), key, start);
     }
 
     /// Removes and releases one entry while the caller holds the disk-index lock.
@@ -438,7 +422,7 @@ impl DiskCacheShard {
 
     /// Releases one held payload and allows its metadata slot to be overwritten.
     fn release_entry(&self, entry: DiskEntry, metadata: &mut metadata::MetadataPages) {
-        self.allocator.release_payload(entry.payload_range.start);
+        self.allocator.release_payload(entry.payload_address);
         metadata.free_entry_positions.push(entry.metadata);
     }
 
@@ -527,15 +511,6 @@ impl Drop for DiskEntryIndex {
 }
 
 impl DiskCacheInner {
-    fn covers_range(&self, key: &ObjectKeyHash, range: ByteRange) -> bool {
-        let shard = &self.shards[self.shard_index_for_key(key)];
-        shard
-            .buffered_small_entry_chunk
-            .try_lock()
-            .is_ok_and(|pending| pending.covering_entry(key, range).is_some())
-            || shard.entry_index.lock().unwrap().covering_entry(key, range).is_some()
-    }
-
     fn shard_index_for_key(&self, key: &ObjectKeyHash) -> usize {
         (key.0 % self.shards.len() as u128) as usize
     }
@@ -543,9 +518,9 @@ impl DiskCacheInner {
 
 impl PayloadRead {
     /// Reads the whole entry payload and verifies its checksum.
-    async fn read_and_verify_payload(&self, file: &DataFile) -> Result<(Bytes, usize), DiskLookupOutcome> {
-        let (bytes, buffer_capacity) = file
-            .read_payload(self.payload_range.clone(), self.object_range.len() as usize)
+    async fn read_and_verify_payload(&self, file: &DataFile) -> Result<Bytes, DiskLookupOutcome> {
+        let bytes = file
+            .read_payload(self.payload_address, self.object_range.len() as usize)
             .await
             .map_err(|error| {
                 tracing::warn!(target: "feuer::storage", %error, "disk read failed");
@@ -555,6 +530,6 @@ impl PayloadRead {
             tracing::warn!(target: "feuer::storage", "disk checksum failed; entry invalidated");
             return Err(DiskLookupOutcome::ChecksumFailed);
         }
-        Ok((bytes, buffer_capacity))
+        Ok(bytes)
     }
 }

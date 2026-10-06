@@ -6,7 +6,7 @@ use feuer_memory::MemoryCache;
 use feuer_memory::MemoryMetrics;
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskCache, DiskCacheError, IoMetrics};
-use feuer_types::{ByteRange, Download, ObjectKeyHash, retention::ObjectAccessHistories};
+use feuer_types::{ByteRange, Download, ObjectKeyHash};
 #[cfg(target_os = "linux")]
 use mixtrics::metrics::BoxedRegistry;
 use thiserror::Error;
@@ -19,8 +19,7 @@ use crate::{
 /// Configuration and cache tiers shared by cloned handles.
 struct TieredMemoryDiskCacheInner {
     config: CacheConfig,
-    memory: Arc<MemoryCache>,
-    access_histories: Arc<ObjectAccessHistories>,
+    memory: MemoryCache,
     metrics: LookupMetrics,
     #[cfg(target_os = "linux")]
     disk: Option<DiskCache>,
@@ -60,15 +59,8 @@ impl TieredMemoryDiskCache {
     /// sharing a registry contribute to the same counters and aggregate gauges.
     #[cfg(target_os = "linux")]
     pub async fn open_with_metrics(config: CacheConfig, registry: &BoxedRegistry) -> Result<Self, DiskCacheError> {
-        let access_histories = Arc::new(ObjectAccessHistories::new());
-        let memory = Arc::new(
-            MemoryCache::with_access_histories(
-                config.memory_capacity(),
-                MemoryMetrics::new(registry),
-                access_histories.clone(),
-            )
-            .with_reclaim_sample_size(config.reclaim_sample_size()),
-        );
+        let memory = MemoryCache::with_metrics(config.memory_capacity(), MemoryMetrics::new(registry))
+            .with_reclaim_sample_size(config.reclaim_sample_size());
         let disk = if config.disk_capacity() == 0 {
             None
         } else {
@@ -77,7 +69,7 @@ impl TieredMemoryDiskCache {
                     config.directory(),
                     config.disk_capacity(),
                     IoMetrics::new(registry),
-                    access_histories.clone(),
+                    memory.access_histories().clone(),
                     feuer_storage::DiskMetrics::new(registry),
                     config.reclaim_sample_size(),
                     memory.buffer_pool(),
@@ -89,7 +81,6 @@ impl TieredMemoryDiskCache {
             inner: Arc::new(TieredMemoryDiskCacheInner {
                 config,
                 memory,
-                access_histories,
                 metrics: LookupMetrics::new(registry),
                 disk,
             }),
@@ -127,7 +118,8 @@ impl TieredMemoryDiskCache {
         Fut: Future<Output = Result<Download, E>>,
     {
         let object_key = ObjectKeyHash::from(object_key);
-        self.inner.access_histories.record_access(&object_key, requested_range);
+        let history = self.inner.memory.access_histories();
+        history.record_access(&object_key, requested_range);
         let metrics = &self.inner.metrics;
         if let Some(bytes) = self.inner.memory.get(&object_key, requested_range) {
             metrics.record(LookupOutcome::MemoryHit, None, requested_range.len());
@@ -161,9 +153,7 @@ impl TieredMemoryDiskCache {
             });
         }
 
-        let start = (requested_range.start() - downloaded_range.start()) as usize;
-        let end = (requested_range.end() - downloaded_range.start()) as usize;
-        let requested_bytes = download.bytes().slice(start..end);
+        let requested_bytes = download.bytes_in_range(requested_range);
         #[cfg(target_os = "linux")]
         if let Some(disk) = &self.inner.disk {
             if disk.covers_range(&object_key, downloaded_range) {
@@ -229,6 +219,10 @@ mod tests {
         .await
         .unwrap();
         let key = "object".to_owned();
+        assert!(Arc::ptr_eq(
+            cache.inner.memory.access_histories(),
+            &cache.inner.disk.as_ref().unwrap().access_histories()
+        ));
         assert!(
             cache
                 .get_or_fetch(key.clone(), range(0, 2), || async { Err::<Download, _>("failed") })
@@ -312,7 +306,7 @@ mod tests {
             1.0
         );
         assert_eq!(
-            cache.inner.access_histories.request_count(),
+            cache.inner.memory.access_histories().request_count(),
             5,
             "every request is recorded, including errors and invalid downloads"
         );
@@ -358,7 +352,7 @@ mod tests {
     async fn buffered_hit_after_memory_pressure_promotes_only_request_and_records_once() {
         let (_directory, cache) = cache(32).await;
         let key = String::from("object");
-        let history = &cache.inner.access_histories;
+        let history = cache.inner.memory.access_histories();
         let source = Download::new(10, Bytes::from_static(b"abcdefghij")).unwrap();
         let result = cache
             .get_or_fetch(key.clone(), range(13, 17), || async {
@@ -470,7 +464,7 @@ mod tests {
     async fn callback_covered_by_a_racing_disk_write_is_not_inserted_again() {
         let (_directory, cache) = cache(32).await;
         let key = String::from("object");
-        let history = &cache.inner.access_histories;
+        let history = cache.inner.memory.access_histories();
         let bytes = cache
             .get_or_fetch(key.clone(), range(2, 4), || async {
                 // Simulate another disk write finishing while this callback is pending.
@@ -494,7 +488,7 @@ mod tests {
     async fn callback_cancellation_keeps_the_recorded_request_without_inserting() {
         let (_directory, cache) = cache(32).await;
         let key = String::from("canceled");
-        let history = &cache.inner.access_histories;
+        let history = cache.inner.memory.access_histories();
         let entered = Arc::new(Notify::new());
         let task = {
             let cache = cache.clone();

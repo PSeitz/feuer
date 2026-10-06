@@ -13,33 +13,30 @@ use crate::ByteRange;
 /// cache-access event.
 #[derive(Clone)]
 pub struct Download {
-    range: ByteRange,
+    start: u64,
     bytes: Bytes,
 }
 
 impl Download {
-    /// Creates a download whose range starts at `downloaded_start`.
-    pub fn new(downloaded_start: u64, bytes: Bytes) -> Result<Self, DownloadError> {
+    /// Creates a download whose range starts at `start`.
+    pub fn new(start: u64, bytes: Bytes) -> Result<Self, DownloadError> {
         let payload_bytes = bytes.len() as u64;
-        let downloaded_end = downloaded_start
-            .checked_add(payload_bytes)
-            .ok_or(DownloadError::RangeOverflow {
-                downloaded_start,
-                payload_bytes,
-            })?;
-        let range =
-            ByteRange::new(downloaded_start, downloaded_end).expect("a payload length produces an ordered range");
-        Ok(Self { range, bytes })
+        start.checked_add(payload_bytes).ok_or(DownloadError::RangeOverflow {
+            downloaded_start: start,
+            payload_bytes,
+        })?;
+        Ok(Self { start, bytes })
     }
 
     /// Returns the first downloaded object offset.
     pub const fn downloaded_start(&self) -> u64 {
-        self.range.start()
+        self.start
     }
 
     /// Returns the exact object range derived from the payload length.
     pub fn downloaded_range(&self) -> ByteRange {
-        self.range
+        ByteRange::new(self.start, self.start + self.bytes.len() as u64)
+            .expect("the download constructor checked the range")
     }
 
     /// Returns the contiguous bytes covering the downloaded range.
@@ -47,9 +44,15 @@ impl Download {
         &self.bytes
     }
 
+    /// Returns a shared byte slice. The caller must supply a contained object range.
+    pub fn bytes_in_range(&self, range: ByteRange) -> Bytes {
+        let start = (range.start() - self.start) as usize;
+        self.bytes.slice(start..start + range.len() as usize)
+    }
+
     /// Decomposes the download into its derived range and payload.
     pub fn into_parts(self) -> (ByteRange, Bytes) {
-        (self.range, self.bytes)
+        (self.downloaded_range(), self.bytes)
     }
 }
 
@@ -85,12 +88,16 @@ mod tests {
 
     #[test]
     fn derives_the_exact_range_from_the_start_and_payload() {
-        let payload = Bytes::from(vec![7; 13]);
-        let download = Download::new(3, payload.clone()).unwrap();
-
-        assert_eq!(download.downloaded_start(), 3);
-        assert_eq!(download.downloaded_range(), range(3, 16));
-        assert_eq!(download.bytes().as_ptr(), payload.as_ptr());
+        for (start, length) in [(3, 13), (u64::MAX - 13, 13), (u64::MAX, 0)] {
+            let payload = Bytes::from(vec![7; length]);
+            let download = Download::new(start, payload.clone()).unwrap();
+            assert_eq!(download.downloaded_start(), start);
+            assert_eq!(download.downloaded_range(), range(start, start + length as u64));
+            assert_eq!(download.bytes().as_ptr(), payload.as_ptr());
+            let requested = range(start + length as u64 / 2, start + length as u64);
+            assert_eq!(download.bytes_in_range(requested), payload.slice(length / 2..));
+            assert_eq!(download.into_parts(), (range(start, start + length as u64), payload));
+        }
     }
 
     #[test]

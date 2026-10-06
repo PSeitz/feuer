@@ -10,8 +10,8 @@ use crate::uring;
 pub struct ReadQueue(uring::ReadQueue);
 
 impl ReadQueue {
-    /// Uses an already-open read-only file; does not create, resize, or write it.
-    pub fn new(file: Arc<File>) -> io::Result<Self> {
+    /// Owns an already-open read-only file; does not create, resize, or write it.
+    pub fn new(file: File) -> io::Result<Self> {
         // SAFETY: F_GETFL only queries flags of the live descriptor.
         let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
         if flags < 0 {
@@ -23,9 +23,12 @@ impl ReadQueue {
                 "benchmark requires a read-only file",
             ));
         }
-        // Raw read-only benchmarks need no cache directory lock. Use the same
-        // file for the directory-lock argument to preserve the queue's ownership logic.
-        uring::ReadQueue::new(file.clone(), file, feuer_memory::BufferPool::unpooled()).map(Self)
+        // Raw read-only benchmarks need no cache directory lock.
+        let files = Arc::new(uring::DataFileAndDirectoryLock {
+            file,
+            _directory_lock: None,
+        });
+        uring::ReadQueue::new(files, feuer_memory::BufferPool::unpooled()).map(Self)
     }
 
     /// Reads through the production admission, allocation, notification, and completion path.

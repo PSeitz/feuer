@@ -23,31 +23,23 @@ impl DiskCacheInner {
         for chunk_index in 0..metadata.chunks.len() {
             for entry_metadata_index in 0..ENTRIES_PER_METADATA_CHUNK {
                 let entry_metadata_bytes = metadata.chunks[chunk_index].entry_metadata_bytes(entry_metadata_index);
-                let entry_metadata =
-                    decode_entry_metadata(entry_metadata_bytes).filter(|(key, _, _, payload_range)| {
+                let entry_metadata = decode_entry_metadata(entry_metadata_bytes, (chunk_index, entry_metadata_index))
+                    .filter(|(key, entry)| {
                         self.shard_index_for_key(key) == shard_index
+                            && disk_index.covering_entry(key, entry.object_range).is_none()
                             && shard
                                 .allocator
-                                .hold_chunks_for_recovered_payload(payload_range)
+                                .hold_chunks_for_recovered_payload(
+                                    &(entry.payload_address
+                                        ..entry.payload_address + payload_disk_bytes(entry.object_range.len())),
+                                )
                                 .is_some()
                     });
-                let Some((key, object_range, payload_checksum, payload_range)) = entry_metadata else {
+                let Some((key, entry)) = entry_metadata else {
                     metadata.free_entry_positions.push((chunk_index, entry_metadata_index));
                     continue;
                 };
-                let entry = DiskEntry {
-                    in_flight_read: Weak::new(),
-                    eviction_position: 0,
-                    object_range,
-                    payload_checksum,
-                    metadata: (chunk_index, entry_metadata_index),
-                    payload_range,
-                };
-                if disk_index.covering_entry(&key, object_range).is_some() {
-                    shard.release_entry(entry, &mut metadata);
-                } else {
-                    shard.insert_entry(&mut disk_index, &mut metadata, key, entry);
-                }
+                shard.insert_entry(&mut disk_index, &mut metadata, key, entry);
             }
         }
     }
@@ -62,7 +54,7 @@ impl DiskCacheShard {
             let Some(mut reserved_chunk) = self.allocator.reserve_chunks_at(address / CHUNK_BYTES, 1) else {
                 break;
             };
-            let Ok(bytes) = file.read_recovery_chunk(address).await else {
+            let Ok(bytes) = file.read_at(address, CHUNK_BYTES as usize).await else {
                 break;
             };
             // An unwritten chunk ends the chain.
@@ -72,7 +64,7 @@ impl DiskCacheShard {
             reserved_chunk.mark_recovered();
             let mut chunk = metadata::MetadataChunk {
                 reserved_chunk,
-                bytes: bytes.to_vec(),
+                bytes: Box::from(bytes.as_ref()),
             };
             for page in 0..ENTRY_METADATA_PAGES_PER_CHUNK {
                 let bytes = &chunk.bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES];
@@ -100,22 +92,24 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
-/// An entry's object key, object range, payload checksum, and payload disk range.
-type EntryMetadata = (ObjectKeyHash, ByteRange, u64, Range<u64>);
-
-/// Decodes a fixed-size record from a validated page. The writer guarantees representable
-/// ranges and aligned payloads; all-zero records are unused.
-fn decode_entry_metadata(bytes: &[u8]) -> Option<EntryMetadata> {
+/// Decodes an entry at its metadata position in a validated page. The writer guarantees
+/// representable ranges and aligned payloads; all-zero records are unused.
+fn decode_entry_metadata(bytes: &[u8], metadata: (usize, usize)) -> Option<(ObjectKeyHash, DiskEntry)> {
     if bytes == [0; ENTRY_METADATA_BYTES] {
         return None;
     }
     let key = ObjectKeyHash(u128::from_le_bytes(bytes[..16].try_into().unwrap()));
     let start = read_u64(bytes, 16);
-    let range = ByteRange::new(start, start + read_u64(bytes, 24)).ok()?;
-    let checksum = read_u64(bytes, 40);
-    let start = read_u64(bytes, 32);
-    let payload = start..start + payload_disk_bytes(range.len());
-    Some((key, range, checksum, payload))
+    let object_range = ByteRange::new(start, start + read_u64(bytes, 24)).ok()?;
+    let entry = DiskEntry {
+        in_flight_read: Weak::new(),
+        eviction_position: 0,
+        object_range,
+        payload_address: read_u64(bytes, 32),
+        payload_checksum: read_u64(bytes, 40),
+        metadata,
+    };
+    Some((key, entry))
 }
 
 #[cfg(test)]

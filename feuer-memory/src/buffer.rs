@@ -44,10 +44,10 @@ static IDLE_BUFFER_POOL_PERCENT: LazyLock<u64> = LazyLock::new(|| {
 /// Idle aligned buffers and the cached-allocation charges sharing one cache's budget.
 /// Active allocations and caller-only results are not charged to this budget.
 pub struct BufferPool {
-    capacity: u64,
+    pub(crate) capacity: u64,
     idle_limit: u64,
     state: Mutex<EntryAllocationBytesAndIdleBuffers>,
-    metrics: Arc<MemoryMetrics>,
+    pub(crate) metrics: Arc<MemoryMetrics>,
 }
 
 /// Entry allocation byte counts and idle buffers grouped by size, protected by one lock.
@@ -86,19 +86,12 @@ impl BufferPool {
         let bucket = BUFFER_SIZES.iter().position(|&size| length <= size);
         let capacity = bucket.map(|index| BUFFER_SIZES[index]).unwrap_or(length);
         let mut buffer = bucket
-            .and_then(|index| {
-                let mut state = self.state.lock();
-                let buffer = state.by_size[index].pop()?;
-                state.idle_bytes -= capacity as u64;
-                self.decrease_idle_buffer_metrics(index, capacity as u64);
-                Some(buffer)
-            })
+            .and_then(|index| self.take_idle_buffer(&mut self.state.lock(), index))
             .map_or_else(|| AlignedBuffer::allocate_zeroed(capacity), Ok)?;
         buffer.length = length;
         if let Some(index) = bucket {
-            buffer.pool = Arc::downgrade(self);
+            buffer.pool = Some((Arc::downgrade(self), self.metrics.clone()));
             self.metrics.used_buffer_bytes[index].increase(capacity as u64);
-            buffer.metrics = Some(self.metrics.clone());
         }
         Ok(buffer)
     }
@@ -114,34 +107,42 @@ impl BufferPool {
         self.state.lock().idle_bytes
     }
 
-    /// Adds entry-allocation bytes to the pool's accounting, freeing idle buffers if needed.
+    /// Adds entry-allocation bytes to accounting and metrics, freeing idle buffers if needed.
     pub(crate) fn add_entry_bytes(&self, bytes: u64) {
         let mut state = self.state.lock();
         state.cached_bytes += bytes;
+        self.metrics.used_bytes.increase(bytes);
         let idle_limit = self.capacity.saturating_sub(state.cached_bytes);
         // Cache entries take precedence over idle buffers. Free larger buffers first.
         for index in (0..BUFFER_SIZES.len()).rev() {
             while state.idle_bytes > idle_limit
-                && let Some(buffer) = state.by_size[index].pop()
+                && let Some(buffer) = self.take_idle_buffer(&mut state, index)
             {
-                let capacity = buffer.capacity() as u64;
-                state.idle_bytes -= capacity;
-                self.decrease_idle_buffer_metrics(index, capacity);
                 // Idle buffers have no pool reference; dropping them frees their allocations.
                 drop(buffer);
             }
         }
     }
 
-    /// Subtracts entry-allocation bytes from the pool's accounting.
+    /// Subtracts entry-allocation bytes from accounting and metrics.
     pub(crate) fn remove_entry_bytes(&self, bytes: u64) {
         self.state.lock().cached_bytes -= bytes;
+        self.metrics.used_bytes.decrease(bytes);
+    }
+
+    /// Takes one idle buffer and subtracts its bytes from accounting and metrics under the pool lock.
+    fn take_idle_buffer(&self, state: &mut EntryAllocationBytesAndIdleBuffers, index: usize) -> Option<AlignedBuffer> {
+        let buffer = state.by_size[index].pop()?;
+        let capacity = buffer.capacity() as u64;
+        state.idle_bytes -= capacity;
+        self.decrease_idle_buffer_metrics(index, capacity);
+        Some(buffer)
     }
 
     /// Decreases metrics for idle-buffer bytes.
     fn decrease_idle_buffer_metrics(&self, index: usize, bytes: u64) {
         self.metrics.idle_buffer_bytes[index].decrease(bytes);
-        self.metrics.decrease_usage(bytes, 0);
+        self.metrics.used_bytes.decrease(bytes);
     }
 }
 
@@ -163,9 +164,8 @@ pub struct AlignedBuffer {
     ptr: NonNull<u8>,
     layout: Layout,
     length: usize,
-    pool: Weak<BufferPool>,
-    // Checked-out buffers retain metrics, but not the pool, until their last owner releases them.
-    metrics: Option<Arc<MemoryMetrics>>,
+    // Checked-out pooled buffers retain metrics, but only a weak reference to their pool.
+    pool: Option<(Weak<BufferPool>, Arc<MemoryMetrics>)>,
 }
 
 impl AlignedBuffer {
@@ -181,8 +181,7 @@ impl AlignedBuffer {
             ptr,
             layout,
             length,
-            pool: Weak::new(),
-            metrics: None,
+            pool: None,
         })
     }
 
@@ -215,11 +214,11 @@ unsafe impl Send for AlignedBuffer {}
 
 impl Drop for AlignedBuffer {
     fn drop(&mut self) {
-        if let Some(metrics) = self.metrics.take() {
+        if let Some((pool, metrics)) = self.pool.take() {
             let index = BUFFER_SIZES.iter().position(|&size| size == self.capacity()).unwrap();
             let capacity = self.capacity() as u64;
             metrics.used_buffer_bytes[index].decrease(capacity);
-            if let Some(pool) = self.pool.upgrade() {
+            if let Some(pool) = pool.upgrade() {
                 let mut state = pool.state.lock();
                 let idle_limit = pool.idle_limit.min(pool.capacity.saturating_sub(state.cached_bytes));
                 if state.idle_bytes + capacity <= idle_limit {
@@ -227,12 +226,11 @@ impl Drop for AlignedBuffer {
                         ptr: self.ptr,
                         layout: self.layout,
                         length: self.length,
-                        pool: Weak::new(),
-                        metrics: None,
+                        pool: None,
                     });
                     state.idle_bytes += capacity;
                     pool.metrics.idle_buffer_bytes[index].increase(capacity);
-                    pool.metrics.increase_usage(capacity, 0);
+                    pool.metrics.used_bytes.increase(capacity);
                     return;
                 }
             }

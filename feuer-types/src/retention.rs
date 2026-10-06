@@ -18,14 +18,18 @@ use crate::{ByteRange, ObjectKeyHash, config::read_env_number};
 pub const RECLAIM_SAMPLE_SIZE: usize = 64;
 
 /// Chooses up to `sample_size` candidates, advancing through the list and wrapping at its end.
-pub fn sample_candidates(next_candidate: &mut usize, candidate_count: usize, sample_size: usize) -> (usize, usize) {
-    if candidate_count == 0 {
-        return (0, 0);
+pub fn sample_candidates<'a, T>(
+    next_candidate: &mut usize,
+    candidates: &'a [T],
+    sample_size: usize,
+) -> impl Iterator<Item = &'a T> {
+    let candidate_count = candidates.len();
+    let sample_start = *next_candidate % candidate_count.max(1);
+    if candidate_count > 0 {
+        *next_candidate = (sample_start + candidate_count.min(sample_size)) % candidate_count;
     }
-    let sample_start = *next_candidate % candidate_count;
-    let sample_count = candidate_count.min(sample_size);
-    *next_candidate = (sample_start + sample_count) % candidate_count;
-    (sample_start, sample_count)
+    let (before_start, from_start) = candidates.split_at(sample_start);
+    from_start.iter().chain(before_start).take(sample_size)
 }
 
 /// Compares decayed retrieval value per payload byte without division.
@@ -122,10 +126,10 @@ pub static MAX_ACCESS_AGE_ACCESSES: LazyLock<u64> = LazyLock::new(|| {
     read_env_number("FEUER_MAX_ACCESS_AGE_ACCESSES", 262_144, 1).unwrap_or_else(|error| panic!("{error}"))
 });
 
-/// A requested byte range and the global request-counter value assigned when the access was recorded.
+/// A permanent range-counter index and the global request-counter value assigned when the access was recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RangeAccess {
-    range: ByteRange,
+    count_index: usize,
     observed_at_access: u64,
 }
 
@@ -189,7 +193,7 @@ impl RangeAccessHistory {
             self.events.pop_front();
         }
         self.events.push_back(RangeAccess {
-            range,
+            count_index,
             observed_at_access: access_clock,
         });
     }
@@ -199,7 +203,7 @@ impl RangeAccessHistory {
         self.events
             .iter()
             .skip_while(move |event| access_clock.saturating_sub(event.observed_at_access) > *MAX_ACCESS_AGE_ACCESSES)
-            .map(|event| event.range)
+            .map(|event| self.access_counts[event.count_index].0)
     }
 
     /// Sums retrieval costs for contained requests, weighted by decayed access counts.
@@ -214,11 +218,6 @@ impl RangeAccessHistory {
                 access_count.decayed_count(access_clock) * (fixed_retrieval_cost + requested_range.len() as f64)
             })
             .sum()
-    }
-
-    #[cfg(test)]
-    pub(super) fn ranges(&self) -> Vec<ByteRange> {
-        self.events.iter().map(|event| event.range).collect()
     }
 
     #[cfg(test)]
@@ -286,7 +285,10 @@ mod tests {
                 history.record(requested, 0);
             }
             assert_eq!(history.len(), limit);
-            assert_eq!(history.ranges(), requested_ranges[3..]);
+            assert_eq!(
+                history.recent_requested_ranges(0).collect::<Vec<_>>(),
+                requested_ranges[3..]
+            );
             assert_eq!(
                 history.decayed_retrieval_cost(range(0, 1), 0),
                 *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + 1.0
@@ -463,9 +465,16 @@ mod tests {
     #[test]
     fn samples_at_most_64_candidates_and_compares_large_costs_per_byte_without_overflow() {
         let mut cursor = 0;
-        assert_eq!(sample_candidates(&mut cursor, 0, RECLAIM_SAMPLE_SIZE), (0, 0));
-        assert_eq!(sample_candidates(&mut cursor, 100, RECLAIM_SAMPLE_SIZE), (0, 64));
-        assert_eq!(sample_candidates(&mut cursor, 100, RECLAIM_SAMPLE_SIZE), (64, 64));
+        let candidates: Vec<_> = (0..100).collect();
+        let mut sample = |count| {
+            sample_candidates(&mut cursor, &candidates[..count], RECLAIM_SAMPLE_SIZE)
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sample(100), (0..64).collect::<Vec<_>>());
+        assert_eq!(sample(100), (64..100).chain(0..28).collect::<Vec<_>>());
+        assert_eq!(sample(0), []);
+        assert_eq!(sample(3), [1, 2, 0]);
         assert_eq!(
             compare_cost_per_byte(u64::MAX as f64 * 2.0, u64::MAX, u64::MAX as f64, u64::MAX),
             Ordering::Greater
@@ -506,6 +515,8 @@ mod tests {
         }
         history.record(first, *ACCESS_COUNT_HALF_LIFE);
         assert_eq!(history.access_counts.len(), 257);
+        let recent = history.recent_requested_ranges(*ACCESS_COUNT_HALF_LIFE);
+        assert_eq!(recent.last(), Some(first));
         assert_eq!(history.access_count_indices.len(), 257);
         for (&requested, &index) in &history.access_count_indices {
             assert_eq!(history.access_counts[index].0, requested);

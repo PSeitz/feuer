@@ -226,8 +226,8 @@ flushing retains the detached buffer through I/O as well. This gauge measures lo
 - `feuer_memory_entries`: cache entries (not idle buffers).
 - `feuer_memory_compacted_payload_bytes_total`: cached allocation charges released
   by compaction; does not guarantee the allocation was freed if callers still hold it.
-- `feuer_disk_io_total{operation,outcome}`: operations `read` and `write`,
-  outcomes `success` and `error`.
+- `feuer_disk_io_total{operation,outcome}`: logical data-file operations `read` and `write`,
+  outcomes `success` and `error`. A multi-chunk payload run counts as one write, not one per kernel request.
 - `feuer_disk_io_duration_seconds{operation,outcome}`: operations `read` and
   `write`, outcome `success` only. Errors remain counted but are not timed.
 - `feuer_disk_io_bytes_total{operation}`: operations `read` and `write`.
