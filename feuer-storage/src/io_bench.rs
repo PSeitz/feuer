@@ -33,6 +33,6 @@ impl ReadQueue {
 
     /// Reads through the production admission, allocation, notification, and completion path.
     pub async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
-        self.0.read(offset, length).await
+        self.0.read(offset, length).await.map(|(bytes, _)| bytes)
     }
 }

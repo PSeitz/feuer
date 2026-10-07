@@ -131,6 +131,7 @@ fn large_buffers_are_resized_on_reuse() {
     assert_eq!(buffer.capacity(), grown);
     assert_eq!(buffer.as_ref().len(), grown);
     assert_eq!(buffer.as_ref().as_ptr() as usize % BUFFER_ALIGNMENT, 0);
+    assert!(buffer.as_ref()[..length].iter().all(|&byte| byte == 0x99));
     assert!(buffer.as_ref()[length..].iter().all(|&byte| byte == 0));
     assert_eq!(pool.idle_bytes(), 0);
     assert_eq!((large("idle"), large("used")), (0.0, grown as f64));
@@ -157,6 +158,65 @@ fn large_buffers_are_resized_on_reuse() {
     assert_eq!(scratch.capacity(), BUFFER_ALIGNMENT);
     assert!(scratch.pool.is_none());
     assert!(scratch.as_ref().iter().all(|byte| *byte == 0));
+}
+
+#[test]
+fn large_buffers_shrink_only_when_capacity_is_at_least_ten_percent_larger() {
+    let (registry, backend) = registry();
+    let mib = 1024 * 1024;
+    let capacity = 77 * mib;
+    let pool = BufferPool::new(100 * capacity as u64, MemoryMetrics::new(&backend));
+    let large = |status| {
+        value(
+            &registry,
+            "feuer_io_buffer_pool_bytes",
+            &[("bucket", ">64 MiB"), ("status", status)],
+        )
+    };
+    let buffer = pool.allocate(capacity).unwrap();
+    let address = buffer.as_ref().as_ptr();
+    drop(buffer);
+
+    // Just below the threshold, preserve capacity but expose only the requested bytes.
+    let length = 70 * mib + 1;
+    let buffer = pool.allocate(length).unwrap();
+    assert_eq!(buffer.as_ref().as_ptr(), address);
+    assert_eq!(buffer.as_ref().len(), length);
+    assert_eq!(buffer.capacity(), capacity);
+    assert_eq!((large("idle"), large("used")), (0.0, capacity as f64));
+    let download = buffer.into_download(0).unwrap();
+    assert_eq!(download.allocation_charge(), capacity);
+    drop(download);
+    assert_eq!(pool.idle_bytes(), capacity as u64);
+    assert_eq!((large("idle"), large("used")), (capacity as f64, 0.0));
+
+    // At exactly 10% larger, shrink and account for the new capacity.
+    let length = 70 * mib;
+    let buffer = pool.allocate(length).unwrap();
+    assert_eq!(buffer.capacity(), length);
+    assert_eq!((large("idle"), large("used")), (0.0, length as f64));
+    drop(buffer);
+    assert_eq!(pool.idle_bytes(), length as u64);
+    assert_eq!((large("idle"), large("used")), (length as f64, 0.0));
+}
+
+#[test]
+fn large_buffer_growth_zeroes_bytes_after_an_unaligned_shrink() {
+    let length = MAX_FIXED_BUFFER_BYTES + BUFFER_ALIGNMENT + 1;
+    let pool = BufferPool::new(100 * 2 * length as u64, MemoryMetrics::noop());
+    let mut buffer = pool.allocate(2 * length).unwrap();
+    buffer.as_mut_slice()[length - 1..length + 2 * BUFFER_ALIGNMENT].fill(0x99);
+    drop(buffer);
+
+    let buffer = pool.allocate(length).unwrap();
+    assert_eq!(buffer.capacity(), length);
+    assert_eq!(buffer.as_ref()[length - 1], 0x99);
+    drop(buffer);
+
+    let buffer = pool.allocate(length + 2 * BUFFER_ALIGNMENT).unwrap();
+    assert_eq!(buffer.as_ref()[length - 1], 0x99);
+    assert!(buffer.as_ref()[length..].iter().all(|&byte| byte == 0));
+    assert_eq!(buffer.as_ref().as_ptr() as usize % BUFFER_ALIGNMENT, 0);
 }
 
 #[test]

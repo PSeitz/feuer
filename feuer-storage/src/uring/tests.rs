@@ -254,7 +254,7 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
         write_queue.handle.sender.as_ref().unwrap().try_reserve(),
         Err(mpsc::error::TrySendError::Full(_))
     ));
-    let bytes = tokio::time::timeout(
+    let (bytes, _) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         read_queue.read(0, DIRECT_IO_ALIGNMENT_BYTES),
     )
@@ -269,7 +269,7 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
     drop(queue);
     drop(write_queue);
     assert!(files.upgrade().is_some());
-    let bytes = read_queue.read(0, DIRECT_IO_ALIGNMENT_BYTES).await.unwrap();
+    let (bytes, _) = read_queue.read(0, DIRECT_IO_ALIGNMENT_BYTES).await.unwrap();
     assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
     drop(read_queue);
     assert!(files.upgrade().is_none());
@@ -425,7 +425,7 @@ async fn reads_wait_for_channel_capacity_without_taking_idle_buffers() {
     drop(reservations);
     assert_eq!(handle.handle.sender.as_ref().unwrap().capacity(), MAX_IN_FLIGHT_READS);
     assert_eq!(
-        handle.read(0, MAX_IO_REQUEST_BYTES).await.unwrap().len(),
+        handle.read(0, MAX_IO_REQUEST_BYTES).await.unwrap().0.len(),
         MAX_IO_REQUEST_BYTES
     );
 }
@@ -547,7 +547,8 @@ async fn multi_request_reads_reuse_one_allocation_after_a_padded_write() {
     buffer.as_mut_slice().fill(0x55);
     let address = buffer.as_ref().as_ptr() as usize;
     drop(buffer);
-    let bytes = read.read(0, 3 * length).await.unwrap();
+    let (bytes, capacity) = read.read(0, 3 * length).await.unwrap();
+    assert_eq!(capacity, 3 * length);
     assert_eq!(pool.idle_bytes(), 0);
     assert_eq!(bytes.as_ptr() as usize, address);
     assert_eq!(&bytes[..length], &vec![0x99; length]);

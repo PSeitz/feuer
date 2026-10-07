@@ -143,7 +143,9 @@ Cached allocation charges and idle buffers share the configured memory capacity.
 The idle pool is capped at 7% of that capacity by default. All buckets share this
 ceiling, without per-bucket caps or reservations.
 `FEUER_IDLE_BUFFER_POOL_PERCENT` sets this percentage (0–100); zero disables idle retention.
-Larger allocations are exact-size and share one idle bucket; reuse resizes them. Writes use aligned input slices or unpooled scratch.
+Larger allocations share one idle bucket; reuse grows to fit and shrinks only when capacity
+is at least 10% larger than the requested length. Accounting includes any retained spare capacity.
+On Linux, these buffers use `mmap`/`mremap`/`munmap`. Writes use aligned input slices or unpooled scratch.
 These metrics are registered by `MemoryMetrics`, not `IoMetrics`, and have no `pool`
 or `operation` label. The former `pool=small|medium|large` labels have been removed.
 The buffer gauge has a `bucket` label containing human-readable allocation capacity:

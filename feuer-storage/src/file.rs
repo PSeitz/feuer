@@ -140,22 +140,21 @@ impl DataFile {
             if length == 0 {
                 return Ok(Bytes::new());
             }
-            self.read_slice(offset, length).await
+            self.read_slice(offset, length).await.map(|(bytes, _)| bytes)
         })
         .await
     }
 
-    /// Reads one contiguous payload into a buffer, omitting final alignment padding.
+    /// Reads one contiguous payload, omitting final alignment padding, and returns its backing capacity.
     /// The caller supplies the aligned payload address; even empty payloads occupy one alignment page.
-    pub(crate) async fn read_payload(&self, address: u64, length: usize) -> DataFileResult<Bytes> {
+    pub(crate) async fn read_payload(&self, address: u64, length: usize) -> DataFileResult<(Bytes, usize)> {
         self.measure_io(IoOperation::Read, address, length, self.read_slice(address, length))
             .await
     }
 
     /// Copies a payload read result only if it saves at least 25% of backing capacity.
-    /// Derives read capacity from the whole payload length. Allocation failure leaves the result unchanged.
-    pub(crate) fn shrink_read_buffer(&self, bytes: Bytes, payload_length: u64) -> (Bytes, usize) {
-        let capacity = BufferPool::allocation_capacity(payload_disk_bytes(payload_length) as usize);
+    /// Allocation failure leaves the result unchanged.
+    pub(crate) fn shrink_read_buffer(&self, bytes: Bytes, capacity: usize) -> (Bytes, usize) {
         let saved_bytes = capacity - BufferPool::allocation_capacity(bytes.len());
         if saved_bytes < capacity.div_ceil(4) {
             return (bytes, capacity);
@@ -163,9 +162,12 @@ impl DataFile {
         let Ok(mut buffer) = self.state.read_queue.allocate_buffer(bytes.len()) else {
             return (bytes, capacity);
         };
+        let copied_capacity = buffer.capacity();
+        if capacity - copied_capacity < capacity.div_ceil(4) {
+            return (bytes, capacity);
+        }
         buffer.as_mut_slice().copy_from_slice(&bytes);
-        let capacity = buffer.capacity();
-        (buffer.into_bytes(), capacity)
+        (buffer.into_bytes(), copied_capacity)
     }
 
     /// Writes bytes at a 4096-byte-aligned offset; the byte count must also be a multiple of 4096.
@@ -235,7 +237,7 @@ impl DataFile {
     }
 
     /// Reads exact bytes through aligned I/O, omitting padding.
-    async fn read_slice(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
+    async fn read_slice(&self, offset: u64, length: usize) -> DataFileResult<(Bytes, usize)> {
         let operation = IoOperation::Read;
         let padding = offset % uring::DIRECT_IO_ALIGNMENT_BYTES as u64;
         let buffer_length = usize::try_from(payload_disk_bytes(padding + length as u64)).map_err(|_| {
@@ -244,13 +246,13 @@ impl DataFile {
                 length: usize::MAX,
             }
         })?;
-        let bytes = self
+        let (bytes, capacity) = self
             .state
             .read_queue
             .read(offset - padding, buffer_length)
             .await
             .map_err(|source| self.io_error(operation, source))?;
-        Ok(bytes.slice(padding as usize..padding as usize + length))
+        Ok((bytes.slice(padding as usize..padding as usize + length), capacity))
     }
 }
 
@@ -448,13 +450,45 @@ mod tests {
             (4 * mib, 4 * mib - 1, 4 * mib, false),
             (3 * mib, mib, mib, true),
         ] {
-            let source = file.read_payload(0, payload_length).await.unwrap();
+            let (source, capacity) = file.read_payload(0, payload_length).await.unwrap();
             let slice = source.slice(..slice_length);
-            let (bytes, capacity) = file.shrink_read_buffer(slice.clone(), payload_length as u64);
+            let (bytes, capacity) = file.shrink_read_buffer(slice.clone(), capacity);
             assert_eq!(bytes, slice);
             assert_eq!(capacity, expected_capacity);
             assert_eq!(bytes.as_ptr() != source.as_ptr(), copied);
         }
+    }
+
+    #[tokio::test]
+    async fn large_reads_and_copies_use_retained_buffer_capacity() {
+        let temp = tempdir().unwrap();
+        let mib = CHUNK_BYTES as usize;
+        let pool = feuer_memory::MemoryCache::new(100 * 96 * CHUNK_BYTES).buffer_pool();
+        let file = DataFile::open_with_buffer_pool(temp.path(), 96 * CHUNK_BYTES, IoMetrics::noop(), pool.clone())
+            .await
+            .unwrap();
+        drop(pool.allocate(76 * mib).unwrap());
+        let (bytes, capacity) = file.read_payload(0, 70 * mib).await.unwrap();
+        assert_eq!(bytes.len(), 70 * mib);
+        assert_eq!(capacity, 76 * mib);
+        let address = bytes.as_ptr();
+        let (bytes, capacity) = file.shrink_read_buffer(bytes, capacity);
+        assert_eq!(bytes.as_ptr(), address);
+        assert_eq!(capacity, 76 * mib);
+        drop(bytes);
+
+        let (source, capacity) = file.read_payload(0, 96 * mib).await.unwrap();
+        assert_eq!(capacity, 96 * mib);
+        drop(pool.allocate(76 * mib).unwrap());
+        // Fresh capacity would save 25%, but the reused destination does not.
+        let (bytes, capacity) = file.shrink_read_buffer(source.slice(..70 * mib), capacity);
+        assert_eq!(bytes.as_ptr(), source.as_ptr());
+        assert_eq!(capacity, 96 * mib);
+        // A smaller request shrinks the idle destination and meets the copy threshold.
+        let (bytes, capacity) = file.shrink_read_buffer(source.slice(..68 * mib), capacity);
+        assert_ne!(bytes.as_ptr(), source.as_ptr());
+        assert_eq!(capacity, 68 * mib);
+        assert_eq!(bytes, source.slice(..68 * mib));
     }
 
     #[tokio::test]
@@ -508,7 +542,7 @@ mod tests {
             assert_eq!(result.unwrap_err().kind(), DataFileErrorKind::RangeExceedsCapacity);
         }
         assert!(file.read_at(CAPACITY, 0).await.unwrap().is_empty());
-        assert!(file.read_payload(0, 0).await.unwrap().is_empty());
+        assert!(file.read_payload(0, 0).await.unwrap().0.is_empty());
         assert!(file.read_payload(CAPACITY, 0).await.is_err());
         file.write_at(CAPACITY, &Bytes::new()).await.unwrap();
     }

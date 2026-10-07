@@ -23,6 +23,9 @@ mixtrics = { workspace = true }
 parking_lot = { workspace = true }
 rustc-hash = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 mixtrics = { workspace = true, features = ["prometheus"] }
 prometheus = { workspace = true }

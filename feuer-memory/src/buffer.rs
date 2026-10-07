@@ -1,11 +1,14 @@
 //! Aligned allocations and idle buffers sharing the memory cache's byte budget.
 
 use std::{
-    alloc::{Layout, alloc_zeroed, dealloc, realloc},
+    alloc::{Layout, alloc_zeroed, dealloc},
     io,
     ptr::NonNull,
     sync::{Arc, LazyLock, Weak},
 };
+
+#[cfg(not(target_os = "linux"))]
+use std::alloc::realloc;
 
 use bytes::Bytes;
 use feuer_types::config::read_env_number;
@@ -15,6 +18,8 @@ use crate::MemoryMetrics;
 
 /// Alignment of buffers used for direct disk I/O.
 pub const BUFFER_ALIGNMENT: usize = 4096;
+/// Largest fixed capacity in the buffer pool.
+const MAX_FIXED_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const BUFFER_SIZES: [usize; 13] = [
     32 * 1024,
     256 * 1024,
@@ -28,14 +33,17 @@ pub(crate) const BUFFER_SIZES: [usize; 13] = [
     16 * 1024 * 1024,
     24 * 1024 * 1024,
     32 * 1024 * 1024,
-    64 * 1024 * 1024,
+    MAX_FIXED_BUFFER_BYTES,
 ];
-/// Fixed sizes plus one bucket for exact-size allocations above the largest fixed size.
+/// Fixed sizes plus one bucket for allocations above the largest fixed size.
 pub(crate) const BUCKET_COUNT: usize = BUFFER_SIZES.len() + 1;
 
 /// Bucket of the smallest fixed size that fits `length`, or the bucket above the largest size.
 pub(crate) fn bucket_index(length: usize) -> usize {
-    BUFFER_SIZES.iter().position(|&size| length <= size).unwrap_or(BUFFER_SIZES.len())
+    BUFFER_SIZES
+        .iter()
+        .position(|&size| length <= size)
+        .unwrap_or(BUFFER_SIZES.len())
 }
 
 /// Maximum share of memory capacity occupied by idle buffers across all buckets.
@@ -82,13 +90,13 @@ impl BufferPool {
         Self::new(0, MemoryMetrics::noop())
     }
 
-    /// Backing capacity for a length, without allocating or taking an idle buffer.
+    /// Fresh backing capacity for a length. Reuse may retain less than 10% spare capacity.
     pub fn allocation_capacity(length: usize) -> usize {
         BUFFER_SIZES.into_iter().find(|&size| length <= size).unwrap_or(length)
     }
 
-    /// Takes or allocates a buffer. Larger than 64 MiB is exact-size; an idle buffer of
-    /// that bucket is resized to the requested length.
+    /// Takes or allocates a buffer. Above 64 MiB, reuse grows to fit and shrinks only
+    /// when the idle buffer's capacity is at least 10% larger than the requested length.
     /// Reused bytes are initialized, but must be overwritten before returning a read result.
     pub fn allocate(self: &Arc<Self>, length: usize) -> io::Result<AlignedBuffer> {
         let index = bucket_index(length);
@@ -100,7 +108,7 @@ impl BufferPool {
         };
         buffer.length = length;
         buffer.pool = Some((Arc::downgrade(self), self.metrics.clone()));
-        self.metrics.used_buffer_bytes[index].increase(capacity as u64);
+        self.metrics.used_buffer_bytes[index].increase(buffer.capacity() as u64);
         Ok(buffer)
     }
 
@@ -167,6 +175,8 @@ impl Drop for BufferPool {
 
 /// One owned, initialized, 4-KiB-aligned allocation with a separate exposed length.
 /// It returns to its originating pool only after the last Bytes owner drops it.
+/// On Linux, capacities above 64 MiB use anonymous mappings. Resizing stays in that
+/// bucket, so capacity also determines how the allocation is released.
 ///
 /// This buffer is strongly aligned with my values (performance)
 pub struct AlignedBuffer {
@@ -182,6 +192,29 @@ impl AlignedBuffer {
     pub fn allocate_zeroed(length: usize) -> io::Result<Self> {
         assert!(length > 0);
         let layout = Self::layout(length)?;
+        #[cfg(target_os = "linux")]
+        if length > MAX_FIXED_BUFFER_BYTES {
+            // SAFETY: length is nonzero and valid; anonymous private pages are initialized to zero.
+            let ptr = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    length,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            if ptr == libc::MAP_FAILED {
+                return Err(io::Error::last_os_error());
+            }
+            return Ok(Self {
+                ptr: NonNull::new(ptr.cast()).expect("mmap returned a null address"),
+                layout,
+                length,
+                pool: None,
+            });
+        }
         // SAFETY: layout is nonzero with a valid power-of-two alignment.
         let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
             .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer allocation failed"))?;
@@ -193,21 +226,45 @@ impl AlignedBuffer {
         })
     }
 
-    /// Resizes the allocation to `capacity` bytes, zeroing added bytes. The allocator may move it.
+    /// Resizes a buffer in the above-64-MiB bucket, preserving initialized bytes and zeroing added bytes.
+    /// Both capacities exceed 64 MiB. Shrinks only if the old capacity is at least 10% larger.
     /// On failure, the original allocation is freed when the returned error drops `self`.
     fn resize(mut self, capacity: usize) -> io::Result<Self> {
         let old_capacity = self.capacity();
-        if capacity == old_capacity {
+        if capacity <= old_capacity && old_capacity - capacity < capacity.div_ceil(10) {
             return Ok(self);
         }
         let layout = Self::layout(capacity)?;
-        // SAFETY: ptr was allocated with self.layout; the new size is nonzero and valid for its alignment.
-        let ptr = NonNull::new(unsafe { realloc(self.ptr.as_ptr(), self.layout, capacity) })
-            .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer resize failed"))?;
-        if capacity > old_capacity {
-            // SAFETY: bytes past the old capacity belong to the new allocation.
-            unsafe { ptr.add(old_capacity).write_bytes(0, capacity - old_capacity) };
-        }
+        #[cfg(target_os = "linux")]
+        let ptr = {
+            // SAFETY: this buffer owns an anonymous mapping; both sizes are nonzero and valid.
+            let ptr = unsafe { libc::mremap(self.ptr.as_ptr().cast(), old_capacity, capacity, libc::MREMAP_MAYMOVE) };
+            if ptr == libc::MAP_FAILED {
+                return Err(io::Error::last_os_error());
+            }
+            let ptr = NonNull::<u8>::new(ptr.cast()).expect("mremap returned a null address");
+            if capacity > old_capacity {
+                // New pages are zeroed by the kernel. Only the retained last page can contain
+                // old bytes beyond the previous capacity, after a shrink and subsequent growth.
+                // SAFETY: sysconf queries the process's page size.
+                let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+                let end = old_capacity.next_multiple_of(page_size).min(capacity);
+                // SAFETY: these bytes belong to the resized mapping.
+                unsafe { ptr.add(old_capacity).write_bytes(0, end - old_capacity) };
+            }
+            ptr
+        };
+        #[cfg(not(target_os = "linux"))]
+        let ptr = {
+            // SAFETY: ptr was allocated with self.layout; the new size is valid for its alignment.
+            let ptr = NonNull::new(unsafe { realloc(self.ptr.as_ptr(), self.layout, capacity) })
+                .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer resize failed"))?;
+            if capacity > old_capacity {
+                // SAFETY: bytes past the old capacity belong to the new allocation.
+                unsafe { ptr.add(old_capacity).write_bytes(0, capacity - old_capacity) };
+            }
+            ptr
+        };
         self.ptr = ptr;
         self.layout = layout;
         Ok(self)
@@ -273,6 +330,12 @@ impl Drop for AlignedBuffer {
                     return;
                 }
             }
+        }
+        #[cfg(target_os = "linux")]
+        if self.capacity() > MAX_FIXED_BUFFER_BYTES {
+            // SAFETY: this owner holds the anonymous mapping, which the kernel rounds to whole pages.
+            unsafe { libc::munmap(self.ptr.as_ptr().cast(), self.capacity()) };
+            return;
         }
         // SAFETY: this owner holds the allocation made with exactly this layout.
         unsafe { dealloc(self.ptr.as_ptr(), self.layout) };

@@ -107,7 +107,7 @@ struct PayloadRead {
     object_range: ByteRange,
     payload_checksum: u64,
     payload_address: u64,
-    result: OnceCell<Result<Bytes, DiskLookupOutcome>>,
+    result: OnceCell<Result<(Bytes, usize), DiskLookupOutcome>>,
 }
 
 /// An error opening or writing the disk cache. Read uncertainty becomes a miss.
@@ -319,10 +319,10 @@ impl DiskCache {
             })
             .await;
         match result {
-            Ok(bytes) => {
+            Ok((bytes, capacity)) => {
                 let start = (requested.start() - read.object_range.start()) as usize;
                 let bytes = bytes.slice(start..start + requested.len() as usize);
-                let (bytes, buffer_capacity) = self.disk.file.shrink_read_buffer(bytes, read.object_range.len());
+                let (bytes, buffer_capacity) = self.disk.file.shrink_read_buffer(bytes, *capacity);
                 metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
                 Some((bytes, buffer_capacity))
             }
@@ -519,8 +519,8 @@ impl DiskCacheInner {
 
 impl PayloadRead {
     /// Reads the whole entry payload and verifies its checksum.
-    async fn read_and_verify_payload(&self, file: &DataFile) -> Result<Bytes, DiskLookupOutcome> {
-        let bytes = file
+    async fn read_and_verify_payload(&self, file: &DataFile) -> Result<(Bytes, usize), DiskLookupOutcome> {
+        let (bytes, capacity) = file
             .read_payload(self.payload_address, self.object_range.len() as usize)
             .await
             .map_err(|error| {
@@ -531,6 +531,6 @@ impl PayloadRead {
             tracing::warn!(target: "feuer::storage", "disk checksum failed; entry invalidated");
             return Err(DiskLookupOutcome::ChecksumFailed);
         }
-        Ok(bytes)
+        Ok((bytes, capacity))
     }
 }

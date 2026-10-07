@@ -155,8 +155,9 @@ process-wide, read once on first use, and panic on invalid values.
 readers. Allocation sizes are 32 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB,
 8 MiB, 16 MiB, 32 MiB, and 64 MiB.
 Aligned read lengths round up to the smallest fitting size; callers receive only the
-requested bytes. Larger allocations are exact-size and share one idle bucket; reuse resizes
-the idle buffer to the requested length.
+requested bytes. Larger allocations share one idle bucket. Reuse grows to fit and shrinks
+only when capacity is at least 10% larger than the requested length. On Linux, buffers over
+64 MiB use `mmap`/`mremap`/`munmap` rather than the allocator.
 
 Disk reads and downloads acquired through `cache.allocate_buffer` share this pool.
 Cached entries and idle buffers share the configured memory capacity. The idle pool is

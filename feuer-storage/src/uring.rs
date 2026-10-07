@@ -149,8 +149,8 @@ impl ReadQueue {
         self.buffer_pool.allocate(length)
     }
 
-    /// Reads into one allocation, splitting at the request-size limit.
-    pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<Bytes> {
+    /// Reads into one allocation, splitting at the request-size limit, and returns its capacity.
+    pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<(Bytes, usize)> {
         let mut permit = self.handle.reserve_request().await?;
         let mut buffer = self.allocate_buffer(length)?;
         let mut start = 0;
@@ -167,7 +167,8 @@ impl ReadQueue {
             start = end;
             permit = self.handle.reserve_request().await?;
         }
-        Ok(buffer.into_bytes())
+        let capacity = buffer.capacity();
+        Ok((buffer.into_bytes(), capacity))
     }
 }
 
