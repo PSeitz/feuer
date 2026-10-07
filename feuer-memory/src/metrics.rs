@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bytesize::ByteSize;
 use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedRegistry};
 
-use crate::buffer::BUFFER_SIZES;
+use crate::buffer::{BUCKET_COUNT, BUFFER_SIZES};
 
 /// Internal metric handles for Feuer's in-memory range tier.
 ///
@@ -20,8 +20,8 @@ pub struct MemoryMetrics {
     trimmed_payload_bytes: BoxedCounter,
     pub(crate) used_bytes: BoxedGauge,
     pub(crate) capacity_bytes: BoxedGauge,
-    pub(crate) idle_buffer_bytes: [BoxedGauge; BUFFER_SIZES.len()],
-    pub(crate) used_buffer_bytes: [BoxedGauge; BUFFER_SIZES.len()],
+    pub(crate) idle_buffer_bytes: [BoxedGauge; BUCKET_COUNT],
+    pub(crate) used_buffer_bytes: [BoxedGauge; BUCKET_COUNT],
     pub(crate) entries: BoxedGauge,
 }
 
@@ -65,8 +65,11 @@ impl MemoryMetrics {
         );
         let operation_counter = |label: &'static str| operations.counter(&[label.into()]);
         let buffer_gauges = |status: &'static str| {
-            BUFFER_SIZES.map(|size| {
-                let bucket = format!("{:.0}", ByteSize(size as u64));
+            std::array::from_fn(|index| {
+                let bucket = match BUFFER_SIZES.get(index) {
+                    Some(&size) => format!("{:.0}", ByteSize(size as u64)),
+                    None => format!(">{:.0}", ByteSize(*BUFFER_SIZES.last().unwrap() as u64)),
+                };
                 buffer_bytes.gauge(&[bucket.into(), status.into()])
             })
         };

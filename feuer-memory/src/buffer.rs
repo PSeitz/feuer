@@ -1,7 +1,7 @@
 //! Aligned allocations and idle buffers sharing the memory cache's byte budget.
 
 use std::{
-    alloc::{Layout, alloc_zeroed, dealloc},
+    alloc::{Layout, alloc_zeroed, dealloc, realloc},
     io,
     ptr::NonNull,
     sync::{Arc, LazyLock, Weak},
@@ -30,6 +30,13 @@ pub(crate) const BUFFER_SIZES: [usize; 13] = [
     32 * 1024 * 1024,
     64 * 1024 * 1024,
 ];
+/// Fixed sizes plus one bucket for exact-size allocations above the largest fixed size.
+pub(crate) const BUCKET_COUNT: usize = BUFFER_SIZES.len() + 1;
+
+/// Bucket of the smallest fixed size that fits `length`, or the bucket above the largest size.
+pub(crate) fn bucket_index(length: usize) -> usize {
+    BUFFER_SIZES.iter().position(|&size| length <= size).unwrap_or(BUFFER_SIZES.len())
+}
 
 /// Maximum share of memory capacity occupied by idle buffers across all buckets.
 static IDLE_BUFFER_POOL_PERCENT: LazyLock<u64> = LazyLock::new(|| {
@@ -55,7 +62,7 @@ pub struct BufferPool {
 struct EntryAllocationBytesAndIdleBuffers {
     cached_bytes: u64,
     idle_bytes: u64,
-    by_size: [Vec<AlignedBuffer>; BUFFER_SIZES.len()],
+    by_size: [Vec<AlignedBuffer>; BUCKET_COUNT],
 }
 
 impl BufferPool {
@@ -80,19 +87,20 @@ impl BufferPool {
         BUFFER_SIZES.into_iter().find(|&size| length <= size).unwrap_or(length)
     }
 
-    /// Takes or allocates a buffer. Larger than 64 MiB is exact-size and unpooled.
+    /// Takes or allocates a buffer. Larger than 64 MiB is exact-size; an idle buffer of
+    /// that bucket is resized to the requested length.
     /// Reused bytes are initialized, but must be overwritten before returning a read result.
     pub fn allocate(self: &Arc<Self>, length: usize) -> io::Result<AlignedBuffer> {
-        let bucket = BUFFER_SIZES.iter().position(|&size| length <= size);
-        let capacity = bucket.map(|index| BUFFER_SIZES[index]).unwrap_or(length);
-        let mut buffer = bucket
-            .and_then(|index| self.take_idle_buffer(&mut self.state.lock(), index))
-            .map_or_else(|| AlignedBuffer::allocate_zeroed(capacity), Ok)?;
+        let index = bucket_index(length);
+        let capacity = BUFFER_SIZES.get(index).copied().unwrap_or(length);
+        let idle_buffer = self.take_idle_buffer(&mut self.state.lock(), index);
+        let mut buffer = match idle_buffer {
+            Some(buffer) => buffer.resize(capacity)?,
+            None => AlignedBuffer::allocate_zeroed(capacity)?,
+        };
         buffer.length = length;
-        if let Some(index) = bucket {
-            buffer.pool = Some((Arc::downgrade(self), self.metrics.clone()));
-            self.metrics.used_buffer_bytes[index].increase(capacity as u64);
-        }
+        buffer.pool = Some((Arc::downgrade(self), self.metrics.clone()));
+        self.metrics.used_buffer_bytes[index].increase(capacity as u64);
         Ok(buffer)
     }
 
@@ -114,7 +122,7 @@ impl BufferPool {
         self.metrics.used_bytes.increase(bytes);
         let idle_limit = self.capacity.saturating_sub(state.cached_bytes);
         // Cache entries take precedence over idle buffers. Free larger buffers first.
-        for index in (0..BUFFER_SIZES.len()).rev() {
+        for index in (0..BUCKET_COUNT).rev() {
             while state.idle_bytes > idle_limit
                 && let Some(buffer) = self.take_idle_buffer(&mut state, index)
             {
@@ -148,8 +156,9 @@ impl BufferPool {
 
 impl Drop for BufferPool {
     fn drop(&mut self) {
-        for (index, &size) in BUFFER_SIZES.iter().enumerate() {
-            let bytes = self.state.get_mut().by_size[index].len() as u64 * size as u64;
+        for index in 0..BUCKET_COUNT {
+            let buffers = &self.state.get_mut().by_size[index];
+            let bytes = buffers.iter().map(|buffer| buffer.capacity() as u64).sum();
             self.decrease_idle_buffer_metrics(index, bytes);
         }
         self.metrics.capacity_bytes.decrease(self.capacity);
@@ -172,8 +181,7 @@ impl AlignedBuffer {
     /// Allocates zeroed memory that is freed, not pooled, on release (used for write scratch).
     pub fn allocate_zeroed(length: usize) -> io::Result<Self> {
         assert!(length > 0);
-        let layout = Layout::from_size_align(length, BUFFER_ALIGNMENT)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "buffer length exceeds allocation limit"))?;
+        let layout = Self::layout(length)?;
         // SAFETY: layout is nonzero with a valid power-of-two alignment.
         let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
             .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer allocation failed"))?;
@@ -183,6 +191,31 @@ impl AlignedBuffer {
             length,
             pool: None,
         })
+    }
+
+    /// Resizes the allocation to `capacity` bytes, zeroing added bytes. The allocator may move it.
+    /// On failure, the original allocation is freed when the returned error drops `self`.
+    fn resize(mut self, capacity: usize) -> io::Result<Self> {
+        let old_capacity = self.capacity();
+        if capacity == old_capacity {
+            return Ok(self);
+        }
+        let layout = Self::layout(capacity)?;
+        // SAFETY: ptr was allocated with self.layout; the new size is nonzero and valid for its alignment.
+        let ptr = NonNull::new(unsafe { realloc(self.ptr.as_ptr(), self.layout, capacity) })
+            .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer resize failed"))?;
+        if capacity > old_capacity {
+            // SAFETY: bytes past the old capacity belong to the new allocation.
+            unsafe { ptr.add(old_capacity).write_bytes(0, capacity - old_capacity) };
+        }
+        self.ptr = ptr;
+        self.layout = layout;
+        Ok(self)
+    }
+
+    fn layout(length: usize) -> io::Result<Layout> {
+        Layout::from_size_align(length, BUFFER_ALIGNMENT)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "buffer length exceeds allocation limit"))
     }
 
     /// Actual backing allocation bytes, including spare capacity.
@@ -221,7 +254,7 @@ unsafe impl Send for AlignedBuffer {}
 impl Drop for AlignedBuffer {
     fn drop(&mut self) {
         if let Some((pool, metrics)) = self.pool.take() {
-            let index = BUFFER_SIZES.iter().position(|&size| size == self.capacity()).unwrap();
+            let index = bucket_index(self.capacity());
             let capacity = self.capacity() as u64;
             metrics.used_buffer_bytes[index].decrease(capacity);
             if let Some(pool) = pool.upgrade() {

@@ -155,7 +155,8 @@ process-wide, read once on first use, and panic on invalid values.
 readers. Allocation sizes are 32 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB,
 8 MiB, 16 MiB, 32 MiB, and 64 MiB.
 Aligned read lengths round up to the smallest fitting size; callers receive only the
-requested bytes. Larger allocations are exact-size and unpooled.
+requested bytes. Larger allocations are exact-size and share one idle bucket; reuse resizes
+the idle buffer to the requested length.
 
 Disk reads and downloads acquired through `cache.allocate_buffer` share this pool.
 Cached entries and idle buffers share the configured memory capacity. The idle pool is

@@ -89,7 +89,7 @@ fn cache_pressure_frees_larger_idle_buffers_and_updates_bucket_gauges() {
     }
     for family in registry.gather() {
         if family.name() == "feuer_io_buffer_pool_bytes" {
-            assert_eq!(family.get_metric().len(), 2 * BUFFER_SIZES.len());
+            assert_eq!(family.get_metric().len(), 2 * BUCKET_COUNT);
         }
     }
 }
@@ -104,25 +104,59 @@ fn small_and_zero_budgets_do_not_retain_buffers() {
 }
 
 #[test]
-fn oversized_and_write_scratch_allocations_are_not_pooled() {
+fn large_buffers_are_resized_on_reuse() {
+    let (registry, backend) = registry();
     let length = BUFFER_SIZES.last().unwrap() + BUFFER_ALIGNMENT;
     assert_eq!(BufferPool::allocation_capacity(length), length);
     assert_eq!(BufferPool::allocation_capacity(usize::MAX), usize::MAX);
-    let pool = BufferPool::new(12 * length as u64, MemoryMetrics::noop());
+    let pool = BufferPool::new(100 * 2 * length as u64, MemoryMetrics::new(&backend));
+    let large = |status| {
+        value(
+            &registry,
+            "feuer_io_buffer_pool_bytes",
+            &[("bucket", ">64 MiB"), ("status", status)],
+        )
+    };
+    let mut buffer = pool.allocate(length).unwrap();
+    assert_eq!(buffer.capacity(), length);
+    assert_eq!(large("used"), length as f64);
+    buffer.as_mut_slice().fill(0x99);
+    drop(buffer);
+    assert_eq!(pool.idle_bytes(), length as u64);
+    assert_eq!(large("idle"), length as f64);
+
+    // Growing keeps the old bytes initialized and zeroes the added bytes.
+    let grown = 2 * length;
+    let buffer = pool.allocate(grown).unwrap();
+    assert_eq!(buffer.capacity(), grown);
+    assert_eq!(buffer.as_ref().len(), grown);
+    assert_eq!(buffer.as_ref().as_ptr() as usize % BUFFER_ALIGNMENT, 0);
+    assert!(buffer.as_ref()[length..].iter().all(|&byte| byte == 0));
+    assert_eq!(pool.idle_bytes(), 0);
+    assert_eq!((large("idle"), large("used")), (0.0, grown as f64));
+    drop(buffer);
+    assert_eq!(pool.idle_bytes(), grown as u64);
+
+    // Shrinking exposes only the new capacity.
     let buffer = pool.allocate(length).unwrap();
     assert_eq!(buffer.capacity(), length);
-    assert_eq!(buffer.as_ref().len(), length);
-    assert!(buffer.pool.is_none());
+    assert_eq!(large("used"), length as f64);
     drop(buffer);
-    assert_eq!(pool.used_bytes(), 0);
-    let scratch = AlignedBuffer::allocate_zeroed(BUFFER_ALIGNMENT).unwrap();
-    assert_eq!(scratch.capacity(), BUFFER_ALIGNMENT);
-    assert!(scratch.pool.is_none());
-    assert!(scratch.as_ref().iter().all(|byte| *byte == 0));
+    assert_eq!(pool.idle_bytes(), length as u64);
+    assert_eq!(large("idle"), length as f64);
+
+    // A failed resize frees the idle buffer.
     assert_eq!(
         pool.allocate(usize::MAX).err().unwrap().kind(),
         io::ErrorKind::InvalidInput
     );
+    assert_eq!(pool.idle_bytes(), 0);
+    assert_eq!((large("idle"), large("used")), (0.0, 0.0));
+
+    let scratch = AlignedBuffer::allocate_zeroed(BUFFER_ALIGNMENT).unwrap();
+    assert_eq!(scratch.capacity(), BUFFER_ALIGNMENT);
+    assert!(scratch.pool.is_none());
+    assert!(scratch.as_ref().iter().all(|byte| *byte == 0));
 }
 
 #[test]

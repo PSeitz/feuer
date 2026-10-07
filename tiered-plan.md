@@ -206,7 +206,8 @@ Feuer has one sharded in-memory cache sharing its allocation-byte target with an
   The idle pool is capped at 7% of configured memory capacity by default, shared by all buckets
   without per-bucket caps or reservations. `FEUER_IDLE_BUFFER_POOL_PERCENT` configures this percentage (0–100; zero disables
   idle retention). Cached entries and idle buffers together share the full memory capacity. Admission frees
-  idle buffers first; released buffers never evict entries. Allocations above 64 MiB are not pooled.
+  idle buffers first; released buffers never evict entries. Larger allocations share one
+  exact-size bucket; reuse resizes them.
 - Metadata, allocator overhead, active reads, transient copies, and caller-only results are outside accounting.
 
 In-memory compaction remains an MVP feature. Feuer observes exact ranges from incoming requests and

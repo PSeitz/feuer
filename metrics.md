@@ -143,12 +143,12 @@ Cached allocation charges and idle buffers share the configured memory capacity.
 The idle pool is capped at 7% of that capacity by default. All buckets share this
 ceiling, without per-bucket caps or reservations.
 `FEUER_IDLE_BUFFER_POOL_PERCENT` sets this percentage (0–100); zero disables idle retention.
-Larger allocations are not pooled. Writes use aligned input slices or unpooled scratch.
+Larger allocations are exact-size and share one idle bucket; reuse resizes them. Writes use aligned input slices or unpooled scratch.
 These metrics are registered by `MemoryMetrics`, not `IoMetrics`, and have no `pool`
 or `operation` label. The former `pool=small|medium|large` labels have been removed.
 The buffer gauge has a `bucket` label containing human-readable allocation capacity:
 `32 KiB`, `256 KiB`, `512 KiB`, `1 MiB`, `2 MiB`, `4 MiB`, `8 MiB`, `16 MiB`,
-`32 MiB`, or `64 MiB`.
+`32 MiB`, `64 MiB`, or `>64 MiB`.
 Gauge values remain in bytes. Update filters using the former numeric bucket labels.
 
 | Metric | Type | Meaning |
@@ -186,7 +186,7 @@ Buffers remain `used` until their last owner releases them, even if the pool has
 already been destroyed. They then become `idle` if returned to the pool, or leave
 the gauge if freed. Idle bytes are included in `feuer_memory_used_bytes`; used buffer bytes
 are charged there only when held by cache entries. Do not add the two gauges.
-Allocations above 64 MiB and write scratch bypass the pool gauge. Admission frees
+Write scratch bypasses the pool gauge. Admission frees
 idle buffers as necessary before retaining cached allocations. Gauges sum across
 cache instances sharing a registry. Standalone storage without a memory cache
 retains no idle buffers.

@@ -45,7 +45,7 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
   2 MiB, 4 MiB, 8 MiB, 16 MiB, 32 MiB, and 64 MiB. The idle pool is capped at 7% of memory capacity
   by default, shared by all buckets without per-bucket caps or reservations. `FEUER_IDLE_BUFFER_POOL_PERCENT` configures this percentage
   (0–100; zero disables idle retention).
-  Admission frees idle buffers as needed; returns never evict cached entries. Above 64 MiB is unpooled.
+  Admission frees idle buffers as needed; returns never evict cached entries. Above 64 MiB, buffers share one exact-size bucket and are resized on reuse.
 
 ### Memory retention and compaction
 
