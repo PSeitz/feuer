@@ -1,9 +1,46 @@
 //! Shared retention policy for the memory and disk tiers.
 
-use std::{cmp::Ordering, sync::LazyLock};
+use std::sync::LazyLock;
 
 use feuer_historian::ObjectAccessHistories;
 use feuer_types::{ByteRange, ObjectKeyHash, config::read_env_number};
+
+/// Scores how valuable a cached byte range is to retain.
+///
+/// Scores must be finite; the lowest-scoring eligible sampled entry is evicted.
+/// Normalization is up to the scorer. `charged_bytes` is memory allocation charge
+/// or disk payload length, possibly zero.
+/// Both tiers share the scorer; it may own application metadata keyed by [`ObjectKeyHash`].
+/// Calls run concurrently under shard locks: avoid I/O, cache re-entry, and holding
+/// application locks across cache operations if scoring acquires those locks.
+/// Sampling, trimming, and removal remain cache-owned; custom metadata does not.
+pub trait RetentionScorer: Send + Sync {
+    /// Returns the retention score for one object's cached range and tier-specific byte charge.
+    fn score(
+        &self,
+        key: &ObjectKeyHash,
+        cached_range: ByteRange,
+        charged_bytes: u64,
+        histories: &ObjectAccessHistories,
+    ) -> f64;
+}
+
+/// Scores cached ranges by decayed retrieval cost per charged byte.
+/// Empty entries use a one-byte denominator to keep scores finite.
+#[derive(Debug, Default)]
+pub struct RetrievalCostScorer;
+
+impl RetentionScorer for RetrievalCostScorer {
+    fn score(
+        &self,
+        key: &ObjectKeyHash,
+        cached_range: ByteRange,
+        charged_bytes: u64,
+        histories: &ObjectAccessHistories,
+    ) -> f64 {
+        decayed_retrieval_cost(histories, key, cached_range) / charged_bytes.max(1) as f64
+    }
+}
 
 /// Default maximum entries inspected in one retention-policy sample.
 pub const RECLAIM_SAMPLE_SIZE: usize = 64;
@@ -21,11 +58,6 @@ pub fn sample_candidates<'a, T>(
     }
     let (before_start, from_start) = candidates.split_at(sample_start);
     from_start.iter().chain(before_start).take(sample_size)
-}
-
-/// Compares decayed retrieval value per payload byte without division.
-pub fn compare_cost_per_byte(left_cost: f64, left_bytes: u64, right_cost: f64, right_bytes: u64) -> Ordering {
-    (left_cost * right_bytes as f64).total_cmp(&(right_cost * left_bytes as f64))
 }
 
 /// Fixed source-request cost as equivalent transferred bytes; zero scores only bytes.

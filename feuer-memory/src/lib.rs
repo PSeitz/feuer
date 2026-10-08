@@ -3,11 +3,10 @@
 //! This is one sharded, soft-capacity cache of downloaded ranges keyed by
 //! 128-bit immutable-object key hashes. Covering lookups return exactly
 //! the requested bytes, access evidence is separate from insertion, and
-//! shard-local retention and range trimming remain private policy.
+//! retention scores are customizable while reclamation remains shard-local.
 
 mod buffer;
 mod metrics;
-#[doc(hidden)]
 pub mod retention;
 mod store;
 #[cfg(test)]

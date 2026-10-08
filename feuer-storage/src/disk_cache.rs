@@ -25,7 +25,7 @@ use bytes::Bytes;
 use feuer_historian::ObjectAccessHistories;
 use feuer_memory::{
     BufferPool,
-    retention::{RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, decayed_retrieval_cost, sample_candidates},
+    retention::{RECLAIM_SAMPLE_SIZE, RetentionScorer, RetrievalCostScorer, sample_candidates},
 };
 use feuer_types::{ByteRange, Download, ObjectKeyHash};
 use rustc_hash::FxHashMap;
@@ -55,7 +55,7 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 /// Reads verify the whole covering entry, returning only requested bytes. Reuse requires a wholly free chunk.
 /// The key hash selects an independently allocated shard; admission may fail despite space elsewhere.
 ///
-/// Pressure eviction uses sampled retrieval value per payload byte.
+/// Pressure eviction uses sampled retention scores, defaulting to retrieval value per payload byte.
 /// Opening waits for all shards to recover before making the cache available.
 /// The experimental format is neither a persistence guarantee nor a stable on-disk interface.
 #[derive(Clone)]
@@ -69,6 +69,7 @@ struct DiskCacheInner {
     file: DataFile,
     shards: Box<[DiskCacheShard]>,
     access_histories: Arc<ObjectAccessHistories>,
+    retention_scorer: Arc<dyn RetentionScorer>,
     metrics: Arc<DiskMetrics>,
     reclaim_sample_size: usize,
 }
@@ -202,12 +203,13 @@ impl DiskCache {
             reclaim_sample_size,
             buffer_pool,
             None,
+            Arc::new(RetrievalCostScorer),
         )
         .await
     }
 
-    /// Opens a disk tier with independent buffering and background writes, optionally sharing I/O queues.
-    /// `None` creates dedicated queues. Only low-level read/write admission and threads are shared.
+    /// Opens a disk tier with a retention scorer and optional shared I/O queues.
+    /// `None` creates dedicated queues. The scorer also applies to recovered entries.
     #[expect(
         clippy::too_many_arguments,
         reason = "preserves the existing disk-tier resource arguments"
@@ -221,6 +223,7 @@ impl DiskCache {
         reclaim_sample_size: usize,
         buffer_pool: Arc<BufferPool>,
         io_queues: Option<crate::IoQueues>,
+        retention_scorer: Arc<dyn RetentionScorer>,
     ) -> Result<Self, DiskCacheError> {
         assert!(reclaim_sample_size > 0, "reclaim sample size must be greater than zero");
         if capacity < CHUNK_BYTES || capacity > i64::MAX as u64 {
@@ -245,6 +248,7 @@ impl DiskCache {
             file,
             shards,
             access_histories,
+            retention_scorer,
             metrics,
             reclaim_sample_size,
         });
@@ -411,14 +415,17 @@ impl DiskCacheShard {
             let entry = &disk_index.entries_by_key[key][range_start];
             let chunk_count = entry.chunk_count() as usize;
             (chunk_count <= *remaining_eviction_chunk_budget).then(|| {
-                let cost = decayed_retrieval_cost(&disk.access_histories, key, entry.object_range);
-                (candidate, cost, entry.object_range.len(), chunk_count)
+                let score = disk.retention_scorer.score(
+                    key,
+                    entry.object_range,
+                    entry.object_range.len(),
+                    &disk.access_histories,
+                );
+                (candidate, score, chunk_count)
             })
         })
-        .min_by(|(_, left_cost, left_bytes, _), (_, right_cost, right_bytes, _)| {
-            compare_cost_per_byte(*left_cost, *left_bytes, *right_cost, *right_bytes)
-        });
-        if let Some((&(key, start), _, _, chunk_count)) = selected_candidate {
+        .min_by(|(_, left_score, _), (_, right_score, _)| left_score.total_cmp(right_score));
+        if let Some((&(key, start), _, chunk_count)) = selected_candidate {
             *remaining_eviction_chunk_budget -= chunk_count;
             self.remove_entry_from_index(disk_index, &key, start);
         }

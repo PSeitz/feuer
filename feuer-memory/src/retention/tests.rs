@@ -32,7 +32,7 @@ fn fixed_retrieval_cost_environment_override() {
 }
 
 #[test]
-fn samples_at_most_64_candidates_and_compares_large_costs_per_byte_without_overflow() {
+fn samples_at_most_64_candidates() {
     let mut cursor = 0;
     let candidates: Vec<_> = (0..100).collect();
     let mut sample = |count| {
@@ -44,22 +44,22 @@ fn samples_at_most_64_candidates_and_compares_large_costs_per_byte_without_overf
     assert_eq!(sample(100), (64..100).chain(0..28).collect::<Vec<_>>());
     assert_eq!(sample(0), []);
     assert_eq!(sample(3), [1, 2, 0]);
-    assert_eq!(
-        compare_cost_per_byte(u64::MAX as f64 * 2.0, u64::MAX, u64::MAX as f64, u64::MAX),
-        Ordering::Greater
-    );
-    assert_eq!(compare_cost_per_byte(1.0, 2, 2.0, 4), Ordering::Equal);
 }
 
 #[test]
 fn whole_object_requests_score_the_stored_length() {
     let histories = ObjectAccessHistories::new();
     let key = ObjectKeyHash::from("whole");
+    assert_eq!(RetrievalCostScorer.score(&key, range(0, 0), 0, &histories), 0.0);
     histories.record_access(&key, None);
     for cached_range in [range(0, 0), range(0, 100)] {
         assert_eq!(
             decayed_retrieval_cost(&histories, &key, cached_range),
             *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + cached_range.len() as f64
+        );
+        assert_eq!(
+            RetrievalCostScorer.score(&key, cached_range, cached_range.len(), &histories),
+            decayed_retrieval_cost(&histories, &key, cached_range) / cached_range.len().max(1) as f64
         );
     }
 }

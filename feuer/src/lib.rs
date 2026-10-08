@@ -16,10 +16,14 @@ mod test_metrics;
 
 pub use cache::{GetOrFetchError, TieredMemoryDiskCache};
 pub use config::{CacheConfig, CacheConfigError};
-pub use feuer_memory::AlignedBuffer;
+pub use feuer_historian::ObjectAccessHistories;
+pub use feuer_memory::{
+    AlignedBuffer,
+    retention::{RetentionScorer, RetrievalCostScorer},
+};
 #[cfg(target_os = "linux")]
 pub use feuer_storage::{DiskCacheError, IoQueues};
-pub use feuer_types::{ByteRange, Download, DownloadError, InvalidByteRange};
+pub use feuer_types::{ByteRange, Download, DownloadError, InvalidByteRange, ObjectKeyHash};
 
 /// The complete UTF-8 identity supplied at the public cache boundary.
 /// Internally only its XXH3-128 hash is stored; collisions are not verified against full keys.

@@ -12,7 +12,10 @@ use parking_lot::Mutex;
 use rustc_hash::FxBuildHasher;
 
 use self::shard::{InsertOrReclaimResult, MemoryCacheShard};
-use crate::{BufferPool, MemoryMetrics, retention::RECLAIM_SAMPLE_SIZE};
+use crate::{
+    BufferPool, MemoryMetrics,
+    retention::{RECLAIM_SAMPLE_SIZE, RetentionScorer, RetrievalCostScorer},
+};
 
 /// Caps lock partitioning to avoid excessive per-cache metadata.
 const MAX_SHARDS: usize = 64;
@@ -31,7 +34,8 @@ const MAX_SHARDS: usize = 64;
 /// Each shard evicts locally against its share before insertion; admission also
 /// frees idle buffers when needed. An allocation larger than its shard's target
 /// is cached after that shard is emptied, so total usage can exceed capacity.
-/// Victims are selected shard-locally by recent modeled retrieval value per charged allocation byte.
+/// Victims are selected shard-locally by retention score, defaulting to recent modeled
+/// retrieval value per charged allocation byte.
 /// A rotating sample selects one victim;
 /// if its observed requests form a useful smaller payload, Feuer trims that victim
 /// outside the shard lock.
@@ -39,6 +43,7 @@ pub struct MemoryCache {
     /// Independently locked partitions selected by complete object identity.
     shards: Box<[Mutex<MemoryCacheShard>]>,
     access_histories: Arc<ObjectAccessHistories>,
+    retention_scorer: Arc<dyn RetentionScorer>,
     reclaim_sample_size: usize,
     buffer_pool: Arc<BufferPool>,
 }
@@ -106,9 +111,16 @@ impl MemoryCache {
         Self {
             shards,
             access_histories,
+            retention_scorer: Arc::new(RetrievalCostScorer),
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             buffer_pool,
         }
+    }
+
+    /// Uses application-provided retention scores instead of modeled retrieval cost per byte.
+    pub fn with_retention_scorer(mut self, scorer: Arc<dyn RetentionScorer>) -> Self {
+        self.retention_scorer = scorer;
+        self
     }
 
     /// Sets the maximum candidates inspected per decision. Panics if zero.

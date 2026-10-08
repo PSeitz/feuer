@@ -1,5 +1,5 @@
 use super::*;
-use feuer_memory::BUFFER_ALIGNMENT;
+use feuer_memory::{BUFFER_ALIGNMENT, retention::decayed_retrieval_cost};
 use std::{future::Future, task::Poll, time::Duration};
 
 // Keep single-entry scenarios concise while exercising the explicit batch API.

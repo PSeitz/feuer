@@ -14,6 +14,7 @@ exclude.workspace = true
 
 [dependencies]
 bytes = { workspace = true }
+feuer-historian = { workspace = true }
 feuer-memory = { workspace = true }
 feuer-types = { workspace = true }
 mixtrics = { workspace = true }

@@ -6,10 +6,7 @@ use feuer_types::{ByteRange, Download, ObjectKeyHash};
 use rustc_hash::FxHashMap;
 
 use super::{MemoryCache, range_trim::plan_range_trim};
-use crate::{
-    BufferPool,
-    retention::{compare_cost_per_byte, decayed_retrieval_cost, sample_candidates},
-};
+use crate::{BufferPool, retention::sample_candidates};
 
 /// Minimum requests across all keys since admission before trimming a range.
 pub(super) const MIN_REQUESTS_BEFORE_RANGE_TRIM: u64 = 64;
@@ -249,14 +246,13 @@ impl MemoryCacheShard {
         self.buffer_pool.metrics.entries.decrease(1);
     }
 
-    /// Samples entries using the cache's sample size and selects the lowest retrieval cost per charged allocation byte.
+    /// Samples eligible entries and selects the lowest retention score, breaking ties by key and range.
     fn select_reclaim_candidate(
         &mut self,
         admitting_key: &ObjectKeyHash,
         admitting_range: ByteRange,
         cache: &MemoryCache,
     ) -> Option<(ObjectKeyHash, &MemoryEntry)> {
-        let access_histories = &cache.access_histories;
         sample_candidates(
             &mut self.next_sample_start,
             &self.reclaim_candidates,
@@ -264,17 +260,21 @@ impl MemoryCacheShard {
         )
         .map(|(key, start)| (key, &self.entries_by_key[key].by_start[start]))
         .filter(|(key, entry)| **key != *admitting_key || !admitting_range.contains(entry.range()))
-        .map(|(key, entry)| (key, entry, decayed_retrieval_cost(access_histories, key, entry.range())))
+        .map(|(key, entry)| {
+            let score = cache.retention_scorer.score(
+                key,
+                entry.range(),
+                entry.download.allocation_charge() as u64,
+                &cache.access_histories,
+            );
+            (key, entry, score)
+        })
         .min_by(
-            |(left_key, left_entry, left_cost), (right_key, right_entry, right_cost)| {
-                compare_cost_per_byte(
-                    *left_cost,
-                    left_entry.download.allocation_charge() as u64,
-                    *right_cost,
-                    right_entry.download.allocation_charge() as u64,
-                )
-                .then_with(|| left_key.cmp(right_key))
-                .then_with(|| left_entry.range().cmp(&right_entry.range()))
+            |(left_key, left_entry, left_score), (right_key, right_entry, right_score)| {
+                left_score
+                    .total_cmp(right_score)
+                    .then_with(|| left_key.cmp(right_key))
+                    .then_with(|| left_entry.range().cmp(&right_entry.range()))
             },
         )
         .map(|(object_key, entry, _)| (*object_key, entry))

@@ -3,7 +3,10 @@ use std::{fmt, future::Future, sync::Arc, time::Instant};
 use bytes::Bytes;
 use feuer_memory::MemoryCache;
 #[cfg(target_os = "linux")]
-use feuer_memory::MemoryMetrics;
+use feuer_memory::{
+    MemoryMetrics,
+    retention::{RetentionScorer, RetrievalCostScorer},
+};
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskCache, DiskCacheError, IoMetrics, IoQueues};
 use feuer_types::{ByteRange, Download, ObjectKeyHash};
@@ -63,10 +66,23 @@ impl TieredMemoryDiskCache {
         metrics_registry: Option<&BoxedRegistry>,
         io_queues: Option<IoQueues>,
     ) -> Result<Self, DiskCacheError> {
+        Self::open_with_retention_scorer(config, metrics_registry, io_queues, Arc::new(RetrievalCostScorer)).await
+    }
+
+    /// Opens a cache with one application-provided scorer shared by memory and disk.
+    /// See [`Self::open`] for resource configuration and [`RetentionScorer`] for the scoring contract.
+    #[cfg(target_os = "linux")]
+    pub async fn open_with_retention_scorer(
+        config: CacheConfig,
+        metrics_registry: Option<&BoxedRegistry>,
+        io_queues: Option<IoQueues>,
+        retention_scorer: Arc<dyn RetentionScorer>,
+    ) -> Result<Self, DiskCacheError> {
         let noop_metrics_registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         let metrics_registry = metrics_registry.unwrap_or(&noop_metrics_registry);
         let memory = MemoryCache::with_metrics(config.memory_capacity(), MemoryMetrics::new(metrics_registry))
-            .with_reclaim_sample_size(config.reclaim_sample_size());
+            .with_reclaim_sample_size(config.reclaim_sample_size())
+            .with_retention_scorer(retention_scorer.clone());
         let disk = if config.disk_capacity() == 0 {
             None
         } else {
@@ -80,6 +96,7 @@ impl TieredMemoryDiskCache {
                     config.reclaim_sample_size(),
                     memory.buffer_pool(),
                     io_queues,
+                    retention_scorer,
                 )
                 .await?,
             )
@@ -308,6 +325,65 @@ mod tests {
 
     use super::*;
     use crate::test_metrics::{registry, value};
+
+    #[tokio::test]
+    async fn custom_scorer_and_history_are_shared_by_both_tiers() {
+        use crate::ObjectAccessHistories;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct ScoredEntries(Mutex<Vec<(ObjectKeyHash, ByteRange, u64, usize)>>);
+
+        impl RetentionScorer for ScoredEntries {
+            fn score(
+                &self,
+                key: &ObjectKeyHash,
+                cached_range: ByteRange,
+                charged_bytes: u64,
+                histories: &ObjectAccessHistories,
+            ) -> f64 {
+                self.0.lock().unwrap().push((
+                    *key,
+                    cached_range,
+                    charged_bytes,
+                    histories as *const ObjectAccessHistories as usize,
+                ));
+                if cached_range.start() == 0 { 2.0 } else { 1.0 }
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let scorer = Arc::new(ScoredEntries::default());
+        let cache = TieredMemoryDiskCache::open_with_retention_scorer(
+            CacheConfig::new(directory.path(), 3 << 20, 1).unwrap(),
+            None,
+            None,
+            scorer.clone(),
+        )
+        .await
+        .unwrap();
+        let key = ObjectKeyHash::from("computed");
+        let disk = cache.inner.disk.as_ref().unwrap();
+        for start in [0, 10, 20] {
+            let download = Download::new(start, Bytes::from_static(b"x"))
+                .unwrap()
+                .with_allocation_charge(100);
+            cache.inner.memory.insert(key, download.clone());
+            disk.insert_batch(vec![(key, download)]).await.unwrap();
+        }
+        let history = Arc::as_ptr(cache.inner.memory.access_histories()) as usize;
+        assert_eq!(
+            *scorer.0.lock().unwrap(),
+            [
+                (key, range(0, 1), 100, history),
+                (key, range(10, 11), 100, history),
+                (key, range(0, 1), 1, history),
+                (key, range(10, 11), 1, history),
+            ]
+        );
+        assert!(disk.get(&key, range(0, 1)).await.is_some());
+        assert!(disk.get(&key, range(10, 11)).await.is_none());
+    }
 
     #[tokio::test]
     async fn public_registry_observes_memory_disk_callbacks_and_writes() {

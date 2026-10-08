@@ -203,6 +203,47 @@ fn eviction_triggering_insertions_count_once_per_attempt_not_per_victim() {
 }
 
 #[test]
+fn custom_scores_use_live_application_metadata_without_cache_byte_normalization() {
+    use crate::retention::RetentionScorer;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct ComputationCost(AtomicU64);
+
+    impl RetentionScorer for ComputationCost {
+        fn score(
+            &self,
+            key: &ObjectKeyHash,
+            _cached_range: ByteRange,
+            _charged_bytes: u64,
+            _histories: &ObjectAccessHistories,
+        ) -> f64 {
+            if *key == ObjectKeyHash(1) {
+                self.0.load(Ordering::Relaxed) as f64
+            } else {
+                1.0
+            }
+        }
+    }
+
+    let scorer = Arc::new(ComputationCost(AtomicU64::new(2)));
+    let cache = cache(101).with_retention_scorer(scorer.clone());
+    let payload = Download::new(10, Bytes::from_static(b"x")).unwrap();
+    cache.insert_with_allocation_charge(ObjectKeyHash(1), payload.clone(), 100);
+    cache.insert(ObjectKeyHash(2), payload.clone());
+    cache.insert(ObjectKeyHash(3), payload.clone());
+    // Absolute scores retain the costly object despite its larger memory charge.
+    assert!(cache.get(&ObjectKeyHash(1), range(10, 11)).is_some());
+    assert!(cache.get(&ObjectKeyHash(2), range(10, 11)).is_none());
+
+    // Application metadata changes affect the next decision without updating cache entries.
+    scorer.0.store(0, Ordering::Relaxed);
+    cache.insert(ObjectKeyHash(4), payload);
+    assert!(cache.get(&ObjectKeyHash(1), range(10, 11)).is_none());
+    assert!(cache.get(&ObjectKeyHash(3), range(10, 11)).is_some());
+    assert!(cache.get(&ObjectKeyHash(4), range(10, 11)).is_some());
+}
+
+#[test]
 fn equal_cost_eviction_uses_key_order_not_sample_order() {
     let cache = cache(3);
     let payload = Download::new(0, Bytes::from_static(b"x")).unwrap();

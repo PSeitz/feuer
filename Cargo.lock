@@ -405,6 +405,7 @@ name = "feuer"
 version = "0.23.0-dev"
 dependencies = [
  "bytes",
+ "feuer-historian",
  "feuer-memory",
  "feuer-storage",
  "feuer-tokio",

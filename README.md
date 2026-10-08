@@ -136,9 +136,10 @@ requirement imposed by Feuer; the configured memory target is not an RSS limit.
 
 ## Eviction
 
-Both tiers sample entries and evict the lowest retention score per byte:
-allocation capacity in memory, payload length on disk.
-For each request fully contained in a cached range, the score adds:
+Both tiers sample eligible entries and evict the lowest retention score.
+The default `RetrievalCostScorer` divides modeled retrieval cost by charged bytes:
+allocation capacity in memory, payload length on disk (at least one byte for empty entries).
+For each request fully contained in a cached range, the retrieval cost adds:
 
 ```text
 decayed access count × (fixed request cost + requested bytes)
@@ -163,6 +164,16 @@ Memory may trim an entry to previously requested ranges instead of evicting it.
 Trimming uses recent-access events with per-object count and age limits, not the full counter set.
 A trimming plan uses a history snapshot; newer accesses do not invalidate it. Cached-range changes
 are still checked before publishing bytes copied outside the memory shard lock.
+
+### Custom retention scores
+
+Pass an `Arc<dyn RetentionScorer>` to
+`TieredMemoryDiskCache::open_with_retention_scorer(config, metrics, io_queues, scorer)`.
+Both tiers share it. The scorer can own computation costs keyed by
+`ObjectKeyHash::from(key.as_str())` and combine them with the supplied historian's demand.
+Higher finite scores favor retention; any byte normalization belongs to the scorer.
+Application metadata is neither persisted nor removed by the cache, including on eviction.
+Scoring runs under shard locks; keep it short and do not re-enter the cache.
 
 ## Environment variables
 
