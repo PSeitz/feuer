@@ -431,10 +431,8 @@
             <summary>Types &amp; configuration<small>Keys, byte ranges, downloads, and cache settings</small></summary>
             <div class="content">
               <ul><li><code>ObjectKey</code>: public UTF-8 string identifying immutable content.</li><li><code>ObjectKeyHash</code>: internal seed-zero XXH3-128 identity shared by both tiers, history, and recovery; full-key collision checks are not performed.</li><li><code>ByteRange</code>: an exact half-open byte interval, possibly empty.</li><li><code>Download</code>: starting offset plus bytes, possibly empty, with a derived range.</li><li><code>CacheConfig</code>: cache directory, fixed disk capacity, memory target, and reclaim sample size.</li></ul>
-              <details class="deeper"><summary>Opening a cache and selecting a runtime</summary><div>
+              <details class="deeper"><summary>Opening a cache</summary><div>
                 <p>Public opening is asynchronous, requires a Tokio runtime, and waits for all disk shards to recover. On Linux, requested disk capacity must be at least 1 MiB and at most i64::MAX bytes; storage rounds it down to whole 1-MiB chunks, including alignment and metadata overhead. Other platforms use only the memory tier and callback.</p>
-                <p><code>feuer-tokio</code> lets the code use either Tokio or madsim's Tokio replacement for deterministic tests. Enable one runtime feature, not both.</p>
-                <a href="feuer-tokio/src/lib.rs">feuer-tokio/src/lib.rs</a>
               </div></details>
               <a class="source" href="feuer/src/lib.rs">feuer/src/lib.rs · public types</a>
               <a class="source" href="feuer-types/src/lib.rs">feuer-types/src/lib.rs · ObjectKeyHash</a>
@@ -444,7 +442,7 @@
           <details class="branch">
             <summary>Metrics<small>Observe tier outcomes, pressure, capacity, and I/O</small></summary>
             <div class="content">
-              <p><code>open_with_metrics</code> wires a <code>mixtrics</code> registry through all layers. Plain <code>open</code> uses no-op metrics; your application handles export.</p>
+              <p>Passing a <code>mixtrics</code> registry to <code>open</code> wires it through all layers. Without one, metrics are no-ops; your application handles export.</p>
               <details class="deeper"><summary>What is instrumented?</summary><div>
                 <ul><li>Lookup outcomes, latency, and served bytes.</li><li>Memory payload accounting, eviction, and trimming.</li><li>Disk-write admission, skips, queue pressure, and terminal outcomes.</li><li>Disk capacity states, indexed payload, packing, and integrity failures.</li><li>Data-file I/O outcomes, bytes, latency, read sizes, and aligned-buffer pool accounting.</li></ul>
                 <p>Labels are bounded and do not contain object identities or cache names. Gauges track queued writes, buffer ownership, and reserved chunks.</p>

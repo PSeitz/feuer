@@ -4,15 +4,12 @@ use std::{
     collections::HashMap,
     fs,
     path::Path,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
-use feuer_historian::{
-    ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY, ObjectAccessHistories,
-};
+use feuer_historian::{ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY};
 use feuer_memory::{MemoryCache, retention::FIXED_RETRIEVAL_EQUIVALENT_BYTES};
 use feuer_types::{
     ByteRange, Download, ObjectKeyHash,
@@ -158,9 +155,8 @@ struct FeuerReplayCache {
 
 impl FeuerReplayCache {
     fn new(capacity: usize, num_shards: usize) -> Self {
-        let access_histories = Arc::new(ObjectAccessHistories::new());
         Self {
-            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards, access_histories),
+            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards),
         }
     }
 }

@@ -5,7 +5,11 @@ async fn reopen(directory: &Path, cache: DiskCache) -> DiskCache {
     cache.write_dirty_metadata_pages().await;
     let capacity = cache.disk.file.capacity();
     drop(cache);
-    with_manual_metadata_writes(DiskCache::open(directory, capacity, IoMetrics::noop()).await.unwrap())
+    with_manual_metadata_writes(
+        DiskCache::open(directory, capacity, DiskCacheOptions::default())
+            .await
+            .unwrap(),
+    )
 }
 
 #[test]
@@ -422,13 +426,13 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
         let capacity = cache.disk.file.capacity();
         drop(cache);
         let (registry, backend) = crate::test_metrics::registry();
-        let cache = DiskCache::open_with_metrics(
+        let cache = DiskCache::open(
             directory.path(),
             capacity,
-            IoMetrics::noop(),
-            Arc::new(ObjectAccessHistories::new()),
-            DiskMetrics::new(&backend),
-            RECLAIM_SAMPLE_SIZE,
+            DiskCacheOptions {
+                metrics: DiskMetrics::new(&backend),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();

@@ -8,13 +8,14 @@ fn download(length: usize) -> Download {
 async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskCache, prometheus::Registry) {
     let directory = tempfile::tempdir().unwrap();
     let (registry, backend) = registry();
-    let cache = DiskCache::open_with_metrics(
+    let cache = DiskCache::open(
         directory.path(),
         capacity,
-        IoMetrics::new(&backend),
-        Arc::new(ObjectAccessHistories::new()),
-        DiskMetrics::new(&backend),
-        RECLAIM_SAMPLE_SIZE,
+        DiskCacheOptions {
+            io_metrics: IoMetrics::new(&backend),
+            metrics: DiskMetrics::new(&backend),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();
@@ -71,9 +72,16 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
         drop(cache);
 
         let (registry, backend) = registry();
-        let cache = DiskCache::open(directory.path(), capacity, IoMetrics::new(&backend))
-            .await
-            .unwrap();
+        let cache = DiskCache::open(
+            directory.path(),
+            capacity,
+            DiskCacheOptions {
+                io_metrics: IoMetrics::new(&backend),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(
             value(
                 &registry,
@@ -128,13 +136,13 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     cache.write_dirty_metadata_pages().await;
     drop(cache);
 
-    let cache = DiskCache::open_with_metrics(
+    let cache = DiskCache::open(
         directory.path(),
         capacity,
-        IoMetrics::noop(),
-        Arc::new(ObjectAccessHistories::new()),
-        metrics,
-        RECLAIM_SAMPLE_SIZE,
+        DiskCacheOptions {
+            metrics,
+            ..Default::default()
+        },
     )
     .await
     .unwrap();

@@ -35,9 +35,13 @@ pub(super) async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskCa
     let directory = tempfile::tempdir().unwrap();
     // Keep the requested payload capacity, plus one metadata chunk per shard.
     let shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
-    let cache = DiskCache::open(directory.path(), capacity + shards * CHUNK_BYTES, IoMetrics::noop())
-        .await
-        .unwrap();
+    let cache = DiskCache::open(
+        directory.path(),
+        capacity + shards * CHUNK_BYTES,
+        DiskCacheOptions::default(),
+    )
+    .await
+    .unwrap();
     (directory, with_manual_metadata_writes(cache))
 }
 
@@ -90,7 +94,7 @@ async fn whole_object_reads_survive_recovery() {
     cache.insert_batch(downloads).await.unwrap();
     cache.write_dirty_metadata_pages().await;
     drop(cache);
-    let cache = DiskCache::open(directory.path(), 9 * CHUNK_BYTES, IoMetrics::noop())
+    let cache = DiskCache::open(directory.path(), 9 * CHUNK_BYTES, DiskCacheOptions::default())
         .await
         .unwrap();
     for length in lengths {
@@ -105,7 +109,7 @@ async fn whole_object_reads_survive_recovery() {
 async fn rejects_invalid_capacity() {
     let directory = tempfile::tempdir().unwrap();
     for capacity in [0, 1, CHUNK_BYTES - 1, 1 << 63, u64::MAX] {
-        let result = DiskCache::open(directory.path(), capacity, IoMetrics::noop()).await;
+        let result = DiskCache::open(directory.path(), capacity, DiskCacheOptions::default()).await;
         assert!(matches!(result, Err(DiskCacheError::InvalidCapacity)));
     }
 }
@@ -661,16 +665,19 @@ async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
 async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     let history = Arc::new(ObjectAccessHistories::new());
     let (_, registry) = crate::test_metrics::registry();
-    let memory = feuer_memory::MemoryCache::with_access_histories(
-        4096,
-        feuer_memory::MemoryMetrics::new(&registry),
-        history.clone(),
-    );
+    let memory = feuer_memory::MemoryCache::with_metrics(4096, feuer_memory::MemoryMetrics::new(&registry), 7)
+        .with_access_histories(history.clone());
     let directory = tempfile::tempdir().unwrap();
-    let cache =
-        DiskCache::open_with_access_histories(directory.path(), 3 * CHUNK_BYTES, IoMetrics::noop(), history.clone())
-            .await
-            .unwrap();
+    let cache = DiskCache::open(
+        directory.path(),
+        3 * CHUNK_BYTES,
+        DiskCacheOptions {
+            access_histories: history.clone(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let hot = ObjectKeyHash::from("hot");
     let cold = ObjectKeyHash::from("cold");
     memory.insert(hot, download(0, 100));
@@ -1311,7 +1318,7 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
     cache.write_dirty_metadata_pages().await;
     let capacity = cache.disk.file.capacity();
     drop(cache);
-    let reopened = DiskCache::open(directory.path(), capacity, IoMetrics::noop())
+    let reopened = DiskCache::open(directory.path(), capacity, DiskCacheOptions::default())
         .await
         .unwrap();
     assert!(keys.iter().all(|key| reopened.covers_range(key, range(0, 100))));
@@ -1330,13 +1337,13 @@ async fn insertion_releases_contained_entries_and_preserves_covering_entries() {
     let key = ObjectKeyHash::from("object");
     let (registry, backend) = crate::test_metrics::registry();
     let directory = tempfile::tempdir().unwrap();
-    let cache = DiskCache::open_with_metrics(
+    let cache = DiskCache::open(
         directory.path(),
         3 * CHUNK_BYTES,
-        IoMetrics::noop(),
-        Arc::new(ObjectAccessHistories::new()),
-        DiskMetrics::new(&backend),
-        RECLAIM_SAMPLE_SIZE,
+        DiskCacheOptions {
+            metrics: DiskMetrics::new(&backend),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();

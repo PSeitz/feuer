@@ -17,7 +17,7 @@ fn idle_buffer_pool_percent_is_independent_per_cache() {
     let capacity = 4 * size as u64;
     let caches: Vec<_> = [0, 25, 100]
         .into_iter()
-        .map(|percent| MemoryCache::with_metrics_and_idle_buffer_pool_percent(capacity, MemoryMetrics::noop(), percent))
+        .map(|percent| MemoryCache::with_metrics(capacity, MemoryMetrics::noop(), percent))
         .collect();
     for (cache, expected_buffers) in caches.iter().zip([0, 1, 4]) {
         let pool = cache.buffer_pool();
@@ -42,13 +42,25 @@ fn cached_slices_and_idle_buffers_share_allocation_accounting() {
     let buffer = pool.allocate(capacity).unwrap();
     let bytes = buffer.into_bytes().slice(17..18);
     let key = ObjectKeyHash::from("slice");
-    cache.insert_with_allocation_charge(key, Download::new(0, bytes.clone()).unwrap(), capacity);
+    cache.insert(
+        key,
+        Download::new(0, bytes.clone())
+            .unwrap()
+            .with_allocation_charge(capacity),
+    );
     assert_eq!(cache.used_bytes(), capacity as u64);
     assert_eq!(pool.idle_bytes(), 0);
     assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), capacity as f64);
     assert_eq!(cache.get(&key, range(0, 1)).unwrap().as_ptr(), bytes.as_ptr());
     // A redundant insertion does not charge the shared allocation again.
-    assert!(!cache.insert_with_allocation_charge(key, Download::new(0, bytes.clone()).unwrap(), capacity));
+    assert!(
+        !cache.insert(
+            key,
+            Download::new(0, bytes.clone())
+                .unwrap()
+                .with_allocation_charge(capacity)
+        )
+    );
     assert_eq!(cache.used_bytes(), capacity as u64);
     cache.remove(&key, range(0, 1));
     assert_eq!(cache.used_bytes(), 0); // caller-only results are outside the budget
@@ -64,30 +76,17 @@ fn cached_slices_and_idle_buffers_share_allocation_accounting() {
 
 #[test]
 fn cached_capacity_drives_eviction_not_slice_length() {
-    for override_charge in [false, true] {
-        let cache = cache(32 * 1024);
-        for key in ["first", "second"] {
-            let buffer = cache.buffer_pool().allocate(1).unwrap();
-            let capacity = buffer.capacity();
-            let download = buffer.into_download(0).unwrap();
-            if override_charge {
-                // The explicit charge replaces an existing download charge, not just the default.
-                cache.insert_with_allocation_charge(
-                    key.into(),
-                    download.with_allocation_charge(capacity / 2),
-                    capacity,
-                );
-            } else {
-                cache.insert(key.into(), download);
-            }
-        }
-        assert!(cache.get(&"first".into(), range(0, 1)).is_none());
-        assert!(cache.get(&"second".into(), range(0, 1)).is_some());
-        assert_eq!(cache.used_bytes(), 32 * 1024);
-        assert_eq!(cache.buffer_pool().idle_bytes(), 0);
-        cache.remove(&"second".into(), range(0, 1));
-        assert_eq!(cache.used_bytes(), 0); // even one idle buffer exceeds the pool's limit
+    let cache = cache(32 * 1024);
+    for key in ["first", "second"] {
+        let buffer = cache.buffer_pool().allocate(1).unwrap();
+        cache.insert(key.into(), buffer.into_download(0).unwrap());
     }
+    assert!(cache.get(&"first".into(), range(0, 1)).is_none());
+    assert!(cache.get(&"second".into(), range(0, 1)).is_some());
+    assert_eq!(cache.used_bytes(), 32 * 1024);
+    assert_eq!(cache.buffer_pool().idle_bytes(), 0);
+    cache.remove(&"second".into(), range(0, 1));
+    assert_eq!(cache.used_bytes(), 0); // even one idle buffer exceeds the pool's limit
 }
 
 #[test]
@@ -116,7 +115,12 @@ fn replacement_releases_the_old_allocation_charge() {
     let cache = cache(100 * capacity as u64);
     let key = ObjectKeyHash::from("replace");
     let buffer = cache.buffer_pool().allocate(capacity).unwrap();
-    cache.insert_with_allocation_charge(key, Download::new(1, buffer.into_bytes().slice(..1)).unwrap(), capacity);
+    cache.insert(
+        key,
+        Download::new(1, buffer.into_bytes().slice(..1))
+            .unwrap()
+            .with_allocation_charge(capacity),
+    );
     cache.insert(key, Download::new(0, Bytes::from_static(b"abc")).unwrap());
     assert_eq!(cache.shards[0].lock().used_bytes(), 3);
     assert_eq!(cache.buffer_pool().idle_bytes(), capacity as u64);
@@ -131,10 +135,11 @@ fn trimming_replaces_allocation_capacity_with_copied_payload_capacity() {
     let cache = cache(capacity as u64);
     let key = ObjectKeyHash::from("trim");
     let buffer = cache.buffer_pool().allocate(capacity).unwrap();
-    cache.insert_with_allocation_charge(
+    cache.insert(
         key,
-        Download::new(0, buffer.into_bytes().slice(..100)).unwrap(),
-        capacity,
+        Download::new(0, buffer.into_bytes().slice(..100))
+            .unwrap()
+            .with_allocation_charge(capacity),
     );
     for _ in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM {
         cache.access_histories.record_access(&key, range(10, 20));
@@ -183,11 +188,7 @@ fn cache(capacity: u64) -> MemoryCache {
 }
 
 fn cache_with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>) -> MemoryCache {
-    MemoryCache::with_shard_count(
-        BufferPool::new(capacity, metrics),
-        1,
-        Arc::new(ObjectAccessHistories::new()),
-    )
+    MemoryCache::with_shard_count(BufferPool::new(capacity, metrics), 1)
 }
 
 fn accessed_ranges(cache: &MemoryCache, key: &ObjectKeyHash) -> Vec<ByteRange> {
@@ -249,7 +250,7 @@ fn custom_scores_use_live_application_metadata_without_cache_byte_normalization(
     let scorer = Arc::new(ComputationCost(AtomicU64::new(2)));
     let cache = cache(101).with_retention_scorer(scorer.clone());
     let payload = Download::new(10, Bytes::from_static(b"x")).unwrap();
-    cache.insert_with_allocation_charge(ObjectKeyHash(1), payload.clone(), 100);
+    cache.insert(ObjectKeyHash(1), payload.clone().with_allocation_charge(100));
     cache.insert(ObjectKeyHash(2), payload.clone());
     cache.insert(ObjectKeyHash(3), payload.clone());
     // Absolute scores retain the costly object despite its larger memory charge.
@@ -437,14 +438,17 @@ fn replacement_releases_contained_charges_including_an_empty_entry_at_the_end() 
             (3, Bytes::new(), 3),
             (4, Bytes::from_static(b"ef"), 2),
         ] {
-            assert!(cache.insert_with_allocation_charge(key, Download::new(start, bytes).unwrap(), charge));
+            assert!(cache.insert(key, Download::new(start, bytes).unwrap().with_allocation_charge(charge)));
         }
         assert_eq!(cache.used_bytes(), 13);
-        assert!(cache.insert_with_allocation_charge(
-            key,
-            Download::new(0, Bytes::from_static(b"abc")).unwrap(),
-            replacement_charge,
-        ));
+        assert!(
+            cache.insert(
+                key,
+                Download::new(0, Bytes::from_static(b"abc"))
+                    .unwrap()
+                    .with_allocation_charge(replacement_charge)
+            )
+        );
         assert_eq!(cache.used_bytes(), replacement_charge as u64 + 2);
         assert_eq!(cache.entry_count(), 2);
         assert!(!cache.contains_entry(&key, range(3, 3)));
@@ -760,7 +764,7 @@ fn range_trim_requires_only_the_exact_source_range() {
             1 => {
                 assert!(cache.remove(&key, range(0, 10)));
                 // The replacement may have a different allocation charge for the same bytes.
-                cache.insert_with_allocation_charge(key, source, 16);
+                cache.insert(key, source.with_allocation_charge(16));
             }
             2 => {
                 cache.insert(key, download(range(12, 13), Bytes::from_static(b"x")));
@@ -842,11 +846,7 @@ fn configured_target_is_divided_without_losing_remainder_bytes() {
 
 #[test]
 fn shard_targets_can_collectively_exceed_the_configured_capacity() {
-    let cache = MemoryCache::with_shard_count(
-        BufferPool::new(2, MemoryMetrics::noop()),
-        2,
-        Arc::new(ObjectAccessHistories::new()),
-    );
+    let cache = MemoryCache::with_shard_count(BufferPool::new(2, MemoryMetrics::noop()), 2);
     let [first, second] = std::array::from_fn(|shard_index| {
         (0..100)
             .map(|candidate| ObjectKeyHash::from(format!("object-{candidate}")))
@@ -863,11 +863,7 @@ fn shard_targets_can_collectively_exceed_the_configured_capacity() {
 
 #[test]
 fn concurrent_shards_respect_their_targets_for_regular_entries() {
-    let cache = MemoryCache::with_shard_count(
-        BufferPool::new(256, MemoryMetrics::noop()),
-        8,
-        Arc::new(ObjectAccessHistories::new()),
-    );
+    let cache = MemoryCache::with_shard_count(BufferPool::new(256, MemoryMetrics::noop()), 8);
     thread::scope(|scope| {
         for worker in 0..8_u64 {
             let cache = &cache;

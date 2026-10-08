@@ -99,7 +99,10 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 
 /// Decodes an entry at its metadata position in a validated page. The writer guarantees
 /// representable ranges and aligned payloads; all-zero records are unused.
-fn decode_entry_metadata(bytes: &RawMetadataBytes, metadata: EntryMetadataLocation) -> Option<(ObjectKeyHash, DiskEntry)> {
+fn decode_entry_metadata(
+    bytes: &RawMetadataBytes,
+    metadata: EntryMetadataLocation,
+) -> Option<(ObjectKeyHash, DiskEntry)> {
     if bytes == &[0; ENTRY_METADATA_BYTES] {
         return None;
     }

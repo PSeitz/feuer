@@ -5,13 +5,13 @@ use std::time::Duration;
 async fn measured_disk() -> (tempfile::TempDir, DiskCache, prometheus::Registry) {
     let directory = tempfile::tempdir().unwrap();
     let (registry, backend) = registry();
-    let disk = DiskCache::open_with_metrics(
+    let disk = DiskCache::open(
         directory.path(),
         4 * CHUNK_BYTES,
-        IoMetrics::noop(),
-        Arc::new(ObjectAccessHistories::new()),
-        DiskMetrics::new(&backend),
-        RECLAIM_SAMPLE_SIZE,
+        DiskCacheOptions {
+            metrics: DiskMetrics::new(&backend),
+            ..Default::default()
+        },
     )
     .await
     .unwrap();

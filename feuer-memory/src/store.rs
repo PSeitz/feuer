@@ -13,7 +13,7 @@ use rustc_hash::FxBuildHasher;
 
 use self::shard::{InsertOrReclaimResult, MemoryCacheShard};
 use crate::{
-    BufferPool, MemoryMetrics,
+    BufferPool, DEFAULT_IDLE_BUFFER_POOL_PERCENT, MemoryMetrics,
     retention::{RECLAIM_SAMPLE_SIZE, RetentionScorer, RetrievalCostScorer},
 };
 
@@ -60,62 +60,34 @@ impl fmt::Debug for MemoryCache {
 
 impl MemoryCache {
     /// Creates a cache with a shared allocation-byte target, empty history, and no-op metrics.
-    /// Use [`Self::with_access_histories`] to supply request history for access-aware retention.
     pub fn new(capacity: u64) -> Self {
-        Self::with_metrics(capacity, MemoryMetrics::noop())
+        Self::with_metrics(capacity, MemoryMetrics::noop(), DEFAULT_IDLE_BUFFER_POOL_PERCENT)
     }
 
-    /// Creates a cache with a shared allocation-byte target, empty history, and registered metrics.
-    /// Use [`Self::with_access_histories`] to supply request history for access-aware retention.
-    pub fn with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self {
-        Self::with_access_histories(capacity, metrics, Arc::new(ObjectAccessHistories::new()))
-    }
-
-    /// Creates a cache with registered metrics and an explicit idle buffer ceiling (0–100).
+    /// Creates a cache with registered metrics and an idle buffer ceiling (0–100) of its capacity.
     /// Zero disables idle retention. Panics if the percentage exceeds 100.
-    /// Overrides `FEUER_IDLE_BUFFER_POOL_PERCENT` for this cache.
-    pub fn with_metrics_and_idle_buffer_pool_percent(capacity: u64, metrics: Arc<MemoryMetrics>, percent: u64) -> Self {
+    pub fn with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>, idle_buffer_pool_percent: u64) -> Self {
         Self::with_shard_count(
-            BufferPool::with_idle_buffer_pool_percent(capacity, metrics, percent),
+            BufferPool::with_idle_buffer_pool_percent(capacity, metrics, idle_buffer_pool_percent),
             default_shard_count(),
-            Arc::new(ObjectAccessHistories::new()),
         )
     }
 
-    /// Creates a cache that consults standalone request history for retention decisions.
+    /// Consults the supplied request history for retention decisions.
     /// The caller records requests directly in that history before lookup, independently of cache operations.
-    pub fn with_access_histories(
-        capacity: u64,
-        metrics: Arc<MemoryMetrics>,
-        access_histories: Arc<ObjectAccessHistories>,
-    ) -> Self {
-        Self::with_shard_count(
-            BufferPool::new(capacity, metrics),
-            default_shard_count(),
-            access_histories,
-        )
+    pub fn with_access_histories(mut self, access_histories: Arc<ObjectAccessHistories>) -> Self {
+        self.access_histories = access_histories;
+        self
     }
 
     /// Creates a cache with an explicit shard count for controlled benchmarks.
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
-    pub fn with_shards_for_benchmark(
-        capacity: u64,
-        num_shards: usize,
-        access_histories: Arc<ObjectAccessHistories>,
-    ) -> Self {
-        Self::with_shard_count(
-            BufferPool::new(capacity, MemoryMetrics::noop()),
-            num_shards,
-            access_histories,
-        )
+    pub fn with_shards_for_benchmark(capacity: u64, num_shards: usize) -> Self {
+        Self::with_shard_count(BufferPool::new(capacity, MemoryMetrics::noop()), num_shards)
     }
 
-    fn with_shard_count(
-        buffer_pool: Arc<BufferPool>,
-        num_shards: usize,
-        access_histories: Arc<ObjectAccessHistories>,
-    ) -> Self {
+    fn with_shard_count(buffer_pool: Arc<BufferPool>, num_shards: usize) -> Self {
         assert!(num_shards > 0, "memory cache requires at least one shard");
         let capacity = buffer_pool.capacity;
         let shards = (0..num_shards)
@@ -128,7 +100,7 @@ impl MemoryCache {
             .collect();
         Self {
             shards,
-            access_histories,
+            access_histories: Arc::new(ObjectAccessHistories::new()),
             retention_scorer: Arc::new(RetrievalCostScorer),
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             buffer_pool,
@@ -212,17 +184,6 @@ impl MemoryCache {
                 }
             }
         }
-    }
-
-    /// Inserts downloaded bytes using the supplied allocation-byte charge, even if they are a smaller slice.
-    /// Shared allocations are conservatively charged once per cached entry.
-    pub fn insert_with_allocation_charge(
-        &self,
-        object_key: ObjectKeyHash,
-        download: Download,
-        allocation_charge: usize,
-    ) -> bool {
-        self.insert(object_key, download.with_allocation_charge(allocation_charge))
     }
 
     /// Checks whether the exact key and range are cached, without retaining bytes or recording an access.

@@ -8,7 +8,7 @@ use feuer_memory::{
     retention::{RetentionScorer, RetrievalCostScorer},
 };
 #[cfg(target_os = "linux")]
-use feuer_storage::{DiskCache, DiskCacheError, IoMetrics, IoQueues};
+use feuer_storage::{DiskCache, DiskCacheError, DiskCacheOptions, IoMetrics, IoQueues};
 use feuer_types::{ByteRange, Download, ObjectKeyHash};
 #[cfg(target_os = "linux")]
 use mixtrics::metrics::BoxedRegistry;
@@ -80,7 +80,7 @@ impl TieredMemoryDiskCache {
     ) -> Result<Self, DiskCacheError> {
         let noop_metrics_registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         let metrics_registry = metrics_registry.unwrap_or(&noop_metrics_registry);
-        let memory = MemoryCache::with_metrics_and_idle_buffer_pool_percent(
+        let memory = MemoryCache::with_metrics(
             config.memory_capacity(),
             MemoryMetrics::new(metrics_registry),
             config.idle_buffer_pool_percent(),
@@ -91,16 +91,18 @@ impl TieredMemoryDiskCache {
             None
         } else {
             Some(
-                DiskCache::open_with_io_queues(
+                DiskCache::open(
                     config.directory(),
                     config.disk_capacity(),
-                    IoMetrics::new(metrics_registry),
-                    memory.access_histories().clone(),
-                    feuer_storage::DiskMetrics::new(metrics_registry),
-                    config.reclaim_sample_size(),
-                    memory.buffer_pool(),
-                    io_queues,
-                    retention_scorer,
+                    DiskCacheOptions {
+                        io_metrics: IoMetrics::new(metrics_registry),
+                        metrics: feuer_storage::DiskMetrics::new(metrics_registry),
+                        access_histories: memory.access_histories().clone(),
+                        reclaim_sample_size: config.reclaim_sample_size(),
+                        buffer_pool: memory.buffer_pool(),
+                        io_queues,
+                        retention_scorer,
+                    },
                 )
                 .await?,
             )
@@ -207,69 +209,77 @@ impl TieredMemoryDiskCache {
         Fut: Future<Output = Result<Download, E>>,
     {
         let object_key = ObjectKeyHash::from(object_key);
-        let history = self.inner.memory.access_histories();
-        history.record_access(&object_key, requested);
-        let access = if let Some(trace) = &self.trace {
-            let range = requested.unwrap_or_else(|| ByteRange::new(0, u64::MAX).unwrap());
-            Some(trace.send_request_start(object_key, range).await)
-        } else {
-            None
-        };
-        let metrics = &self.inner.metrics;
-        if let Some(bytes) = self.inner.memory.get(&object_key, requested) {
-            metrics.record(LookupOutcome::MemoryHit, None, bytes.len() as u64);
-            if let Some(access) = access {
-                access.send_outcome(LookupOutcome::MemoryHit, None).await;
+        self.inner
+            .memory
+            .access_histories()
+            .record_access(&object_key, requested);
+        let access = match &self.trace {
+            Some(trace) => {
+                let range = requested.unwrap_or_else(|| ByteRange::new(0, u64::MAX).unwrap());
+                Some(trace.send_request_start(object_key, range).await)
             }
-            return Ok(bytes);
-        }
-
+            None => None,
+        };
         let started = Instant::now();
+        let (outcome, downloaded_range, result) = self.fetch(object_key, requested, callback).await;
+        let bytes = result.as_ref().map_or(0, |bytes| bytes.len() as u64);
+        self.inner.metrics.record(outcome, started.elapsed(), bytes);
+        if let Some(access) = access {
+            access.send_outcome(outcome, downloaded_range).await;
+        }
+        result
+    }
+
+    /// Returns the lookup outcome, the downloaded range of a callback result, and the requested bytes.
+    async fn fetch<F, Fut, E>(
+        &self,
+        object_key: ObjectKeyHash,
+        requested: Option<ByteRange>,
+        callback: F,
+    ) -> (LookupOutcome, Option<ByteRange>, Result<Bytes, GetOrFetchError<E>>)
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Download, E>>,
+    {
+        if let Some(bytes) = self.inner.memory.get(&object_key, requested) {
+            return (LookupOutcome::MemoryHit, None, Ok(bytes));
+        }
         #[cfg(target_os = "linux")]
         if let Some(disk) = &self.inner.disk
             && let Some((bytes, buffer_capacity)) = disk.fetch_from_disk(&object_key, requested).await
         {
-            self.inner.memory.insert_with_allocation_charge(
-                object_key,
-                Download::new(requested.map_or(0, ByteRange::start), bytes.clone())
-                    .expect("disk result covers the request"),
-                buffer_capacity,
-            );
-            metrics.record(LookupOutcome::DiskHit, Some(started.elapsed()), bytes.len() as u64);
-            if let Some(access) = access {
-                access.send_outcome(LookupOutcome::DiskHit, None).await;
-            }
-            return Ok(bytes);
+            let download = Download::new(requested.map_or(0, ByteRange::start), bytes.clone())
+                .expect("disk result covers the request");
+            self.inner
+                .memory
+                .insert(object_key, download.with_allocation_charge(buffer_capacity));
+            return (LookupOutcome::DiskHit, None, Ok(bytes));
         }
 
         let download = match callback().await {
             Ok(download) => download,
             Err(error) => {
-                metrics.record(LookupOutcome::CallbackError, None, 0);
-                if let Some(access) = access {
-                    access.send_outcome(LookupOutcome::CallbackError, None).await;
-                }
-                return Err(GetOrFetchError::Callback(error));
+                return (
+                    LookupOutcome::CallbackError,
+                    None,
+                    Err(GetOrFetchError::Callback(error)),
+                );
             }
         };
         let downloaded_range = download.downloaded_range();
         let requested_range = requested.unwrap_or(downloaded_range);
         if !downloaded_range.contains(requested_range) {
-            metrics.record(LookupOutcome::InvalidDownload, None, 0);
-            if let Some(access) = access {
-                access
-                    .send_outcome(LookupOutcome::InvalidDownload, Some(downloaded_range))
-                    .await;
-            }
-            return Err(GetOrFetchError::DownloadDoesNotCover {
+            let error = GetOrFetchError::DownloadDoesNotCover {
                 requested_range,
                 downloaded_range,
-            });
+            };
+            return (LookupOutcome::InvalidDownload, Some(downloaded_range), Err(error));
         }
 
         let requested_bytes = download.bytes_in_range(requested_range);
         #[cfg(target_os = "linux")]
         if let Some(disk) = &self.inner.disk {
+            let metrics = &self.inner.metrics;
             if disk.covers_range(&object_key, downloaded_range) {
                 metrics.disk_write_already_covered.increase(1);
             } else if self.inner.memory.insert(object_key, download.clone()) {
@@ -277,19 +287,10 @@ impl TieredMemoryDiskCache {
             } else {
                 metrics.disk_write_redundant.increase(1);
             }
-        } else {
-            self.inner.memory.insert(object_key, download);
+            return (LookupOutcome::Callback, Some(downloaded_range), Ok(requested_bytes));
         }
-        #[cfg(not(target_os = "linux"))]
         self.inner.memory.insert(object_key, download);
-
-        metrics.record(LookupOutcome::Callback, Some(started.elapsed()), requested_range.len());
-        if let Some(access) = access {
-            access
-                .send_outcome(LookupOutcome::Callback, Some(downloaded_range))
-                .await;
-        }
-        Ok(requested_bytes)
+        (LookupOutcome::Callback, Some(downloaded_range), Ok(requested_bytes))
     }
 }
 

@@ -84,17 +84,7 @@ impl DataFile {
     /// directory is created if needed and the file is set to exactly `capacity`.
     /// A second concurrent open fails with [`crate::DataFileErrorKind::AlreadyOpen`].
     pub async fn open(directory: impl AsRef<Path>, capacity: u64, metrics: Arc<IoMetrics>) -> DataFileResult<Self> {
-        Self::open_with_buffer_pool(directory, capacity, metrics, BufferPool::unpooled()).await
-    }
-
-    /// Opens storage using the buffer pool belonging to its memory-cache instance.
-    pub async fn open_with_buffer_pool(
-        directory: impl AsRef<Path>,
-        capacity: u64,
-        metrics: Arc<IoMetrics>,
-        buffer_pool: Arc<BufferPool>,
-    ) -> DataFileResult<Self> {
-        Self::open_with_io_queues(directory, capacity, metrics, buffer_pool, None).await
+        Self::open_with_io_queues(directory, capacity, metrics, BufferPool::unpooled(), None).await
     }
 
     /// Opens storage with independent file ownership and buffer pooling, optionally sharing I/O queues.
@@ -488,7 +478,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let mib = CHUNK_BYTES as usize;
         let pool = feuer_memory::MemoryCache::new(100 * 96 * CHUNK_BYTES).buffer_pool();
-        let file = DataFile::open_with_buffer_pool(temp.path(), 96 * CHUNK_BYTES, IoMetrics::noop(), pool.clone())
+        let file = DataFile::open_with_io_queues(temp.path(), 96 * CHUNK_BYTES, IoMetrics::noop(), pool.clone(), None)
             .await
             .unwrap();
         drop(pool.allocate(76 * mib).unwrap());

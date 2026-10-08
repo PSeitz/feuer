@@ -4,14 +4,13 @@ use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
     io,
     ptr::NonNull,
-    sync::{Arc, LazyLock, Weak},
+    sync::{Arc, Weak},
 };
 
 #[cfg(not(target_os = "linux"))]
 use std::alloc::realloc;
 
 use bytes::Bytes;
-use feuer_types::config::read_env_number;
 use parking_lot::Mutex;
 
 use crate::MemoryMetrics;
@@ -46,15 +45,8 @@ pub(crate) fn bucket_index(length: usize) -> usize {
         .unwrap_or(BUFFER_SIZES.len())
 }
 
-/// Maximum share of memory capacity occupied by idle buffers across all buckets.
-static IDLE_BUFFER_POOL_PERCENT: LazyLock<u64> = LazyLock::new(|| {
-    let percent = read_env_number("FEUER_IDLE_BUFFER_POOL_PERCENT", 7, 0).unwrap_or_else(|error| panic!("{error}"));
-    assert!(
-        percent <= 100,
-        "FEUER_IDLE_BUFFER_POOL_PERCENT must be between 0 and 100"
-    );
-    percent
-});
+/// Default maximum share of memory capacity occupied by idle buffers across all buckets.
+pub const DEFAULT_IDLE_BUFFER_POOL_PERCENT: u64 = 7;
 
 /// Idle aligned buffers and the cached-allocation charges sharing one cache's budget.
 /// Active allocations and caller-only results are not charged to this budget.
@@ -75,7 +67,7 @@ struct EntryAllocationBytesAndIdleBuffers {
 
 impl BufferPool {
     pub(crate) fn new(capacity: u64, metrics: Arc<MemoryMetrics>) -> Arc<Self> {
-        Self::with_idle_buffer_pool_percent(capacity, metrics, *IDLE_BUFFER_POOL_PERCENT)
+        Self::with_idle_buffer_pool_percent(capacity, metrics, DEFAULT_IDLE_BUFFER_POOL_PERCENT)
     }
 
     pub(crate) fn with_idle_buffer_pool_percent(capacity: u64, metrics: Arc<MemoryMetrics>, percent: u64) -> Arc<Self> {

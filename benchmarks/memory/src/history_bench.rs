@@ -3,6 +3,7 @@
 use std::{collections::HashSet, sync::Barrier, thread};
 
 use super::*;
+use feuer_historian::ObjectAccessHistories;
 
 #[test]
 #[ignore = "manual throughput benchmark; run in release mode with --nocapture"]

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use feuer_memory::retention::RECLAIM_SAMPLE_SIZE;
+use feuer_memory::{DEFAULT_IDLE_BUFFER_POOL_PERCENT, retention::RECLAIM_SAMPLE_SIZE};
 use feuer_types::config::read_env_number;
 use thiserror::Error;
 
@@ -36,8 +36,9 @@ impl CacheConfig {
             return Err(CacheConfigError::InvalidMemoryCapacity);
         }
 
-        let idle_buffer_pool_percent = read_env_number("FEUER_IDLE_BUFFER_POOL_PERCENT", 7, 0)
-            .map_err(|_| CacheConfigError::InvalidIdleBufferPoolPercent)?;
+        let idle_buffer_pool_percent =
+            read_env_number("FEUER_IDLE_BUFFER_POOL_PERCENT", DEFAULT_IDLE_BUFFER_POOL_PERCENT, 0)
+                .map_err(|_| CacheConfigError::InvalidIdleBufferPoolPercent)?;
         if idle_buffer_pool_percent > 100 {
             return Err(CacheConfigError::InvalidIdleBufferPoolPercent);
         }

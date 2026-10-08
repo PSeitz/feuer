@@ -131,7 +131,7 @@ fn benchmark_recovery() {
         let capacity = capacity_chunks * CHUNK_BYTES;
         let (shards, metadata_chunks) = runtime.block_on(async {
             let cache = with_manual_metadata_writes(
-                DiskCache::open(directory.path(), capacity, IoMetrics::noop())
+                DiskCache::open(directory.path(), capacity, DiskCacheOptions::default())
                     .await
                     .unwrap(),
             );
@@ -171,7 +171,7 @@ fn benchmark_recovery() {
             .name(format!("{label} / {entries} entries / {shards} shards"));
         group.register("open", |_| {
             let cache = runtime
-                .block_on(DiskCache::open(directory.path(), capacity, IoMetrics::noop()))
+                .block_on(DiskCache::open(directory.path(), capacity, DiskCacheOptions::default()))
                 .unwrap();
             *reopened.borrow_mut() = Some(cache);
             entries

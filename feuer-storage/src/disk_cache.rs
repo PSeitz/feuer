@@ -134,97 +134,56 @@ impl fmt::Debug for DiskCache {
     }
 }
 
+/// Optional settings and shared resources for opening a disk cache.
+/// Defaults use no-op metrics, private history and queues, no buffer pooling, and retrieval-cost scoring.
+pub struct DiskCacheOptions {
+    /// Raw file I/O metrics.
+    pub io_metrics: Arc<IoMetrics>,
+    /// Disk-cache lookup, write, and capacity metrics.
+    pub metrics: Arc<DiskMetrics>,
+    /// Request history consulted for retention decisions. Insertion and `get` do not record accesses;
+    /// public request handling records once before lookup.
+    pub access_histories: Arc<ObjectAccessHistories>,
+    /// Maximum candidates inspected per eviction decision; must be positive.
+    pub reclaim_sample_size: usize,
+    /// Aligned buffer pool for reads, normally shared with the memory cache.
+    pub buffer_pool: Arc<BufferPool>,
+    /// I/O queues shared with other caches; `None` creates dedicated queues.
+    pub io_queues: Option<crate::IoQueues>,
+    /// Retention scorer, also applied to recovered entries.
+    pub retention_scorer: Arc<dyn RetentionScorer>,
+}
+
+impl Default for DiskCacheOptions {
+    fn default() -> Self {
+        Self {
+            io_metrics: IoMetrics::noop(),
+            metrics: DiskMetrics::noop(),
+            access_histories: Arc::new(ObjectAccessHistories::new()),
+            reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
+            buffer_pool: BufferPool::unpooled(),
+            io_queues: None,
+            retention_scorer: Arc::new(RetrievalCostScorer),
+        }
+    }
+}
+
 impl DiskCache {
     /// Opens an exclusively locked, fixed-capacity file after scanning every shard's metadata.
     pub async fn open(
         directory: impl AsRef<Path>,
         capacity: u64,
-        metrics: Arc<IoMetrics>,
+        options: DiskCacheOptions,
     ) -> Result<Self, DiskCacheError> {
-        Self::open_with_access_histories(directory, capacity, metrics, Arc::new(ObjectAccessHistories::new())).await
-    }
-
-    /// Opens a disk tier that consults standalone shared request history for retention decisions.
-    /// Insertion and `get` do not record accesses; public request handling records once before lookup.
-    pub async fn open_with_access_histories(
-        directory: impl AsRef<Path>,
-        capacity: u64,
-        metrics: Arc<IoMetrics>,
-        access_histories: Arc<ObjectAccessHistories>,
-    ) -> Result<Self, DiskCacheError> {
-        Self::open_with_metrics(
-            directory,
-            capacity,
-            metrics,
-            access_histories,
-            DiskMetrics::noop(),
-            RECLAIM_SAMPLE_SIZE,
-        )
-        .await
-    }
-
-    /// Opens a disk tier with registered file-I/O and disk-cache metrics.
-    pub async fn open_with_metrics(
-        directory: impl AsRef<Path>,
-        capacity: u64,
-        io_metrics: Arc<IoMetrics>,
-        access_histories: Arc<ObjectAccessHistories>,
-        metrics: Arc<DiskMetrics>,
-        reclaim_sample_size: usize,
-    ) -> Result<Self, DiskCacheError> {
-        Self::open_with_buffer_pool(
-            directory,
-            capacity,
+        let DiskCacheOptions {
             io_metrics,
-            access_histories,
             metrics,
-            reclaim_sample_size,
-            BufferPool::unpooled(),
-        )
-        .await
-    }
-
-    /// Opens a disk tier sharing its memory cache's aligned buffer pool.
-    pub async fn open_with_buffer_pool(
-        directory: impl AsRef<Path>,
-        capacity: u64,
-        io_metrics: Arc<IoMetrics>,
-        access_histories: Arc<ObjectAccessHistories>,
-        metrics: Arc<DiskMetrics>,
-        reclaim_sample_size: usize,
-        buffer_pool: Arc<BufferPool>,
-    ) -> Result<Self, DiskCacheError> {
-        Self::open_with_io_queues(
-            directory,
-            capacity,
-            io_metrics,
             access_histories,
-            metrics,
             reclaim_sample_size,
             buffer_pool,
-            None,
-            Arc::new(RetrievalCostScorer),
-        )
-        .await
-    }
-
-    /// Opens a disk tier with a retention scorer and optional shared I/O queues.
-    /// `None` creates dedicated queues. The scorer also applies to recovered entries.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "preserves the existing disk-tier resource arguments"
-    )]
-    pub async fn open_with_io_queues(
-        directory: impl AsRef<Path>,
-        capacity: u64,
-        io_metrics: Arc<IoMetrics>,
-        access_histories: Arc<ObjectAccessHistories>,
-        metrics: Arc<DiskMetrics>,
-        reclaim_sample_size: usize,
-        buffer_pool: Arc<BufferPool>,
-        io_queues: Option<crate::IoQueues>,
-        retention_scorer: Arc<dyn RetentionScorer>,
-    ) -> Result<Self, DiskCacheError> {
+            io_queues,
+            retention_scorer,
+        } = options;
         assert!(reclaim_sample_size > 0, "reclaim sample size must be greater than zero");
         if capacity < CHUNK_BYTES || capacity > i64::MAX as u64 {
             return Err(DiskCacheError::InvalidCapacity);

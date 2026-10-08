@@ -71,14 +71,18 @@ impl LookupMetrics {
         }
     }
 
-    /// Only successful disk hits and callbacks may supply `elapsed`.
-    pub(crate) fn record(&self, outcome: LookupOutcome, elapsed: Option<Duration>, bytes: u64) {
+    /// Records `elapsed` only for successful disk hits and callbacks.
+    pub(crate) fn record(&self, outcome: LookupOutcome, elapsed: Duration, bytes: u64) {
         self.outcome_counts[outcome as usize].increase(1);
         if let Some(served_bytes) = self.served_bytes.get(outcome as usize) {
             served_bytes.increase(bytes);
         }
-        if let Some(elapsed) = elapsed {
-            self.success_durations[outcome as usize - 1].record(elapsed.as_secs_f64());
+        // Disk hits and callbacks immediately follow memory hits in the outcome order.
+        if let Some(duration) = (outcome as usize)
+            .checked_sub(1)
+            .and_then(|index| self.success_durations.get(index))
+        {
+            duration.record(elapsed.as_secs_f64());
         }
     }
 }

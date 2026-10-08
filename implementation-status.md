@@ -19,7 +19,7 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 | `feuer-historian` | Standalone request history, decayed access counts, and recent request events | History is volatile; distinct counters have no capacity limit |
 | `feuer-memory` | Sharded covering-range index, exact access counts shared with disk, per-object trimming-event limits, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
 | `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskCache` with small entries packed into immutable 1-MiB chunks, whole-entry checksums, whole-chunk reuse and per-admission eviction limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
-| Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
+| Runtime and tooling | Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
 
 ## Implemented behavior
 
@@ -154,7 +154,7 @@ byte, using the same history, cost calculation and comparison as memory. Ties ch
 Alignment, metadata and chunk overhead do not enter the score. Only selected entries are removed. Neighbors
 remain indexed and may keep a partially empty chunk unavailable. No eviction metadata reads are needed.
 Each flush or independent large write is limited to 64 sampled decisions and 4,096 chunks charged to removed entries. Active
-storage remains unavailable, and exhausted budgets skip admission. `open_with_access_histories` connects the
+storage remains unavailable, and exhausted budgets skip admission. `DiskCacheOptions::access_histories` connects the
 disk cache to a memory cache's evidence. Public tier orchestration now uses it.
 Recovery starts at each shard's first chunk and follows last-page links, reading exactly 1 MiB per metadata chunk
 without scanning payload chunks. Fixed starts need no `recovery-heads` file or periodic checkpoint. Open waits for

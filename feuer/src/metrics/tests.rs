@@ -23,15 +23,15 @@ fn memory_operations_exclude_access_hit_miss_and_victim_counters() {
 fn lookup_bytes_record_all_successes_but_latency_excludes_memory_hits() {
     let (registry, backend) = registry();
     let metrics = LookupMetrics::new(&backend);
-    for (outcome, label, elapsed) in [
-        (LookupOutcome::MemoryHit, "memory_hit", None),
+    for (outcome, label) in [
+        (LookupOutcome::MemoryHit, "memory_hit"),
         #[cfg(target_os = "linux")]
-        (LookupOutcome::DiskHit, "disk_hit", Some(Duration::from_micros(10))),
-        (LookupOutcome::Callback, "callback", Some(Duration::from_micros(10))),
-        (LookupOutcome::CallbackError, "callback_error", None),
-        (LookupOutcome::InvalidDownload, "invalid_download", None),
+        (LookupOutcome::DiskHit, "disk_hit"),
+        (LookupOutcome::Callback, "callback"),
+        (LookupOutcome::CallbackError, "callback_error"),
+        (LookupOutcome::InvalidDownload, "invalid_download"),
     ] {
-        metrics.record(outcome, elapsed, 7);
+        metrics.record(outcome, Duration::from_micros(10), 7);
         assert_eq!(value(&registry, "feuer_lookup_total", &[("outcome", label)]), 1.0);
     }
     for source in ["memory", "callback"] {

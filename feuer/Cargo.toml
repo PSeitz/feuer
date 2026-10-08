@@ -21,9 +21,6 @@ mixtrics = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 
-[features]
-default = ["tokio/runtime-tokio"]
-
 [target.'cfg(target_os = "linux")'.dependencies]
 feuer-storage = { path = "../feuer-storage" }
 
@@ -31,7 +28,7 @@ feuer-storage = { path = "../feuer-storage" }
 mixtrics = { workspace = true, features = ["prometheus"] }
 prometheus = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["runtime-tokio", "macros", "rt-multi-thread", "sync", "time", "test-util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 
 [lints]
 workspace = true
