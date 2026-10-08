@@ -1,4 +1,4 @@
-//! Shared contract types and internal retention evidence for Feuer's immutable-object range tiers.
+//! Shared contract types for Feuer's immutable-object range tiers.
 //!
 //! The top-level `feuer` crate re-exports the range and download contracts.
 //! Private memory and disk components exchange hashed object identities and
@@ -9,9 +9,6 @@ pub mod config;
 
 mod download;
 mod range;
-
-#[doc(hidden)]
-pub mod retention;
 
 pub use download::{Download, DownloadError};
 pub use range::{ByteRange, InvalidByteRange};

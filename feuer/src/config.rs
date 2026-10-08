@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use feuer_types::{config::read_env_number, retention::RECLAIM_SAMPLE_SIZE};
+use feuer_memory::retention::RECLAIM_SAMPLE_SIZE;
+use feuer_types::config::read_env_number;
 use thiserror::Error;
 
 /// Explicit capacities and location for one Feuer cache.

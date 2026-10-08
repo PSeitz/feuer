@@ -73,7 +73,8 @@ owned memory buffer. Concurrent disk overwrite is allowed: checksum validation h
 and before using the bytes, subject to the usual checksum-collision limitation. A checksum mismatch removes the entry only if its expected
 checksum still matches the failed read; discarding a newer identical copy remains an allowed miss.
 
-Disk and memory consult standalone access history through `feuer-types::retention`. Public requests
+Disk and memory consult standalone access history through `feuer-historian`, using the shared
+retrieval-cost policy in `feuer-memory::retention`. Public requests
 record accesses before lookup; raw reads and writes do not. Eviction samples live entries and removes
 the lowest recent retrieval value per payload byte. Metadata, alignment, and unused chunk space
 count against capacity but not the score. Each flush or independent large write allows at most 64 eviction attempts and

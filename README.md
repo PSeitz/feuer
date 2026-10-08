@@ -119,7 +119,9 @@ decayed access count × (fixed request cost + requested bytes)
 ```
 
 Each started request records its requested range or whole-object demand once, before any lookup,
-in standalone history shared by both tiers. Whole-object scores use the cached object's payload length;
+in `feuer-historian`, shared by both tiers. Historian supplies request counts and recent events;
+retrieval-cost scoring belongs to the shared retention policy in `feuer-memory`.
+Whole-object scores use the cached object's payload length;
 whole-object entries are evicted rather than trimmed to partial ranges.
 Failed requests, invalid downloads, and requests canceled after starting all count as demand.
 History hashes object keys into 64 independently locked maps, separate from cache shards.
@@ -212,7 +214,7 @@ cargo fmt --all -- --check
 Storage tests require Linux with io_uring and direct-I/O support. On other platforms:
 
 ```console
-cargo test -p feuer -p feuer-memory -p feuer-types
+cargo test -p feuer -p feuer-memory -p feuer-historian -p feuer-types
 ```
 
 ## Details

@@ -630,7 +630,7 @@ async fn pressure_replacement_preserves_evidence_while_the_last_old_entry_is_rem
 
 #[tokio::test]
 async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
-    use feuer_types::retention::ACCESS_COUNT_HALF_LIFE;
+    use feuer_historian::ACCESS_COUNT_HALF_LIFE;
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
     let key = ObjectKeyHash::from("object");
     cache.insert(key, download(0, 100)).await.unwrap();
@@ -639,9 +639,9 @@ async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
     for _ in 0..3 {
         histories.record_access(&key, range(0, 1));
     }
-    let original_cost = histories.decayed_retrieval_cost(&key, range(0, 100));
+    let original_cost = decayed_retrieval_cost(&histories, &key, range(0, 100));
     assert!(original_cost > 0.0);
-    assert_eq!(histories.decayed_retrieval_cost(&key, range(200, 300)), 0.0);
+    assert_eq!(decayed_retrieval_cost(&histories, &key, range(200, 300)), 0.0);
     // Successful lookups are recorded explicitly; raw storage reads/writes do not double-count.
     assert!(cache.get(&key, range(0, 1)).await.is_some());
     assert_eq!(histories.request_count(), 3);
@@ -649,7 +649,7 @@ async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
         histories.record_access(&key, range(200, 201));
     }
     assert_eq!(
-        histories.decayed_retrieval_cost(&key, range(0, 100)),
+        decayed_retrieval_cost(&histories, &key, range(0, 100)),
         original_cost * 0.5
     );
     assert!(cache.insert(ObjectKeyHash::from("new"), download(0, 1)).await.unwrap());
@@ -701,7 +701,7 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     drop(memory);
     drop(cache);
     assert_eq!(history.recent_requested_ranges(&hot).len(), 5);
-    assert!(history.decayed_retrieval_cost(&hot, range(0, 100)) > 0.0);
+    assert!(decayed_retrieval_cost(&history, &hot, range(0, 100)) > 0.0);
 }
 
 #[tokio::test]

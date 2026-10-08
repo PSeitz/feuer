@@ -7,6 +7,8 @@
 
 mod buffer;
 mod metrics;
+#[doc(hidden)]
+pub mod retention;
 mod store;
 #[cfg(test)]
 #[path = "../../test_support/metrics.rs"]

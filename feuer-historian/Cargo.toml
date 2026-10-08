@@ -1,6 +1,6 @@
 [package]
-name = "feuer-types"
-description = "Shared immutable-object range contract types for Feuer"
+name = "feuer-historian"
+description = "Request history and decayed access counts for immutable objects and byte ranges"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,10 +13,8 @@ readme.workspace = true
 exclude.workspace = true
 
 [dependencies]
-bytes = { workspace = true }
-bytesize = "2.7"
-thiserror = { workspace = true }
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+feuer-types = { workspace = true }
+rustc-hash = { workspace = true }
 
 [lints]
 workspace = true

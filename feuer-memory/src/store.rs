@@ -6,13 +6,13 @@ mod tests;
 use std::{fmt, hash::BuildHasher, sync::Arc};
 
 use bytes::Bytes;
-use feuer_types::retention::RECLAIM_SAMPLE_SIZE;
-use feuer_types::{ByteRange, Download, ObjectKeyHash, retention::ObjectAccessHistories};
+use feuer_historian::ObjectAccessHistories;
+use feuer_types::{ByteRange, Download, ObjectKeyHash};
 use parking_lot::Mutex;
 use rustc_hash::FxBuildHasher;
 
 use self::shard::{InsertOrReclaimResult, MemoryCacheShard};
-use crate::{BufferPool, MemoryMetrics};
+use crate::{BufferPool, MemoryMetrics, retention::RECLAIM_SAMPLE_SIZE};
 
 /// Caps lock partitioning to avoid excessive per-cache metadata.
 const MAX_SHARDS: usize = 64;

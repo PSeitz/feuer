@@ -18,6 +18,7 @@ io-bench = []
 
 [dependencies]
 bytes = { workspace = true }
+feuer-historian = { workspace = true }
 feuer-memory = { workspace = true }
 feuer-types = { workspace = true }
 fs4 = { workspace = true, features = ["sync"] }

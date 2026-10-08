@@ -10,14 +10,13 @@ use std::{
 
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
-use feuer_memory::MemoryCache;
+use feuer_historian::{
+    ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY, ObjectAccessHistories,
+};
+use feuer_memory::{MemoryCache, retention::FIXED_RETRIEVAL_EQUIVALENT_BYTES};
 use feuer_types::{
     ByteRange, Download, ObjectKeyHash,
     config::{parse_config_number, read_env_number},
-    retention::{
-        ACCESS_COUNT_HALF_LIFE, FIXED_RETRIEVAL_EQUIVALENT_BYTES, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY,
-        ObjectAccessHistories,
-    },
 };
 use foyer_memory::{Cache as FoyerCache, CacheBuilder, CostAwareConfig, S3FifoConfig};
 

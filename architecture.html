@@ -385,7 +385,7 @@
 
       <details class="component" id="retention">
         <summary>
-          <span class="component-label"><span class="number">05</span><span class="crate">feuer-types · both tiers</span></span>
+          <span class="component-label"><span class="number">05</span><span class="crate">feuer-historian · feuer-memory</span></span>
           <h3>Shared retention policy</h3>
           <span class="description">Uses request history to choose which entries to keep and which to remove.</span>
           <span class="child-count">2 components · expand to explore</span>
@@ -400,7 +400,7 @@
                 <p><strong>Trimming history:</strong> a separate bounded event history. Defaults retain up to 64 events per object, aged out after 262,144 requests across all keys.</p>
                 <p>History uses 64 independently locked maps and one global request clock, separate from memory and disk shard counts. It is not persisted; aging is request-based, not wall-clock-based.</p>
               </div></details>
-              <a class="source" href="feuer-types/src/retention.rs">feuer-types/src/retention.rs · ObjectAccessHistories</a>
+              <a class="source" href="feuer-historian/src/lib.rs">feuer-historian/src/lib.rs · ObjectAccessHistories</a>
             </div>
           </details>
           <details class="branch">
@@ -413,7 +413,7 @@
                 <ul><li>Sample size: 64 live candidates per decision, configurable.</li><li>Fixed request cost: 10,000,000 equivalent bytes by default; zero scores bytes only.</li><li>Both tiers maintain dense candidate lists sampled in rotation; removal leaves no stale-candidate backlog.</li><li>Disk alignment, metadata, and chunk overhead do not enter the payload-only score.</li><li>Tier-aware memory valuation based on disk residency is not implemented.</li></ul>
                 <p>Settings include <code>FEUER_RECLAIM_SAMPLE_SIZE</code>, <code>FEUER_ACCESS_COUNT_HALF_LIFE</code>, and <code>FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES</code>.</p>
               </div></details>
-              <a class="source" href="feuer-types/src/retention.rs">feuer-types/src/retention.rs · shared scoring</a>
+              <a class="source" href="feuer-memory/src/retention.rs">feuer-memory/src/retention.rs · shared scoring</a>
             </div>
           </details>
         </div>

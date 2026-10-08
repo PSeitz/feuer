@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 bytes.workspace = true
 clap.workspace = true
+feuer-historian = { workspace = true }
 feuer-memory = { workspace = true, features = ["benchmark"] }
 feuer-types.workspace = true
 foyer-memory = { git = "https://github.com/PSeitz/foyer", rev = "14c2d88b9d7dd2135bfc723d0967debb59532b4b" }

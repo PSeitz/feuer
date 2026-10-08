@@ -1,14 +1,15 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use bytes::Bytes;
-use feuer_types::{
-    ByteRange, Download, ObjectKeyHash,
-    retention::{ObjectAccessHistories, compare_cost_per_byte, sample_candidates},
-};
+use feuer_historian::ObjectAccessHistories;
+use feuer_types::{ByteRange, Download, ObjectKeyHash};
 use rustc_hash::FxHashMap;
 
 use super::{MemoryCache, range_trim::plan_range_trim};
-use crate::BufferPool;
+use crate::{
+    BufferPool,
+    retention::{compare_cost_per_byte, decayed_retrieval_cost, sample_candidates},
+};
 
 /// Minimum requests across all keys since admission before trimming a range.
 pub(super) const MIN_REQUESTS_BEFORE_RANGE_TRIM: u64 = 64;
@@ -263,7 +264,7 @@ impl MemoryCacheShard {
         )
         .map(|(key, start)| (key, &self.entries_by_key[key].by_start[start]))
         .filter(|(key, entry)| **key != *admitting_key || !admitting_range.contains(entry.range()))
-        .map(|(key, entry)| (key, entry, access_histories.decayed_retrieval_cost(key, entry.range())))
+        .map(|(key, entry)| (key, entry, decayed_retrieval_cost(access_histories, key, entry.range())))
         .min_by(
             |(left_key, left_entry, left_cost), (right_key, right_entry, right_cost)| {
                 compare_cost_per_byte(

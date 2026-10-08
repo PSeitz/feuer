@@ -1,17 +1,15 @@
 use std::{sync::Arc, thread};
 
 use bytes::Bytes;
-use feuer_types::{
-    ByteRange, Download, ObjectKeyHash,
-    retention::{ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_EVENTS_PER_KEY, ObjectAccessHistories},
-};
+use feuer_historian::{ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_EVENTS_PER_KEY, ObjectAccessHistories};
+use feuer_types::{ByteRange, Download, ObjectKeyHash};
 
 use super::{
     MemoryCache,
     shard::{InsertOrReclaimResult, MIN_REQUESTS_BEFORE_RANGE_TRIM},
     shard_capacity_for,
 };
-use crate::MemoryMetrics;
+use crate::{MemoryMetrics, retention::decayed_retrieval_cost};
 
 #[test]
 fn cached_slices_and_idle_buffers_share_allocation_accounting() {
@@ -765,7 +763,7 @@ fn access_history_survives_removal_reinsertion_and_cache_drop() {
     assert!(cache.get(&key, range(0, 1)).is_some());
     assert_eq!(history.request_count(), 2, "raw lookups do not record requests");
     drop(cache);
-    assert!(history.decayed_retrieval_cost(&key, range(0, 1)) > 0.0);
+    assert!(decayed_retrieval_cost(&history, &key, range(0, 1)) > 0.0);
 }
 
 #[test]

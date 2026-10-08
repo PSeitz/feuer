@@ -372,11 +372,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "feuer-historian"
+version = "0.23.0-dev"
+dependencies = [
+ "feuer-types",
+ "rustc-hash",
+]
+
+[[package]]
 name = "feuer-memory"
 version = "0.23.0-dev"
 dependencies = [
  "bytes",
  "bytesize",
+ "feuer-historian",
  "feuer-types",
  "libc",
  "mixtrics",
@@ -391,6 +400,7 @@ version = "0.23.0-dev"
 dependencies = [
  "bytes",
  "clap",
+ "feuer-historian",
  "feuer-memory",
  "feuer-types",
  "foyer-memory",
@@ -402,6 +412,7 @@ version = "0.23.0-dev"
 dependencies = [
  "blake3",
  "bytes",
+ "feuer-historian",
  "feuer-memory",
  "feuer-tokio",
  "feuer-types",
@@ -432,7 +443,6 @@ version = "0.23.0-dev"
 dependencies = [
  "bytes",
  "bytesize",
- "rustc-hash",
  "thiserror",
  "xxhash-rust",
 ]

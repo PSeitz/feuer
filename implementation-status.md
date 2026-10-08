@@ -15,7 +15,8 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 | Area | Implemented | Remaining |
 | --- | --- | --- |
 | `feuer` | Fallible async open, cloneable tiered handle, memory/disk/callback lookup, disk writes through a 512-entry queue with per-shard small-entry chunks, typed callback and validation errors | I/O mode selection, recovery crash testing, tier-aware retention tuning |
-| `feuer-types` | XXH3-128 object identity, exact non-empty `ByteRange`, keyless `Download` with a derived range, internal shared access evidence and value comparison | None for the current public type boundary |
+| `feuer-types` | XXH3-128 object identity, exact non-empty `ByteRange`, keyless `Download` with a derived range | None for the current public type boundary |
+| `feuer-historian` | Standalone request history, decayed access counts, and recent request events | History is volatile; distinct counters have no capacity limit |
 | `feuer-memory` | Sharded covering-range index, exact access counts shared with disk, per-object trimming-event limits, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
 | `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskCache` with small entries packed into immutable 1-MiB chunks, whole-entry checksums, whole-chunk reuse and per-admission eviction limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
 | Runtime and tooling | `feuer-tokio`, Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
@@ -50,7 +51,8 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 ### Memory retention and compaction
 
 - Cost-aware scoring uses exact-range access counts with a 262,144-request half-life by default,
-  measured across all keys. Both tiers consult standalone history in `feuer-types::retention`, with 64
+  measured across all keys. Both tiers use the shared policy in `feuer-memory::retention` to score
+  standalone history in `feuer-historian`, with 64
   independently locked maps selected by object key and one global atomic request clock, separate from cache
   shards. Every distinct counter survives all cache evictions for the
   history object's lifetime; metadata has no capacity limit. History is volatile, not persisted.

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "benchmarks/memory",
   "feuer",
+  "feuer-historian",
   "feuer-memory",
   "feuer-storage",
   "feuer-tokio",
@@ -24,6 +25,7 @@ exclude = []
 [workspace.dependencies]
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+feuer-historian = { version = "0.23.0-dev", path = "feuer-historian" }
 feuer-memory = { version = "0.23.0-dev", path = "feuer-memory" }
 feuer-types = { version = "0.23.0-dev", path = "feuer-types" }
 fs4 = { version = "0.13", default-features = false }

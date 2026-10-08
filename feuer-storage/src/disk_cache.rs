@@ -22,11 +22,12 @@ use std::{
 };
 
 use bytes::Bytes;
-use feuer_memory::BufferPool;
-use feuer_types::{
-    ByteRange, Download, ObjectKeyHash,
-    retention::{ObjectAccessHistories, RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, sample_candidates},
+use feuer_historian::ObjectAccessHistories;
+use feuer_memory::{
+    BufferPool,
+    retention::{RECLAIM_SAMPLE_SIZE, compare_cost_per_byte, decayed_retrieval_cost, sample_candidates},
 };
+use feuer_types::{ByteRange, Download, ObjectKeyHash};
 use rustc_hash::FxHashMap;
 use tokio::sync::{OnceCell, mpsc};
 use twox_hash::XxHash64;
@@ -381,7 +382,7 @@ impl DiskCacheShard {
             let entry = &disk_index.entries_by_key[key][range_start];
             let chunk_count = entry.chunk_count() as usize;
             (chunk_count <= *remaining_eviction_chunk_budget).then(|| {
-                let cost = disk.access_histories.decayed_retrieval_cost(key, entry.object_range);
+                let cost = decayed_retrieval_cost(&disk.access_histories, key, entry.object_range);
                 (candidate, cost, entry.object_range.len(), chunk_count)
             })
         })
