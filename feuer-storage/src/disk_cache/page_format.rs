@@ -13,6 +13,8 @@ use crate::allocation::CHUNK_BYTES;
 pub(super) const METADATA_PAGE_BYTES: usize = 4096;
 pub(super) const PAGE_HEADER_BYTES: usize = 32;
 pub(super) const ENTRY_METADATA_BYTES: usize = 48;
+/// The bytes of one entry's metadata record.
+pub(super) type RawMetadataBytes = [u8; ENTRY_METADATA_BYTES];
 pub(super) const PAGE_CONTENT_BYTES: usize =
     (METADATA_PAGE_BYTES - PAGE_HEADER_BYTES) / ENTRY_METADATA_BYTES * ENTRY_METADATA_BYTES;
 pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES13";

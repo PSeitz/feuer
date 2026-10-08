@@ -134,14 +134,14 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     drop(entry); // Must not lock metadata or release the allocator's payload.
     assert_eq!(
         metadata.chunks[location.chunk_index as usize].entry_metadata_bytes(location.entry_index as usize),
-        entry_metadata_bytes
+        entry_metadata_bytes.as_slice()
     );
     assert!(shard.allocator.reserve_chunks(1).is_none());
     shard.allocator.release_payload(address);
     assert!(shard.allocator.reserve_chunks(1).is_some());
     assert_eq!(
         metadata.chunks[location.chunk_index as usize].entry_metadata_bytes(location.entry_index as usize),
-        entry_metadata_bytes
+        entry_metadata_bytes.as_slice()
     );
 }
 

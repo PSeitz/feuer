@@ -88,9 +88,9 @@ impl MetadataChunk {
     }
 
     /// The 48 bytes describing one entry's key, object range, payload address, and checksum.
-    pub(super) fn entry_metadata_bytes(&self, entry_metadata_index: usize) -> &[u8] {
+    pub(super) fn entry_metadata_bytes(&self, entry_metadata_index: usize) -> &RawMetadataBytes {
         let offset = entry_metadata_offset(entry_metadata_index);
-        &self.bytes[offset..offset + ENTRY_METADATA_BYTES]
+        self.bytes[offset..offset + ENTRY_METADATA_BYTES].try_into().unwrap()
     }
 }
 
