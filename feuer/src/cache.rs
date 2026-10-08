@@ -80,9 +80,13 @@ impl TieredMemoryDiskCache {
     ) -> Result<Self, DiskCacheError> {
         let noop_metrics_registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         let metrics_registry = metrics_registry.unwrap_or(&noop_metrics_registry);
-        let memory = MemoryCache::with_metrics(config.memory_capacity(), MemoryMetrics::new(metrics_registry))
-            .with_reclaim_sample_size(config.reclaim_sample_size())
-            .with_retention_scorer(retention_scorer.clone());
+        let memory = MemoryCache::with_metrics_and_idle_buffer_pool_percent(
+            config.memory_capacity(),
+            MemoryMetrics::new(metrics_registry),
+            config.idle_buffer_pool_percent(),
+        )
+        .with_reclaim_sample_size(config.reclaim_sample_size())
+        .with_retention_scorer(retention_scorer.clone());
         let disk = if config.disk_capacity() == 0 {
             None
         } else {
@@ -517,6 +521,21 @@ mod tests {
         .await
         .unwrap();
         (directory, cache)
+    }
+
+    #[tokio::test]
+    async fn configured_idle_buffer_pool_percent_controls_retention() {
+        let size = 32 * 1024;
+        for (percent, expected) in [(0, 0), (25, size as u64)] {
+            let config = CacheConfig::new("unused", 0, 4 * size as u64)
+                .unwrap()
+                .with_idle_buffer_pool_percent(percent)
+                .unwrap();
+            let cache = TieredMemoryDiskCache::open(config, None, None).await.unwrap();
+            let buffers: Vec<_> = (0..2).map(|_| cache.allocate_buffer(size).unwrap()).collect();
+            drop(buffers);
+            assert_eq!(cache.inner.memory.buffer_pool().idle_bytes(), expected);
+        }
     }
 
     async fn wait_for_buffered(cache: &TieredMemoryDiskCache, key: &str, range: ByteRange) {

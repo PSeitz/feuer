@@ -191,9 +191,10 @@ Binary suffixes use powers of 1024 and decimal suffixes use powers of 1000.
 Suffixes work for counts too: `FEUER_ACCESS_COUNT_HALF_LIFE=8KiB` means 8192 accesses.
 The first four settings require positive values. The rest allow zero.
 
-`CacheConfig::new` reads the sample size and returns an error for invalid values.
-`.with_reclaim_sample_size(n)` overrides it for that cache. The other settings are
-process-wide, read once on first use, and panic on invalid values.
+`CacheConfig::new` reads the sample size and idle buffer percentage, returning an error
+for invalid values. `.with_reclaim_sample_size(n)` and `.with_idle_buffer_pool_percent(n)`
+override them for that cache. The other settings are process-wide, read once on first use,
+and panic on invalid values.
 
 ### Read buffers
 
@@ -214,8 +215,15 @@ frees idle buffers before retaining new cached allocations; returning buffers ne
 cached entries. Writes use unpooled scratch buffers, and standalone storage without a
 memory cache retains no idle buffers.
 
-Set `FEUER_IDLE_BUFFER_POOL_PERCENT` to change the idle ceiling. `FEUER_IO_BUFFER_POOL_BYTES`
-and the former small/medium/large settings are no longer read.
+Set `FEUER_IDLE_BUFFER_POOL_PERCENT` to change the default idle ceiling, or set it per cache:
+
+```rust
+let config = CacheConfig::new("/path/on/ssd/cache", 1 << 30, 256 << 20)?
+    .with_idle_buffer_pool_percent(10)?;
+```
+
+Use `0` to disable idle buffer retention. `FEUER_IO_BUFFER_POOL_BYTES` and the former
+small/medium/large settings are no longer read.
 
 ### Memory benchmark only
 

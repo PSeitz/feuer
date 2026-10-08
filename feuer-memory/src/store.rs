@@ -71,6 +71,17 @@ impl MemoryCache {
         Self::with_access_histories(capacity, metrics, Arc::new(ObjectAccessHistories::new()))
     }
 
+    /// Creates a cache with registered metrics and an explicit idle buffer ceiling (0–100).
+    /// Zero disables idle retention. Panics if the percentage exceeds 100.
+    /// Overrides `FEUER_IDLE_BUFFER_POOL_PERCENT` for this cache.
+    pub fn with_metrics_and_idle_buffer_pool_percent(capacity: u64, metrics: Arc<MemoryMetrics>, percent: u64) -> Self {
+        Self::with_shard_count(
+            BufferPool::with_idle_buffer_pool_percent(capacity, metrics, percent),
+            default_shard_count(),
+            Arc::new(ObjectAccessHistories::new()),
+        )
+    }
+
     /// Creates a cache that consults standalone request history for retention decisions.
     /// The caller records requests directly in that history before lookup, independently of cache operations.
     pub fn with_access_histories(
@@ -78,7 +89,11 @@ impl MemoryCache {
         metrics: Arc<MemoryMetrics>,
         access_histories: Arc<ObjectAccessHistories>,
     ) -> Self {
-        Self::with_shard_count(capacity, metrics, default_shard_count(), access_histories)
+        Self::with_shard_count(
+            BufferPool::new(capacity, metrics),
+            default_shard_count(),
+            access_histories,
+        )
     }
 
     /// Creates a cache with an explicit shard count for controlled benchmarks.
@@ -89,17 +104,20 @@ impl MemoryCache {
         num_shards: usize,
         access_histories: Arc<ObjectAccessHistories>,
     ) -> Self {
-        Self::with_shard_count(capacity, MemoryMetrics::noop(), num_shards, access_histories)
+        Self::with_shard_count(
+            BufferPool::new(capacity, MemoryMetrics::noop()),
+            num_shards,
+            access_histories,
+        )
     }
 
     fn with_shard_count(
-        capacity: u64,
-        metrics: Arc<MemoryMetrics>,
+        buffer_pool: Arc<BufferPool>,
         num_shards: usize,
         access_histories: Arc<ObjectAccessHistories>,
     ) -> Self {
         assert!(num_shards > 0, "memory cache requires at least one shard");
-        let buffer_pool = BufferPool::new(capacity, metrics);
+        let capacity = buffer_pool.capacity;
         let shards = (0..num_shards)
             .map(|shard_index| {
                 Mutex::new(MemoryCacheShard::new(

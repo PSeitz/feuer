@@ -9,7 +9,24 @@ use super::{
     shard::{InsertOrReclaimResult, MIN_REQUESTS_BEFORE_RANGE_TRIM},
     shard_capacity_for,
 };
-use crate::{MemoryMetrics, retention::decayed_retrieval_cost};
+use crate::{BufferPool, MemoryMetrics, retention::decayed_retrieval_cost};
+
+#[test]
+fn idle_buffer_pool_percent_is_independent_per_cache() {
+    let size = 32 * 1024;
+    let capacity = 4 * size as u64;
+    let caches: Vec<_> = [0, 25, 100]
+        .into_iter()
+        .map(|percent| MemoryCache::with_metrics_and_idle_buffer_pool_percent(capacity, MemoryMetrics::noop(), percent))
+        .collect();
+    for (cache, expected_buffers) in caches.iter().zip([0, 1, 4]) {
+        let pool = cache.buffer_pool();
+        let buffers: Vec<_> = (0..5).map(|_| pool.allocate(size).unwrap()).collect();
+        drop(buffers);
+        assert_eq!(pool.idle_bytes(), expected_buffers * size as u64);
+        assert_eq!(cache.used_bytes(), expected_buffers * size as u64);
+    }
+}
 
 #[test]
 fn cached_slices_and_idle_buffers_share_allocation_accounting() {
@@ -166,7 +183,11 @@ fn cache(capacity: u64) -> MemoryCache {
 }
 
 fn cache_with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>) -> MemoryCache {
-    MemoryCache::with_shard_count(capacity, metrics, 1, Arc::new(ObjectAccessHistories::new()))
+    MemoryCache::with_shard_count(
+        BufferPool::new(capacity, metrics),
+        1,
+        Arc::new(ObjectAccessHistories::new()),
+    )
 }
 
 fn accessed_ranges(cache: &MemoryCache, key: &ObjectKeyHash) -> Vec<ByteRange> {
@@ -821,7 +842,11 @@ fn configured_target_is_divided_without_losing_remainder_bytes() {
 
 #[test]
 fn shard_targets_can_collectively_exceed_the_configured_capacity() {
-    let cache = MemoryCache::with_shard_count(2, MemoryMetrics::noop(), 2, Arc::new(ObjectAccessHistories::new()));
+    let cache = MemoryCache::with_shard_count(
+        BufferPool::new(2, MemoryMetrics::noop()),
+        2,
+        Arc::new(ObjectAccessHistories::new()),
+    );
     let [first, second] = std::array::from_fn(|shard_index| {
         (0..100)
             .map(|candidate| ObjectKeyHash::from(format!("object-{candidate}")))
@@ -838,7 +863,11 @@ fn shard_targets_can_collectively_exceed_the_configured_capacity() {
 
 #[test]
 fn concurrent_shards_respect_their_targets_for_regular_entries() {
-    let cache = MemoryCache::with_shard_count(256, MemoryMetrics::noop(), 8, Arc::new(ObjectAccessHistories::new()));
+    let cache = MemoryCache::with_shard_count(
+        BufferPool::new(256, MemoryMetrics::noop()),
+        8,
+        Arc::new(ObjectAccessHistories::new()),
+    );
     thread::scope(|scope| {
         for worker in 0..8_u64 {
             let cache = &cache;

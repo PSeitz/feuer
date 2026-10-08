@@ -75,7 +75,12 @@ struct EntryAllocationBytesAndIdleBuffers {
 
 impl BufferPool {
     pub(crate) fn new(capacity: u64, metrics: Arc<MemoryMetrics>) -> Arc<Self> {
-        let idle_limit = (u128::from(capacity) * u128::from(*IDLE_BUFFER_POOL_PERCENT) / 100) as u64;
+        Self::with_idle_buffer_pool_percent(capacity, metrics, *IDLE_BUFFER_POOL_PERCENT)
+    }
+
+    pub(crate) fn with_idle_buffer_pool_percent(capacity: u64, metrics: Arc<MemoryMetrics>, percent: u64) -> Arc<Self> {
+        assert!(percent <= 100, "idle buffer pool percent must be between 0 and 100");
+        let idle_limit = (u128::from(capacity) * u128::from(percent) / 100) as u64;
         metrics.capacity_bytes.increase(capacity);
         Arc::new(Self {
             capacity,
