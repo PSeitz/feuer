@@ -128,19 +128,19 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     let address = entry.payload_address;
     let location = entry.metadata;
     let metadata = shard.metadata_pages.lock().unwrap();
-    let entry_metadata_bytes = metadata.chunks[location.chunk_index]
-        .entry_metadata_bytes(location.entry_index)
+    let entry_metadata_bytes = metadata.chunks[location.chunk_index as usize]
+        .entry_metadata_bytes(location.entry_index as usize)
         .to_vec();
     drop(entry); // Must not lock metadata or release the allocator's payload.
     assert_eq!(
-        metadata.chunks[location.chunk_index].entry_metadata_bytes(location.entry_index),
+        metadata.chunks[location.chunk_index as usize].entry_metadata_bytes(location.entry_index as usize),
         entry_metadata_bytes
     );
     assert!(shard.allocator.reserve_chunks(1).is_none());
     shard.allocator.release_payload(address);
     assert!(shard.allocator.reserve_chunks(1).is_some());
     assert_eq!(
-        metadata.chunks[location.chunk_index].entry_metadata_bytes(location.entry_index),
+        metadata.chunks[location.chunk_index as usize].entry_metadata_bytes(location.entry_index as usize),
         entry_metadata_bytes
     );
 }
@@ -387,7 +387,7 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
         // Give key 2's record key 1's identity, regardless of which payload was written first.
         let position = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(2)][&0]
             .metadata
-            .entry_index;
+            .entry_index as usize;
         let mut page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap().to_vec();
         let offset = PAGE_HEADER_BYTES + position * ENTRY_METADATA_BYTES;
         page[offset..offset + 16].copy_from_slice(&key.0.to_le_bytes());

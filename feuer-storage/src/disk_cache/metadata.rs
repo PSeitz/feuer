@@ -10,9 +10,9 @@ use super::{page_format::*, *};
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct EntryMetadataLocation {
     /// Index into `MetadataPages::chunks`, in metadata-chain order.
-    pub(super) chunk_index: usize,
+    pub(super) chunk_index: u32,
     /// Entry index within that metadata chunk, across its metadata pages.
-    pub(super) entry_index: usize,
+    pub(super) entry_index: u16,
 }
 
 /// Metadata pages in reserved chunks, with free entry positions and dirty-page tracking.
@@ -109,14 +109,15 @@ impl MetadataPages {
         while self.free_entry_positions.len() < count {
             let chunk = MetadataChunk::empty(allocator.reserve_chunks(1)?);
             self.set_last_chunk_link(chunk.reserved_chunk.disk_byte_range().start);
-            let chunk_index = self.chunks.len();
+            let chunk_index = u32::try_from(self.chunks.len()).unwrap();
             self.chunks.push(chunk);
-            self.dirty_pages.insert((chunk_index, ENTRY_METADATA_PAGES_PER_CHUNK));
+            self.dirty_pages
+                .insert((chunk_index as usize, ENTRY_METADATA_PAGES_PER_CHUNK));
             self.free_entry_positions
                 .extend(
                     (0..ENTRIES_PER_METADATA_CHUNK).map(|entry_index| EntryMetadataLocation {
                         chunk_index,
-                        entry_index,
+                        entry_index: entry_index as u16,
                     }),
                 );
         }
@@ -126,11 +127,11 @@ impl MetadataPages {
     /// Updates an entry's reserved metadata bytes and marks its page for writing.
     pub(super) fn set_entry_metadata(&mut self, key: &ObjectKeyHash, entry: &DiskEntry) {
         let location = entry.metadata;
-        let offset = entry_metadata_offset(location.entry_index);
-        let bytes = &mut self.chunks[location.chunk_index].bytes[offset..offset + ENTRY_METADATA_BYTES];
+        let offset = entry_metadata_offset(location.entry_index as usize);
+        let bytes = &mut self.chunks[location.chunk_index as usize].bytes[offset..offset + ENTRY_METADATA_BYTES];
         encode_entry_metadata(bytes, key, entry);
-        let page = location.entry_index / ENTRIES_PER_METADATA_PAGE;
-        self.dirty_pages.insert((location.chunk_index, page));
+        let page = location.entry_index as usize / ENTRIES_PER_METADATA_PAGE;
+        self.dirty_pages.insert((location.chunk_index as usize, page));
     }
 
     pub(super) fn set_last_chunk_link(&mut self, address: u64) {

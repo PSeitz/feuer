@@ -24,8 +24,8 @@ impl DiskCacheInner {
             for entry_metadata_index in 0..ENTRIES_PER_METADATA_CHUNK {
                 let entry_metadata_bytes = metadata.chunks[chunk_index].entry_metadata_bytes(entry_metadata_index);
                 let location = EntryMetadataLocation {
-                    chunk_index,
-                    entry_index: entry_metadata_index,
+                    chunk_index: chunk_index.try_into().unwrap(),
+                    entry_index: entry_metadata_index as u16,
                 };
                 let entry_metadata = decode_entry_metadata(entry_metadata_bytes, location).filter(|(key, entry)| {
                     self.shard_index_for_key(key) == shard_index

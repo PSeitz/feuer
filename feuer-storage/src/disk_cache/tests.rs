@@ -64,11 +64,11 @@ pub(super) async fn entry_disk_ranges(
     let entry = disk_index.entries_by_key[key].first_key_value().unwrap().1;
     let location = entry.metadata;
     let pages = shard.metadata_pages.lock().unwrap();
-    let address = pages.chunks[location.chunk_index]
+    let address = pages.chunks[location.chunk_index as usize]
         .reserved_chunk
         .disk_byte_range()
         .start
-        + (location.entry_index / page_format::ENTRIES_PER_METADATA_PAGE * METADATA_PAGE_BYTES) as u64;
+        + (location.entry_index as usize / page_format::ENTRIES_PER_METADATA_PAGE * METADATA_PAGE_BYTES) as u64;
     let metadata = address..address + METADATA_PAGE_BYTES as u64;
     let payload = entry.payload_address..entry.payload_address + payload_disk_bytes(entry.object_range.len());
     (payload, metadata)
