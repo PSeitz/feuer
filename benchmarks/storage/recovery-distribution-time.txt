@@ -1,0 +1,23 @@
+	Command being timed: "env TMPDIR=/mnt/local-ssd RECOVERY_100_GB=1 /home/ubuntu/feuer-simplify-target/release/deps/feuer_storage-8b1a8517a0d5b8ec disk_cache::recovery::benchmark::benchmark_recovery --exact --ignored --nocapture"
+	User time (seconds): 13.52
+	System time (seconds): 5.76
+	Percent of CPU this job got: 31%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:00.56
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 4768100
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 1281352
+	Voluntary context switches: 536715
+	Involuntary context switches: 114
+	Swaps: 0
+	File system inputs: 96080
+	File system outputs: 216365592
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

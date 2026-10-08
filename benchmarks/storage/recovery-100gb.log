@@ -1,0 +1,16 @@
+   Compiling feuer-storage v0.23.0-dev (/mnt/local-ssd/feuer-recovery-100gb.qI7L1b/feuer-storage)
+    Finished `release` profile [optimized + debuginfo] target(s) in 7.42s
+     Running unittests src/lib.rs (/home/ubuntu/feuer-simplify-target/release/deps/feuer_storage-8b1a8517a0d5b8ec)
+
+running 1 test
+unknown option: '--ignored'
+test disk_cache::recovery::benchmark::benchmark_recovery has been running for over 60 seconds
+Fixture: 99999997952 payload bytes, 1152 metadata chunks, 101254959104 disk bytes, 137438953472 capacity bytes
+disk recovery
+24414062 entries / 64 shards
+open        Avg: 990.8904ms     Median: 528.5271ms     [407.4528ms .. 4.828795496s]    Output: 24_414_062
+test disk_cache::recovery::benchmark::benchmark_recovery ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 294.27s
+
+EXIT_STATUS=0

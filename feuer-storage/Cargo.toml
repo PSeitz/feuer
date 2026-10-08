@@ -34,6 +34,7 @@ io-uring = "0.7"
 libc = "0.2"
 
 [dev-dependencies]
+binggan = "0.17"
 blake3 = "1"
 mixtrics = { workspace = true, features = ["prometheus"] }
 prometheus = { workspace = true }

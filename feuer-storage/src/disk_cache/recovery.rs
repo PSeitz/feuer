@@ -116,4 +116,6 @@ fn decode_entry_metadata(bytes: &[u8], metadata: EntryMetadataLocation) -> Optio
 }
 
 #[cfg(test)]
+mod benchmark;
+#[cfg(test)]
 pub(super) mod tests;
