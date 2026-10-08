@@ -15,11 +15,18 @@ pub(super) struct EntryMetadataLocation {
     pub(super) entry_index: u16,
 }
 
+/// The location of one metadata page within the metadata chain.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct MetadataPageLocation {
+    pub(super) chunk_index: u32,
+    pub(super) page_index: u8,
+}
+
 /// Metadata pages in reserved chunks, with free entry positions and dirty-page tracking.
 #[derive(Default)]
 pub(super) struct MetadataPages {
     pub(super) chunks: Vec<MetadataChunk>,
-    pub(super) dirty_pages: BTreeSet<(usize, usize)>,
+    pub(super) dirty_pages: BTreeSet<MetadataPageLocation>,
     free_entry_positions: BTreeSet<EntryMetadataLocation>,
 }
 
@@ -111,8 +118,10 @@ impl MetadataPages {
             self.set_last_chunk_link(chunk.reserved_chunk.disk_byte_range().start);
             let chunk_index = u32::try_from(self.chunks.len()).unwrap();
             self.chunks.push(chunk);
-            self.dirty_pages
-                .insert((chunk_index as usize, ENTRY_METADATA_PAGES_PER_CHUNK));
+            self.dirty_pages.insert(MetadataPageLocation {
+                chunk_index,
+                page_index: ENTRY_METADATA_PAGES_PER_CHUNK as u8,
+            });
             self.free_entry_positions
                 .extend(
                     (0..ENTRIES_PER_METADATA_CHUNK).map(|entry_index| EntryMetadataLocation {
@@ -130,14 +139,19 @@ impl MetadataPages {
         let offset = entry_metadata_offset(location.entry_index as usize);
         let bytes = &mut self.chunks[location.chunk_index as usize].bytes[offset..offset + ENTRY_METADATA_BYTES];
         encode_entry_metadata(bytes, key, entry);
-        let page = location.entry_index as usize / ENTRIES_PER_METADATA_PAGE;
-        self.dirty_pages.insert((location.chunk_index as usize, page));
+        self.dirty_pages.insert(MetadataPageLocation {
+            chunk_index: location.chunk_index,
+            page_index: (location.entry_index as usize / ENTRIES_PER_METADATA_PAGE) as u8,
+        });
     }
 
     pub(super) fn set_last_chunk_link(&mut self, address: u64) {
         if let Some(last) = self.chunks.len().checked_sub(1) {
             self.chunks[last].set_next_chunk_address(address);
-            self.dirty_pages.insert((last, ENTRY_METADATA_PAGES_PER_CHUNK));
+            self.dirty_pages.insert(MetadataPageLocation {
+                chunk_index: last.try_into().unwrap(),
+                page_index: ENTRY_METADATA_PAGES_PER_CHUNK as u8,
+            });
         }
     }
 }
@@ -169,9 +183,9 @@ impl DiskCacheShard {
             std::mem::take(&mut pages.dirty_pages)
                 .into_iter()
                 .rev() // Write later chunks before the links pointing to them.
-                .map(|(chunk, page)| {
-                    let chunk = &pages.chunks[chunk];
-                    let offset = page * METADATA_PAGE_BYTES;
+                .map(|location| {
+                    let chunk = &pages.chunks[location.chunk_index as usize];
+                    let offset = location.page_index as usize * METADATA_PAGE_BYTES;
                     let start = chunk.reserved_chunk.disk_byte_range().start + offset as u64;
                     (start, chunk.bytes[offset..offset + METADATA_PAGE_BYTES].into())
                 })

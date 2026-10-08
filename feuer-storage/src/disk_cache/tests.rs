@@ -102,7 +102,10 @@ async fn metadata_changes_after_copying_remain_dirty() {
     }
     let pages = shard.metadata_pages.lock().unwrap();
     assert_eq!(pages.dirty_pages.len(), 1);
-    assert!(pages.dirty_pages.contains(&(0, 0)));
+    assert!(pages.dirty_pages.contains(&metadata::MetadataPageLocation {
+        chunk_index: 0,
+        page_index: 0,
+    }));
 }
 
 #[tokio::test]
