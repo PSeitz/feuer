@@ -75,6 +75,33 @@ pub(super) async fn entry_disk_ranges(
 }
 
 #[tokio::test]
+async fn whole_object_reads_survive_recovery() {
+    let (directory, cache) = open_test_cache(8 * CHUNK_BYTES).await;
+    let lengths = [0, 6, 700 * 1024, 2 * CHUNK_BYTES as usize];
+    let downloads = lengths
+        .into_iter()
+        .map(|length| {
+            (
+                ObjectKeyHash::from(format!("object-{length}")),
+                Download::new(0, Bytes::from(vec![0x77; length])).unwrap(),
+            )
+        })
+        .collect();
+    cache.insert_batch(downloads).await.unwrap();
+    cache.write_dirty_metadata_pages().await;
+    drop(cache);
+    let cache = DiskCache::open(directory.path(), 9 * CHUNK_BYTES, IoMetrics::noop())
+        .await
+        .unwrap();
+    for length in lengths {
+        let hash = ObjectKeyHash::from(format!("object-{length}"));
+        let (bytes, capacity) = cache.fetch_from_disk(&hash, None).await.unwrap();
+        assert_eq!(bytes, Bytes::from(vec![0x77; length]));
+        assert!(capacity >= bytes.len());
+    }
+}
+
+#[tokio::test]
 async fn rejects_invalid_capacity() {
     let directory = tempfile::tempdir().unwrap();
     for capacity in [0, 1, CHUNK_BYTES - 1, 1 << 63, u64::MAX] {

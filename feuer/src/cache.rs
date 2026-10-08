@@ -114,7 +114,32 @@ impl TieredMemoryDiskCache {
         self.inner.memory.buffer_pool().allocate(length)
     }
 
+    /// Returns the complete object from memory, disk, or this call's callback.
+    ///
+    /// The callback returns the entire immutable object as [`Bytes`], including empty objects.
+    /// Do not mix this API and [`Self::get_or_fetch`] for the same key,
+    /// including after reopening the disk cache. The stored length is treated as the object length.
+    pub async fn get_or_fetch_object<F, Fut, E>(
+        &self,
+        object_key: crate::ObjectKey,
+        callback: F,
+    ) -> Result<Bytes, GetOrFetchError<E>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Bytes, E>>,
+    {
+        self.lookup(object_key, None, || async {
+            callback()
+                .await
+                .map(|bytes| Download::new(0, bytes).expect("an object length fits in u64"))
+        })
+        .await
+    }
+
     /// Returns the requested bytes from memory, disk, or this call's callback.
+    ///
+    /// Do not mix this API and [`Self::get_or_fetch_object`] for the same key,
+    /// including after reopening the disk cache.
     ///
     /// A covering memory range is checked first, then disk. A disk hit promotes
     /// only the requested bytes to memory, copying if the destination allocation
@@ -142,17 +167,31 @@ impl TieredMemoryDiskCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Download, E>>,
     {
+        self.lookup(object_key, Some(requested_range), callback).await
+    }
+
+    async fn lookup<F, Fut, E>(
+        &self,
+        object_key: crate::ObjectKey,
+        requested: Option<ByteRange>,
+        callback: F,
+    ) -> Result<Bytes, GetOrFetchError<E>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Download, E>>,
+    {
         let object_key = ObjectKeyHash::from(object_key);
         let history = self.inner.memory.access_histories();
-        history.record_access(&object_key, requested_range);
+        history.record_access(&object_key, requested);
         let access = if let Some(trace) = &self.trace {
-            Some(trace.send_request_start(object_key, requested_range).await)
+            let range = requested.unwrap_or_else(|| ByteRange::new(0, u64::MAX).unwrap());
+            Some(trace.send_request_start(object_key, range).await)
         } else {
             None
         };
         let metrics = &self.inner.metrics;
-        if let Some(bytes) = self.inner.memory.get(&object_key, requested_range) {
-            metrics.record(LookupOutcome::MemoryHit, None, requested_range.len());
+        if let Some(bytes) = self.inner.memory.get(&object_key, requested) {
+            metrics.record(LookupOutcome::MemoryHit, None, bytes.len() as u64);
             if let Some(access) = access {
                 access.send_outcome(LookupOutcome::MemoryHit, None).await;
             }
@@ -162,14 +201,15 @@ impl TieredMemoryDiskCache {
         let started = Instant::now();
         #[cfg(target_os = "linux")]
         if let Some(disk) = &self.inner.disk
-            && let Some((bytes, buffer_capacity)) = disk.fetch_from_disk(&object_key, requested_range).await
+            && let Some((bytes, buffer_capacity)) = disk.fetch_from_disk(&object_key, requested).await
         {
             self.inner.memory.insert_with_allocation_charge(
                 object_key,
-                Download::new(requested_range.start(), bytes.clone()).expect("disk result covers the request"),
+                Download::new(requested.map_or(0, ByteRange::start), bytes.clone())
+                    .expect("disk result covers the request"),
                 buffer_capacity,
             );
-            metrics.record(LookupOutcome::DiskHit, Some(started.elapsed()), requested_range.len());
+            metrics.record(LookupOutcome::DiskHit, Some(started.elapsed()), bytes.len() as u64);
             if let Some(access) = access {
                 access.send_outcome(LookupOutcome::DiskHit, None).await;
             }
@@ -187,6 +227,7 @@ impl TieredMemoryDiskCache {
             }
         };
         let downloaded_range = download.downloaded_range();
+        let requested_range = requested.unwrap_or(downloaded_range);
         if !downloaded_range.contains(requested_range) {
             metrics.record(LookupOutcome::InvalidDownload, None, 0);
             if let Some(access) = access {
@@ -226,7 +267,7 @@ impl TieredMemoryDiskCache {
     }
 }
 
-/// A failed [`TieredMemoryDiskCache::get_or_fetch`] operation.
+/// A failed cache lookup or download operation.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum GetOrFetchError<E> {
     /// The callback supplied to this lookup failed.
@@ -443,6 +484,31 @@ mod tests {
             assert_eq!(history.request_count(), accesses);
         }
         assert_eq!(cache.inner.memory.used_bytes(), 4);
+    }
+
+    #[tokio::test]
+    async fn whole_object_buffer_and_disk_hits_promote_all_bytes() {
+        let (_directory, cache) = cache(32).await;
+        let key = "whole-object".to_owned();
+        let hash = ObjectKeyHash::from(key.as_str());
+        let payload = Bytes::from_static(b"abcdef");
+        cache
+            .get_or_fetch_object(key.clone(), || async { Ok::<_, &str>(payload.clone()) })
+            .await
+            .unwrap();
+        wait_for_buffered(&cache, &key, range(0, 6)).await;
+        for flush in [false, true] {
+            assert!(cache.inner.memory.remove(&hash, range(0, 6)));
+            if flush {
+                cache.inner.disk.as_ref().unwrap().flush().await.unwrap();
+            }
+            let bytes = cache
+                .get_or_fetch_object(key.clone(), || async { Err::<Bytes, _>("must hit disk") })
+                .await
+                .unwrap();
+            assert_eq!(bytes, payload);
+            assert_eq!(cache.inner.memory.get(&hash, None).unwrap().as_ptr(), bytes.as_ptr());
+        }
     }
 
     #[tokio::test]

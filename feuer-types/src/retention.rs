@@ -69,7 +69,8 @@ impl ObjectAccessHistories {
     /// Failed and canceled requests contribute to demand just like successful requests.
     /// Exact repeats update the same counter.
     /// Cache insertion and eviction do not record or remove history.
-    pub fn record_access(&self, key: &ObjectKeyHash, requested: ByteRange) {
+    /// `None` records whole-object demand. Do not mix whole-object and range requests for a key.
+    pub fn record_access(&self, key: &ObjectKeyHash, requested: impl Into<Option<ByteRange>>) {
         let mut objects = self.shard(key).lock().unwrap();
         // Assign the clock under the shard lock so this key's updates cannot arrive out of order.
         // The atomic only measures request age; the shard mutex protects the history itself.
@@ -93,7 +94,9 @@ impl ObjectAccessHistories {
         })
     }
 
-    /// Snapshots recent requested ranges for trimming. Later accesses do not invalidate the snapshot:
+    /// Snapshots recent requested ranges for trimming. Whole-object requests are excluded,
+    /// so their entries are evicted rather than trimmed to partial ranges.
+    /// Later accesses do not invalidate the snapshot:
     /// it guides a retention policy, not the correctness of the cached bytes.
     pub fn recent_requested_ranges(&self, key: &ObjectKeyHash) -> Vec<ByteRange> {
         let objects = self.shard(key).lock().unwrap();
@@ -174,13 +177,14 @@ impl DecayedAccessCount {
 #[derive(Default)]
 struct RangeAccessHistory {
     events: VecDeque<RangeAccess>,
-    access_count_indices: FxHashMap<ByteRange, usize>,
+    access_count_indices: FxHashMap<Option<ByteRange>, usize>,
     // Each counter is stored once: indexed for recording, scanned for scoring.
-    access_counts: Vec<(ByteRange, DecayedAccessCount)>,
+    access_counts: Vec<(Option<ByteRange>, DecayedAccessCount)>,
 }
 
 impl RangeAccessHistory {
-    fn record(&mut self, range: ByteRange, access_clock: u64) {
+    fn record(&mut self, range: impl Into<Option<ByteRange>>, access_clock: u64) {
+        let range = range.into();
         let count_index = *self.access_count_indices.entry(range).or_insert_with(|| {
             let count_index = self.access_counts.len();
             self.access_counts.push((range, DecayedAccessCount::default()));
@@ -203,7 +207,7 @@ impl RangeAccessHistory {
         self.events
             .iter()
             .skip_while(move |event| access_clock.saturating_sub(event.observed_at_access) > *MAX_ACCESS_AGE_ACCESSES)
-            .map(|event| self.access_counts[event.count_index].0)
+            .filter_map(|event| self.access_counts[event.count_index].0)
     }
 
     /// Sums retrieval costs for contained requests, weighted by decayed access counts.
@@ -213,6 +217,7 @@ impl RangeAccessHistory {
         let fixed_retrieval_cost = *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64;
         self.access_counts
             .iter()
+            .map(|(requested, access_count)| (requested.unwrap_or(cached_range), access_count))
             .filter(|(requested_range, _)| cached_range.contains(*requested_range))
             .map(|(requested_range, access_count)| {
                 access_count.decayed_count(access_clock) * (fixed_retrieval_cost + requested_range.len() as f64)
@@ -480,6 +485,21 @@ mod tests {
             Ordering::Greater
         );
         assert_eq!(compare_cost_per_byte(1.0, 2, 2.0, 4), Ordering::Equal);
+    }
+
+    #[test]
+    fn whole_object_requests_score_the_stored_length_and_do_not_request_partial_trimming() {
+        let mut history = RangeAccessHistory::default();
+        history.record(None, 0);
+        history.record(None, 0);
+        for cached_range in [range(0, 0), range(0, 100)] {
+            assert_eq!(
+                history.decayed_retrieval_cost(cached_range, 0),
+                2.0 * (*FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64 + cached_range.len() as f64)
+            );
+        }
+        assert_eq!(history.access_counts.len(), 1);
+        assert_eq!(history.recent_requested_ranges(0).count(), 0);
     }
 
     #[test]

@@ -31,6 +31,9 @@ events**. Integers are little-endian, without padding. Persist one package per f
 | 33, 41 | `u64`, `u64` | Requested start, end |
 | 49, 57 | `u64`, `u64` | Downloaded start, end; meaningful only for kinds 3 and 5, otherwise zero |
 
+Whole-object requests encode the unknown requested length as `0..u64::MAX`.
+Their callback-success events record the actual object range in the downloaded fields.
+
 Ranges are half-open. Timestamps are captured before enqueue; queue order can differ
 from timestamp order. Join start/outcome by request ID. Python layout: `<B8Q`, with
 the hash split into low/high halves. Check magic, record size, kinds, and ranges;

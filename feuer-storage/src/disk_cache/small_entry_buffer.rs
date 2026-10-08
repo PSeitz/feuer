@@ -119,8 +119,9 @@ impl BufferedSmallEntryChunk {
 
     /// Checks if a buffered entry covers the requested range, returning its bytes if so.
     /// We buffer for 60 seconds, so reads may miss during payload I/O.
-    pub(super) fn get(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<Bytes> {
-        let entry = self.covering_entry(key, requested)?;
+    pub(super) fn get(&self, key: &ObjectKeyHash, requested: Option<ByteRange>) -> Option<Bytes> {
+        let entry = self.covering_entry(key, requested.unwrap_or_else(|| ByteRange::new(0, 0).unwrap()))?;
+        let requested = requested.unwrap_or(entry.object_range);
         let start = entry.offset + (requested.start() - entry.object_range.start()) as usize;
         Some(Bytes::copy_from_slice(
             &self.buffer.as_ref()[start..start + requested.len() as usize],

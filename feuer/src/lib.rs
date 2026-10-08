@@ -1,6 +1,6 @@
-//! Feuer is a tiered cache for ranges of immutable objects.
+//! Feuer is a tiered cache for immutable objects and their byte ranges.
 //!
-//! The current public boundary provides exact requested byte ranges, opaque
+//! The current public boundary provides whole objects or exact requested byte ranges, opaque
 //! object identities, a soft-capacity memory tier, integrity-checked disk hits,
 //! best-effort disk writes through a 512-entry queue, and per-call asynchronous download callbacks.
 //! Zero disk capacity disables the disk tier. With disk enabled, opening requires

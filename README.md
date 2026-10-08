@@ -41,6 +41,11 @@ Replace the callback with your source download. It returns a starting offset and
 `Bytes` covering at least the requested range. Feuer returns exactly the
 requested bytes as one contiguous `Bytes`.
 
+`get_or_fetch_object(key, callback)` returns the complete object without requiring its length;
+the callback returns `Bytes`. Do not mix whole-object and range lookups for the same key,
+including after reopening the disk cache. Whole-object lookups treat the stored entry's
+length as the object length. Empty objects are supported.
+
 Keys must identify immutable content. Requested ranges for a key may overlap;
 exact repeats update the same access counter. Cached ranges receive retrieval credit
 for every recorded request range they fully contain, not for partial overlaps.
@@ -113,8 +118,10 @@ For each request fully contained in a cached range, the score adds:
 decayed access count × (fixed request cost + requested bytes)
 ```
 
-Each started request records its requested range once, before any lookup, in standalone history shared
-by both tiers. Failed requests, invalid downloads, and requests canceled after starting all count as demand.
+Each started request records its requested range or whole-object demand once, before any lookup,
+in standalone history shared by both tiers. Whole-object scores use the cached object's payload length;
+whole-object entries are evicted rather than trimmed to partial ranges.
+Failed requests, invalid downloads, and requests canceled after starting all count as demand.
 History hashes object keys into 64 independently locked maps, separate from cache shards.
 One atomic request clock across all history shards preserves global request-age decay.
 Raw cache reads, insertions, and evictions do not record accesses or delete history.

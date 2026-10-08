@@ -139,10 +139,12 @@ impl MemoryCache {
         self.buffer_pool.clone()
     }
 
-    /// Looks up one covering range without recording an access.
-    pub fn get(&self, object_key: &ObjectKeyHash, requested_range: ByteRange) -> Option<Bytes> {
+    /// Looks up one covering entry without recording an access.
+    /// `None` requests the whole object. Do not mix whole-object and range requests for a key;
+    /// whole-object keys must contain only complete objects starting at zero.
+    pub fn get(&self, object_key: &ObjectKeyHash, requested: impl Into<Option<ByteRange>>) -> Option<Bytes> {
         let shard_index = self.shard_index(object_key);
-        self.shards[shard_index].lock().get(object_key, requested_range)
+        self.shards[shard_index].lock().get(object_key, requested.into())
     }
 
     /// Caches one downloaded range without creating an access, using its allocation charge.

@@ -125,11 +125,11 @@ impl MemoryCacheShard {
         self.used_bytes
     }
 
-    pub(super) fn get(&self, object_key: &ObjectKeyHash, requested_range: ByteRange) -> Option<Bytes> {
+    pub(super) fn get(&self, object_key: &ObjectKeyHash, requested: Option<ByteRange>) -> Option<Bytes> {
         self.entries_by_key
             .get(object_key)?
-            .covering_entry(requested_range)
-            .map(|entry| entry.download.bytes_in_range(requested_range))
+            .covering_entry(requested.unwrap_or_else(|| ByteRange::new(0, 0).unwrap()))
+            .map(|entry| entry.download.bytes_in_range(requested.unwrap_or(entry.range())))
     }
 
     /// Tries to admit the download or reclaim space using the cache's access history and sample size.

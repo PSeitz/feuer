@@ -286,7 +286,14 @@ impl DiskCache {
     /// Allocation failure keeps the original slice.
     /// Returns the final backing buffer's capacity too. Concurrent callers share the entry read.
     /// Missing entries and read or checksum failures are misses.
-    pub async fn fetch_from_disk(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<(Bytes, usize)> {
+    /// `None` requests the whole object. Do not mix whole-object and range requests for a key;
+    /// whole-object keys must contain only complete objects starting at zero.
+    pub async fn fetch_from_disk(
+        &self,
+        key: &ObjectKeyHash,
+        requested: impl Into<Option<ByteRange>>,
+    ) -> Option<(Bytes, usize)> {
+        let requested = requested.into();
         let started = Instant::now();
         let metrics = &self.disk.metrics;
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
@@ -295,11 +302,14 @@ impl DiskCache {
             && let Some(bytes) = pending.get(key, requested)
         {
             metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
-            return Some((bytes, requested.len() as usize));
+            let capacity = bytes.len();
+            return Some((bytes, capacity));
         }
         let read = {
             let mut disk_index = shard.entry_index.lock().unwrap();
-            let Some(entry) = disk_index.covering_entry(key, requested) else {
+            let Some(entry) =
+                disk_index.covering_entry(key, requested.unwrap_or_else(|| ByteRange::new(0, 0).unwrap()))
+            else {
                 drop(disk_index);
                 metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
                 return None;
@@ -319,6 +329,7 @@ impl DiskCache {
             .await;
         match result {
             Ok((bytes, capacity)) => {
+                let requested = requested.unwrap_or(read.object_range);
                 let start = (requested.start() - read.object_range.start()) as usize;
                 let bytes = bytes.slice(start..start + requested.len() as usize);
                 let (bytes, buffer_capacity) = self.disk.file.shrink_read_buffer(bytes, *capacity);
