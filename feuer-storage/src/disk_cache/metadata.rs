@@ -87,10 +87,18 @@ impl MetadataChunk {
         Some(u64::from_le_bytes(contents[..8].try_into().unwrap()))
     }
 
-    /// The 48 bytes describing one entry's key, object range, payload address, and checksum.
-    pub(super) fn entry_metadata_bytes(&self, entry_metadata_index: usize) -> &RawMetadataBytes {
-        let offset = entry_metadata_offset(entry_metadata_index);
-        self.bytes[offset..offset + ENTRY_METADATA_BYTES].try_into().unwrap()
+    /// Iterates entry metadata records in their order within the chunk.
+    pub(super) fn entry_metadata_records(&self) -> impl Iterator<Item = &RawMetadataBytes> {
+        self.bytes[..ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES]
+            .as_chunks::<METADATA_PAGE_BYTES>()
+            .0
+            .iter()
+            .flat_map(|page| {
+                page[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + PAGE_CONTENT_BYTES]
+                    .as_chunks::<ENTRY_METADATA_BYTES>()
+                    .0
+                    .iter()
+            })
     }
 }
 

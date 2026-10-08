@@ -8,6 +8,23 @@ async fn reopen(directory: &Path, cache: DiskCache) -> DiskCache {
     with_manual_metadata_writes(DiskCache::open(directory, capacity, IoMetrics::noop()).await.unwrap())
 }
 
+#[test]
+fn metadata_record_iterator_preserves_order_and_skips_page_framing() {
+    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES);
+    let mut chunk = metadata::MetadataChunk::empty(allocator.reserve_chunks(1).unwrap());
+    chunk.bytes.fill(0xff);
+    for entry_index in 0..ENTRIES_PER_METADATA_CHUNK {
+        let offset = entry_index / ENTRIES_PER_METADATA_PAGE * METADATA_PAGE_BYTES
+            + PAGE_HEADER_BYTES
+            + entry_index % ENTRIES_PER_METADATA_PAGE * ENTRY_METADATA_BYTES;
+        chunk.bytes[offset..offset + ENTRY_METADATA_BYTES].fill(entry_index as u8);
+    }
+    assert_eq!(chunk.entry_metadata_records().count(), ENTRIES_PER_METADATA_CHUNK);
+    for (entry_index, bytes) in chunk.entry_metadata_records().enumerate() {
+        assert_eq!(bytes, &[entry_index as u8; ENTRY_METADATA_BYTES]);
+    }
+}
+
 #[tokio::test]
 async fn metadata_chains_start_at_each_shards_first_chunk_without_a_sidecar() {
     let (directory, cache) = open_test_cache(256 * CHUNK_BYTES).await;
@@ -129,18 +146,26 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     let location = entry.metadata;
     let metadata = shard.metadata_pages.lock().unwrap();
     let entry_metadata_bytes = metadata.chunks[location.chunk_index as usize]
-        .entry_metadata_bytes(location.entry_index as usize)
+        .entry_metadata_records()
+        .nth(location.entry_index as usize)
+        .unwrap()
         .to_vec();
     drop(entry); // Must not lock metadata or release the allocator's payload.
     assert_eq!(
-        metadata.chunks[location.chunk_index as usize].entry_metadata_bytes(location.entry_index as usize),
+        metadata.chunks[location.chunk_index as usize]
+            .entry_metadata_records()
+            .nth(location.entry_index as usize)
+            .unwrap(),
         entry_metadata_bytes.as_slice()
     );
     assert!(shard.allocator.reserve_chunks(1).is_none());
     shard.allocator.release_payload(address);
     assert!(shard.allocator.reserve_chunks(1).is_some());
     assert_eq!(
-        metadata.chunks[location.chunk_index as usize].entry_metadata_bytes(location.entry_index as usize),
+        metadata.chunks[location.chunk_index as usize]
+            .entry_metadata_records()
+            .nth(location.entry_index as usize)
+            .unwrap(),
         entry_metadata_bytes.as_slice()
     );
 }

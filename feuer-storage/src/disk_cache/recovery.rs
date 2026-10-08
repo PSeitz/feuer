@@ -20,9 +20,10 @@ impl DiskCacheInner {
         shard.load_metadata_chain(&self.file, shard_disk_range.start).await;
         let mut metadata = shard.metadata_pages.lock().unwrap();
         let mut disk_index = shard.entry_index.lock().unwrap();
-        for chunk_index in 0..metadata.chunks.len() {
-            for entry_metadata_index in 0..ENTRIES_PER_METADATA_CHUNK {
-                let entry_metadata_bytes = metadata.chunks[chunk_index].entry_metadata_bytes(entry_metadata_index);
+        // Keep chunk bytes separate while recovery updates free metadata positions.
+        let chunks = std::mem::take(&mut metadata.chunks);
+        for (chunk_index, chunk) in chunks.iter().enumerate() {
+            for (entry_metadata_index, entry_metadata_bytes) in chunk.entry_metadata_records().enumerate() {
                 let location = EntryMetadataLocation {
                     chunk_index: chunk_index.try_into().unwrap(),
                     entry_index: entry_metadata_index as u16,
@@ -45,6 +46,7 @@ impl DiskCacheInner {
                 shard.insert_entry(&mut disk_index, &mut metadata, key, entry);
             }
         }
+        metadata.chunks = chunks;
     }
 }
 
