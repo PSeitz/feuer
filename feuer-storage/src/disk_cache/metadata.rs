@@ -111,9 +111,9 @@ impl MetadataPages {
         self.free_entry_positions.len()
     }
 
-    /// Grows metadata capacity without taking positions; publication consumes them under the entry-index lock.
+    /// Grows capacity for one payload write (at most 256 entries); publication consumes positions under the entry-index lock.
     pub(super) fn ensure_free_positions(&mut self, count: usize, allocator: &DiskChunkAllocator) -> Option<()> {
-        while self.free_entry_positions.len() < count {
+        if self.free_entry_positions.len() < count {
             let chunk = MetadataChunk::empty(allocator.reserve_chunks(1)?);
             self.set_last_chunk_link(chunk.reserved_chunk.disk_byte_range().start);
             let chunk_index = u32::try_from(self.chunks.len()).unwrap();
