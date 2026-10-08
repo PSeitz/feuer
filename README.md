@@ -24,7 +24,7 @@ use feuer::{ByteRange, CacheConfig, Download, TieredMemoryDiskCache};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1 GiB on disk, 64 MiB in memory.
     let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?;
-    let cache = TieredMemoryDiskCache::open(config).await?;
+    let cache = TieredMemoryDiskCache::open(config, None, None).await?;
 
     let bytes = cache
         .get_or_fetch("object-v1".to_owned(), ByteRange::new(6, 11)?, || async {
@@ -61,7 +61,9 @@ full keys are not stored or checked for collisions. Keys must not be adversarial
 ## Independent caches on one SSD
 
 Create one `IoQueues::new()?` and pass its clones to
-`TieredMemoryDiskCache::open_with_io_queues(config, &registry, io_queues).await`.
+`TieredMemoryDiskCache::open(config, None, Some(io_queues)).await`.
+Metrics and queue sharing are independent: replace `None` with
+`Some(&metrics_registry)` to collect metrics while sharing queues.
 Use a separate directory for each cache, on the same SSD. The caches share only
 low-level read/write queues and worker threads: 64 active reads and 8 active writes,
 with waiting channels for another 64 reads and 8 writes, across all attached caches.
@@ -70,8 +72,8 @@ Scheduling follows arrival order, without per-cache fairness.
 Contents, capacities, eviction, access histories, buffer pools, directory locks,
 and 512-entry background-write queues remain independent. Dropping one cache does
 not stop the others. Pending I/O retains its target file and lock through completion;
-idle shared queues retain no files. Existing `open` and `open_with_metrics` calls
-continue to create dedicated I/O queues.
+idle shared queues retain no files. Passing `None` for `io_queues` creates dedicated
+I/O queues.
 
 See the [whole-object example](feuer/examples/shared_io_objects.rs):
 
@@ -79,7 +81,7 @@ See the [whole-object example](feuer/examples/shared_io_objects.rs):
 cargo run -p feuer --example shared_io_objects -- /path/on/ssd/cache
 ```
 
-The example uses a no-op metrics registry. With a real registry, caches sharing it
+The example leaves metrics disabled. With a real registry, caches sharing it
 contribute to aggregate metrics; use separate registries for per-cache metrics.
 
 ## Capacity and disk writes
@@ -215,9 +217,10 @@ Both accept the same size suffixes and allow zero.
 
 ## Metrics
 
-Use `TieredMemoryDiskCache::open_with_metrics(config, &registry).await` with a
+Use `TieredMemoryDiskCache::open(config, Some(&metrics_registry), None).await` with a
 `mixtrics::metrics::BoxedRegistry` to collect lookup, download, memory, and disk
-metrics. Your application handles export. `open(config)` disables metrics.
+metrics. Your application handles export. Passing `None` for `metrics_registry`
+disables metrics, independently of the I/O queue choice.
 See the [metric reference](metrics.md) for names and accounting rules.
 
 ## Access tracing

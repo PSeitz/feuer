@@ -50,40 +50,22 @@ impl TieredMemoryDiskCache {
     /// Opens a cache, using only memory when disk capacity is zero.
     /// Otherwise requires Tokio, io_uring and direct I/O, locks the directory,
     /// and waits for metadata recovery. Disk failures never fall back to memory.
-    #[cfg(target_os = "linux")]
-    pub async fn open(config: CacheConfig) -> Result<Self, DiskCacheError> {
-        let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
-        Self::open_with_metrics(config, &registry).await
-    }
-
-    /// Opens a cache with metrics registered through `mixtrics`.
-    /// Label values are defined by Feuer and contain no object identities or cache names. Caches
-    /// sharing a registry contribute to the same counters and aggregate gauges.
-    #[cfg(target_os = "linux")]
-    pub async fn open_with_metrics(config: CacheConfig, registry: &BoxedRegistry) -> Result<Self, DiskCacheError> {
-        Self::open_tiers(config, registry, None).await
-    }
-
-    /// Opens an independent cache using the supplied low-level read/write queues and registered metrics.
+    ///
+    /// `metrics_registry: None` disables metrics; `io_queues: None` creates dedicated queues.
+    /// Metrics and queues can be supplied independently. A shared registry aggregates metrics;
+    /// labels contain no object identities or cache names.
     /// Pass clones of the same [`IoQueues`] to caches on the same SSD to share I/O concurrency.
     /// Contents, capacities, eviction, buffer pools, directory locks, and background-write queues
     /// remain independent. Zero disk capacity ignores the queues.
     #[cfg(target_os = "linux")]
-    pub async fn open_with_io_queues(
+    pub async fn open(
         config: CacheConfig,
-        registry: &BoxedRegistry,
-        io_queues: IoQueues,
-    ) -> Result<Self, DiskCacheError> {
-        Self::open_tiers(config, registry, Some(io_queues)).await
-    }
-
-    #[cfg(target_os = "linux")]
-    async fn open_tiers(
-        config: CacheConfig,
-        registry: &BoxedRegistry,
+        metrics_registry: Option<&BoxedRegistry>,
         io_queues: Option<IoQueues>,
     ) -> Result<Self, DiskCacheError> {
-        let memory = MemoryCache::with_metrics(config.memory_capacity(), MemoryMetrics::new(registry))
+        let noop_metrics_registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
+        let metrics_registry = metrics_registry.unwrap_or(&noop_metrics_registry);
+        let memory = MemoryCache::with_metrics(config.memory_capacity(), MemoryMetrics::new(metrics_registry))
             .with_reclaim_sample_size(config.reclaim_sample_size());
         let disk = if config.disk_capacity() == 0 {
             None
@@ -92,9 +74,9 @@ impl TieredMemoryDiskCache {
                 DiskCache::open_with_io_queues(
                     config.directory(),
                     config.disk_capacity(),
-                    IoMetrics::new(registry),
+                    IoMetrics::new(metrics_registry),
                     memory.access_histories().clone(),
-                    feuer_storage::DiskMetrics::new(registry),
+                    feuer_storage::DiskMetrics::new(metrics_registry),
                     config.reclaim_sample_size(),
                     memory.buffer_pool(),
                     io_queues,
@@ -106,7 +88,7 @@ impl TieredMemoryDiskCache {
             inner: Arc::new(TieredMemoryDiskCacheInner {
                 config,
                 memory,
-                metrics: LookupMetrics::new(registry),
+                metrics: LookupMetrics::new(metrics_registry),
                 disk,
             }),
             trace: None,
@@ -331,9 +313,10 @@ mod tests {
     async fn public_registry_observes_memory_disk_callbacks_and_writes() {
         let directory = tempfile::tempdir().unwrap();
         let (registry, backend) = registry();
-        let cache = TieredMemoryDiskCache::open_with_metrics(
+        let cache = TieredMemoryDiskCache::open(
             CacheConfig::new(directory.path(), 4 << 20, 32).unwrap(),
-            &backend,
+            Some(&backend),
+            None,
         )
         .await
         .unwrap();
@@ -450,9 +433,13 @@ mod tests {
 
     async fn cache(memory_capacity: u64) -> (tempfile::TempDir, TieredMemoryDiskCache) {
         let directory = tempfile::tempdir().unwrap();
-        let cache = TieredMemoryDiskCache::open(CacheConfig::new(directory.path(), 4 << 20, memory_capacity).unwrap())
-            .await
-            .unwrap();
+        let cache = TieredMemoryDiskCache::open(
+            CacheConfig::new(directory.path(), 4 << 20, memory_capacity).unwrap(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         (directory, cache)
     }
 
@@ -513,19 +500,20 @@ mod tests {
     async fn shared_io_queues_preserve_independent_whole_object_caches() {
         let first_directory = tempfile::tempdir().unwrap();
         let second_directory = tempfile::tempdir().unwrap();
-        let (_, backend) = registry();
+        let (metrics_registry, backend) = registry();
         let queues = IoQueues::new().unwrap();
-        let first = TieredMemoryDiskCache::open_with_io_queues(
+        let first = TieredMemoryDiskCache::open(
             CacheConfig::new(first_directory.path(), 4 << 20, 1 << 20).unwrap(),
-            &backend,
-            queues.clone(),
+            Some(&backend),
+            Some(queues.clone()),
         )
         .await
         .unwrap();
-        let second = TieredMemoryDiskCache::open_with_io_queues(
+        // Queue sharing does not require the caches to use the same metrics configuration.
+        let second = TieredMemoryDiskCache::open(
             CacheConfig::new(second_directory.path(), 4 << 20, 1 << 20).unwrap(),
-            &backend,
-            queues,
+            None,
+            Some(queues),
         )
         .await
         .unwrap();
@@ -547,6 +535,10 @@ mod tests {
         );
         assert_eq!(first_result.unwrap(), first_bytes);
         assert_eq!(second_result.unwrap(), second_bytes);
+        assert_eq!(
+            value(&metrics_registry, "feuer_lookup_total", &[("outcome", "callback")]),
+            1.0
+        );
         wait_for_buffered(&first, key, range(0, first_bytes.len() as u64)).await;
         wait_for_buffered(&second, key, range(0, second_bytes.len() as u64)).await;
         let (first_flush, second_flush) = tokio::join!(
@@ -563,6 +555,10 @@ mod tests {
         );
         assert_eq!(first_result.unwrap(), first_bytes);
         assert_eq!(second_result.unwrap(), second_bytes);
+        assert_eq!(
+            value(&metrics_registry, "feuer_lookup_total", &[("outcome", "disk_hit")]),
+            1.0
+        );
         drop(first);
         assert!(second.inner.memory.remove(&hash, range(0, second_bytes.len() as u64)));
         assert_eq!(
@@ -731,10 +727,14 @@ mod tests {
     #[tokio::test]
     async fn opening_validates_disk_capacity_and_exclusive_directory_ownership() {
         let (directory, cache) = cache(32).await;
-        assert!(TieredMemoryDiskCache::open(cache.config().clone()).await.is_err());
+        assert!(
+            TieredMemoryDiskCache::open(cache.config().clone(), None, None)
+                .await
+                .is_err()
+        );
         let invalid = CacheConfig::new(directory.path(), 1024, 32).unwrap();
         assert!(matches!(
-            TieredMemoryDiskCache::open(invalid).await,
+            TieredMemoryDiskCache::open(invalid, None, None).await,
             Err(DiskCacheError::InvalidCapacity)
         ));
     }
@@ -749,7 +749,7 @@ mod tests {
     async fn callback_result_and_covering_memory_hit_return_the_exact_request() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("unused");
-        let cache = TieredMemoryDiskCache::open(CacheConfig::new(&path, 0, 32).unwrap())
+        let cache = TieredMemoryDiskCache::open(CacheConfig::new(&path, 0, 32).unwrap(), None, None)
             .await
             .unwrap();
         let key = String::from("object");

@@ -204,8 +204,9 @@ cancellation cleanup, and discarding partial chunks on close. Linux-target works
 
 ## Implemented: cache metrics
 
-- `open_with_metrics` wires a `mixtrics` registry through public lookups, callbacks, both cache tiers and
-  disk writes. `open` remains no-op. Labels contain only fixed operation/outcome/source values.
+- `open` accepts an optional `mixtrics` metrics registry, independently of optional shared I/O queues,
+  wiring metrics through public lookups, callbacks, both cache tiers and disk writes. Without a registry,
+  metrics are no-op. Labels contain only fixed operation/outcome/source values.
 - Added lookup latency/outcomes and served bytes, callback counts/latency/download bytes, disk read-error
   and integrity outcomes, disk-write admission/skip/terminal outcomes, queue pressure/wait time,
   chunk capacity states, indexed payload/entries, pressure eviction and byte-weighted batch packing.

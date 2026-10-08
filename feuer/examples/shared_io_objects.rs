@@ -7,23 +7,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     use bytes::Bytes;
     use feuer::{CacheConfig, IoQueues, TieredMemoryDiskCache};
-    use mixtrics::metrics::BoxedRegistry;
 
     let directory = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "cache".to_owned()));
-    let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
     let io_queues = IoQueues::new()?;
     // Both directories must be on the same SSD. Each cache has its own capacities,
     // contents, eviction, buffer pool, directory lock, and background-write queue.
-    let images = TieredMemoryDiskCache::open_with_io_queues(
+    let images = TieredMemoryDiskCache::open(
         CacheConfig::new(directory.join("images"), 1 << 30, 64 << 20)?,
-        &registry,
-        io_queues.clone(),
+        None,
+        Some(io_queues.clone()),
     )
     .await?;
-    let documents = TieredMemoryDiskCache::open_with_io_queues(
+    let documents = TieredMemoryDiskCache::open(
         CacheConfig::new(directory.join("documents"), 2 << 30, 32 << 20)?,
-        &registry,
-        io_queues,
+        None,
+        Some(io_queues),
     )
     .await?;
 

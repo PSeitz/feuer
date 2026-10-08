@@ -1,8 +1,10 @@
 # Metrics
 
-On Linux, use `TieredMemoryDiskCache::open_with_metrics(config, &registry).await`
+On Linux, use `TieredMemoryDiskCache::open(config, Some(&metrics_registry), None).await`
 with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup,
 memory, disk I/O, disk-cache and disk-write metrics in that registry.
+The last argument independently selects dedicated (`None`) or shared (`Some(io_queues)`)
+I/O queues. Passing `None` for the metrics registry disables metrics.
 Feuer does not install an exporter, the application owns the registry and its export endpoint.
 
 All labels below have fixed values. Object keys, paths and caller-defined cache

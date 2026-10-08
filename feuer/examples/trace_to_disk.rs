@@ -13,7 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir(&directory)?;
     let mut file_number = 0u64;
     let (sender, mut results) = tokio::sync::mpsc::unbounded_channel();
-    let cache = TieredMemoryDiskCache::open(CacheConfig::new("unused", 0, 1 << 20).unwrap())
+    let cache = TieredMemoryDiskCache::open(CacheConfig::new("unused", 0, 1 << 20).unwrap(), None, None)
         .await?
         .with_trace(move |package| {
             let path = directory.join(format!("{file_number:012}.feuer"));
