@@ -58,6 +58,30 @@ full keys are not stored or checked for collisions. Keys must not be adversarial
 [Disk format v13](format.md) stores the hash in little-endian form in fixed
 48-byte entry metadata. Older disk formats are not migrated.
 
+## Independent caches on one SSD
+
+Create one `IoQueues::new()?` and pass its clones to
+`TieredMemoryDiskCache::open_with_io_queues(config, &registry, io_queues).await`.
+Use a separate directory for each cache, on the same SSD. The caches share only
+low-level read/write queues and worker threads: 64 active reads and 8 active writes,
+with waiting channels for another 64 reads and 8 writes, across all attached caches.
+Scheduling follows arrival order, without per-cache fairness.
+
+Contents, capacities, eviction, access histories, buffer pools, directory locks,
+and 512-entry background-write queues remain independent. Dropping one cache does
+not stop the others. Pending I/O retains its target file and lock through completion;
+idle shared queues retain no files. Existing `open` and `open_with_metrics` calls
+continue to create dedicated I/O queues.
+
+See the [whole-object example](feuer/examples/shared_io_objects.rs):
+
+```console
+cargo run -p feuer --example shared_io_objects -- /path/on/ssd/cache
+```
+
+The example uses a no-op metrics registry. With a real registry, caches sharing it
+contribute to aggregate metrics; use separate registries for per-cache metrics.
+
 ## Capacity and disk writes
 
 Memory capacity covers cached allocation charges and idle read buffers in one cache instance.

@@ -31,3 +31,5 @@ pub use error::{DataFileError, DataFileErrorKind, DataFileResult, IoOperation};
 #[cfg(target_os = "linux")]
 pub use file::DataFile;
 pub use metrics::IoMetrics;
+#[cfg(target_os = "linux")]
+pub use uring::IoQueues;

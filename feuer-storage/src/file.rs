@@ -38,6 +38,7 @@ struct DataFileState {
 ///
 /// Reads and writes have separate io_uring rings and worker threads, with up to
 /// 64 active reads and 8 active writes, plus waiting channels for another 64 reads and 8 writes.
+/// Files opened with shared [`crate::IoQueues`] share these limits and threads.
 /// Queues schedule in arrival order without checking for conflicts.
 /// Submission order does not guarantee completion order.
 /// Each I/O request transfers at most 1 MiB. Request limits do not bound full read-result allocations.
@@ -55,7 +56,9 @@ struct DataFileState {
 ///
 /// Capacity must be a positive multiple of 4096. Opening fails
 /// if io_uring or verified O_DIRECT alignment is unavailable; there is no fallback.
-/// Normal last-handle drop drains submitted I/O and joins both queue threads, which can block.
+/// Dropping the last queue owner drains submitted I/O and joins both threads, which can block.
+/// With shared queues, dropping one file does not wait for other files' I/O. Its pending requests
+/// retain its file and directory lock until completion.
 /// Temporary submission resource pressure (EAGAIN) is retried. A queue-level error is not a
 /// completion for outstanding requests: on unrecoverable queue failure or thread unwind, their
 /// backing allocations and the file/directory lock are retained until process exit to prevent
@@ -91,6 +94,18 @@ impl DataFile {
         metrics: Arc<IoMetrics>,
         buffer_pool: Arc<BufferPool>,
     ) -> DataFileResult<Self> {
+        Self::open_with_io_queues(directory, capacity, metrics, buffer_pool, None).await
+    }
+
+    /// Opens storage with independent file ownership and buffer pooling, optionally sharing I/O queues.
+    /// `None` creates dedicated queues. Pending requests retain this file's directory lock.
+    pub async fn open_with_io_queues(
+        directory: impl AsRef<Path>,
+        capacity: u64,
+        metrics: Arc<IoMetrics>,
+        buffer_pool: Arc<BufferPool>,
+        io_queues: Option<uring::IoQueues>,
+    ) -> DataFileResult<Self> {
         let directory = directory.as_ref().to_path_buf();
         let runtime = Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
         let started = Instant::now();
@@ -104,7 +119,7 @@ impl DataFile {
         );
         let result = async {
             let state = runtime
-                .spawn_blocking(move || open_file_state(directory, capacity, buffer_pool, metrics))
+                .spawn_blocking(move || open_file_state(directory, capacity, buffer_pool, metrics, io_queues))
                 .await
                 .map_err(|source| DataFileError::Task {
                     operation: IoOperation::OpenDataFile,
@@ -187,7 +202,7 @@ impl DataFile {
     }
 
     /// Writes bytes with zero padding to fill an aligned disk byte range without an intermediate buffer.
-    /// The queue splits requests at 1 MiB and retains only I/O buffers.
+    /// The queue splits requests at 1 MiB and retains I/O buffers and the file/directory lock.
     pub(crate) async fn write_padded(&self, offset: u64, length: usize, bytes: &Bytes) -> DataFileResult<()> {
         self.measure_io(IoOperation::Write, offset, length, async {
             check_range_fits_file(IoOperation::Write, offset, length as u64, self.state.capacity)?;
@@ -261,6 +276,7 @@ fn open_file_state(
     capacity: u64,
     buffer_pool: Arc<BufferPool>,
     metrics: Arc<IoMetrics>,
+    io_queues: Option<uring::IoQueues>,
 ) -> DataFileResult<DataFileState> {
     if capacity == 0 || capacity > i64::MAX as u64 || !capacity.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64)
     {
@@ -318,10 +334,17 @@ fn open_file_state(
         file,
         _directory_lock: Some(lock_file),
     });
-    let read_queue =
-        uring::ReadQueue::new(files.clone(), buffer_pool).map_err(|source| error(IoOperation::OpenDataFile, source))?;
-    let write_queue =
-        uring::WriteQueue::new(files.clone()).map_err(|source| error(IoOperation::OpenDataFile, source))?;
+    let (read_queue, write_queue) = match io_queues {
+        Some(queues) => (
+            queues.read_queue(files.clone(), buffer_pool),
+            queues.write_queue(files.clone()),
+        ),
+        None => (
+            uring::ReadQueue::new(files.clone(), buffer_pool)
+                .map_err(|source| error(IoOperation::OpenDataFile, source))?,
+            uring::WriteQueue::new(files.clone()).map_err(|source| error(IoOperation::OpenDataFile, source))?,
+        ),
+    };
     files
         .file
         .set_len(capacity)
@@ -398,6 +421,7 @@ mod tests {
         fn assert_send_sync_static<T: Send + Sync + 'static>() {}
         assert_send_sync_static::<DataFile>();
         assert_send_sync_static::<DataFileError>();
+        assert_send_sync_static::<crate::IoQueues>();
     }
 
     #[tokio::test]
@@ -585,6 +609,61 @@ mod tests {
             .unwrap();
         assert_eq!(file.capacity(), CAPACITY / 2);
         assert_eq!(file.read_at(17, 10).await.unwrap(), Bytes::from_static(b"persistent"));
+    }
+
+    #[tokio::test]
+    async fn shared_queues_keep_directory_locks_and_file_contents_independent() {
+        let first_directory = tempdir().unwrap();
+        let second_directory = tempdir().unwrap();
+        let queues = crate::IoQueues::new().unwrap();
+        let first = DataFile::open_with_io_queues(
+            first_directory.path(),
+            CAPACITY,
+            IoMetrics::noop(),
+            BufferPool::unpooled(),
+            Some(queues.clone()),
+        )
+        .await
+        .unwrap();
+        let second = DataFile::open_with_io_queues(
+            second_directory.path(),
+            CAPACITY,
+            IoMetrics::noop(),
+            BufferPool::unpooled(),
+            Some(queues.clone()),
+        )
+        .await
+        .unwrap();
+        let first_bytes = Bytes::from(vec![0x55; 4096]);
+        let second_bytes = Bytes::from(vec![0x99; 4096]);
+        let (first_result, second_result) =
+            tokio::join!(first.write_at(0, &first_bytes), second.write_at(0, &second_bytes),);
+        first_result.unwrap();
+        second_result.unwrap();
+        assert_eq!(first.read_at(0, 4096).await.unwrap(), first_bytes);
+        assert_eq!(second.read_at(0, 4096).await.unwrap(), second_bytes);
+        assert_eq!(
+            DataFile::open(first_directory.path(), CAPACITY, IoMetrics::noop())
+                .await
+                .unwrap_err()
+                .kind(),
+            DataFileErrorKind::AlreadyOpen,
+        );
+        drop(first);
+        // Idle shared queues must not keep a closed file's directory locked.
+        let reopened = DataFile::open_with_io_queues(
+            first_directory.path(),
+            CAPACITY,
+            IoMetrics::noop(),
+            BufferPool::unpooled(),
+            Some(queues.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reopened.read_at(0, 4096).await.unwrap(), first_bytes);
+        drop(reopened);
+        drop(queues);
+        assert_eq!(second.read_at(0, 4096).await.unwrap(), second_bytes);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

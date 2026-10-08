@@ -193,12 +193,41 @@ impl DiskCache {
         reclaim_sample_size: usize,
         buffer_pool: Arc<BufferPool>,
     ) -> Result<Self, DiskCacheError> {
+        Self::open_with_io_queues(
+            directory,
+            capacity,
+            io_metrics,
+            access_histories,
+            metrics,
+            reclaim_sample_size,
+            buffer_pool,
+            None,
+        )
+        .await
+    }
+
+    /// Opens a disk tier with independent buffering and background writes, optionally sharing I/O queues.
+    /// `None` creates dedicated queues. Only low-level read/write admission and threads are shared.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "preserves the existing disk-tier resource arguments"
+    )]
+    pub async fn open_with_io_queues(
+        directory: impl AsRef<Path>,
+        capacity: u64,
+        io_metrics: Arc<IoMetrics>,
+        access_histories: Arc<ObjectAccessHistories>,
+        metrics: Arc<DiskMetrics>,
+        reclaim_sample_size: usize,
+        buffer_pool: Arc<BufferPool>,
+        io_queues: Option<crate::IoQueues>,
+    ) -> Result<Self, DiskCacheError> {
         assert!(reclaim_sample_size > 0, "reclaim sample size must be greater than zero");
         if capacity < CHUNK_BYTES || capacity > i64::MAX as u64 {
             return Err(DiskCacheError::InvalidCapacity);
         }
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
-        let file = DataFile::open_with_buffer_pool(directory, capacity, io_metrics, buffer_pool).await?;
+        let file = DataFile::open_with_io_queues(directory, capacity, io_metrics, buffer_pool, io_queues).await?;
         let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
         let shards = (0..num_shards)
             .map(|shard_index| {

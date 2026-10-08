@@ -46,10 +46,47 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;
 #[cfg(test)]
 mod tests;
 
-/// The data file and optional cache-directory lock retained together by I/O queues.
+/// The data file and optional cache-directory lock retained together by file handles and I/O requests.
 pub(crate) struct DataFileAndDirectoryLock {
     pub(crate) file: File,
     pub(crate) _directory_lock: Option<File>,
+}
+
+/// One read queue and one write queue shared by independent caches on the same SSD.
+///
+/// All attached files share 64 active reads and 8 active writes, plus waiting channels
+/// for another 64 reads and 8 writes. Requests run in arrival order; there is no per-cache fairness.
+/// File ownership and read-buffer pools remain independent. Idle queues retain no files.
+/// Dropping the last queue owner drains submitted I/O and joins both threads, which can block.
+#[derive(Clone)]
+pub struct IoQueues {
+    read: Arc<IoQueueHandle>,
+    write: Arc<IoQueueHandle>,
+}
+
+impl IoQueues {
+    /// Creates the two io_uring rings and worker threads. Requires Linux io_uring support.
+    pub fn new() -> io::Result<Self> {
+        Ok(Self {
+            read: Arc::new(IoQueueHandle::new(IoOperation::Read)?),
+            write: Arc::new(IoQueueHandle::new(IoOperation::Write)?),
+        })
+    }
+
+    pub(crate) fn read_queue(&self, files: Arc<DataFileAndDirectoryLock>, buffer_pool: Arc<BufferPool>) -> ReadQueue {
+        ReadQueue {
+            handle: self.read.clone(),
+            files,
+            buffer_pool,
+        }
+    }
+
+    pub(crate) fn write_queue(&self, files: Arc<DataFileAndDirectoryLock>) -> WriteQueue {
+        WriteQueue {
+            handle: self.write.clone(),
+            files,
+        }
+    }
 }
 
 /// A handle that submits I/O requests and owns the queue thread's lifetime.
@@ -63,7 +100,7 @@ struct IoQueueHandle {
 }
 
 impl IoQueueHandle {
-    fn new(files: Arc<DataFileAndDirectoryLock>, operation: IoOperation) -> io::Result<Self> {
+    fn new(operation: IoOperation) -> io::Result<Self> {
         let (thread_name, max_in_flight) = match operation {
             IoOperation::Read => ("feuer-read-io", MAX_IN_FLIGHT_READS),
             IoOperation::Write => ("feuer-write-io", MAX_IN_FLIGHT_WRITES),
@@ -80,7 +117,6 @@ impl IoQueueHandle {
         let (sender, receiver) = mpsc::channel(max_in_flight);
         let mut queue = IoQueue {
             ring,
-            files,
             wake_fd: wake_fd.clone(),
             receiver,
             active: (0..max_in_flight).map(|_| None).collect(),
@@ -110,13 +146,14 @@ impl IoQueueHandle {
     /// Submits the admitted request and waits for a read buffer, write success, or an I/O error.
     async fn submit_and_wait(
         &self,
+        files: Arc<DataFileAndDirectoryLock>,
         offset: u64,
         buffers: IoBuffers,
         buffer_range: Range<usize>,
         permit: mpsc::Permit<'_, IoRequest>,
     ) -> io::Result<Option<AlignedBuffer>> {
         let (result_sender, result_receiver) = oneshot::channel();
-        permit.send(IoRequest::new(offset, buffers, buffer_range, result_sender));
+        permit.send(IoRequest::new(files, offset, buffers, buffer_range, result_sender));
         wake_queue(&self.wake_fd);
         result_receiver.await.map_err(|_| queue_stopped_error())?
     }
@@ -133,14 +170,16 @@ impl Drop for IoQueueHandle {
 
 /// Submits reads and allocates their buffers.
 pub(crate) struct ReadQueue {
-    handle: IoQueueHandle,
+    handle: Arc<IoQueueHandle>,
+    files: Arc<DataFileAndDirectoryLock>,
     buffer_pool: Arc<BufferPool>,
 }
 
 impl ReadQueue {
     pub(crate) fn new(files: Arc<DataFileAndDirectoryLock>, buffer_pool: Arc<BufferPool>) -> io::Result<Self> {
         Ok(Self {
-            handle: IoQueueHandle::new(files, IoOperation::Read)?,
+            handle: Arc::new(IoQueueHandle::new(IoOperation::Read)?),
+            files,
             buffer_pool,
         })
     }
@@ -158,7 +197,13 @@ impl ReadQueue {
             let end = (start + MAX_IO_REQUEST_BYTES).min(length);
             buffer = self
                 .handle
-                .submit_and_wait(offset + start as u64, IoBuffers::Read(buffer), start..end, permit)
+                .submit_and_wait(
+                    self.files.clone(),
+                    offset + start as u64,
+                    IoBuffers::Read(buffer),
+                    start..end,
+                    permit,
+                )
                 .await?
                 .expect("read completion returns its buffer");
             if end == length {
@@ -174,13 +219,15 @@ impl ReadQueue {
 
 /// Submits writes, retaining input slices or using unpooled scratch buffers.
 pub(crate) struct WriteQueue {
-    handle: IoQueueHandle,
+    handle: Arc<IoQueueHandle>,
+    files: Arc<DataFileAndDirectoryLock>,
 }
 
 impl WriteQueue {
     pub(crate) fn new(files: Arc<DataFileAndDirectoryLock>) -> io::Result<Self> {
         Ok(Self {
-            handle: IoQueueHandle::new(files, IoOperation::Write)?,
+            handle: Arc::new(IoQueueHandle::new(IoOperation::Write)?),
+            files,
         })
     }
 
@@ -193,7 +240,13 @@ impl WriteQueue {
             let permit = self.handle.reserve_request().await?;
             let buffers = IoBuffers::from_write_bytes(request_length, bytes.slice(start.min(end)..end))?;
             self.handle
-                .submit_and_wait(offset + start as u64, buffers, 0..request_length, permit)
+                .submit_and_wait(
+                    self.files.clone(),
+                    offset + start as u64,
+                    buffers,
+                    0..request_length,
+                    permit,
+                )
                 .await?;
         }
         Ok(())
@@ -273,6 +326,8 @@ unsafe impl Send for IoBuffers {}
 
 /// One I/O request, owning its buffers through completion; writes cover both buffers.
 struct IoRequest {
+    // Each request retains its target file and directory lock until completion, including on cancellation.
+    files: Arc<DataFileAndDirectoryLock>,
     // Exclusive disk end of this request, unchanged by short completions.
     disk_end: u64,
     // Aligned memory for disk reads/writes; kept alive until I/O completes.
@@ -285,6 +340,7 @@ struct IoRequest {
 
 impl IoRequest {
     fn new(
+        files: Arc<DataFileAndDirectoryLock>,
         offset: u64,
         buffers: IoBuffers,
         buffer_range: Range<usize>,
@@ -299,6 +355,7 @@ impl IoRequest {
         }
         assert!(length > 0 && length <= MAX_IO_REQUEST_BYTES);
         Self {
+            files,
             disk_end: offset + length as u64,
             buffers,
             buffer_range,
@@ -306,10 +363,14 @@ impl IoRequest {
         }
     }
 
-    fn submission_entry(&mut self, fd: i32, request_index: usize) -> squeue::Entry {
+    fn submission_entry(&mut self, request_index: usize) -> squeue::Entry {
         let offset = self.disk_end - self.buffer_range.len() as u64;
         self.buffers
-            .submission_entry(types::Fd(fd), offset, self.buffer_range.clone())
+            .submission_entry(
+                types::Fd(self.files.file.as_raw_fd()),
+                offset,
+                self.buffer_range.clone(),
+            )
             .user_data(request_index as u64)
     }
 
@@ -343,6 +404,7 @@ impl IoRequest {
 
     /// Returns the completed read buffer; writes release their buffers before reporting success.
     fn send_result(self, result: io::Result<()>) {
+        drop(self.files);
         let _ = self.reply.unwrap().send(result.map(|()| match self.buffers {
             IoBuffers::Read(buffer) => Some(buffer),
             IoBuffers::Write { .. } => None,
@@ -353,8 +415,6 @@ impl IoRequest {
 struct IoQueue {
     // Thread-owned kernel submission/completion queues; no cross-thread ring access.
     ring: IoUring,
-    // Both queues must drain before releasing the data file and directory lock.
-    files: Arc<DataFileAndDirectoryLock>,
     // Eventfd polled alongside the ring so new work need not wait for completion.
     wake_fd: Arc<OwnedFd>,
     // Holds up to active.len() waiting requests; receive only when the active array has room.
@@ -435,7 +495,7 @@ impl IoQueue {
         let entry = self.active[request_index]
             .as_mut()
             .unwrap()
-            .submission_entry(self.files.file.as_raw_fd(), request_index);
+            .submission_entry(request_index);
         // SAFETY: the fixed active slot owns buffers and descriptors through completion.
         // The ring is sized for all active requests, each with at most one submitted or queued SQE.
         unsafe {
@@ -456,7 +516,6 @@ impl IoQueue {
         for request in requests.iter_mut().flatten() {
             let _ = request.reply.take().unwrap().send(Err(queue_stopped_error()));
         }
-        std::mem::forget(self.files.clone());
         requests
     }
 

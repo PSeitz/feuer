@@ -5,7 +5,7 @@ use feuer_memory::MemoryCache;
 #[cfg(target_os = "linux")]
 use feuer_memory::MemoryMetrics;
 #[cfg(target_os = "linux")]
-use feuer_storage::{DiskCache, DiskCacheError, IoMetrics};
+use feuer_storage::{DiskCache, DiskCacheError, IoMetrics, IoQueues};
 use feuer_types::{ByteRange, Download, ObjectKeyHash};
 #[cfg(target_os = "linux")]
 use mixtrics::metrics::BoxedRegistry;
@@ -61,13 +61,35 @@ impl TieredMemoryDiskCache {
     /// sharing a registry contribute to the same counters and aggregate gauges.
     #[cfg(target_os = "linux")]
     pub async fn open_with_metrics(config: CacheConfig, registry: &BoxedRegistry) -> Result<Self, DiskCacheError> {
+        Self::open_tiers(config, registry, None).await
+    }
+
+    /// Opens an independent cache using the supplied low-level read/write queues and registered metrics.
+    /// Pass clones of the same [`IoQueues`] to caches on the same SSD to share I/O concurrency.
+    /// Contents, capacities, eviction, buffer pools, directory locks, and background-write queues
+    /// remain independent. Zero disk capacity ignores the queues.
+    #[cfg(target_os = "linux")]
+    pub async fn open_with_io_queues(
+        config: CacheConfig,
+        registry: &BoxedRegistry,
+        io_queues: IoQueues,
+    ) -> Result<Self, DiskCacheError> {
+        Self::open_tiers(config, registry, Some(io_queues)).await
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn open_tiers(
+        config: CacheConfig,
+        registry: &BoxedRegistry,
+        io_queues: Option<IoQueues>,
+    ) -> Result<Self, DiskCacheError> {
         let memory = MemoryCache::with_metrics(config.memory_capacity(), MemoryMetrics::new(registry))
             .with_reclaim_sample_size(config.reclaim_sample_size());
         let disk = if config.disk_capacity() == 0 {
             None
         } else {
             Some(
-                DiskCache::open_with_buffer_pool(
+                DiskCache::open_with_io_queues(
                     config.directory(),
                     config.disk_capacity(),
                     IoMetrics::new(registry),
@@ -75,6 +97,7 @@ impl TieredMemoryDiskCache {
                     feuer_storage::DiskMetrics::new(registry),
                     config.reclaim_sample_size(),
                     memory.buffer_pool(),
+                    io_queues,
                 )
                 .await?,
             )
@@ -484,6 +507,71 @@ mod tests {
             assert_eq!(history.request_count(), accesses);
         }
         assert_eq!(cache.inner.memory.used_bytes(), 4);
+    }
+
+    #[tokio::test]
+    async fn shared_io_queues_preserve_independent_whole_object_caches() {
+        let first_directory = tempfile::tempdir().unwrap();
+        let second_directory = tempfile::tempdir().unwrap();
+        let (_, backend) = registry();
+        let queues = IoQueues::new().unwrap();
+        let first = TieredMemoryDiskCache::open_with_io_queues(
+            CacheConfig::new(first_directory.path(), 4 << 20, 1 << 20).unwrap(),
+            &backend,
+            queues.clone(),
+        )
+        .await
+        .unwrap();
+        let second = TieredMemoryDiskCache::open_with_io_queues(
+            CacheConfig::new(second_directory.path(), 4 << 20, 1 << 20).unwrap(),
+            &backend,
+            queues,
+        )
+        .await
+        .unwrap();
+        assert!(!Arc::ptr_eq(
+            &first.inner.memory.buffer_pool(),
+            &second.inner.memory.buffer_pool()
+        ));
+        assert!(!Arc::ptr_eq(
+            first.inner.memory.access_histories(),
+            second.inner.memory.access_histories()
+        ));
+        let key = "object-v1";
+        let hash = ObjectKeyHash::from(key);
+        let first_bytes = Bytes::from_static(b"first object");
+        let second_bytes = Bytes::from_static(b"second object");
+        let (first_result, second_result) = tokio::join!(
+            first.get_or_fetch_object(key.to_owned(), || async { Ok::<_, Infallible>(first_bytes.clone()) }),
+            second.get_or_fetch_object(key.to_owned(), || async { Ok::<_, Infallible>(second_bytes.clone()) }),
+        );
+        assert_eq!(first_result.unwrap(), first_bytes);
+        assert_eq!(second_result.unwrap(), second_bytes);
+        wait_for_buffered(&first, key, range(0, first_bytes.len() as u64)).await;
+        wait_for_buffered(&second, key, range(0, second_bytes.len() as u64)).await;
+        let (first_flush, second_flush) = tokio::join!(
+            first.inner.disk.as_ref().unwrap().flush(),
+            second.inner.disk.as_ref().unwrap().flush(),
+        );
+        first_flush.unwrap();
+        second_flush.unwrap();
+        assert!(first.inner.memory.remove(&hash, range(0, first_bytes.len() as u64)));
+        assert!(second.inner.memory.remove(&hash, range(0, second_bytes.len() as u64)));
+        let (first_result, second_result) = tokio::join!(
+            first.get_or_fetch_object(key.to_owned(), || async { Err::<Bytes, _>("must hit first disk") }),
+            second.get_or_fetch_object(key.to_owned(), || async { Err::<Bytes, _>("must hit second disk") }),
+        );
+        assert_eq!(first_result.unwrap(), first_bytes);
+        assert_eq!(second_result.unwrap(), second_bytes);
+        drop(first);
+        assert!(second.inner.memory.remove(&hash, range(0, second_bytes.len() as u64)));
+        assert_eq!(
+            second
+                .get_or_fetch_object(key.to_owned(), || async { Err::<Bytes, _>("must hit surviving disk") })
+                .await
+                .unwrap(),
+            second_bytes,
+        );
     }
 
     #[tokio::test]
