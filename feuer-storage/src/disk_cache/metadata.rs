@@ -6,12 +6,21 @@ use std::{collections::BTreeSet, time::Duration};
 
 use super::{page_format::*, *};
 
+/// The location of one entry's metadata, ordered by metadata chunk then entry within that chunk.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct EntryMetadataLocation {
+    /// Index into `MetadataPages::chunks`, in metadata-chain order.
+    pub(super) chunk_index: usize,
+    /// Entry index within that metadata chunk, across its metadata pages.
+    pub(super) entry_index: usize,
+}
+
 /// Metadata pages in reserved chunks, with free entry positions and dirty-page tracking.
 #[derive(Default)]
 pub(super) struct MetadataPages {
     pub(super) chunks: Vec<MetadataChunk>,
     pub(super) dirty_pages: BTreeSet<(usize, usize)>,
-    pub(super) free_entry_positions: Vec<(usize, usize)>,
+    free_entry_positions: BTreeSet<EntryMetadataLocation>,
 }
 
 /// One reserved metadata chunk and its independently checksummed pages.
@@ -79,6 +88,22 @@ impl MetadataChunk {
 }
 
 impl MetadataPages {
+    /// Gets the first free metadata location in recovery scan order and removes it from the free locations.
+    pub(super) fn get_free_metadata_location(&mut self) -> Option<EntryMetadataLocation> {
+        // Earliest reuse lets live metadata claim reused payload chunks before stale metadata.
+        self.free_entry_positions.pop_first()
+    }
+
+    /// Makes space for one entry's metadata available for reuse without changing its bytes.
+    pub(super) fn free_entry_metadata(&mut self, location: EntryMetadataLocation) {
+        self.free_entry_positions.insert(location);
+    }
+
+    #[cfg(test)]
+    pub(super) fn free_position_count(&self) -> usize {
+        self.free_entry_positions.len()
+    }
+
     /// Grows metadata capacity without taking positions; publication consumes them under the entry-index lock.
     pub(super) fn ensure_free_positions(&mut self, count: usize, allocator: &DiskChunkAllocator) -> Option<()> {
         while self.free_entry_positions.len() < count {
@@ -88,19 +113,24 @@ impl MetadataPages {
             self.chunks.push(chunk);
             self.dirty_pages.insert((chunk_index, ENTRY_METADATA_PAGES_PER_CHUNK));
             self.free_entry_positions
-                .extend((0..ENTRIES_PER_METADATA_CHUNK).rev().map(|entry| (chunk_index, entry)));
+                .extend(
+                    (0..ENTRIES_PER_METADATA_CHUNK).map(|entry_index| EntryMetadataLocation {
+                        chunk_index,
+                        entry_index,
+                    }),
+                );
         }
         Some(())
     }
 
     /// Updates an entry's reserved metadata bytes and marks its page for writing.
     pub(super) fn set_entry_metadata(&mut self, key: &ObjectKeyHash, entry: &DiskEntry) {
-        let (chunk_index, entry_metadata_index) = entry.metadata;
-        let offset = entry_metadata_offset(entry_metadata_index);
-        let bytes = &mut self.chunks[chunk_index].bytes[offset..offset + ENTRY_METADATA_BYTES];
+        let location = entry.metadata;
+        let offset = entry_metadata_offset(location.entry_index);
+        let bytes = &mut self.chunks[location.chunk_index].bytes[offset..offset + ENTRY_METADATA_BYTES];
         encode_entry_metadata(bytes, key, entry);
-        let page = entry_metadata_index / ENTRIES_PER_METADATA_PAGE;
-        self.dirty_pages.insert((chunk_index, page));
+        let page = location.entry_index / ENTRIES_PER_METADATA_PAGE;
+        self.dirty_pages.insert((location.chunk_index, page));
     }
 
     pub(super) fn set_last_chunk_link(&mut self, address: u64) {

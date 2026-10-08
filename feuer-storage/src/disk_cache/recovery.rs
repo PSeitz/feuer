@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use super::{page_format::*, *};
+use super::{metadata::EntryMetadataLocation, page_format::*, *};
 
 /// The disk byte range assigned to one shard.
 pub(super) fn shard_disk_range(capacity: u64, num_shards: usize, shard_index: usize) -> Range<u64> {
@@ -23,20 +23,23 @@ impl DiskCacheInner {
         for chunk_index in 0..metadata.chunks.len() {
             for entry_metadata_index in 0..ENTRIES_PER_METADATA_CHUNK {
                 let entry_metadata_bytes = metadata.chunks[chunk_index].entry_metadata_bytes(entry_metadata_index);
-                let entry_metadata = decode_entry_metadata(entry_metadata_bytes, (chunk_index, entry_metadata_index))
-                    .filter(|(key, entry)| {
-                        self.shard_index_for_key(key) == shard_index
-                            && disk_index.covering_entry(key, entry.object_range).is_none()
-                            && shard
-                                .allocator
-                                .hold_chunks_for_recovered_payload(
-                                    &(entry.payload_address
-                                        ..entry.payload_address + payload_disk_bytes(entry.object_range.len())),
-                                )
-                                .is_some()
-                    });
+                let location = EntryMetadataLocation {
+                    chunk_index,
+                    entry_index: entry_metadata_index,
+                };
+                let entry_metadata = decode_entry_metadata(entry_metadata_bytes, location).filter(|(key, entry)| {
+                    self.shard_index_for_key(key) == shard_index
+                        && disk_index.covering_entry(key, entry.object_range).is_none()
+                        && shard
+                            .allocator
+                            .hold_chunks_for_recovered_payload(
+                                &(entry.payload_address
+                                    ..entry.payload_address + payload_disk_bytes(entry.object_range.len())),
+                            )
+                            .is_some()
+                });
                 let Some((key, entry)) = entry_metadata else {
-                    metadata.free_entry_positions.push((chunk_index, entry_metadata_index));
+                    metadata.free_entry_metadata(location);
                     continue;
                 };
                 shard.insert_entry(&mut disk_index, &mut metadata, key, entry);
@@ -94,7 +97,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 
 /// Decodes an entry at its metadata position in a validated page. The writer guarantees
 /// representable ranges and aligned payloads; all-zero records are unused.
-fn decode_entry_metadata(bytes: &[u8], metadata: (usize, usize)) -> Option<(ObjectKeyHash, DiskEntry)> {
+fn decode_entry_metadata(bytes: &[u8], metadata: EntryMetadataLocation) -> Option<(ObjectKeyHash, DiskEntry)> {
     if bytes == [0; ENTRY_METADATA_BYTES] {
         return None;
     }

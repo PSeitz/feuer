@@ -103,7 +103,9 @@ The background writer flushes full/no-fit chunks immediately and partial chunks 
 
 1. Reserve payload chunks at flush time, not while buffering. Grow metadata chunks as needed, but take entry
    positions only after successful payload I/O. Publication holds the index lock and requires metadata capacity
-   for the whole flush; otherwise discard the written payload. Metadata updates mark their pages dirty.
+   for the whole flush; otherwise discard the written payload. Publication takes the earliest free
+   position in recovery scan order, so live records claim reused payload chunks before remaining
+   stale records. Metadata updates mark their pages dirty.
 2. One metadata writer runs every second after recovery. It copies dirty pages under the
    metadata mutex, releases it, then checksums and writes complete 4-KiB pages sequentially.
    It waits for I/O queue capacity and completion without holding the mutex. Concurrent changes

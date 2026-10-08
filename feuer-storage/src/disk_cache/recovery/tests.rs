@@ -126,21 +126,21 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     let shard = &cache.disk.shards[0];
     let entry = shard.entry_index.lock().unwrap().take_entry(&key, 0).unwrap();
     let address = entry.payload_address;
-    let (chunk_index, entry_metadata_index) = entry.metadata;
+    let location = entry.metadata;
     let metadata = shard.metadata_pages.lock().unwrap();
-    let entry_metadata_bytes = metadata.chunks[chunk_index]
-        .entry_metadata_bytes(entry_metadata_index)
+    let entry_metadata_bytes = metadata.chunks[location.chunk_index]
+        .entry_metadata_bytes(location.entry_index)
         .to_vec();
     drop(entry); // Must not lock metadata or release the allocator's payload.
     assert_eq!(
-        metadata.chunks[chunk_index].entry_metadata_bytes(entry_metadata_index),
+        metadata.chunks[location.chunk_index].entry_metadata_bytes(location.entry_index),
         entry_metadata_bytes
     );
     assert!(shard.allocator.reserve_chunks(1).is_none());
     shard.allocator.release_payload(address);
     assert!(shard.allocator.reserve_chunks(1).is_some());
     assert_eq!(
-        metadata.chunks[chunk_index].entry_metadata_bytes(entry_metadata_index),
+        metadata.chunks[location.chunk_index].entry_metadata_bytes(location.entry_index),
         entry_metadata_bytes
     );
 }
@@ -158,6 +158,45 @@ async fn eviction_does_not_recover_an_old_record_for_reused_payload_chunks() {
         cache.get(&new, range(100, 4196)).await.unwrap(),
         download(100, 4096).bytes()
     );
+}
+
+#[tokio::test]
+async fn metadata_slot_reuse_preserves_multi_chunk_recovery() {
+    for recover_before_removal in [false, true] {
+        for reverse_removal in [false, true] {
+            let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+            let first = ObjectKeyHash(1);
+            let second = ObjectKeyHash(2);
+            let large = ObjectKeyHash(3);
+            for key in [first, second] {
+                assert!(cache.insert(key, download(0, CHUNK_BYTES as usize)).await.unwrap());
+            }
+            let cache = if recover_before_removal {
+                reopen(directory.path(), cache).await
+            } else {
+                cache
+            };
+            cache.write_dirty_metadata_pages().await;
+            let shard = &cache.disk.shards[0];
+            let removed = if reverse_removal {
+                [second, first]
+            } else {
+                [first, second]
+            };
+            for key in removed {
+                shard.remove_entry(&key, 0);
+            }
+            assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
+            let length = CHUNK_BYTES as usize + 1;
+            assert!(cache.insert(large, download(0, length)).await.unwrap());
+            let cache = reopen(directory.path(), cache).await;
+            assert!(cache.covers_range(&large, range(0, length as u64)));
+            assert_eq!(
+                cache.get(&large, range(0, length as u64)).await.unwrap(),
+                download(0, length).bytes()
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -348,7 +387,7 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
         // Give key 2's record key 1's identity, regardless of which payload was written first.
         let position = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(2)][&0]
             .metadata
-            .1;
+            .entry_index;
         let mut page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap().to_vec();
         let offset = PAGE_HEADER_BYTES + position * ENTRY_METADATA_BYTES;
         page[offset..offset + 16].copy_from_slice(&key.0.to_le_bytes());
@@ -376,7 +415,7 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
             assert_eq!(disk_index.entries_by_key[&key][&0].eviction_position, 0);
         }
         assert_eq!(
-            shard.metadata_pages.lock().unwrap().free_entry_positions.len(),
+            shard.metadata_pages.lock().unwrap().free_position_count(),
             ENTRIES_PER_METADATA_CHUNK - 1
         );
         assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 1.0);
@@ -402,10 +441,9 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
             recovered_chunks
         );
         assert!(cache.insert(ObjectKeyHash(3), download(0, 1)).await.unwrap());
-        let (_, entry_metadata_index) =
-            shard.entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(3)][&0].metadata;
-        let retained_position = shard.entry_index.lock().unwrap().entries_by_key[&key][&0].metadata.1;
-        assert_ne!(entry_metadata_index, retained_position);
+        let location = shard.entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(3)][&0].metadata;
+        let retained_location = shard.entry_index.lock().unwrap().entries_by_key[&key][&0].metadata;
+        assert_ne!(location, retained_location);
         assert_eq!(shard.metadata_pages.lock().unwrap().chunks.len(), 1);
         drop(cache);
         assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 0.0);

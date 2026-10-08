@@ -26,7 +26,8 @@ tails. The allocator retains payload reservations; index entries and readers hol
 Individual payload holes are never reused. `src/allocation.rs` tracks coalesced free chunk runs;
 each `ReservedChunks` has one owner: a pending write, the allocator, or a metadata chunk. I/O requests carry
 addresses and buffers, not reservations. Scattered chunks are never combined for one entry.
-The metadata component assigns entry positions, reserving whole chunks from the allocator as needed.
+The metadata component owns entry-position allocation, reserving whole chunks from the allocator as needed.
+Publication takes the earliest free position in recovery scan order; returning a position does not dirty metadata.
 
 Each shard's metadata lock protects entry positions, page bytes, and dirty-page tracking;
 it and the range-index lock never span I/O. Page bytes consume 1 MiB per metadata chunk.

@@ -74,7 +74,7 @@ impl DiskCacheShard {
                     object_range: buffered.object_range,
                     payload_checksum: buffered.payload_checksum,
                     payload_address: range.start + buffered.offset as u64,
-                    metadata: pages.free_entry_positions.pop().unwrap(),
+                    metadata: pages.get_free_metadata_location().unwrap(),
                 };
                 pages.set_entry_metadata(&buffered.key, &entry);
                 self.insert_entry(&mut disk_index, &mut pages, buffered.key, entry);

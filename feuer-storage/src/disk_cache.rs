@@ -98,8 +98,7 @@ struct DiskEntry {
     object_range: ByteRange,
     payload_checksum: u64,
     payload_address: u64,
-    /// Metadata chunk and entry metadata indexes identifying this entry's 48-byte disk metadata.
-    metadata: (usize, usize),
+    metadata: metadata::EntryMetadataLocation,
 }
 
 /// One payload read's disk address, object range, checksum, and result shared by concurrent readers.
@@ -424,7 +423,7 @@ impl DiskCacheShard {
     /// Releases one held payload and allows its metadata slot to be overwritten.
     fn release_entry(&self, entry: DiskEntry, metadata: &mut metadata::MetadataPages) {
         self.allocator.release_payload(entry.payload_address);
-        metadata.free_entry_positions.push(entry.metadata);
+        metadata.free_entry_metadata(entry.metadata);
     }
 
     /// Inserts an entry not already covered and releases entries it contains.
