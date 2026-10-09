@@ -380,7 +380,27 @@ impl IoRequest {
             return Ok(());
         }
         if result < 0 {
-            return Err(io::Error::from_raw_os_error(-result));
+            let error = io::Error::from_raw_os_error(-result);
+            if let IoBuffers::Write { vectors, .. } = &self.buffers {
+                tracing::error!(
+                    target: "feuer::storage::io",
+                    fd = self.files.file.as_raw_fd(),
+                    offset = self.disk_end - self.buffer_range.len() as u64,
+                    length = self.buffer_range.len(),
+                    alignment = DIRECT_IO_ALIGNMENT_BYTES,
+                    buffer_address_remainders = ?vectors.map(|vector| vector.iov_base as usize % DIRECT_IO_ALIGNMENT_BYTES),
+                    buffer_lengths = ?vectors.map(|vector| vector.iov_len),
+                    errno = -result,
+                    %error,
+                    hint = if result == -libc::EINVAL {
+                        "EINVAL can indicate an unsupported direct-I/O request or a misaligned offset, length, or buffer address"
+                    } else {
+                        ""
+                    },
+                    "io_uring direct write failed",
+                );
+            }
+            return Err(error);
         }
         let completion_bytes = result as usize;
         // An unaligned completion leaves a remainder that cannot be resubmitted with O_DIRECT.

@@ -739,6 +739,53 @@ fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
 }
 
 #[test]
+fn write_error_logs_remaining_request_and_buffer_alignment() {
+    use std::io::{Read, Seek};
+
+    let page = DIRECT_IO_ALIGNMENT_BYTES;
+    let (mut write, _reply) = request(&data_file(), IoOperation::Write, page as u64, 2 * page);
+    let payload = AlignedBuffer::allocate_zeroed(page + 17).unwrap().into_bytes();
+    write.buffers = IoBuffers::from_write_bytes(2 * page, payload).unwrap();
+    write.submission_entry(0);
+    write.apply_completion_result(page as i32).unwrap();
+    write.submission_entry(0);
+    // Inject a misaligned submitted vector without sending it to the kernel.
+    let IoBuffers::Write { vectors, .. } = &mut write.buffers else {
+        unreachable!()
+    };
+    vectors[1].iov_base = vectors[1].iov_base.wrapping_byte_add(1);
+
+    let mut log = tempfile::tempfile().unwrap();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(log.try_clone().unwrap()))
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        assert_eq!(
+            write.apply_completion_result(-libc::EINVAL).unwrap_err().raw_os_error(),
+            Some(libc::EINVAL)
+        );
+    });
+    log.rewind().unwrap();
+    let mut output = String::new();
+    log.read_to_string(&mut output).unwrap();
+    for field in [
+        "ERROR".to_string(),
+        "io_uring direct write failed".to_string(),
+        format!("offset={}", 2 * page),
+        format!("length={page}"),
+        format!("alignment={page}"),
+        "buffer_address_remainders=[0, 1]".to_string(),
+        format!("buffer_lengths=[0, {page}]"),
+        format!("errno={}", libc::EINVAL),
+        "EINVAL can indicate".to_string(),
+    ] {
+        assert!(output.contains(&field), "missing {field} in {output}");
+    }
+}
+
+#[test]
 fn completion_state_handles_short_io_and_errors() {
     let files = data_file();
     let page = DIRECT_IO_ALIGNMENT_BYTES;

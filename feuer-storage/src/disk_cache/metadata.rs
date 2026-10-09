@@ -175,7 +175,7 @@ impl DiskCacheInner {
             let Some(disk) = disk.upgrade() else { return };
             for shard in &disk.shards {
                 if let Err(error) = shard.write_dirty_metadata_pages(&disk.file).await {
-                    tracing::warn!(target: "feuer::storage", %error, "metadata write failed; entries remain usable");
+                    tracing::error!(target: "feuer::storage", %error, "metadata write failed; entries remain usable");
                 }
             }
         }

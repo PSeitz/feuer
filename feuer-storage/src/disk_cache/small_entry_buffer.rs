@@ -40,7 +40,7 @@ impl DiskCacheInner {
             interval.tick().await;
             let Some(disk) = disk.upgrade() else { return };
             if let Err(error) = disk.flush().await {
-                tracing::warn!(target: "feuer::storage", %error, "payload flush failed");
+                tracing::error!(target: "feuer::storage", %error, "payload flush failed");
             }
         }
     }

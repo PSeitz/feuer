@@ -83,7 +83,7 @@ impl DiskCache {
         {
             entry_metrics.finish_queue_wait();
             if let Err(error) = disk.write(key, download, entry_metrics).await {
-                tracing::warn!(target: "feuer::storage", %error, "disk write failed");
+                tracing::error!(target: "feuer::storage", %error, "disk write failed");
             }
         }
     }
