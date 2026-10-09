@@ -2,10 +2,9 @@
 //! entry-metadata pages and one checksummed next-chunk page. All-zero entry metadata is unused.
 //! Payloads live in separate chunks. An entry's metadata never crosses a page boundary.
 
-use feuer_types::ObjectKeyHash;
 use twox_hash::XxHash64;
 
-use super::DiskEntry;
+use super::metadata::EntryMetadata;
 use crate::allocation::CHUNK_BYTES;
 
 /// Size in bytes of a metadata page, including its header and padding.
@@ -50,9 +49,9 @@ pub(super) fn validate_page<'a>(page: &'a [u8], page_tag: &[u8; 8]) -> Option<&'
 
 /// Key hash (u128), object start and length, payload address, payload checksum (u64s).
 /// All integers are little-endian. Aligned payload length is derived from object length.
-/// Payload checksums exclude alignment padding. Writes directly into the reserved metadata slot.
-pub(super) fn encode_entry_metadata(bytes: &mut [u8], key: &ObjectKeyHash, entry: &DiskEntry) {
-    bytes[..16].copy_from_slice(&key.0.to_le_bytes());
+/// Payload checksums exclude alignment padding.
+pub(super) fn encode_entry_metadata(bytes: &mut RawMetadataBytes, entry: &EntryMetadata) {
+    bytes[..16].copy_from_slice(&entry.key.0.to_le_bytes());
     bytes[16..24].copy_from_slice(&entry.object_range.start().to_le_bytes());
     bytes[24..32].copy_from_slice(&entry.object_range.len().to_le_bytes());
     bytes[32..40].copy_from_slice(&entry.payload_address.to_le_bytes());

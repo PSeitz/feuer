@@ -1,6 +1,8 @@
-use super::*;
-use feuer_memory::{BUFFER_ALIGNMENT, retention::decayed_retrieval_cost};
 use std::{future::Future, task::Poll, time::Duration};
+
+use feuer_memory::{BUFFER_ALIGNMENT, retention::decayed_retrieval_cost};
+
+use super::*;
 
 // Keep single-entry scenarios concise while exercising the explicit batch API.
 impl DiskCache {
@@ -319,7 +321,7 @@ async fn full_and_no_fit_chunks_flush_across_metadata_pages() {
 }
 
 #[tokio::test]
-async fn failed_large_reservation_leaves_buffered_entries_and_metadata_positions_untouched() {
+async fn failed_large_reservation_leaves_buffered_entries_and_metadata_slots_untouched() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let shard = &cache.disk.shards[0];
     let source = download(0, 4097);
@@ -339,7 +341,7 @@ async fn failed_large_reservation_leaves_buffered_entries_and_metadata_positions
         0
     );
     assert_eq!(
-        shard.metadata_pages.lock().unwrap().free_position_count(),
+        shard.metadata_pages.lock().unwrap().free_slot_count(),
         page_format::ENTRIES_PER_METADATA_CHUNK
     );
     assert_eq!(cache.get(&ObjectKeyHash(1), range(0, 4097)).await.unwrap(), bytes);
@@ -381,24 +383,29 @@ async fn cancellation_or_lost_metadata_capacity_discards_the_whole_flush() {
         }
         let shard = &cache.disk.shards[0];
         assert_eq!(
-            shard.metadata_pages.lock().unwrap().free_position_count(),
+            shard.metadata_pages.lock().unwrap().free_slot_count(),
             page_format::ENTRIES_PER_METADATA_CHUNK
         );
         if cancel {
             drop(flush);
         } else {
-            // Simulate another publisher consuming positions during I/O. One slot cannot admit both entries.
+            // Simulate another publisher consuming slots during I/O. One slot cannot admit both entries.
             {
                 let mut pages = shard.metadata_pages.lock().unwrap();
                 for _ in 1..page_format::ENTRIES_PER_METADATA_CHUNK {
-                    pages.get_free_metadata_location().unwrap();
+                    pages.store_entry_metadata(metadata::EntryMetadata {
+                        key: ObjectKeyHash(0),
+                        object_range: range(0, 1),
+                        payload_address: 0,
+                        payload_checksum: 0,
+                    });
                 }
             }
             assert_eq!(flush.await.unwrap(), 0);
         }
         assert_eq!(shard.allocator.available_bytes(), CHUNK_BYTES);
         assert_eq!(
-            shard.metadata_pages.lock().unwrap().free_position_count(),
+            shard.metadata_pages.lock().unwrap().free_slot_count(),
             if cancel {
                 page_format::ENTRIES_PER_METADATA_CHUNK
             } else {
@@ -834,11 +841,11 @@ async fn removing_one_shared_payload_does_not_free_its_neighbors_chunks() {
         .await
         .unwrap();
     let shard = &cache.disk.shards[0];
-    let free_metadata_slots = shard.metadata_pages.lock().unwrap().free_position_count();
+    let free_metadata_slots = shard.metadata_pages.lock().unwrap().free_slot_count();
     shard.remove_entry(&first, 3);
     assert!(!cache.covers_range(&first, range(3, 1027)));
     assert_eq!(
-        shard.metadata_pages.lock().unwrap().free_position_count(),
+        shard.metadata_pages.lock().unwrap().free_slot_count(),
         free_metadata_slots + 1
     );
     assert!(shard.allocator.reserve_chunks(1).is_none());
@@ -899,7 +906,7 @@ async fn batch_rejects_fragmented_space_without_consuming_it() {
         .metadata_pages
         .lock()
         .unwrap()
-        .ensure_free_positions(1, &shard.allocator)
+        .ensure_free_slots(1, &shard.allocator)
         .unwrap();
     let allocator = &shard.allocator;
     let first = allocator.reserve_chunks(1).unwrap();
@@ -1240,7 +1247,7 @@ async fn failed_multi_chunk_write_keeps_earlier_entries_and_releases_its_storage
     let shard = &cache.disk.shards[0];
     assert_eq!(shard.allocator.available_bytes(), 2 * CHUNK_BYTES);
     assert_eq!(
-        shard.metadata_pages.lock().unwrap().free_position_count(),
+        shard.metadata_pages.lock().unwrap().free_slot_count(),
         page_format::ENTRIES_PER_METADATA_CHUNK - 1
     );
 }
@@ -1365,7 +1372,7 @@ async fn insertion_releases_contained_entries_and_preserves_covering_entries() {
         let shard = &cache.disk.shards[0];
         assert_eq!(shard.allocator.available_bytes(), CHUNK_BYTES);
         assert_eq!(
-            shard.metadata_pages.lock().unwrap().free_position_count(),
+            shard.metadata_pages.lock().unwrap().free_slot_count(),
             page_format::ENTRIES_PER_METADATA_CHUNK - 1
         );
     }

@@ -28,6 +28,8 @@ use feuer_memory::{
     retention::{RECLAIM_SAMPLE_SIZE, RetentionScorer, RetrievalCostScorer, sample_candidates},
 };
 use feuer_types::{ByteRange, Download, ObjectKeyHash};
+#[cfg(test)]
+use page_format::METADATA_PAGE_BYTES;
 use rustc_hash::FxHashMap;
 use tokio::sync::{OnceCell, mpsc};
 use twox_hash::XxHash64;
@@ -38,8 +40,6 @@ use crate::{
     disk_metrics::{DiskLookupOutcome, DiskWriteAttempt, DiskWriteOutcome},
     file::payload_disk_bytes,
 };
-#[cfg(test)]
-use page_format::METADATA_PAGE_BYTES;
 
 // Per admission: limit sampled eviction decisions and removal work, including multi-chunk entries.
 const MAX_EVICTION_ATTEMPTS: usize = 64;
@@ -393,6 +393,18 @@ impl DiskCacheShard {
 }
 
 impl DiskEntry {
+    /// An entry without readers, described by its metadata at `location`.
+    fn new(entry_metadata: &metadata::EntryMetadata, location: metadata::EntryMetadataLocation) -> Self {
+        Self {
+            in_flight_read: Weak::new(),
+            eviction_position: 0,
+            object_range: entry_metadata.object_range,
+            payload_checksum: entry_metadata.payload_checksum,
+            payload_address: entry_metadata.payload_address,
+            metadata: location,
+        }
+    }
+
     /// Shares the payload read, creating one from this entry's metadata when no readers remain.
     fn share_payload_read(&mut self) -> Arc<PayloadRead> {
         self.in_flight_read.upgrade().unwrap_or_else(|| {
@@ -414,7 +426,7 @@ impl DiskEntry {
 }
 
 impl DiskCacheShard {
-    /// Locks the disk index, removes one entry, releases its payload, and allows its metadata to be overwritten.
+    /// Locks the disk index, removes one entry, releases its payload, and frees its metadata slot.
     fn remove_entry(&self, key: &ObjectKeyHash, start: u64) {
         self.remove_entry_from_index(&mut self.entry_index.lock().unwrap(), key, start);
     }
@@ -427,7 +439,7 @@ impl DiskCacheShard {
         self.release_entry(entry, &mut self.metadata_pages.lock().unwrap());
     }
 
-    /// Releases one held payload and allows its metadata slot to be overwritten.
+    /// Releases one held payload and frees its metadata slot.
     fn release_entry(&self, entry: DiskEntry, metadata: &mut metadata::MetadataPages) {
         self.allocator.release_payload(entry.payload_address);
         metadata.free_entry_metadata(entry.metadata);

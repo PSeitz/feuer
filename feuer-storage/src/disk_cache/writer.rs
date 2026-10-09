@@ -1,4 +1,4 @@
-//! Writes and publishes payload runs with one eviction budget per run; only publication consumes metadata positions.
+//! Writes and publishes payload runs with one eviction budget per run; only publication consumes metadata slots.
 
 use super::*;
 
@@ -25,9 +25,9 @@ impl DiskCacheShard {
             let mut budget = MAX_EVICTION_CHUNKS;
             let chunks = loop {
                 let mut pages = self.metadata_pages.lock().unwrap();
-                // Establish the metadata chain before payloads; leave all entry positions free during I/O.
+                // Establish the metadata chain before payloads; leave all metadata slots free during I/O.
                 let chunks = pages
-                    .ensure_free_positions(entries.len(), &self.allocator)
+                    .ensure_free_slots(entries.len(), &self.allocator)
                     .and_then(|()| self.allocator.reserve_chunks(count));
                 let capacity = self.allocator.chunk_capacity - pages.chunks.len() as u64;
                 drop(pages);
@@ -52,8 +52,8 @@ impl DiskCacheShard {
                 .increase(chunks.chunk_count() * CHUNK_BYTES);
             let mut disk_index = self.entry_index.lock().unwrap();
             let mut pages = self.metadata_pages.lock().unwrap();
-            // Other writers may have consumed free positions during I/O. Publish all or discard this run.
-            if pages.ensure_free_positions(entries.len(), &self.allocator).is_none() {
+            // Other writers may have consumed free slots during I/O. Publish all or discard this run.
+            if pages.ensure_free_slots(entries.len(), &self.allocator).is_none() {
                 return Ok(0);
             }
             self.allocator
@@ -68,15 +68,13 @@ impl DiskCacheShard {
                     self.allocator.release_payload(range.start);
                     continue;
                 }
-                let entry = DiskEntry {
-                    in_flight_read: Weak::new(),
-                    eviction_position: 0,
+                let entry_metadata = metadata::EntryMetadata {
+                    key: buffered.key,
                     object_range: buffered.object_range,
-                    payload_checksum: buffered.payload_checksum,
                     payload_address: range.start + buffered.offset as u64,
-                    metadata: pages.get_free_metadata_location().unwrap(),
+                    payload_checksum: buffered.payload_checksum,
                 };
-                pages.set_entry_metadata(&buffered.key, &entry);
+                let entry = DiskEntry::new(&entry_metadata, pages.store_entry_metadata(entry_metadata));
                 self.insert_entry(&mut disk_index, &mut pages, buffered.key, entry);
                 published += 1;
                 buffered.attempt.outcome = DiskWriteOutcome::Published;

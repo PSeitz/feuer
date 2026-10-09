@@ -1,5 +1,5 @@
-//! Inserts update pages under the metadata mutex; one periodic writer copies dirty pages,
-//! releases the mutex, then checksums and writes them sequentially. Changes during I/O remain dirty.
+//! Inserts and removals update entry metadata slots under the metadata mutex; one periodic writer
+//! encodes dirty pages, releases the mutex, then writes them sequentially. Changes during I/O remain dirty.
 //! Failed writes are not retried. No stable-storage sync or shutdown flush; recovery is best-effort.
 
 use std::{collections::BTreeSet, time::Duration};
@@ -22,145 +22,164 @@ pub(super) struct MetadataPageLocation {
     pub(super) page_index: u8,
 }
 
-/// Metadata pages in reserved chunks, with free entry positions and dirty-page tracking.
+/// One entry's key hash, object range, payload disk address, and payload checksum, as recorded on disk.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct EntryMetadata {
+    pub(super) key: ObjectKeyHash,
+    pub(super) object_range: ByteRange,
+    pub(super) payload_address: u64,
+    pub(super) payload_checksum: u64,
+}
+
+/// One entry's metadata, or a free slot linked to the next free slot. Free slots are written as zeros.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum MetadataSlot {
+    Entry(EntryMetadata),
+    Free { next_free: Option<EntryMetadataLocation> },
+}
+
+pub(super) const FREE_SLOT: MetadataSlot = MetadataSlot::Free { next_free: None };
+
+/// Metadata chunks, the list of free slots linked through them, and dirty-page tracking.
 #[derive(Default)]
 pub(super) struct MetadataPages {
     pub(super) chunks: Vec<MetadataChunk>,
     pub(super) dirty_pages: BTreeSet<MetadataPageLocation>,
-    free_entry_positions: BTreeSet<EntryMetadataLocation>,
+    first_free: Option<EntryMetadataLocation>,
+    free_slot_count: usize,
 }
 
-/// One reserved metadata chunk and its independently checksummed pages.
+/// One reserved metadata chunk: its entry metadata slots in disk order, and the next chunk's address.
 pub(super) struct MetadataChunk {
     pub(super) reserved_chunk: ReservedChunks,
-    pub(super) bytes: Box<[u8]>,
-}
-
-/// Byte offset of one entry's metadata within a chunk, skipping metadata page headers.
-fn entry_metadata_offset(entry_metadata_index: usize) -> usize {
-    entry_metadata_index / ENTRIES_PER_METADATA_PAGE * METADATA_PAGE_BYTES
-        + PAGE_HEADER_BYTES
-        + entry_metadata_index % ENTRIES_PER_METADATA_PAGE * ENTRY_METADATA_BYTES
+    pub(super) slots: Box<[MetadataSlot]>,
+    /// The next metadata chunk's disk address, or `NO_CHUNK` at the end of the chain.
+    pub(super) next_chunk_address: u64,
 }
 
 impl MetadataChunk {
-    pub(super) fn empty(reserved_chunk: ReservedChunks) -> Self {
-        let mut chunk = Self {
-            reserved_chunk,
-            bytes: vec![0; CHUNK_BYTES as usize].into_boxed_slice(),
-        };
-        chunk.clear_entry_metadata_page(0);
-        let bytes = &mut chunk.bytes;
-        for page in 1..ENTRY_METADATA_PAGES_PER_CHUNK {
-            bytes.copy_within(..METADATA_PAGE_BYTES, page * METADATA_PAGE_BYTES);
+    /// Encodes one checksummed page: an entry metadata page, or the final next-chunk page.
+    fn encode_page(&self, page_index: usize) -> Box<[u8]> {
+        let mut page = vec![0; METADATA_PAGE_BYTES].into_boxed_slice();
+        if page_index == ENTRY_METADATA_PAGES_PER_CHUNK {
+            encode_page(
+                &mut page,
+                NEXT_CHUNK_PAGE_TAG,
+                1,
+                &self.next_chunk_address.to_le_bytes(),
+            );
+            return page;
         }
-        chunk.set_next_chunk_address(NO_CHUNK);
-        chunk
-    }
-
-    /// Clears a page's entry metadata.
-    pub(super) fn clear_entry_metadata_page(&mut self, page: usize) {
+        let mut contents = [0; PAGE_CONTENT_BYTES];
+        let slots = &self.slots[page_index * ENTRIES_PER_METADATA_PAGE..][..ENTRIES_PER_METADATA_PAGE];
+        for (bytes, slot) in contents.as_chunks_mut().0.iter_mut().zip(slots) {
+            if let MetadataSlot::Entry(entry) = slot {
+                encode_entry_metadata(bytes, entry);
+            }
+        }
         encode_page(
-            &mut self.bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES],
+            &mut page,
             ENTRY_METADATA_PAGE_TAG,
             ENTRIES_PER_METADATA_PAGE as u64,
-            &[],
+            &contents,
         );
-    }
-
-    /// Sets the next metadata chunk's disk address, or `NO_CHUNK` to end the chain.
-    fn set_next_chunk_address(&mut self, address: u64) {
-        let offset = ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES;
-        encode_page(
-            &mut self.bytes[offset..],
-            NEXT_CHUNK_PAGE_TAG,
-            1,
-            &address.to_le_bytes(),
-        );
-    }
-
-    /// Reads the next metadata chunk's disk address, or `NO_CHUNK` at the end of the chain.
-    /// Returns `None` if the link page is invalid.
-    pub(super) fn next_chunk_address(&self) -> Option<u64> {
-        let offset = ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES;
-        let contents = validate_page(&self.bytes[offset..], NEXT_CHUNK_PAGE_TAG)?;
-        Some(u64::from_le_bytes(contents[..8].try_into().unwrap()))
-    }
-
-    /// Iterates entry metadata records in their order within the chunk.
-    pub(super) fn entry_metadata_records(&self) -> impl Iterator<Item = &RawMetadataBytes> {
-        self.bytes[..ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES]
-            .as_chunks::<METADATA_PAGE_BYTES>()
-            .0
-            .iter()
-            .flat_map(|page| {
-                page[PAGE_HEADER_BYTES..PAGE_HEADER_BYTES + PAGE_CONTENT_BYTES]
-                    .as_chunks::<ENTRY_METADATA_BYTES>()
-                    .0
-                    .iter()
-            })
+        page
     }
 }
 
 impl MetadataPages {
-    /// Gets the first free metadata location in recovery scan order and removes it from the free locations.
-    pub(super) fn get_free_metadata_location(&mut self) -> Option<EntryMetadataLocation> {
-        // Earliest reuse lets live metadata claim reused payload chunks before stale metadata.
-        self.free_entry_positions.pop_first()
+    /// Stores one entry's metadata in the most recently freed slot and marks its page for writing.
+    /// Panics without a free slot; callers reserve slots with `ensure_free_slots`.
+    pub(super) fn store_entry_metadata(&mut self, entry: EntryMetadata) -> EntryMetadataLocation {
+        let location = self.first_free.expect("a free metadata slot");
+        let MetadataSlot::Free { next_free } = std::mem::replace(self.slot_mut(location), MetadataSlot::Entry(entry))
+        else {
+            unreachable!("the free list links only free slots");
+        };
+        self.first_free = next_free;
+        self.free_slot_count -= 1;
+        self.mark_page_dirty(location);
+        location
     }
 
-    /// Makes space for one entry's metadata available for reuse without changing its bytes.
+    /// Frees one entry's slot for reuse and marks its page for rewriting without the entry.
     pub(super) fn free_entry_metadata(&mut self, location: EntryMetadataLocation) {
-        self.free_entry_positions.insert(location);
+        let next_free = self.first_free;
+        let freed = std::mem::replace(self.slot_mut(location), MetadataSlot::Free { next_free });
+        assert!(matches!(freed, MetadataSlot::Entry(_)), "metadata slot freed twice");
+        self.first_free = Some(location);
+        self.free_slot_count += 1;
+        self.mark_page_dirty(location);
     }
 
     #[cfg(test)]
-    pub(super) fn free_position_count(&self) -> usize {
-        self.free_entry_positions.len()
+    pub(super) fn free_slot_count(&self) -> usize {
+        self.free_slot_count
     }
 
-    /// Grows capacity for one payload write (at most 256 entries); publication consumes positions under the entry-index lock.
-    pub(super) fn ensure_free_positions(&mut self, count: usize, allocator: &DiskChunkAllocator) -> Option<()> {
-        if self.free_entry_positions.len() < count {
-            let chunk = MetadataChunk::empty(allocator.reserve_chunks(1)?);
-            self.set_last_chunk_link(chunk.reserved_chunk.disk_byte_range().start);
-            let chunk_index = u32::try_from(self.chunks.len()).unwrap();
-            self.chunks.push(chunk);
-            self.dirty_pages.insert(MetadataPageLocation {
-                chunk_index,
-                page_index: ENTRY_METADATA_PAGES_PER_CHUNK as u8,
+    /// Grows capacity for one payload write (at most 256 entries); publication consumes slots under the entry-index
+    /// lock.
+    pub(super) fn ensure_free_slots(&mut self, count: usize, allocator: &DiskChunkAllocator) -> Option<()> {
+        if self.free_slot_count < count {
+            let reserved_chunk = allocator.reserve_chunks(1)?;
+            self.set_last_chunk_link(reserved_chunk.disk_byte_range().start);
+            let chunk_index = self.chunks.len();
+            self.chunks.push(MetadataChunk {
+                reserved_chunk,
+                slots: vec![FREE_SLOT; ENTRIES_PER_METADATA_CHUNK].into(),
+                next_chunk_address: NO_CHUNK,
             });
-            self.free_entry_positions
-                .extend(
-                    (0..ENTRIES_PER_METADATA_CHUNK).map(|entry_index| EntryMetadataLocation {
-                        chunk_index,
-                        entry_index: entry_index as u16,
-                    }),
-                );
+            self.mark_link_page_dirty(chunk_index);
+            self.link_free_slots(chunk_index);
         }
         Some(())
     }
 
-    /// Updates an entry's reserved metadata bytes and marks its page for writing.
-    pub(super) fn set_entry_metadata(&mut self, key: &ObjectKeyHash, entry: &DiskEntry) {
-        let location = entry.metadata;
-        let offset = entry_metadata_offset(location.entry_index as usize);
-        let bytes = &mut self.chunks[location.chunk_index as usize].bytes[offset..offset + ENTRY_METADATA_BYTES];
-        encode_entry_metadata(bytes, key, entry);
+    /// Rebuilds the free list from all free slots, in ascending location order.
+    pub(super) fn relink_free_slots(&mut self) {
+        self.first_free = None;
+        self.free_slot_count = 0;
+        self.link_free_slots(0);
+    }
+
+    /// Links the free slots of chunks from `first_chunk_index` on ahead of the free list, in ascending order.
+    fn link_free_slots(&mut self, first_chunk_index: usize) {
+        for (chunk_index, chunk) in self.chunks.iter_mut().enumerate().skip(first_chunk_index).rev() {
+            for (entry_index, slot) in chunk.slots.iter_mut().enumerate().rev() {
+                if let MetadataSlot::Free { next_free } = slot {
+                    *next_free = self.first_free.replace(EntryMetadataLocation {
+                        chunk_index: chunk_index as u32,
+                        entry_index: entry_index as u16,
+                    });
+                    self.free_slot_count += 1;
+                }
+            }
+        }
+    }
+
+    pub(super) fn set_last_chunk_link(&mut self, address: u64) {
+        if let Some(last) = self.chunks.last_mut() {
+            last.next_chunk_address = address;
+            self.mark_link_page_dirty(self.chunks.len() - 1);
+        }
+    }
+
+    fn slot_mut(&mut self, location: EntryMetadataLocation) -> &mut MetadataSlot {
+        &mut self.chunks[location.chunk_index as usize].slots[location.entry_index as usize]
+    }
+
+    fn mark_page_dirty(&mut self, location: EntryMetadataLocation) {
         self.dirty_pages.insert(MetadataPageLocation {
             chunk_index: location.chunk_index,
             page_index: (location.entry_index as usize / ENTRIES_PER_METADATA_PAGE) as u8,
         });
     }
 
-    pub(super) fn set_last_chunk_link(&mut self, address: u64) {
-        if let Some(last) = self.chunks.len().checked_sub(1) {
-            self.chunks[last].set_next_chunk_address(address);
-            self.dirty_pages.insert(MetadataPageLocation {
-                chunk_index: last.try_into().unwrap(),
-                page_index: ENTRY_METADATA_PAGES_PER_CHUNK as u8,
-            });
-        }
+    fn mark_link_page_dirty(&mut self, chunk_index: usize) {
+        self.dirty_pages.insert(MetadataPageLocation {
+            chunk_index: chunk_index.try_into().unwrap(),
+            page_index: ENTRY_METADATA_PAGES_PER_CHUNK as u8,
+        });
     }
 }
 
@@ -195,13 +214,11 @@ impl DiskCacheShard {
                     let chunk = &pages.chunks[location.chunk_index as usize];
                     let offset = location.page_index as usize * METADATA_PAGE_BYTES;
                     let start = chunk.reserved_chunk.disk_byte_range().start + offset as u64;
-                    (start, chunk.bytes[offset..offset + METADATA_PAGE_BYTES].into())
+                    (start, chunk.encode_page(location.page_index as usize))
                 })
                 .collect()
         };
-        for (address, mut bytes) in writes {
-            let checksum = XxHash64::oneshot(0, &bytes[8..]);
-            bytes[..8].copy_from_slice(&checksum.to_le_bytes());
+        for (address, bytes) in writes {
             file.write_at(address, &Bytes::from(bytes)).await?;
         }
         Ok(())

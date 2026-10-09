@@ -2,7 +2,14 @@
 
 use std::ops::Range;
 
-use super::{metadata::EntryMetadataLocation, page_format::*, *};
+use super::{
+    metadata::{EntryMetadata, EntryMetadataLocation, FREE_SLOT, MetadataChunk, MetadataSlot},
+    page_format::*,
+    *,
+};
+
+/// Records of a page that failed validation: all unused.
+const UNUSED_RECORDS: &[RawMetadataBytes] = &[[0; ENTRY_METADATA_BYTES]; ENTRIES_PER_METADATA_PAGE];
 
 /// The disk byte range assigned to one shard.
 pub(super) fn shard_disk_range(capacity: u64, num_shards: usize, shard_index: usize) -> Range<u64> {
@@ -20,38 +27,38 @@ impl DiskCacheInner {
         shard.load_metadata_chain(&self.file, shard_disk_range.start).await;
         let mut metadata = shard.metadata_pages.lock().unwrap();
         let mut disk_index = shard.entry_index.lock().unwrap();
-        // Keep chunk bytes separate while recovery updates free metadata positions.
-        let chunks = std::mem::take(&mut metadata.chunks);
-        for (chunk_index, chunk) in chunks.iter().enumerate() {
-            for (entry_metadata_index, entry_metadata_bytes) in chunk.entry_metadata_records().enumerate() {
-                let location = EntryMetadataLocation {
-                    chunk_index: chunk_index.try_into().unwrap(),
-                    entry_index: entry_metadata_index as u16,
-                };
-                let entry_metadata = decode_entry_metadata(entry_metadata_bytes, location).filter(|(key, entry)| {
-                    self.shard_index_for_key(key) == shard_index
-                        && disk_index.covering_entry(key, entry.object_range).is_none()
-                        && shard
-                            .allocator
-                            .hold_chunks_for_recovered_payload(
-                                &(entry.payload_address
-                                    ..entry.payload_address + payload_disk_bytes(entry.object_range.len())),
-                            )
-                            .is_some()
-                });
-                let Some((key, entry)) = entry_metadata else {
-                    metadata.free_entry_metadata(location);
+        for chunk_index in 0..metadata.chunks.len() {
+            for entry_index in 0..ENTRIES_PER_METADATA_CHUNK {
+                let slot = &mut metadata.chunks[chunk_index].slots[entry_index];
+                let MetadataSlot::Entry(entry_metadata) = *slot else {
                     continue;
                 };
-                shard.insert_entry(&mut disk_index, &mut metadata, key, entry);
+                let payload = entry_metadata.payload_address
+                    ..entry_metadata.payload_address + payload_disk_bytes(entry_metadata.object_range.len());
+                if self.shard_index_for_key(&entry_metadata.key) != shard_index
+                    || disk_index
+                        .covering_entry(&entry_metadata.key, entry_metadata.object_range)
+                        .is_some()
+                    || shard.allocator.hold_chunks_for_recovered_payload(&payload).is_none()
+                {
+                    // Rejected records stay on disk until a later change rewrites their page.
+                    *slot = FREE_SLOT;
+                    continue;
+                }
+                let location = EntryMetadataLocation {
+                    chunk_index: chunk_index.try_into().unwrap(),
+                    entry_index: entry_index as u16,
+                };
+                let entry = DiskEntry::new(&entry_metadata, location);
+                shard.insert_entry(&mut disk_index, &mut metadata, entry_metadata.key, entry);
             }
         }
-        metadata.chunks = chunks;
+        metadata.relink_free_slots();
     }
 }
 
 impl DiskCacheShard {
-    /// Reads the metadata chain and resets invalid record pages before reserving payload chunks.
+    /// Reads the metadata chain and decodes its records before reserving payload chunks.
     async fn load_metadata_chain(&self, file: &DataFile, mut address: u64) {
         let mut metadata = metadata::MetadataPages::default();
         while address != NO_CHUNK {
@@ -67,20 +74,27 @@ impl DiskCacheShard {
                 break;
             }
             reserved_chunk.mark_recovered();
-            let mut chunk = metadata::MetadataChunk {
+            let (entry_pages, link_page) = bytes.split_at(ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES);
+            let slots = entry_pages
+                .as_chunks::<METADATA_PAGE_BYTES>()
+                .0
+                .iter()
+                .flat_map(|page| {
+                    // An invalid page holds no entries. It is safe to leave on disk until a later insertion rewrites
+                    // it.
+                    validate_page(page, ENTRY_METADATA_PAGE_TAG).map_or(UNUSED_RECORDS, |contents| {
+                        contents[..PAGE_CONTENT_BYTES].as_chunks::<ENTRY_METADATA_BYTES>().0
+                    })
+                })
+                .map(|bytes| decode_entry_metadata(bytes).map_or(FREE_SLOT, MetadataSlot::Entry))
+                .collect();
+            let next_chunk_address =
+                validate_page(link_page, NEXT_CHUNK_PAGE_TAG).map(|contents| read_u64(contents, 0));
+            metadata.chunks.push(MetadataChunk {
                 reserved_chunk,
-                bytes: Box::from(bytes.as_ref()),
-            };
-            for page in 0..ENTRY_METADATA_PAGES_PER_CHUNK {
-                let bytes = &chunk.bytes[page * METADATA_PAGE_BYTES..(page + 1) * METADATA_PAGE_BYTES];
-                if validate_page(bytes, ENTRY_METADATA_PAGE_TAG).is_none() {
-                    // Clear invalid records before a later insertion rechecksums the page.
-                    // Until then, the invalid page on disk is safe to leave untouched.
-                    chunk.clear_entry_metadata_page(page);
-                }
-            }
-            let next_chunk_address = chunk.next_chunk_address();
-            metadata.chunks.push(chunk);
+                slots,
+                next_chunk_address: next_chunk_address.unwrap_or(NO_CHUNK),
+            });
             match next_chunk_address {
                 Some(next_chunk_address) => address = next_chunk_address,
                 None => break,
@@ -97,27 +111,19 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
-/// Decodes an entry at its metadata position in a validated page. The writer guarantees
+/// Decodes one record from a validated page. The writer guarantees
 /// representable ranges and aligned payloads; all-zero records are unused.
-fn decode_entry_metadata(
-    bytes: &RawMetadataBytes,
-    metadata: EntryMetadataLocation,
-) -> Option<(ObjectKeyHash, DiskEntry)> {
+fn decode_entry_metadata(bytes: &RawMetadataBytes) -> Option<EntryMetadata> {
     if bytes == &[0; ENTRY_METADATA_BYTES] {
         return None;
     }
-    let key = ObjectKeyHash(u128::from_le_bytes(bytes[..16].try_into().unwrap()));
     let start = read_u64(bytes, 16);
-    let object_range = ByteRange::new(start, start + read_u64(bytes, 24)).ok()?;
-    let entry = DiskEntry {
-        in_flight_read: Weak::new(),
-        eviction_position: 0,
-        object_range,
+    Some(EntryMetadata {
+        key: ObjectKeyHash(u128::from_le_bytes(bytes[..16].try_into().unwrap())),
+        object_range: ByteRange::new(start, start + read_u64(bytes, 24)).ok()?,
         payload_address: read_u64(bytes, 32),
         payload_checksum: read_u64(bytes, 40),
-        metadata,
-    };
-    Some((key, entry))
+    })
 }
 
 #[cfg(test)]
