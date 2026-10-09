@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 
 use feuer_memory::{read_idle_buffer_pool_percent, retention::RECLAIM_SAMPLE_SIZE};
 use feuer_types::config::read_env_number;
@@ -7,12 +10,13 @@ use thiserror::Error;
 /// Explicit capacities and location for one Feuer cache.
 ///
 /// `disk_capacity` includes metadata and alignment overhead; zero disables the disk tier.
-/// When disk is disabled, `directory` is unused.
+/// When disk is disabled, `directory` and `file_name` are unused.
 /// `memory_capacity` is a soft eviction target divided among the in-memory shards; oversized entries
 /// can make entry allocation charges exceed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheConfig {
     directory: PathBuf,
+    file_name: String,
     disk_capacity: u64,
     memory_capacity: u64,
     reclaim_sample_size: usize,
@@ -38,6 +42,7 @@ impl CacheConfig {
 
         Ok(Self {
             directory: directory.into(),
+            file_name: "data".to_owned(),
             disk_capacity,
             memory_capacity,
             reclaim_sample_size: read_env_number("FEUER_RECLAIM_SAMPLE_SIZE", RECLAIM_SAMPLE_SIZE, 1)
@@ -45,6 +50,21 @@ impl CacheConfig {
             idle_buffer_pool_percent: read_idle_buffer_pool_percent()
                 .map_err(|_| CacheConfigError::InvalidIdleBufferPoolPercent)?,
         })
+    }
+
+    /// Sets the backing filename within the cache directory; defaults to `data`.
+    /// Different filenames allow independent caches in the same directory.
+    /// Must be a single filename, without NUL bytes or the reserved `.feuer.` prefix.
+    pub fn with_file_name(mut self, file_name: impl Into<String>) -> Result<Self, CacheConfigError> {
+        let file_name = file_name.into();
+        if Path::new(&file_name).file_name() != Some(OsStr::new(&file_name))
+            || file_name.contains('\0')
+            || file_name.starts_with(".feuer.")
+        {
+            return Err(CacheConfigError::InvalidFileName);
+        }
+        self.file_name = file_name;
+        Ok(self)
     }
 
     /// Sets the maximum candidates inspected per memory or disk eviction decision.
@@ -82,6 +102,11 @@ impl CacheConfig {
         &self.directory
     }
 
+    /// Returns the backing filename within the cache directory.
+    pub fn file_name(&self) -> &str {
+        &self.file_name
+    }
+
     /// Returns the configured disk capacity in bytes; zero disables the disk tier.
     pub const fn disk_capacity(&self) -> u64 {
         self.disk_capacity
@@ -96,6 +121,9 @@ impl CacheConfig {
 /// An invalid Feuer configuration.
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum CacheConfigError {
+    /// The backing filename contains a path, NUL bytes, or the reserved `.feuer.` prefix.
+    #[error("cache file name must be a single filename without NUL bytes or the reserved .feuer. prefix")]
+    InvalidFileName,
     /// The configured memory eviction target must be positive.
     #[error("memory capacity must be greater than zero")]
     InvalidMemoryCapacity,
@@ -114,6 +142,28 @@ pub enum CacheConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configures_independent_files_in_one_directory() {
+        let config = CacheConfig::new("cache", 1, 1).unwrap();
+        assert_eq!(config.file_name(), "data");
+        assert_eq!(config.clone().with_file_name("images").unwrap().file_name(), "images");
+        for name in [
+            "",
+            ".",
+            "..",
+            "../data",
+            "cache/data",
+            ".feuer.lock",
+            ".feuer.images.lock",
+            "data\0",
+        ] {
+            assert_eq!(
+                config.clone().with_file_name(name),
+                Err(CacheConfigError::InvalidFileName)
+            );
+        }
+    }
 
     #[test]
     fn reclaim_sample_size_environment_override() {

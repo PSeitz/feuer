@@ -137,6 +137,9 @@ impl fmt::Debug for DiskCache {
 /// Optional settings and shared resources for opening a disk cache.
 /// Defaults use no-op metrics, private history and queues, no buffer pooling, and retrieval-cost scoring.
 pub struct DiskCacheOptions {
+    /// Backing filename within the cache directory; defaults to `data`.
+    /// Must be a single filename, without NUL bytes or the reserved `.feuer.` prefix.
+    pub file_name: String,
     /// Raw file I/O metrics.
     pub io_metrics: Arc<IoMetrics>,
     /// Disk-cache lookup, write, and capacity metrics.
@@ -157,6 +160,7 @@ pub struct DiskCacheOptions {
 impl Default for DiskCacheOptions {
     fn default() -> Self {
         Self {
+            file_name: "data".to_owned(),
             io_metrics: IoMetrics::noop(),
             metrics: DiskMetrics::noop(),
             access_histories: Arc::new(ObjectAccessHistories::new()),
@@ -176,6 +180,7 @@ impl DiskCache {
         options: DiskCacheOptions,
     ) -> Result<Self, DiskCacheError> {
         let DiskCacheOptions {
+            file_name,
             io_metrics,
             metrics,
             access_histories,
@@ -189,7 +194,8 @@ impl DiskCache {
             return Err(DiskCacheError::InvalidCapacity);
         }
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
-        let file = DataFile::open_with_io_queues(directory, capacity, io_metrics, buffer_pool, io_queues).await?;
+        let file =
+            DataFile::open_with_io_queues(directory, &file_name, capacity, io_metrics, buffer_pool, io_queues).await?;
         let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
         let shards = (0..num_shards)
             .map(|shard_index| {

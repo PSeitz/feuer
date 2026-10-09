@@ -64,12 +64,21 @@ Create one `IoQueues::new()?` and pass its clones to
 `TieredMemoryDiskCache::open(config, None, Some(io_queues)).await`.
 Metrics and queue sharing are independent: replace `None` with
 `Some(&metrics_registry)` to collect metrics while sharing queues.
-Use a separate directory for each cache, on the same SSD. The caches share only
-low-level read/write queues and worker threads: 64 active reads and 8 active writes,
+Use separate directories or different backing filenames in the same directory:
+
+```rust
+let images = CacheConfig::new("/ssd/cache", 1 << 30, 64 << 20)?.with_file_name("images")?;
+let documents = CacheConfig::new("/ssd/cache", 2 << 30, 32 << 20)?.with_file_name("documents")?;
+```
+
+The filename defaults to `data`, with lock file `.feuer.lock`. Other filenames use
+`.feuer.<filename>.lock`. Filenames must be single names, without NUL bytes or the
+reserved `.feuer.` prefix. Opening the same file twice concurrently fails.
+The caches share only low-level read/write queues and worker threads: 64 active reads and 8 active writes,
 with waiting channels for another 64 reads and 8 writes, across all attached caches.
 Scheduling follows arrival order, without per-cache fairness.
 
-Contents, capacities, eviction, access histories, buffer pools, directory locks,
+Contents, capacities, eviction, access histories, buffer pools, file locks,
 and 512-entry background-write queues remain independent. Dropping one cache does
 not stop the others. Pending I/O retains its target file and lock through completion;
 idle shared queues retain no files. Passing `None` for `io_queues` creates dedicated

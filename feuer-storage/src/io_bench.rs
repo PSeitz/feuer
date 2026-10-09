@@ -23,7 +23,7 @@ impl ReadQueue {
                 "benchmark requires a read-only file",
             ));
         }
-        // Raw read-only benchmarks need no cache directory lock.
+        // Raw read-only benchmarks need no cache file lock.
         let files = Arc::new(uring::DataFileAndDirectoryLock {
             file,
             _directory_lock: None,

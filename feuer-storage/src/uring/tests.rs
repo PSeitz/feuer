@@ -361,7 +361,7 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
     assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
     drop(reservations);
 
-    // The read queue must also keep the shared file and directory lock alive.
+    // The read queue must also keep the shared file and lock alive.
     let weak_files = Arc::downgrade(&files);
     drop(files);
     drop(write_queue);

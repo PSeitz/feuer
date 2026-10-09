@@ -5,10 +5,10 @@ use std::{fmt, io, path::PathBuf};
 pub enum IoOperation {
     /// Create the cache directory.
     CreateDirectory,
-    /// Open the cache-directory lock file.
+    /// Open the data file's lock file.
     OpenLockFile,
-    /// Acquire exclusive ownership of the cache directory.
-    LockDirectory,
+    /// Acquire exclusive ownership of the data file.
+    LockFile,
     /// Open the raw payload data file.
     OpenDataFile,
     /// Inspect the raw payload data file.
@@ -27,7 +27,7 @@ impl IoOperation {
         match self {
             Self::CreateDirectory => "create_directory",
             Self::OpenLockFile => "open_lock_file",
-            Self::LockDirectory => "lock_directory",
+            Self::LockFile => "lock_file",
             Self::OpenDataFile => "open_data_file",
             Self::InspectDataFile => "inspect_data_file",
             Self::ResizeDataFile => "resize_data_file",
@@ -48,7 +48,7 @@ impl fmt::Display for IoOperation {
 pub enum DataFileErrorKind {
     /// The fixed-file configuration is invalid.
     InvalidConfiguration,
-    /// Another cache instance owns the cache directory.
+    /// Another cache instance owns the data file.
     AlreadyOpen,
     /// The requested byte range exceeds capacity, including lengths too large to represent.
     RangeExceedsCapacity,
@@ -84,11 +84,11 @@ pub enum DataFileError {
     /// Capacity is zero, not 4096-byte aligned, or exceeds Linux's file-offset limit.
     #[error("data-file capacity must be a positive multiple of 4096 and at most i64::MAX")]
     InvalidCapacity,
-    /// Another process or cache instance holds the directory lock.
-    #[error("cache directory is already open: {}", .directory.display())]
+    /// Another process or cache instance holds this file's lock.
+    #[error("cache file is already open: {}", .path.display())]
     AlreadyOpen {
-        /// The exclusively owned cache directory.
-        directory: PathBuf,
+        /// The exclusively owned backing file.
+        path: PathBuf,
     },
     /// The configured data path is not a regular file.
     #[error("data-file path is not a regular file: {}", .path.display())]
@@ -158,7 +158,7 @@ impl DataFileError {
     pub const fn operation(&self) -> IoOperation {
         match self {
             Self::InvalidCapacity => IoOperation::OpenDataFile,
-            Self::AlreadyOpen { .. } => IoOperation::LockDirectory,
+            Self::AlreadyOpen { .. } => IoOperation::LockFile,
             Self::InvalidDataFile { .. } => IoOperation::InspectDataFile,
             Self::RuntimeUnavailable => IoOperation::OpenDataFile,
             Self::RangeExceedsCapacity { operation, .. }

@@ -46,7 +46,7 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;
 #[cfg(test)]
 mod tests;
 
-/// The data file and optional cache-directory lock retained together by file handles and I/O requests.
+/// The data file and its optional lock file in the cache directory, retained together by I/O requests.
 pub(crate) struct DataFileAndDirectoryLock {
     pub(crate) file: File,
     pub(crate) _directory_lock: Option<File>,
@@ -163,7 +163,7 @@ impl Drop for IoQueueHandle {
     fn drop(&mut self) {
         self.sender.take();
         wake_queue(&self.wake_fd);
-        // The queue drains submitted I/O before releasing buffers and the directory lock.
+        // The queue drains submitted I/O before releasing buffers and the file lock.
         let _ = self.thread.take().map(JoinHandle::join);
     }
 }
@@ -342,7 +342,7 @@ struct WriteRequestError {
 
 /// One I/O request, owning its buffers through completion; writes cover both buffers.
 struct IoRequest {
-    // Each request retains its target file and directory lock until completion, including on cancellation.
+    // Each request retains its target file and lock until completion, including on cancellation.
     files: Arc<DataFileAndDirectoryLock>,
     // Exclusive disk end of this request, unchanged by short completions.
     disk_end: u64,

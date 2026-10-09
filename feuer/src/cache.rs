@@ -51,14 +51,14 @@ impl fmt::Debug for TieredMemoryDiskCache {
 
 impl TieredMemoryDiskCache {
     /// Opens a cache, using only memory when disk capacity is zero.
-    /// Otherwise requires Tokio, io_uring and direct I/O, locks the directory,
+    /// Otherwise requires Tokio, io_uring and direct I/O, locks the backing file,
     /// and waits for metadata recovery. Disk failures never fall back to memory.
     ///
     /// `metrics_registry: None` disables metrics; `io_queues: None` creates dedicated queues.
     /// Metrics and queues can be supplied independently. A shared registry aggregates metrics;
     /// labels contain no object identities or cache names.
     /// Pass clones of the same [`IoQueues`] to caches on the same SSD to share I/O concurrency.
-    /// Contents, capacities, eviction, buffer pools, directory locks, and background-write queues
+    /// Contents, capacities, eviction, buffer pools, file locks, and background-write queues
     /// remain independent. Zero disk capacity ignores the queues.
     #[cfg(target_os = "linux")]
     pub async fn open(
@@ -95,6 +95,7 @@ impl TieredMemoryDiskCache {
                     config.directory(),
                     config.disk_capacity(),
                     DiskCacheOptions {
+                        file_name: config.file_name().to_owned(),
                         io_metrics: IoMetrics::new(metrics_registry),
                         metrics: feuer_storage::DiskMetrics::new(metrics_registry),
                         access_histories: memory.access_histories().clone(),
@@ -593,13 +594,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_io_queues_preserve_independent_whole_object_caches() {
-        let first_directory = tempfile::tempdir().unwrap();
-        let second_directory = tempfile::tempdir().unwrap();
+    async fn shared_io_queues_preserve_independent_whole_object_caches_in_one_directory() {
+        let directory = tempfile::tempdir().unwrap();
         let (metrics_registry, backend) = registry();
         let queues = IoQueues::new().unwrap();
         let first = TieredMemoryDiskCache::open(
-            CacheConfig::new(first_directory.path(), 4 << 20, 1 << 20).unwrap(),
+            CacheConfig::new(directory.path(), 4 << 20, 1 << 20).unwrap(),
             Some(&backend),
             Some(queues.clone()),
         )
@@ -607,12 +607,20 @@ mod tests {
         .unwrap();
         // Queue sharing does not require the caches to use the same metrics configuration.
         let second = TieredMemoryDiskCache::open(
-            CacheConfig::new(second_directory.path(), 4 << 20, 1 << 20).unwrap(),
+            CacheConfig::new(directory.path(), 4 << 20, 1 << 20)
+                .unwrap()
+                .with_file_name("objects")
+                .unwrap(),
             None,
             Some(queues),
         )
         .await
         .unwrap();
+        assert!(
+            TieredMemoryDiskCache::open(second.config().clone(), None, None)
+                .await
+                .is_err()
+        );
         assert!(!Arc::ptr_eq(
             &first.inner.memory.buffer_pool(),
             &second.inner.memory.buffer_pool()
@@ -821,7 +829,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opening_validates_disk_capacity_and_exclusive_directory_ownership() {
+    async fn opening_validates_disk_capacity_and_exclusive_file_ownership() {
         let (directory, cache) = cache(32).await;
         assert!(
             TieredMemoryDiskCache::open(cache.config().clone(), None, None)

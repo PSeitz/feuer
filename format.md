@@ -44,8 +44,9 @@ reading payloads. Payload checksums are verified when entries are read.
 
 ## Files and encoding
 
-- `data`: backing file; `.feuer.lock`: exclusive directory lock.
-- Integers are unsigned little-endian; addresses are absolute byte offsets in `data`.
+- The backing filename defaults to `data`, with exclusive lock file `.feuer.lock`.
+  A configured filename uses `.feuer.<filename>.lock`; different files may share a directory.
+- Integers are unsigned little-endian; addresses are absolute byte offsets in the backing file.
 - No global header or persistent free-space map; ownership is reconstructed on open.
 
 ## Metadata chunks
