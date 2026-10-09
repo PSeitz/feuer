@@ -123,7 +123,8 @@ pub enum DataFileError {
         operation: IoOperation,
         /// The path on which the operation was attempted.
         path: PathBuf,
-        /// The operating-system error.
+        /// The I/O error. Direct writes include request details and retain the
+        /// operating-system error in the source chain.
         #[source]
         source: io::Error,
     },

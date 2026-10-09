@@ -324,6 +324,22 @@ impl IoBuffers {
 // Only the queue submits pointers; write descriptors stay in its fixed active slots.
 unsafe impl Send for IoBuffers {}
 
+/// An io_uring write request's failure, disk byte range, and buffer alignment.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "{source} (io_uring write: offset={offset}, length={length}, alignment={alignment}, buffer_address_remainders={buffer_address_remainders:?}, buffer_lengths={buffer_lengths:?}){hint}",
+    alignment = DIRECT_IO_ALIGNMENT_BYTES,
+)]
+struct WriteRequestError {
+    #[source]
+    source: io::Error,
+    offset: u64,
+    length: usize,
+    buffer_address_remainders: [usize; 2],
+    buffer_lengths: [usize; 2],
+    hint: &'static str,
+}
+
 /// One I/O request, owning its buffers through completion; writes cover both buffers.
 struct IoRequest {
     // Each request retains its target file and directory lock until completion, including on cancellation.
@@ -380,27 +396,26 @@ impl IoRequest {
             return Ok(());
         }
         if result < 0 {
-            let error = io::Error::from_raw_os_error(-result);
-            if let IoBuffers::Write { vectors, .. } = &self.buffers {
-                tracing::error!(
-                    target: "feuer::storage::io",
-                    fd = self.files.file.as_raw_fd(),
-                    offset = self.disk_end - self.buffer_range.len() as u64,
-                    length = self.buffer_range.len(),
-                    alignment = DIRECT_IO_ALIGNMENT_BYTES,
-                    buffer_address_remainders = ?vectors.map(|vector| vector.iov_base as usize % DIRECT_IO_ALIGNMENT_BYTES),
-                    buffer_lengths = ?vectors.map(|vector| vector.iov_len),
-                    errno = -result,
-                    %error,
-                    hint = if result == -libc::EINVAL {
-                        "EINVAL can indicate an unsupported direct-I/O request or a misaligned offset, length, or buffer address"
+            let source = io::Error::from_raw_os_error(-result);
+            let IoBuffers::Write { vectors, .. } = &self.buffers else {
+                return Err(source);
+            };
+            return Err(io::Error::new(
+                source.kind(),
+                WriteRequestError {
+                    source,
+                    offset: self.disk_end - self.buffer_range.len() as u64,
+                    length: self.buffer_range.len(),
+                    buffer_address_remainders: vectors
+                        .map(|vector| vector.iov_base as usize % DIRECT_IO_ALIGNMENT_BYTES),
+                    buffer_lengths: vectors.map(|vector| vector.iov_len),
+                    hint: if result == -libc::EINVAL {
+                        "; EINVAL can indicate an unsupported direct-I/O request or a misaligned offset, length, or buffer address"
                     } else {
                         ""
                     },
-                    "io_uring direct write failed",
-                );
-            }
-            return Err(error);
+                },
+            ));
         }
         let completion_bytes = result as usize;
         // An unaligned completion leaves a remainder that cannot be resubmitted with O_DIRECT.

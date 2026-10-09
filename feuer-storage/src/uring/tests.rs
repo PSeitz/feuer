@@ -739,7 +739,7 @@ fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
 }
 
 #[test]
-fn write_error_logs_remaining_request_and_buffer_alignment() {
+fn write_error_logs_path_and_request_details_in_one_line() {
     use std::io::{Read, Seek};
 
     let page = DIRECT_IO_ALIGNMENT_BYTES;
@@ -762,23 +762,38 @@ fn write_error_logs_remaining_request_and_buffer_alignment() {
         .with_writer(std::sync::Mutex::new(log.try_clone().unwrap()))
         .finish();
     tracing::subscriber::with_default(subscriber, || {
+        let source = write.apply_completion_result(-libc::EINVAL).unwrap_err();
+        assert_eq!(source.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(
-            write.apply_completion_result(-libc::EINVAL).unwrap_err().raw_os_error(),
+            std::error::Error::source(&source)
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .raw_os_error(),
             Some(libc::EINVAL)
         );
+        let error = crate::DataFileError::Io {
+            operation: IoOperation::Write,
+            path: "/cache/partial-request/data".into(),
+            source,
+        };
+        tracing::error!(target: "feuer::storage", %error, "disk write failed");
     });
     log.rewind().unwrap();
     let mut output = String::new();
     log.read_to_string(&mut output).unwrap();
+    assert_eq!(output.lines().count(), 1, "unexpected log lines: {output}");
     for field in [
         "ERROR".to_string(),
-        "io_uring direct write failed".to_string(),
+        "disk write failed".to_string(),
+        "write failed for /cache/partial-request/data".to_string(),
+        "io_uring write:".to_string(),
         format!("offset={}", 2 * page),
         format!("length={page}"),
         format!("alignment={page}"),
         "buffer_address_remainders=[0, 1]".to_string(),
         format!("buffer_lengths=[0, {page}]"),
-        format!("errno={}", libc::EINVAL),
+        format!("os error {}", libc::EINVAL),
         "EINVAL can indicate".to_string(),
     ] {
         assert!(output.contains(&field), "missing {field} in {output}");
@@ -809,10 +824,17 @@ fn completion_state_handles_short_io_and_errors() {
         write.apply_completion_result(0).unwrap_err().kind(),
         io::ErrorKind::WriteZero
     );
+    let error = write.apply_completion_result(-libc::ENOSPC).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::StorageFull);
     assert_eq!(
-        write.apply_completion_result(-libc::ENOSPC).unwrap_err().raw_os_error(),
+        std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap()
+            .raw_os_error(),
         Some(libc::ENOSPC)
     );
+    assert!(!error.to_string().contains("EINVAL"));
 
     let (mut write, _reply) = request(&files, IoOperation::Write, 0, 2 * page);
     write.apply_completion_result(page as i32).unwrap();
