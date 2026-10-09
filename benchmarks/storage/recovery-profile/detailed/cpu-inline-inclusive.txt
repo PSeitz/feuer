@@ -1,0 +1,466 @@
+# 25216 samples, 16866636329 sampled cycles; DWARF inline expansion via addr2line -i
+# Inclusive percentages overlap; self percentages are mutually exclusive.
+  99.999%  16866515268 start_thread
+  99.999%  16866499385 thread_start
+  99.997%  16866061128 <std::sys::thread::unix::Thread>::new::thread_start
+  99.983%  16863783274 <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once
+  90.560%  15274452199 <std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+  90.560%  15274452199 std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()>::{closure#1}::{closure#0}>>
+  90.560%  15274452199 <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once
+  90.560%  15274452199 std::thread::lifecycle::spawn_unchecked::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()>::{closure#1}
+  90.560%  15274452199 std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()>::{closure#1}::{closure#0}>, ()>
+  90.560%  15274452199 <tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}
+  90.560%  15274452199 std::thread::lifecycle::spawn_unchecked::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()>::{closure#1}::{closure#0}
+  90.560%  15274452199 std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()>::{closure#1}::{closure#0}>, ()>
+  90.560%  15274452199 std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()>
+  90.560%  15274452199 <tokio::runtime::blocking::pool::Inner>::run
+  90.323%  15234531840 <tokio::runtime::blocking::pool::Task>::run
+  90.323%  15234531840 <tokio::runtime::task::UnownedTask<tokio::runtime::blocking::schedule::BlockingSchedule>>::run
+  90.323%  15234531840 <tokio::runtime::task::raw::RawTask>::poll
+  90.024%  15184020332 <tokio::runtime::task::harness::Harness<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll
+  89.949%  15171299469 <tokio::runtime::task::harness::Harness<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll_inner
+  89.948%  15171245378 std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<tokio::runtime::task::harness::poll_future<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>::{closure#0}>, core::task::poll::Poll<()>>
+  89.948%  15171245378 std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<tokio::runtime::task::harness::poll_future<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>::{closure#0}>, core::task::poll::Poll<()>>
+  89.948%  15171245378 std::panicking::catch_unwind::<core::task::poll::Poll<()>, core::panic::unwind_safe::AssertUnwindSafe<tokio::runtime::task::harness::poll_future<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>::{closure#0}>>
+  89.948%  15171245378 tokio::runtime::task::harness::poll_future::<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>
+  89.948%  15171241722 tokio::runtime::task::harness::poll_future::<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>::{closure#0}
+  89.948%  15171241722 <tokio::runtime::task::core::Core<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll
+  89.948%  15171241722 <core::panic::unwind_safe::AssertUnwindSafe<tokio::runtime::task::harness::poll_future<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>::{closure#0}> as core::ops::function::FnOnce<()>>::call_once
+  89.926%  15167570993 <tokio::runtime::task::core::Core<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll::{closure#0}
+  89.926%  15167570993 <tokio::loom::std::unsafe_cell::UnsafeCell<tokio::runtime::task::core::Stage<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>>>>::with_mut::<core::task::poll::Poll<()>, <tokio::runtime::task::core::Core<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll::{closure#0}>
+  89.926%  15167557586 <tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}> as core::future::future::Future>::poll
+  89.919%  15166394161 <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer::<&std::path::Path>::{closure#0}::{closure#1}
+  89.888%  15161138727 <tokio::runtime::handle::Handle>::block_on_inner::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}>
+  89.888%  15161138727 <tokio::runtime::handle::Handle>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}>
+  89.887%  15160956494 tokio::runtime::context::runtime::enter_runtime::<<tokio::runtime::handle::Handle>::block_on_inner<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}>::{closure#0}, ()>
+  89.841%  15153229734 <tokio::runtime::context::blocking::BlockingRegionGuard>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}>
+  89.841%  15153229734 <tokio::runtime::handle::Handle>::block_on_inner::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}>::{closure#0}
+  89.763%  15139987034 <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}>
+  89.517%  15098582791 tokio::task::coop::with_budget::<core::task::poll::Poll<()>, <tokio::runtime::park::CachedParkThread>::block_on<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}>::{closure#0}>
+  89.517%  15098582791 tokio::task::coop::budget::<core::task::poll::Poll<()>, <tokio::runtime::park::CachedParkThread>::block_on<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}>::{closure#0}>
+  89.517%  15098548068 <feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}
+  89.517%  15098548068 <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}>::{closure#0}
+  62.750%  10583766019 <alloc::collections::btree::map::BTreeMap<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert
+  62.750%  10583766019 <feuer_storage::disk_cache::metadata::MetadataPages>::free_entry_metadata
+  62.750%  10583766019 <alloc::collections::btree::set::BTreeSet<feuer_storage::disk_cache::metadata::EntryMetadataLocation>>::insert
+  46.794%   7892526454 <alloc::collections::btree::map::BTreeMap<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::entry
+  46.363%   7819920629 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<feuer_storage::disk_cache::metadata::EntryMetadataLocation>
+  42.301%   7134719769 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<feuer_storage::disk_cache::metadata::EntryMetadataLocation>
+  42.301%   7134719769 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::LeafOrInternal>>::search_node::<feuer_storage::disk_cache::metadata::EntryMetadataLocation>
+  19.822%   3343335266 <core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<feuer_storage::disk_cache::metadata::EntryMetadataLocation>> as core::iter::traits::iterator::Iterator>::next
+  19.822%   3343335266 <core::slice::iter::Iter<feuer_storage::disk_cache::metadata::EntryMetadataLocation> as core::iter::traits::iterator::Iterator>::next
+  13.313%   2245453097 <feuer_storage::disk_cache::DiskCacheShard>::load_metadata_chain::{closure#0}
+  11.408%   1924214507 <alloc::collections::btree::map::entry::VacantEntry<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert
+  11.408%   1924214507 <alloc::collections::btree::map::entry::VacantEntry<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert_entry
+  10.089%   1701689087 <feuer_memory::buffer::AlignedBuffer>::allocate_zeroed
+  10.082%   1700517543 alloc::alloc::alloc_zeroed
+  10.080%   1700223118 __rustc::__rdl_alloc_zeroed
+  10.073%   1699035172 <std::alloc::System as core::alloc::global::GlobalAlloc>::alloc_zeroed
+   9.952%   1678538891 <feuer_storage::disk_cache::metadata::EntryMetadataLocation as core::cmp::Ord>::cmp
+   9.451%   1594133403 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert_entry::{closure#0}>
+   9.072%   1530162867 el0t_64_sync
+   9.072%   1530162867 el0t_64_sync_handler
+   8.272%   1395237463 alloc::alloc::alloc
+   8.215%   1385528423 <alloc::alloc::Global as core::alloc::Allocator>::allocate
+   8.215%   1385528423 <alloc::alloc::Global>::alloc_impl_runtime
+   8.215%   1385528423 <alloc::alloc::Global>::alloc_impl
+   7.903%   1332980422 malloc
+   7.541%   1271855838 __memset_zva64
+   7.442%   1255177607 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert::<alloc::alloc::Global>
+   7.095%   1196765266 core::ptr::write_bytes::<u8>
+   6.860%   1156972913 __aarch64_swp4_rel
+   6.093%   1027674847 std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>>
+   6.093%   1027674847 <binggan::bench::InputWithBenchmark<(), usize> as binggan::bench::Bench>::exec_bench
+   6.093%   1027674847 <binggan::bench_runner::BenchRunner>::run_sequential::{closure#0}
+   6.093%   1027674847 std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}
+   6.093%   1027674847 std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>>
+   6.093%   1027674847 <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+   6.093%   1027674847 std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()>
+   6.093%   1027674847 feuer_storage::disk_cache::recovery::benchmark::benchmark_recovery::{closure#0}
+   6.093%   1027674847 <binggan::bench::NamedBench<(), usize>>::exec_bench
+   6.093%   1027674847 test::run_test_in_process
+   6.093%   1027674847 std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}
+   6.093%   1027674847 <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+   6.093%   1027674847 std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()>
+   6.093%   1027674847 test::run_test_in_process::{closure#0}
+   6.093%   1027674847 <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once
+   6.093%   1027674847 <binggan::bench_runner::BenchRunner>::run_interleaved
+   6.093%   1027674847 alloca::with_alloca::<(), <binggan::bench_runner::BenchRunner>::run_sequential::{closure#0}>::{closure#0}
+   6.093%   1027674847 <feuer_storage::disk_cache::recovery::benchmark::benchmark_recovery::{closure#0} as core::ops::function::FnOnce<()>>::call_once
+   6.093%   1027674847 std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>>
+   6.093%   1027674847 test::run_test::{closure#1}
+   6.093%   1027674847 std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()>
+   6.093%   1027674847 feuer_storage::disk_cache::recovery::benchmark::benchmark_recovery
+   6.093%   1027674847 alloca::trampoline::<alloca::with_alloca<(), <binggan::bench_runner::BenchRunner>::run_sequential::{closure#0}>::{closure#0}>
+   6.093%   1027674847 test::__rust_begin_short_backtrace::<core::result::Result<(), alloc::string::String>, fn() -> core::result::Result<(), alloc::string::String>>
+   6.093%   1027674847 <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once
+   6.093%   1027674847 alloca::with_alloca::<(), <binggan::bench_runner::BenchRunner>::run_interleaved::{closure#0}>
+   6.093%   1027674847 std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>>
+   6.093%   1027674847 <binggan::bench_runner::BenchRunner>::run_group
+   6.093%   1027674847 c_with_alloca
+   6.093%   1027674847 test::run_test::{closure#0}
+   5.981%   1008786304 <alloc::boxed::Box<dyn core::ops::function::FnMut<(&(),), Output = usize>> as core::ops::function::FnMut<(&(),)>>::call_mut
+   5.981%   1008786304 feuer_storage::disk_cache::recovery::benchmark::benchmark_recovery::{closure#2}
+   5.974%   1007574355 <tokio::runtime::runtime::Runtime>::block_on::<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}>
+   5.974%   1007574355 <tokio::runtime::runtime::Runtime>::block_on_inner::<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}>
+   5.973%   1007458437 <tokio::runtime::scheduler::multi_thread::MultiThread>::block_on::<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}>::{closure#0}
+   5.973%   1007458437 tokio::runtime::context::runtime::enter_runtime::<<tokio::runtime::scheduler::multi_thread::MultiThread>::block_on<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}>::{closure#0}, core::result::Result<feuer_storage::disk_cache::DiskCache, feuer_storage::disk_cache::DiskCacheError>>
+   5.973%   1007458437 <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}>
+   5.973%   1007458437 <tokio::runtime::context::blocking::BlockingRegionGuard>::block_on::<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}>
+   5.973%   1007458437 <tokio::runtime::scheduler::multi_thread::MultiThread>::block_on::<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}>
+   5.959%   1005102091 tokio::task::coop::budget::<core::task::poll::Poll<core::result::Result<feuer_storage::disk_cache::DiskCache, feuer_storage::disk_cache::DiskCacheError>>, <tokio::runtime::park::CachedParkThread>::block_on<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}>::{closure#0}>
+   5.959%   1005102091 tokio::task::coop::with_budget::<core::task::poll::Poll<core::result::Result<feuer_storage::disk_cache::DiskCache, feuer_storage::disk_cache::DiskCacheError>>, <tokio::runtime::park::CachedParkThread>::block_on<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}>::{closure#0}>
+   5.959%   1005102091 <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}>::{closure#0}
+   5.959%   1005102091 <feuer_storage::disk_cache::DiskCache>::open::<&std::path::Path>::{closure#0}
+   5.959%   1005098290 <feuer_storage::disk_cache::DiskCache>::open_with_metrics::<&std::path::Path>::{closure#0}
+   5.959%   1005098290 <feuer_storage::disk_cache::DiskCache>::open_with_access_histories::<&std::path::Path>::{closure#0}
+   5.957%   1004662614 <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer::<&std::path::Path>::{closure#0}
+   5.957%   1004662614 <feuer_storage::disk_cache::DiskCache>::open_with_io_queues::<&std::path::Path>::{closure#0}
+   5.957%   1004662614 <feuer_storage::disk_cache::DiskCache>::open_with_buffer_pool::<&std::path::Path>::{closure#0}
+   5.775%    973985981 <feuer_storage::disk_cache::DiskCacheShard>::insert_entry
+   5.680%    958063889 <alloc::vec::Vec<feuer_storage::disk_cache::DiskCacheShard> as core::iter::traits::collect::FromIterator<feuer_storage::disk_cache::DiskCacheShard>>::from_iter::<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>>>
+   5.680%    958063889 <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<feuer_storage::disk_cache::DiskCacheShard>>
+   5.680%    958063889 <core::result::Result<alloc::boxed::Box<[feuer_storage::disk_cache::DiskCacheShard]>, feuer_storage::error::DataFileError> as core::iter::traits::collect::FromIterator<core::result::Result<feuer_storage::disk_cache::DiskCacheShard, feuer_storage::error::DataFileError>>>::from_iter::<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>>::{closure#0}
+   5.680%    958063889 <alloc::vec::Vec<feuer_storage::disk_cache::DiskCacheShard> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<feuer_storage::disk_cache::DiskCacheShard, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>>>>::from_iter
+   5.680%    958063889 <alloc::boxed::Box<[feuer_storage::disk_cache::DiskCacheShard]> as core::iter::traits::collect::FromIterator<feuer_storage::disk_cache::DiskCacheShard>>::from_iter::<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>>>
+   5.680%    958063889 <core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<core::result::Result<alloc::boxed::Box<[feuer_storage::disk_cache::DiskCacheShard]>, feuer_storage::error::DataFileError>>
+   5.680%    958063889 <alloc::vec::Vec<feuer_storage::disk_cache::DiskCacheShard> as alloc::vec::spec_from_iter::SpecFromIter<feuer_storage::disk_cache::DiskCacheShard, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>>>>::from_iter
+   5.680%    958063889 <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>> as core::iter::traits::iterator::Iterator>::collect::<alloc::boxed::Box<[feuer_storage::disk_cache::DiskCacheShard]>>
+   5.680%    958063889 <core::result::Result<alloc::boxed::Box<[feuer_storage::disk_cache::DiskCacheShard]>, feuer_storage::error::DataFileError> as core::iter::traits::collect::FromIterator<core::result::Result<feuer_storage::disk_cache::DiskCacheShard, feuer_storage::error::DataFileError>>>::from_iter::<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>>
+   5.680%    958063889 core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, feuer_storage::disk_cache::DiskCacheShard, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>, <core::result::Result<alloc::boxed::Box<[feuer_storage::disk_cache::DiskCacheShard]>, feuer_storage::error::DataFileError> as core::iter::traits::collect::FromIterator<core::result::Result<feuer_storage::disk_cache::DiskCacheShard, feuer_storage::error::DataFileError>>>::from_iter<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>>::{closure#0}, alloc::boxed::Box<[feuer_storage::disk_cache::DiskCacheShard]>>
+   5.673%    956844578 <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>> as core::iter::traits::iterator::Iterator>::next
+   5.673%    956844578 core::iter::adapters::map::map_try_fold::<usize, core::result::Result<feuer_storage::disk_cache::DiskCacheShard, feuer_storage::error::DataFileError>, (), core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}, <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<feuer_storage::disk_cache::DiskCacheShard, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>>::{closure#0}>::{closure#0}
+   5.673%    956844578 <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer::<&std::path::Path>::{closure#0}::{closure#0}
+   5.673%    956844578 <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::try_for_each::call<feuer_storage::disk_cache::DiskCacheShard, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>>
+   5.673%    956844578 <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>> as core::iter::traits::iterator::Iterator>::try_for_each::<core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>::Break, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>>
+   5.673%    956844578 <core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<feuer_storage::disk_cache::DiskCacheShard, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>>>
+   5.673%    956844578 <core::ops::range::Range<usize> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::map::map_try_fold<usize, core::result::Result<feuer_storage::disk_cache::DiskCacheShard, feuer_storage::error::DataFileError>, (), core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}, <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<feuer_storage::disk_cache::DiskCacheShard, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>>::{closure#0}>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>>>
+   5.656%    953991330 <alloc::vec::Vec<feuer_storage::disk_cache::DiskCacheShard> as alloc::vec::spec_extend::SpecExtend<feuer_storage::disk_cache::DiskCacheShard, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>>>>::spec_extend
+   5.656%    953991330 <alloc::vec::Vec<feuer_storage::disk_cache::DiskCacheShard>>::extend_desugared::<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>>>
+   5.629%    949367987 <feuer_storage::disk_cache::small_entry_buffer::BufferedSmallEntryChunk>::new
+   5.509%    929216786 <core::option::Option<(feuer_types::ObjectKeyHash, feuer_storage::disk_cache::DiskEntry)>>::filter::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}::{closure#0}>
+   5.495%    926744914 <feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}::{closure#0}
+   5.174%    872650195 <feuer_storage::allocation::DiskChunkAllocator>::hold_chunks_for_recovered_payload
+   4.729%    797687854 <feuer_storage::file::DataFile>::read_at::{closure#0}
+   4.729%    797683613 <feuer_storage::file::DataFile>::measure_io::<bytes::bytes::Bytes, <feuer_storage::file::DataFile>::read_at::{closure#0}::{closure#0}>::{closure#0}
+   4.694%    791769760 <tracing::instrument::Instrumented<<feuer_storage::file::DataFile>::read_at::{closure#0}::{closure#0}> as core::future::future::Future>::poll
+   4.685%    790161509 <feuer_storage::file::DataFile>::read_at::{closure#0}::{closure#0}
+   4.684%    790112830 <feuer_storage::file::DataFile>::read_slice::{closure#0}
+   4.662%    786245978 <feuer_storage::uring::ReadQueue>::read::{closure#0}
+   4.551%    767572120 _int_malloc
+   4.528%    763640440 el0_svc
+   4.511%    760807735 el0_da
+   4.496%    758367281 <feuer_memory::buffer::BufferPool>::allocate
+   4.496%    758367281 <feuer_storage::uring::ReadQueue>::allocate_buffer
+   4.334%    731032741 do_el0_svc
+   4.334%    731014523 el0_svc_common.constprop.0
+   4.319%    728431024 invoke_syscall
+   4.198%    708100579 do_mem_abort
+   4.183%    705494898 do_translation_fault
+   4.160%    701579819 do_page_fault
+   4.120%    694834412 core::ptr::copy_nonoverlapping::<u8>
+   4.109%    692967185 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::KV>>::split::<alloc::alloc::Global>
+   4.044%    682111798 <feuer_storage::disk_cache::metadata::MetadataChunk>::clear_entry_metadata_page
+   4.044%    682111798 feuer_storage::disk_cache::page_format::encode_page
+   3.998%    674244535 __memcpy_sve
+   3.959%    667690221 syscall
+   3.902%    658188946 <alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>>::insert
+   3.887%    655553802 <alloc::boxed::Box<[u8]>>::try_clone_from_ref_in
+   3.887%    655553802 <alloc::boxed::Box<[u8]> as core::convert::From<&[u8]>>::from
+   3.887%    655553802 <alloc::boxed::Box<[u8]>>::clone_from_ref_in
+   3.887%    655553802 <alloc::boxed::Box<[u8]>>::clone_from_ref
+   3.874%    653354073 <[u8] as core::clone::CloneToUninit>::clone_to_uninit
+   3.874%    653354073 <u8 as core::clone::uninit::CopySpec>::clone_slice
+   3.871%    652945890 <alloc::collections::btree::node::LeafNode<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::new::<alloc::alloc::Global>
+   3.853%    649853397 handle_mm_fault
+   3.839%    647507133 <alloc::boxed::Box<alloc::collections::btree::node::LeafNode<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>>::try_new_uninit_in
+   3.839%    647507133 <alloc::boxed::Box<alloc::collections::btree::node::LeafNode<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>>::new_uninit_in
+   3.773%    636319720 __handle_mm_fault
+   3.735%    629987253 handle_pte_fault
+   3.644%    614654327 do_anonymous_page
+   3.633%    612709156 <alloc::collections::btree::map::entry::VacantEntry<u64, feuer_storage::disk_cache::DiskEntry>>::insert
+   3.611%    609052916 <alloc::collections::btree::map::entry::VacantEntry<u64, feuer_storage::disk_cache::DiskEntry>>::insert_entry
+   3.607%    608298479 <twox_hash::xxhash64::Hasher>::oneshot
+   3.600%    607182318 <twox_hash::xxhash64::Accumulators>::write_many
+   3.502%    590620304 <alloc::collections::btree::node::LeafNode<u64, feuer_storage::disk_cache::DiskEntry>>::new::<alloc::alloc::Global>
+   3.502%    590620304 <alloc::boxed::Box<alloc::collections::btree::node::LeafNode<u64, feuer_storage::disk_cache::DiskEntry>>>::new_uninit_in
+   3.502%    590620304 <alloc::boxed::Box<alloc::collections::btree::node::LeafNode<u64, feuer_storage::disk_cache::DiskEntry>>>::try_new_uninit_in
+   3.502%    590620304 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Owned, u64, feuer_storage::disk_cache::DiskEntry, alloc::collections::btree::node::marker::Leaf>>::new_leaf::<alloc::alloc::Global>
+   3.330%    561656228 <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<<feuer_storage::uring::IoQueueHandle>::new::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once
+   3.330%    561656228 std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<<feuer_storage::uring::IoQueueHandle>::new::{closure#1}, ()>::{closure#1}::{closure#0}>>
+   3.330%    561656228 std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<<feuer_storage::uring::IoQueueHandle>::new::{closure#1}, ()>::{closure#1}::{closure#0}>, ()>
+   3.330%    561656228 std::thread::lifecycle::spawn_unchecked::<<feuer_storage::uring::IoQueueHandle>::new::{closure#1}, ()>::{closure#1}::{closure#0}
+   3.330%    561656228 std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<<feuer_storage::uring::IoQueueHandle>::new::{closure#1}, ()>::{closure#1}::{closure#0}>, ()>
+   3.330%    561656228 <std::thread::lifecycle::spawn_unchecked<<feuer_storage::uring::IoQueueHandle>::new::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0}
+   3.330%    561656228 std::thread::lifecycle::spawn_unchecked::<<feuer_storage::uring::IoQueueHandle>::new::{closure#1}, ()>::{closure#1}
+   3.328%    561342523 std::sys::backtrace::__rust_begin_short_backtrace::<<feuer_storage::uring::IoQueueHandle>::new::{closure#1}, ()>
+   3.328%    561342523 <feuer_storage::uring::IoQueue>::process_requests_until_disconnected
+   3.328%    561342523 <feuer_storage::uring::IoQueue>::process_requests_with_submit::<<feuer_storage::uring::IoQueue>::process_requests_until_disconnected::{closure#0}>
+   3.328%    561342523 <feuer_storage::uring::IoQueueHandle>::new::{closure#1}
+   3.174%    535355347 <io_uring::submit::Submitter>::submit
+   3.174%    535355347 <io_uring::IoUring>::submit
+   3.174%    535355347 <feuer_storage::uring::IoQueue>::process_requests_until_disconnected::{closure#0}
+   3.174%    535355347 <io_uring::submit::Submitter>::submit_and_wait
+   3.174%    535355347 io_uring::sys::io_uring_enter
+   3.174%    535355347 <io_uring::submit::Submitter>::enter::<libc::unix::linux_like::linux::gnu::b64::sigset_t>
+   3.139%    529419827 __do_sys_io_uring_enter
+   3.139%    529419827 __arm64_sys_io_uring_enter
+   3.134%    528569126 io_submit_sqes
+   3.047%    513999884 io_issue_sqe
+   3.045%    513589496 io_read
+   3.045%    513548215 <std::alloc::System as core::alloc::global::GlobalAlloc>::alloc
+   3.044%    513486610 __io_issue_sqe
+   3.044%    513486610 __io_read
+   3.042%    513041075 ext4_file_read_iter
+   3.032%    511464230 <std::sys::sync::mutex::futex::Mutex>::unlock
+   3.031%    511288410 __iomap_dio_rw
+   3.031%    511288410 iomap_dio_rw
+   3.004%    506677420 __posix_memalign
+   3.004%    506677420 std::sys::alloc::unix::aligned_malloc
+   2.996%    505321092 _mid_memalign.isra.0
+   2.967%    500443681 core::sync::atomic::atomic_swap::<u32>
+   2.967%    500443681 <core::sync::atomic::Atomic<u32>>::swap
+   2.965%    500104054 _int_memalign
+   2.922%    492923184 malloc_consolidate
+   2.880%    485697912 iomap_dio_iter
+   2.690%    453661258 <[u8]>::split_at_checked
+   2.685%    452921476 <[u8]>::split_first_chunk::<32>
+   2.601%    438625579 __arch_clear_user
+   2.601%    438625579 iomap_dio_hole_iter
+   2.431%    410025267 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::LeafOrInternal>>::keys
+   2.166%    365282618 alloc_anon_folio
+   2.158%    363899728 core::ptr::drop_glue::<std::sync::poison::mutex::MutexGuard<std::collections::hash::map::HashMap<u64, (feuer_storage::allocation::ReservedChunks, usize), rustc_hash::FxBuildHasher>>>
+   2.158%    363899728 <std::sync::poison::mutex::MutexGuard<std::collections::hash::map::HashMap<u64, (feuer_storage::allocation::ReservedChunks, usize), rustc_hash::FxBuildHasher>> as core::ops::drop::Drop>::drop
+   2.006%    338291706 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Internal>, alloc::collections::btree::node::marker::Edge>>::descend
+   1.968%    332000178 vma_alloc_folio_noprof
+   1.961%    330681295 vma_alloc_zeroed_movable_folio
+   1.955%    329737627 <u32 as core::cmp::Ord>::cmp
+   1.935%    326359803 folio_alloc_mpol_noprof
+   1.911%    322265526 alloc_pages_mpol
+   1.907%    321594116 __alloc_frozen_pages_noprof
+   1.859%    313605772 get_page_from_freelist
+   1.625%    274027565 <hashbrown::raw::RawTableInner>::reserve_rehash_inner::<alloc::alloc::Global>
+   1.619%    273006682 <hashbrown::raw::RawTableInner>::resize_inner::<alloc::alloc::Global>
+   1.585%    267364001 __pi_clear_page
+   1.549%    261274222 <core::ptr::non_null::NonNull<feuer_storage::disk_cache::metadata::EntryMetadataLocation>>::add
+   1.385%    233576258 <feuer_storage::allocation::DiskChunkAllocator>::reserve_chunks_at
+   1.318%    222310828 <hashbrown::map::HashMap<feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>, rustc_hash::FxBuildHasher>>::rustc_entry
+   1.318%    222310828 <std::collections::hash::map::HashMap<feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>, rustc_hash::FxBuildHasher>>::entry
+   1.299%    219024238 __aarch64_cas4_acq
+   1.281%    215994697 <hashbrown::raw::RawTable<(feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>)>>::reserve::<hashbrown::map::make_hasher<feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>, rustc_hash::FxBuildHasher>::{closure#0}>
+   1.281%    215994697 <hashbrown::map::HashMap<feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>, rustc_hash::FxBuildHasher>>::reserve
+   1.273%    214671116 <hashbrown::raw::RawTable<(feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>)>>::reserve_rehash::<hashbrown::map::make_hasher<feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>, rustc_hash::FxBuildHasher>::{closure#0}>
+   1.153%    194431090 <hashbrown::raw::RawTableInner>::prepare_insert_index
+   1.077%    181734548 <hashbrown::raw::RawTableInner>::find_insert_index
+   0.999%    168474997 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Internal>, alloc::collections::btree::node::marker::Edge>>::insert::<alloc::alloc::Global>
+   0.939%    158298794 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>>::len
+   0.907%    153033086 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>>::as_leaf_ptr
+   0.851%    143548546 <std::sys::sync::mutex::futex::Mutex>::lock
+   0.811%    136852929 unlink_chunk.isra.0
+   0.803%    135359326 <hashbrown::raw::RawTableInner>::find_insert_index_in_group
+   0.779%    131436434 <core::sync::atomic::Atomic<u32>>::compare_exchange
+   0.779%    131436434 core::sync::atomic::atomic_compare_exchange::<u32>
+   0.768%    129463017 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Internal>, alloc::collections::btree::node::marker::KV>>::split::<alloc::alloc::Global>
+   0.766%    129230862 <std::sync::poison::mutex::MutexGuard<feuer_storage::allocation::FreeChunks> as core::ops::drop::Drop>::drop
+   0.766%    129230862 core::ptr::drop_glue::<std::sync::poison::mutex::MutexGuard<feuer_storage::allocation::FreeChunks>>
+   0.679%    114493463 feuer_storage::disk_cache::recovery::decode_entry_metadata
+   0.676%    114009719 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_fit
+   0.634%    106882708 <&[u8; 48] as core::cmp::PartialEq>::eq
+   0.634%    106882708 <[u8; 48] as core::cmp::PartialEq>::eq
+   0.634%    106882708 <u8 as core::array::equality::SpecArrayEq<u8, 48>>::spec_eq
+   0.628%    105893162 twox_hash::xxhash64::round
+   0.628%    105893162 <twox_hash::xxhash64::Accumulators>::write
+   0.604%    101880465 folio_add_lru
+   0.602%    101517295 <hashbrown::control::group::neon::Group>::match_empty_or_deleted
+   0.602%    101517295 core::core_arch::aarch64::neon::generated::vcltz_s8
+   0.596%    100516798 folio_add_lru_vma
+   0.594%    100269945 <alloc::boxed::Box<alloc::collections::btree::node::InternalNode<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>>::try_new_uninit_in
+   0.594%    100269945 <alloc::collections::btree::node::InternalNode<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::new::<alloc::alloc::Global>
+   0.594%    100269945 <alloc::boxed::Box<alloc::collections::btree::node::InternalNode<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>>::new_uninit_in
+   0.583%     98276625 __folio_batch_add_and_move
+   0.571%     96358407 __arm64_sys_futex
+   0.563%     94976600 <feuer_storage::allocation::DiskChunkAllocator>::reserve_chunk_numbers
+   0.555%     93606860 do_futex
+   0.552%     93152383 folio_batch_move_lru
+   0.532%     89681662 <std::sync::poison::mutex::Mutex<std::collections::hash::map::HashMap<u64, (feuer_storage::allocation::ReservedChunks, usize), rustc_hash::FxBuildHasher>>>::lock
+   0.483%     81471416 feuer_storage::recovery_profile::event
+   0.473%     79780220 <hashbrown::map::HashMap<u64, (feuer_storage::allocation::ReservedChunks, usize), rustc_hash::FxBuildHasher>>::rustc_entry
+   0.473%     79780220 <std::collections::hash::map::HashMap<u64, (feuer_storage::allocation::ReservedChunks, usize), rustc_hash::FxBuildHasher>>::entry
+   0.462%     77989564 <core::iter::adapters::enumerate::Enumerate<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<[u8; 4096]>, core::slice::iter::Iter<[u8; 48]>, <feuer_storage::disk_cache::metadata::MetadataChunk>::entry_metadata_records::{closure#0}>> as core::iter::traits::iterator::Iterator>::next
+   0.452%     76168363 __pte_offset_map_lock
+   0.438%     73924539 <[u8] as core::slice::specialize::SpecFill<u8>>::spec_fill
+   0.438%     73924539 <[u8]>::fill
+   0.414%     69786977 <feuer_storage::allocation::FreeChunks>::remove_free_chunks
+   0.400%     67522088 <std::sys::sync::condvar::futex::Condvar>::wait_optional_timeout
+   0.392%     66136090 <u64>::wrapping_add
+   0.363%     61208684 std::sys::pal::unix::futex::futex_wait
+   0.359%     60614433 <feuer_storage::allocation::ReservedChunks>::mark_recovered
+   0.354%     59782661 <hashbrown::map::HashMap<u64, (feuer_storage::allocation::ReservedChunks, usize), rustc_hash::FxBuildHasher>>::reserve
+   0.354%     59782661 <hashbrown::raw::RawTable<(u64, (feuer_storage::allocation::ReservedChunks, usize))>>::reserve::<hashbrown::map::make_hasher<u64, (feuer_storage::allocation::ReservedChunks, usize), rustc_hash::FxBuildHasher>::{closure#0}>
+   0.352%     59356449 <hashbrown::raw::RawTable<(u64, (feuer_storage::allocation::ReservedChunks, usize))>>::reserve_rehash::<hashbrown::map::make_hasher<u64, (feuer_storage::allocation::ReservedChunks, usize), rustc_hash::FxBuildHasher>::{closure#0}>
+   0.327%     55162928 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::LeafOrInternal>, alloc::collections::btree::node::marker::Edge>>::force
+   0.327%     55162928 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::LeafOrInternal>>::force
+   0.323%     54416262 folio_add_new_anon_rmap
+   0.310%     52364202 [unknown]
+   0.310%     52302936 __kernel_clock_gettime
+   0.310%     52275219 clock_gettime@@GLIBC_2.17
+   0.309%     52039785 <std::sync::poison::mutex::Mutex<feuer_storage::allocation::FreeChunks>>::lock
+   0.303%     51025962 feuer_storage::recovery_profile::clock
+   0.300%     50590240 __folio_mod_stat
+   0.297%     50108636 futex_wake
+   0.294%     49672055 <alloc::raw_vec::RawVecInner>::finish_grow
+   0.294%     49672055 <alloc::raw_vec::RawVecInner>::grow_amortized
+   0.287%     48367680 core::ptr::read_unaligned::<[u64; 4]>
+   0.287%     48367680 core::ptr::read::<core::ptr::Packed<[u64; 4]>>
+   0.287%     48367680 <*const [u64; 4]>::read_unaligned
+   0.285%     48063367 __lruvec_stat_mod_folio
+   0.278%     46971822 tokio::runtime::task::harness::poll_future::<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>::{closure#0}
+   0.278%     46971822 tokio::runtime::task::harness::poll_future::<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>
+   0.278%     46971822 <tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}> as core::future::future::Future>::poll
+   0.278%     46971822 <core::panic::unwind_safe::AssertUnwindSafe<tokio::runtime::task::harness::poll_future<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>::{closure#0}> as core::ops::function::FnOnce<()>>::call_once
+   0.278%     46971822 <tokio::runtime::task::harness::Harness<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll_inner
+   0.278%     46971822 <tokio::runtime::task::harness::Harness<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll
+   0.278%     46971822 <tokio::loom::std::unsafe_cell::UnsafeCell<tokio::runtime::task::core::Stage<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>>>>::with_mut::<core::task::poll::Poll<core::result::Result<feuer_storage::file::DataFileState, feuer_storage::error::DataFileError>>, <tokio::runtime::task::core::Core<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll::{closure#0}>
+   0.278%     46971822 <tokio::runtime::task::core::Core<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll
+   0.278%     46971822 std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<tokio::runtime::task::harness::poll_future<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>::{closure#0}>, core::task::poll::Poll<core::result::Result<feuer_storage::file::DataFileState, feuer_storage::error::DataFileError>>>
+   0.278%     46971822 <tokio::runtime::task::core::Core<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll::{closure#0}
+   0.278%     46971822 std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<tokio::runtime::task::harness::poll_future<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>::{closure#0}>, core::task::poll::Poll<core::result::Result<feuer_storage::file::DataFileState, feuer_storage::error::DataFileError>>>
+   0.278%     46971822 std::panicking::catch_unwind::<core::task::poll::Poll<core::result::Result<feuer_storage::file::DataFileState, feuer_storage::error::DataFileError>>, core::panic::unwind_safe::AssertUnwindSafe<tokio::runtime::task::harness::poll_future<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::file::DataFile>::open_with_io_queues<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>::{closure#0}>>
+   0.278%     46971822 <feuer_storage::file::DataFile>::open_with_io_queues::<&std::path::Path>::{closure#0}::{closure#1}::{closure#0}
+   0.278%     46971822 feuer_storage::file::open_file_state
+   0.278%     46835950 iomap_dio_bio_iter
+   0.273%     46089195 <alloc::alloc::Global>::grow_impl_runtime
+   0.273%     46089195 <alloc::alloc::Global>::grow_impl
+   0.273%     46089195 alloc::alloc::realloc_nonnull
+   0.273%     46089195 <alloc::alloc::Global as core::alloc::Allocator>::grow
+   0.267%     45021951 realloc
+   0.264%     44595506 feuer_storage::disk_cache::page_format::validate_page
+   0.262%     44184645 <hashbrown::raw::RawTableInner>::find_inner
+   0.254%     42923999 <alloc::vec::Vec<(feuer_types::ObjectKeyHash, u64)>>::push_mut
+   0.254%     42923999 <alloc::vec::Vec<(feuer_types::ObjectKeyHash, u64)>>::push
+   0.248%     41859963 <alloc::raw_vec::RawVecInner>::grow_one
+   0.239%     40294669 core::intrinsics::unlikely
+   0.238%     40173753 <hashbrown::raw::RawTableInner>::fix_insert_index
+   0.237%     40021295 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::KV>>::split_leaf_data
+   0.237%     39970088 futex_wait
+   0.233%     39368492 wake_up_q
+   0.233%     39368492 try_to_wake_up
+   0.233%     39353912 rmqueue.isra.0
+   0.230%     38759912 <alloc::raw_vec::RawVec<(feuer_types::ObjectKeyHash, u64)>>::grow_one
+   0.227%     38344384 <hashbrown::control::bitmask::BitMask>::lowest_set_bit
+   0.226%     38131080 <alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>>::entry
+   0.215%     36345558 __futex_wait
+   0.214%     36109992 <tokio::runtime::park::Inner>::park
+   0.207%     34977746 <std::sync::poison::condvar::Condvar>::wait::<()>
+   0.207%     34865506 alloc::collections::btree::node::slice_insert::<feuer_storage::disk_cache::metadata::EntryMetadataLocation>
+   0.207%     34840658 <std::sys::sync::condvar::futex::Condvar>::wait
+   0.206%     34691124 <feuer_storage::uring::IoQueueHandle>::new
+   0.198%     33435277 <std::sync::poison::condvar::Condvar>::wait_timeout::<tokio::runtime::blocking::pool::Shared>
+   0.194%     32760594 _int_realloc
+   0.192%     32387216 <core::iter::adapters::flatten::FlattenCompat<core::iter::adapters::map::Map<core::slice::iter::Iter<[u8; 4096]>, <feuer_storage::disk_cache::metadata::MetadataChunk>::entry_metadata_records::{closure#0}>, core::slice::iter::Iter<[u8; 48]>> as core::iter::traits::iterator::Iterator>::next
+   0.192%     32387216 <core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<[u8; 4096]>, core::slice::iter::Iter<[u8; 48]>, <feuer_storage::disk_cache::metadata::MetadataChunk>::entry_metadata_records::{closure#0}> as core::iter::traits::iterator::Iterator>::next
+   0.185%     31276808 <core::option::Option<core::slice::iter::Iter<[u8; 48]>>>::as_mut
+   0.185%     31276808 core::iter::adapters::flatten::and_then_or_clear::<core::slice::iter::Iter<[u8; 48]>, &[u8; 48], <core::slice::iter::Iter<[u8; 48]> as core::iter::traits::iterator::Iterator>::next>
+   0.185%     31225328 __arm64_sys_clock_gettime
+   0.177%     29778163 lock_vma_under_rcu
+   0.176%     29659727 __rmqueue_pcplist
+   0.168%     28361851 core::ptr::read::<core::ptr::non_null::NonNull<alloc::collections::btree::node::LeafNode<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>>
+   0.168%     28361851 <core::mem::maybe_uninit::MaybeUninit<core::ptr::non_null::NonNull<alloc::collections::btree::node::LeafNode<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>>>::assume_init_read
+   0.168%     28361851 <*const core::ptr::non_null::NonNull<alloc::collections::btree::node::LeafNode<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>>::read
+   0.168%     28325246 <tokio::task::join_set::JoinSet<()>>::spawn_blocking::<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>
+   0.166%     27957998 futex_do_wait
+   0.166%     27943361 <[u8]>::copy_from_slice
+   0.166%     27943361 core::slice::copy_from_slice_impl::<u8>
+   0.160%     27009254 <hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+   0.160%     27009254 <hashbrown::raw::RawTableInner>::prepare_resize::<alloc::alloc::Global>
+   0.160%     26979236 __mem_cgroup_charge
+   0.156%     26228880 ??
+   0.154%     25962288 <feuer_storage::uring::ReadQueue>::new
+   0.153%     25880485 <*const u8>::add
+   0.153%     25880485 <[u8]>::split_at_unchecked
+   0.153%     25758066 <alloc::collections::btree::map::BTreeMap<u64, u64>>::remove_entry::<u64>
+   0.153%     25758066 <alloc::collections::btree::map::BTreeMap<u64, u64>>::remove::<u64>
+   0.153%     25724703 <tokio::runtime::blocking::pool::Spawner>::spawn_blocking_inner::<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}, ()>
+   0.153%     25724703 tokio::runtime::blocking::pool::spawn_blocking::<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}, ()>
+   0.153%     25724703 <tokio::runtime::handle::Handle>::spawn_blocking::<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}, ()>
+   0.153%     25724703 <tokio::runtime::blocking::pool::Spawner>::spawn_blocking::<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}, ()>
+   0.149%     25115412 blk_mq_flush_plug_list
+   0.146%     24594699 <hashbrown::raw::RawTableInner>::new_uninitialized::<alloc::alloc::Global>
+   0.146%     24570652 schedule
+   0.144%     24334278 __schedule
+   0.143%     24116525 nvme_prep_rq
+   0.143%     24116525 blk_mq_dispatch_queue_requests
+   0.143%     24116525 nvme_queue_rqs
+   0.142%     23902048 __aarch64_ldadd8_relax
+   0.141%     23850516 thread_cpu_clock_get
+   0.141%     23786287 posix_cpu_clock_get
+   0.140%     23584105 <std::sync::poison::Flag>::guard
+   0.139%     23408934 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Internal>, alloc::collections::btree::node::marker::Edge>>::insert_fit
+   0.138%     23295248 <alloc::collections::btree::map::entry::OccupiedEntry<u64, u64>>::remove_entry
+   0.138%     23277697 <alloc::collections::btree::map::entry::OccupiedEntry<u64, u64>>::remove_kv
+   0.138%     23242259 hashbrown::alloc::inner::do_alloc::<alloc::alloc::Global>
+   0.136%     23000668 finish_task_switch.isra.0
+   0.136%     22966825 <alloc::collections::btree::map::BTreeMap<u64, u64>>::insert
+   0.135%     22763092 <feuer_storage::disk_cache::DiskCacheInner>::shard_index_for_key
+   0.134%     22666800 <core::sync::atomic::Atomic<usize>>::fetch_add
+   0.134%     22666800 core::sync::atomic::atomic_add::<usize, usize>
+   0.134%     22521654 __rustc::__rust_alloc
+   0.133%     22504832 iomap_iter
+   0.131%     22179083 mas_walk
+   0.130%     22001118 <tokio::runtime::blocking::pool::Spawner>::spawn_task
+   0.129%     21785748 __memcpy_generic
+   0.128%     21555759 <tokio::sync::oneshot::Sender<core::result::Result<core::option::Option<feuer_memory::buffer::AlignedBuffer>, core::io::error::Error>>>::send
+   0.128%     21555759 <tokio::sync::oneshot::Inner<core::result::Result<core::option::Option<feuer_memory::buffer::AlignedBuffer>, core::io::error::Error>>>::complete
+   0.128%     21555759 <feuer_storage::uring::IoRequest>::send_result
+   0.127%     21496590 <core::task::wake::Waker>::wake_by_ref
+   0.127%     21462102 mod_memcg_lruvec_state
+   0.127%     21418682 <alloc::sync::Arc<std::sync::poison::mutex::Mutex<feuer_storage::allocation::FreeChunks>> as core::clone::Clone>::clone
+   0.126%     21312472 bio_iov_iter_get_pages
+   0.126%     21312472 __bio_iov_iter_get_pages
+   0.126%     21256426 ext4_iomap_begin
+   0.126%     21254922 submit_bio_noacct
+   0.126%     21254922 iomap_dio_submit_bio
+   0.126%     21254922 __submit_bio
+   0.126%     21254922 submit_bio
+   0.126%     21254922 submit_bio_noacct_nocheck
+   0.126%     21254922 blk_mq_submit_bio
+   0.126%     21194278 std::panicking::panic_count::count_is_zero
+   0.126%     21194278 std::panicking::panicking
+   0.126%     21194278 std::thread::functions::panicking
+   0.126%     21190191 <alloc::collections::btree::map::entry::VacantEntry<u64, u64>>::insert
+   0.126%     21190191 <alloc::collections::btree::map::entry::VacantEntry<u64, u64>>::insert_entry
+   0.124%     20992333 <feuer_storage::disk_cache::DiskEntryIndex>::covering_entry
+   0.124%     20992333 <hashbrown::map::HashMap<feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>, rustc_hash::FxBuildHasher>>::get_mut::<feuer_types::ObjectKeyHash>
+   0.124%     20992333 <std::collections::hash::map::HashMap<feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>, rustc_hash::FxBuildHasher>>::get_mut::<feuer_types::ObjectKeyHash>
+   0.124%     20935728 ext4_map_blocks
+   0.124%     20913360 rmqueue_bulk
+   0.124%     20850180 <hashbrown::raw::RawTable<(feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>)>>::find::<hashbrown::map::equivalent_key<feuer_types::ObjectKeyHash, feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>>::{closure#0}>
+   0.123%     20814992 core::intrinsics::rotate_left::<u64>
+   0.123%     20814992 <u64>::rotate_left
+   0.123%     20707720 __umodti3
+   0.122%     20497520 ext4_es_lookup_extent
+   0.121%     20444990 <feuer_storage::uring::IoQueueHandle>::submit_and_wait::{closure#0}
+   0.121%     20342407 <tokio::loom::std::unsafe_cell::UnsafeCell<core::mem::maybe_uninit::MaybeUninit<core::task::wake::Waker>>>::with::<(), <tokio::sync::oneshot::Task>::with_task<<core::task::wake::Waker>::wake_by_ref, ()>::{closure#0}>
+   0.121%     20342407 <<core::task::wake::Waker>::wake_by_ref as core::ops::function::FnOnce<(&core::task::wake::Waker,)>>::call_once
+   0.121%     20342407 <tokio::sync::oneshot::Task>::with_task::<<core::task::wake::Waker>::wake_by_ref, ()>::{closure#0}
+   0.121%     20342407 <tokio::sync::oneshot::Task>::with_task::<<core::task::wake::Waker>::wake_by_ref, ()>
+   0.118%     19895982 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::DormantMut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::KV>>::awaken
+   0.117%     19797103 cpu_clock_sample
+   0.117%     19714491 task_rq_unlock
+   0.116%     19565425 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u64, u64, alloc::collections::btree::node::marker::LeafOrInternal>, alloc::collections::btree::node::marker::KV>>::remove_kv_tracking::<<alloc::collections::btree::map::entry::OccupiedEntry<u64, u64>>::remove_kv::{closure#0}, alloc::alloc::Global>
+   0.115%     19318459 <u64>::wrapping_mul
+   0.108%     18263355 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u64, u64, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::KV>>::remove_leaf_kv::<<alloc::collections::btree::map::entry::OccupiedEntry<u64, u64>>::remove_kv::{closure#0}, alloc::alloc::Global>
+   0.107%     18099502 perf_tp_event
+   0.107%     18099502 perf_trace_run_bpf_submit
+   0.107%     17988760 __perf_event_overflow
+   0.107%     17988760 perf_swevent_event
+   0.106%     17940616 <core::mem::maybe_uninit::MaybeUninit<feuer_storage::disk_cache::metadata::EntryMetadataLocation>>::write
+   0.106%     17851749 cfree@GLIBC_2.17
+   0.105%     17719169 _int_free
+   0.105%     17643642 <binggan::plugins::events::PluginManager>::emit
+   0.105%     17643642 <feuer_storage::recovery_profile::ProfileRecovery as binggan::plugins::events::EventListener>::on_event
+   0.104%     17608435 compiler_builtins::int::udiv::__umodti3
+   0.103%     17322621 pin_user_pages_fast
+   0.103%     17322621 iov_iter_extract_pages
+   0.103%     17322621 gup_fast_fallback
+   0.101%     17018334 <hashbrown::raw::RawTable<(u64, (feuer_storage::allocation::ReservedChunks, usize))>>::find::<<hashbrown::map::HashMap<u64, (feuer_storage::allocation::ReservedChunks, usize), rustc_hash::FxBuildHasher>>::rustc_entry::{closure#0}>

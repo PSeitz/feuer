@@ -1,0 +1,432 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="1190" viewBox="0 0 1040 1190">
+<rect width="1040" height="1190" fill="white"/>
+<style>text{font-family:monospace;font-size:12px}</style>
+<text x="20" y="24" fill="#222">Recovery wall-time timeline: open 74, 16.095 ms; latest shard 57</text>
+<text x="20" y="44" fill="#222">Blue: read API (includes waits). Purple: record/index rebuild. Orange: shard initialization.</text>
+<line x1="180.00" y1="66" x2="180.00" y2="1120" stroke="#eee"/>
+<text x="180.0" y="62" fill="#222">0ms</text>
+<line x1="229.70" y1="66" x2="229.70" y2="1120" stroke="#eee"/>
+<text x="229.6982292458797" y="62" fill="#222">1ms</text>
+<line x1="279.40" y1="66" x2="279.40" y2="1120" stroke="#eee"/>
+<text x="279.3964584917594" y="62" fill="#222">2ms</text>
+<line x1="329.09" y1="66" x2="329.09" y2="1120" stroke="#eee"/>
+<text x="329.0946877376391" y="62" fill="#222">3ms</text>
+<line x1="378.79" y1="66" x2="378.79" y2="1120" stroke="#eee"/>
+<text x="378.7929169835188" y="62" fill="#222">4ms</text>
+<line x1="428.49" y1="66" x2="428.49" y2="1120" stroke="#eee"/>
+<text x="428.4911462293985" y="62" fill="#222">5ms</text>
+<line x1="478.19" y1="66" x2="478.19" y2="1120" stroke="#eee"/>
+<text x="478.18937547527815" y="62" fill="#222">6ms</text>
+<line x1="527.89" y1="66" x2="527.89" y2="1120" stroke="#eee"/>
+<text x="527.8876047211579" y="62" fill="#222">7ms</text>
+<line x1="577.59" y1="66" x2="577.59" y2="1120" stroke="#eee"/>
+<text x="577.5858339670376" y="62" fill="#222">8ms</text>
+<line x1="627.28" y1="66" x2="627.28" y2="1120" stroke="#eee"/>
+<text x="627.2840632129173" y="62" fill="#222">9ms</text>
+<line x1="676.98" y1="66" x2="676.98" y2="1120" stroke="#eee"/>
+<text x="676.982292458797" y="62" fill="#222">10ms</text>
+<line x1="726.68" y1="66" x2="726.68" y2="1120" stroke="#eee"/>
+<text x="726.6805217046766" y="62" fill="#222">11ms</text>
+<line x1="776.38" y1="66" x2="776.38" y2="1120" stroke="#eee"/>
+<text x="776.3787509505563" y="62" fill="#222">12ms</text>
+<line x1="826.08" y1="66" x2="826.08" y2="1120" stroke="#eee"/>
+<text x="826.076980196436" y="62" fill="#222">13ms</text>
+<line x1="875.78" y1="66" x2="875.78" y2="1120" stroke="#eee"/>
+<text x="875.7752094423157" y="62" fill="#222">14ms</text>
+<line x1="925.47" y1="66" x2="925.47" y2="1120" stroke="#eee"/>
+<text x="925.4734386881954" y="62" fill="#222">15ms</text>
+<line x1="975.17" y1="66" x2="975.17" y2="1120" stroke="#eee"/>
+<text x="975.1716679340751" y="62" fill="#222">16ms</text>
+<text x="20" y="90" fill="#222">Opening thread</text>
+<rect x="180.00" y="80" width="23.47" height="11" fill="#888"><title>file/ring setup: 0.472 ms</title></rect>
+<rect x="203.47" y="80" width="11.64" height="11" fill="#287fb8"><title>aligned-read probe: 0.234 ms</title></rect>
+<rect x="215.11" y="80" width="342.41" height="11" fill="#e78c24"><title>construct shards: 6.890 ms</title></rect>
+<rect x="557.52" y="80" width="422.48" height="11" fill="#ddd"><title>await shard recovery and finish: 8.501 ms</title></rect>
+<text x="20" y="125" fill="#222">Shard 00</text>
+<rect x="557.66" y="115" width="1.61" height="11" fill="#aaa"><title>task queue: 0.032 ms</title></rect>
+<rect x="559.27" y="115" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="559.40" y="115" width="105.60" height="11" fill="#287fb8"><title>metadata read API: 2.125 ms</title></rect>
+<rect x="665.00" y="115" width="10.09" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.203 ms</title></rect>
+<rect x="675.09" y="115" width="77.41" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.558 ms</title></rect>
+<text x="20" y="140" fill="#222">Shard 01</text>
+<rect x="558.08" y="130" width="1.76" height="11" fill="#aaa"><title>task queue: 0.035 ms</title></rect>
+<rect x="559.84" y="130" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="559.97" y="130" width="105.09" height="11" fill="#287fb8"><title>metadata read API: 2.115 ms</title></rect>
+<rect x="665.06" y="130" width="10.57" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.213 ms</title></rect>
+<rect x="675.64" y="130" width="75.27" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.515 ms</title></rect>
+<text x="20" y="155" fill="#222">Shard 02</text>
+<rect x="558.26" y="145" width="1.73" height="11" fill="#aaa"><title>task queue: 0.035 ms</title></rect>
+<rect x="559.98" y="145" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="560.11" y="145" width="105.10" height="11" fill="#287fb8"><title>metadata read API: 2.115 ms</title></rect>
+<rect x="665.21" y="145" width="10.25" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.206 ms</title></rect>
+<rect x="675.46" y="145" width="77.34" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.556 ms</title></rect>
+<text x="20" y="170" fill="#222">Shard 03</text>
+<rect x="558.53" y="160" width="1.84" height="11" fill="#aaa"><title>task queue: 0.037 ms</title></rect>
+<rect x="560.36" y="160" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="560.51" y="160" width="104.88" height="11" fill="#287fb8"><title>metadata read API: 2.110 ms</title></rect>
+<rect x="665.39" y="160" width="9.74" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.196 ms</title></rect>
+<rect x="675.13" y="160" width="75.91" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.527 ms</title></rect>
+<text x="20" y="185" fill="#222">Shard 04</text>
+<rect x="558.73" y="175" width="1.84" height="11" fill="#aaa"><title>task queue: 0.037 ms</title></rect>
+<rect x="560.57" y="175" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="560.73" y="175" width="105.55" height="11" fill="#287fb8"><title>metadata read API: 2.124 ms</title></rect>
+<rect x="666.28" y="175" width="11.65" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.234 ms</title></rect>
+<rect x="677.93" y="175" width="76.01" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.529 ms</title></rect>
+<text x="20" y="200" fill="#222">Shard 05</text>
+<rect x="558.90" y="190" width="1.87" height="11" fill="#aaa"><title>task queue: 0.038 ms</title></rect>
+<rect x="560.77" y="190" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="560.89" y="190" width="104.98" height="11" fill="#287fb8"><title>metadata read API: 2.112 ms</title></rect>
+<rect x="665.87" y="190" width="11.44" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.230 ms</title></rect>
+<rect x="677.30" y="190" width="75.51" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.519 ms</title></rect>
+<text x="20" y="215" fill="#222">Shard 06</text>
+<rect x="559.12" y="205" width="1.86" height="11" fill="#aaa"><title>task queue: 0.037 ms</title></rect>
+<rect x="560.98" y="205" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.004 ms</title></rect>
+<rect x="561.16" y="205" width="106.26" height="11" fill="#287fb8"><title>metadata read API: 2.138 ms</title></rect>
+<rect x="667.42" y="205" width="11.27" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.227 ms</title></rect>
+<rect x="678.68" y="205" width="77.27" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.555 ms</title></rect>
+<text x="20" y="230" fill="#222">Shard 07</text>
+<rect x="559.29" y="220" width="1.72" height="11" fill="#aaa"><title>task queue: 0.035 ms</title></rect>
+<rect x="561.01" y="220" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.004 ms</title></rect>
+<rect x="561.21" y="220" width="105.49" height="11" fill="#287fb8"><title>metadata read API: 2.123 ms</title></rect>
+<rect x="666.70" y="220" width="10.53" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.212 ms</title></rect>
+<rect x="677.23" y="220" width="76.06" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.530 ms</title></rect>
+<text x="20" y="245" fill="#222">Shard 08</text>
+<rect x="559.51" y="235" width="2.26" height="11" fill="#aaa"><title>task queue: 0.046 ms</title></rect>
+<rect x="561.77" y="235" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="561.92" y="235" width="104.58" height="11" fill="#287fb8"><title>metadata read API: 2.104 ms</title></rect>
+<rect x="666.50" y="235" width="11.69" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.235 ms</title></rect>
+<rect x="678.19" y="235" width="75.57" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.521 ms</title></rect>
+<text x="20" y="260" fill="#222">Shard 09</text>
+<rect x="559.70" y="250" width="2.21" height="11" fill="#aaa"><title>task queue: 0.045 ms</title></rect>
+<rect x="561.92" y="250" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="562.04" y="250" width="103.45" height="11" fill="#287fb8"><title>metadata read API: 2.082 ms</title></rect>
+<rect x="665.49" y="250" width="9.79" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.197 ms</title></rect>
+<rect x="675.28" y="250" width="76.41" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.537 ms</title></rect>
+<text x="20" y="275" fill="#222">Shard 10</text>
+<rect x="559.90" y="265" width="2.06" height="11" fill="#aaa"><title>task queue: 0.041 ms</title></rect>
+<rect x="561.96" y="265" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.004 ms</title></rect>
+<rect x="562.18" y="265" width="105.39" height="11" fill="#287fb8"><title>metadata read API: 2.121 ms</title></rect>
+<rect x="667.57" y="265" width="10.85" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.218 ms</title></rect>
+<rect x="678.41" y="265" width="75.82" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.526 ms</title></rect>
+<text x="20" y="290" fill="#222">Shard 11</text>
+<rect x="560.09" y="280" width="2.05" height="11" fill="#aaa"><title>task queue: 0.041 ms</title></rect>
+<rect x="562.14" y="280" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.005 ms</title></rect>
+<rect x="562.40" y="280" width="105.20" height="11" fill="#287fb8"><title>metadata read API: 2.117 ms</title></rect>
+<rect x="667.61" y="280" width="10.56" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.212 ms</title></rect>
+<rect x="678.17" y="280" width="76.42" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.538 ms</title></rect>
+<text x="20" y="305" fill="#222">Shard 12</text>
+<rect x="560.27" y="295" width="2.75" height="11" fill="#aaa"><title>task queue: 0.055 ms</title></rect>
+<rect x="563.03" y="295" width="1.22" height="11" fill="#666"><title>reserve metadata: 0.025 ms</title></rect>
+<rect x="564.25" y="295" width="102.90" height="11" fill="#287fb8"><title>metadata read API: 2.071 ms</title></rect>
+<rect x="667.15" y="295" width="10.34" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.208 ms</title></rect>
+<rect x="677.48" y="295" width="76.73" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.544 ms</title></rect>
+<text x="20" y="320" fill="#222">Shard 13</text>
+<rect x="560.44" y="310" width="2.97" height="11" fill="#aaa"><title>task queue: 0.060 ms</title></rect>
+<rect x="563.41" y="310" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="563.57" y="310" width="104.45" height="11" fill="#287fb8"><title>metadata read API: 2.102 ms</title></rect>
+<rect x="668.02" y="310" width="10.13" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.204 ms</title></rect>
+<rect x="678.14" y="310" width="77.08" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.551 ms</title></rect>
+<text x="20" y="335" fill="#222">Shard 14</text>
+<rect x="561.26" y="325" width="2.33" height="11" fill="#aaa"><title>task queue: 0.047 ms</title></rect>
+<rect x="563.60" y="325" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="563.71" y="325" width="103.69" height="11" fill="#287fb8"><title>metadata read API: 2.086 ms</title></rect>
+<rect x="667.40" y="325" width="11.03" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.222 ms</title></rect>
+<rect x="678.43" y="325" width="78.44" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.578 ms</title></rect>
+<text x="20" y="350" fill="#222">Shard 15</text>
+<rect x="561.50" y="340" width="2.45" height="11" fill="#aaa"><title>task queue: 0.049 ms</title></rect>
+<rect x="563.95" y="340" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.005 ms</title></rect>
+<rect x="564.19" y="340" width="102.00" height="11" fill="#287fb8"><title>metadata read API: 2.052 ms</title></rect>
+<rect x="666.19" y="340" width="11.47" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.231 ms</title></rect>
+<rect x="677.65" y="340" width="75.98" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.529 ms</title></rect>
+<text x="20" y="365" fill="#222">Shard 16</text>
+<rect x="561.82" y="355" width="2.43" height="11" fill="#aaa"><title>task queue: 0.049 ms</title></rect>
+<rect x="564.25" y="355" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="564.36" y="355" width="101.29" height="11" fill="#287fb8"><title>metadata read API: 2.038 ms</title></rect>
+<rect x="665.65" y="355" width="10.48" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.211 ms</title></rect>
+<rect x="676.13" y="355" width="76.30" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.535 ms</title></rect>
+<text x="20" y="380" fill="#222">Shard 17</text>
+<rect x="562.00" y="370" width="2.60" height="11" fill="#aaa"><title>task queue: 0.052 ms</title></rect>
+<rect x="564.59" y="370" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="564.76" y="370" width="101.21" height="11" fill="#287fb8"><title>metadata read API: 2.037 ms</title></rect>
+<rect x="665.98" y="370" width="10.73" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.216 ms</title></rect>
+<rect x="676.71" y="370" width="75.25" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.514 ms</title></rect>
+<text x="20" y="395" fill="#222">Shard 18</text>
+<rect x="562.21" y="385" width="2.89" height="11" fill="#aaa"><title>task queue: 0.058 ms</title></rect>
+<rect x="565.10" y="385" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.004 ms</title></rect>
+<rect x="565.30" y="385" width="229.81" height="11" fill="#287fb8"><title>metadata read API: 4.624 ms</title></rect>
+<rect x="795.11" y="385" width="9.98" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.201 ms</title></rect>
+<rect x="805.09" y="385" width="77.95" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.568 ms</title></rect>
+<text x="20" y="410" fill="#222">Shard 19</text>
+<rect x="563.07" y="400" width="2.04" height="11" fill="#aaa"><title>task queue: 0.041 ms</title></rect>
+<rect x="565.11" y="400" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="565.27" y="400" width="101.86" height="11" fill="#287fb8"><title>metadata read API: 2.050 ms</title></rect>
+<rect x="667.13" y="400" width="9.51" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.191 ms</title></rect>
+<rect x="676.64" y="400" width="74.71" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.503 ms</title></rect>
+<text x="20" y="425" fill="#222">Shard 20</text>
+<rect x="563.29" y="415" width="2.63" height="11" fill="#aaa"><title>task queue: 0.053 ms</title></rect>
+<rect x="565.92" y="415" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="566.08" y="415" width="228.38" height="11" fill="#287fb8"><title>metadata read API: 4.595 ms</title></rect>
+<rect x="794.46" y="415" width="8.79" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.177 ms</title></rect>
+<rect x="803.25" y="415" width="78.92" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.588 ms</title></rect>
+<text x="20" y="440" fill="#222">Shard 21</text>
+<rect x="563.46" y="430" width="2.65" height="11" fill="#aaa"><title>task queue: 0.053 ms</title></rect>
+<rect x="566.12" y="430" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="566.27" y="430" width="228.64" height="11" fill="#287fb8"><title>metadata read API: 4.601 ms</title></rect>
+<rect x="794.91" y="430" width="10.86" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.219 ms</title></rect>
+<rect x="805.77" y="430" width="80.29" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.616 ms</title></rect>
+<text x="20" y="455" fill="#222">Shard 22</text>
+<rect x="564.25" y="445" width="2.59" height="11" fill="#aaa"><title>task queue: 0.052 ms</title></rect>
+<rect x="566.84" y="445" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="566.96" y="445" width="228.38" height="11" fill="#287fb8"><title>metadata read API: 4.595 ms</title></rect>
+<rect x="795.34" y="445" width="10.87" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.219 ms</title></rect>
+<rect x="806.22" y="445" width="77.54" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.560 ms</title></rect>
+<text x="20" y="470" fill="#222">Shard 23</text>
+<rect x="564.44" y="460" width="2.62" height="11" fill="#aaa"><title>task queue: 0.053 ms</title></rect>
+<rect x="567.07" y="460" width="0.84" height="11" fill="#666"><title>reserve metadata: 0.017 ms</title></rect>
+<rect x="567.91" y="460" width="228.42" height="11" fill="#287fb8"><title>metadata read API: 4.596 ms</title></rect>
+<rect x="796.33" y="460" width="11.44" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.230 ms</title></rect>
+<rect x="807.78" y="460" width="78.41" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.578 ms</title></rect>
+<text x="20" y="485" fill="#222">Shard 24</text>
+<rect x="564.64" y="475" width="2.78" height="11" fill="#aaa"><title>task queue: 0.056 ms</title></rect>
+<rect x="567.42" y="475" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="567.58" y="475" width="227.93" height="11" fill="#287fb8"><title>metadata read API: 4.586 ms</title></rect>
+<rect x="795.51" y="475" width="9.87" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.199 ms</title></rect>
+<rect x="805.38" y="475" width="81.37" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.637 ms</title></rect>
+<text x="20" y="500" fill="#222">Shard 25</text>
+<rect x="564.81" y="490" width="3.11" height="11" fill="#aaa"><title>task queue: 0.063 ms</title></rect>
+<rect x="567.92" y="490" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="568.07" y="490" width="226.40" height="11" fill="#287fb8"><title>metadata read API: 4.556 ms</title></rect>
+<rect x="794.47" y="490" width="8.86" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.178 ms</title></rect>
+<rect x="803.33" y="490" width="78.57" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.581 ms</title></rect>
+<text x="20" y="515" fill="#222">Shard 26</text>
+<rect x="565.00" y="505" width="2.75" height="11" fill="#aaa"><title>task queue: 0.055 ms</title></rect>
+<rect x="567.75" y="505" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="567.90" y="505" width="227.91" height="11" fill="#287fb8"><title>metadata read API: 4.586 ms</title></rect>
+<rect x="795.80" y="505" width="10.67" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.215 ms</title></rect>
+<rect x="806.48" y="505" width="76.69" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.543 ms</title></rect>
+<text x="20" y="530" fill="#222">Shard 27</text>
+<rect x="565.35" y="520" width="2.63" height="11" fill="#aaa"><title>task queue: 0.053 ms</title></rect>
+<rect x="567.98" y="520" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="568.13" y="520" width="227.98" height="11" fill="#287fb8"><title>metadata read API: 4.587 ms</title></rect>
+<rect x="796.11" y="520" width="10.16" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.205 ms</title></rect>
+<rect x="806.28" y="520" width="76.81" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.545 ms</title></rect>
+<text x="20" y="545" fill="#222">Shard 28</text>
+<rect x="565.60" y="535" width="2.73" height="11" fill="#aaa"><title>task queue: 0.055 ms</title></rect>
+<rect x="568.33" y="535" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.004 ms</title></rect>
+<rect x="568.53" y="535" width="226.69" height="11" fill="#287fb8"><title>metadata read API: 4.561 ms</title></rect>
+<rect x="795.22" y="535" width="10.90" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.219 ms</title></rect>
+<rect x="806.12" y="535" width="77.04" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.550 ms</title></rect>
+<text x="20" y="560" fill="#222">Shard 29</text>
+<rect x="565.82" y="550" width="2.96" height="11" fill="#aaa"><title>task queue: 0.060 ms</title></rect>
+<rect x="568.78" y="550" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="568.91" y="550" width="228.10" height="11" fill="#287fb8"><title>metadata read API: 4.590 ms</title></rect>
+<rect x="797.01" y="550" width="12.60" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.254 ms</title></rect>
+<rect x="809.61" y="550" width="78.66" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.583 ms</title></rect>
+<text x="20" y="575" fill="#222">Shard 30</text>
+<rect x="566.01" y="565" width="3.52" height="11" fill="#aaa"><title>task queue: 0.071 ms</title></rect>
+<rect x="569.53" y="565" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="569.66" y="565" width="226.98" height="11" fill="#287fb8"><title>metadata read API: 4.567 ms</title></rect>
+<rect x="796.64" y="565" width="11.52" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.232 ms</title></rect>
+<rect x="808.16" y="565" width="78.45" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.578 ms</title></rect>
+<text x="20" y="590" fill="#222">Shard 31</text>
+<rect x="566.20" y="580" width="3.50" height="11" fill="#aaa"><title>task queue: 0.071 ms</title></rect>
+<rect x="569.70" y="580" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="569.79" y="580" width="228.47" height="11" fill="#287fb8"><title>metadata read API: 4.597 ms</title></rect>
+<rect x="798.26" y="580" width="10.94" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.220 ms</title></rect>
+<rect x="809.20" y="580" width="77.77" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.565 ms</title></rect>
+<text x="20" y="605" fill="#222">Shard 32</text>
+<rect x="566.70" y="595" width="3.24" height="11" fill="#aaa"><title>task queue: 0.065 ms</title></rect>
+<rect x="569.94" y="595" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="570.05" y="595" width="229.48" height="11" fill="#287fb8"><title>metadata read API: 4.618 ms</title></rect>
+<rect x="799.54" y="595" width="11.82" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.238 ms</title></rect>
+<rect x="811.35" y="595" width="77.93" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.568 ms</title></rect>
+<text x="20" y="620" fill="#222">Shard 33</text>
+<rect x="567.06" y="610" width="3.31" height="11" fill="#aaa"><title>task queue: 0.067 ms</title></rect>
+<rect x="570.37" y="610" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="570.48" y="610" width="228.47" height="11" fill="#287fb8"><title>metadata read API: 4.597 ms</title></rect>
+<rect x="798.95" y="610" width="12.56" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.253 ms</title></rect>
+<rect x="811.51" y="610" width="77.00" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.549 ms</title></rect>
+<text x="20" y="635" fill="#222">Shard 34</text>
+<rect x="567.29" y="625" width="3.64" height="11" fill="#aaa"><title>task queue: 0.073 ms</title></rect>
+<rect x="570.93" y="625" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="571.08" y="625" width="226.95" height="11" fill="#287fb8"><title>metadata read API: 4.567 ms</title></rect>
+<rect x="798.03" y="625" width="11.43" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.230 ms</title></rect>
+<rect x="809.45" y="625" width="76.84" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.546 ms</title></rect>
+<text x="20" y="650" fill="#222">Shard 35</text>
+<rect x="567.51" y="640" width="5.21" height="11" fill="#aaa"><title>task queue: 0.105 ms</title></rect>
+<rect x="572.73" y="640" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="572.90" y="640" width="226.49" height="11" fill="#287fb8"><title>metadata read API: 4.557 ms</title></rect>
+<rect x="799.38" y="640" width="12.36" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.249 ms</title></rect>
+<rect x="811.75" y="640" width="79.68" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.603 ms</title></rect>
+<text x="20" y="665" fill="#222">Shard 36</text>
+<rect x="568.32" y="655" width="5.06" height="11" fill="#aaa"><title>task queue: 0.102 ms</title></rect>
+<rect x="573.37" y="655" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="573.49" y="655" width="226.31" height="11" fill="#287fb8"><title>metadata read API: 4.554 ms</title></rect>
+<rect x="799.80" y="655" width="12.58" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.253 ms</title></rect>
+<rect x="812.37" y="655" width="78.75" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.585 ms</title></rect>
+<text x="20" y="680" fill="#222">Shard 37</text>
+<rect x="568.61" y="670" width="4.61" height="11" fill="#aaa"><title>task queue: 0.093 ms</title></rect>
+<rect x="573.22" y="670" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="573.33" y="670" width="225.69" height="11" fill="#287fb8"><title>metadata read API: 4.541 ms</title></rect>
+<rect x="799.02" y="670" width="12.80" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.258 ms</title></rect>
+<rect x="811.83" y="670" width="77.42" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.558 ms</title></rect>
+<text x="20" y="695" fill="#222">Shard 38</text>
+<rect x="568.82" y="685" width="4.40" height="11" fill="#aaa"><title>task queue: 0.088 ms</title></rect>
+<rect x="573.22" y="685" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="573.33" y="685" width="223.43" height="11" fill="#287fb8"><title>metadata read API: 4.496 ms</title></rect>
+<rect x="796.76" y="685" width="12.01" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.242 ms</title></rect>
+<rect x="808.78" y="685" width="80.35" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.617 ms</title></rect>
+<text x="20" y="710" fill="#222">Shard 39</text>
+<rect x="568.97" y="700" width="4.92" height="11" fill="#aaa"><title>task queue: 0.099 ms</title></rect>
+<rect x="573.88" y="700" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="574.01" y="700" width="225.77" height="11" fill="#287fb8"><title>metadata read API: 4.543 ms</title></rect>
+<rect x="799.78" y="700" width="12.33" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.248 ms</title></rect>
+<rect x="812.11" y="700" width="77.63" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.562 ms</title></rect>
+<text x="20" y="725" fill="#222">Shard 40</text>
+<rect x="569.65" y="715" width="4.24" height="11" fill="#aaa"><title>task queue: 0.085 ms</title></rect>
+<rect x="573.89" y="715" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="574.01" y="715" width="224.56" height="11" fill="#287fb8"><title>metadata read API: 4.518 ms</title></rect>
+<rect x="798.57" y="715" width="12.60" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.254 ms</title></rect>
+<rect x="811.18" y="715" width="80.08" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.611 ms</title></rect>
+<text x="20" y="740" fill="#222">Shard 41</text>
+<rect x="569.82" y="730" width="5.62" height="11" fill="#aaa"><title>task queue: 0.113 ms</title></rect>
+<rect x="575.44" y="730" width="0.85" height="11" fill="#666"><title>reserve metadata: 0.017 ms</title></rect>
+<rect x="576.29" y="730" width="224.46" height="11" fill="#287fb8"><title>metadata read API: 4.516 ms</title></rect>
+<rect x="800.75" y="730" width="11.35" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.228 ms</title></rect>
+<rect x="812.10" y="730" width="76.62" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.542 ms</title></rect>
+<text x="20" y="755" fill="#222">Shard 42</text>
+<rect x="570.04" y="745" width="4.37" height="11" fill="#aaa"><title>task queue: 0.088 ms</title></rect>
+<rect x="574.42" y="745" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="574.52" y="745" width="226.55" height="11" fill="#287fb8"><title>metadata read API: 4.559 ms</title></rect>
+<rect x="801.07" y="745" width="10.95" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.220 ms</title></rect>
+<rect x="812.02" y="745" width="78.14" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.572 ms</title></rect>
+<text x="20" y="770" fill="#222">Shard 43</text>
+<rect x="570.30" y="760" width="5.20" height="11" fill="#aaa"><title>task queue: 0.105 ms</title></rect>
+<rect x="575.50" y="760" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="575.61" y="760" width="222.90" height="11" fill="#287fb8"><title>metadata read API: 4.485 ms</title></rect>
+<rect x="798.50" y="760" width="11.50" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.231 ms</title></rect>
+<rect x="810.00" y="760" width="77.19" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.553 ms</title></rect>
+<text x="20" y="785" fill="#222">Shard 44</text>
+<rect x="570.62" y="775" width="4.01" height="11" fill="#aaa"><title>task queue: 0.081 ms</title></rect>
+<rect x="574.64" y="775" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="574.76" y="775" width="228.61" height="11" fill="#287fb8"><title>metadata read API: 4.600 ms</title></rect>
+<rect x="803.37" y="775" width="10.02" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.202 ms</title></rect>
+<rect x="813.39" y="775" width="78.24" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.574 ms</title></rect>
+<text x="20" y="800" fill="#222">Shard 45</text>
+<rect x="570.83" y="790" width="3.88" height="11" fill="#aaa"><title>task queue: 0.078 ms</title></rect>
+<rect x="574.70" y="790" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="574.85" y="790" width="225.08" height="11" fill="#287fb8"><title>metadata read API: 4.529 ms</title></rect>
+<rect x="799.93" y="790" width="11.56" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.233 ms</title></rect>
+<rect x="811.49" y="790" width="80.77" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.625 ms</title></rect>
+<text x="20" y="815" fill="#222">Shard 46</text>
+<rect x="570.97" y="805" width="4.62" height="11" fill="#aaa"><title>task queue: 0.093 ms</title></rect>
+<rect x="575.59" y="805" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="575.71" y="805" width="222.02" height="11" fill="#287fb8"><title>metadata read API: 4.467 ms</title></rect>
+<rect x="797.73" y="805" width="12.30" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.248 ms</title></rect>
+<rect x="810.03" y="805" width="77.92" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.568 ms</title></rect>
+<text x="20" y="830" fill="#222">Shard 47</text>
+<rect x="571.20" y="820" width="5.06" height="11" fill="#aaa"><title>task queue: 0.102 ms</title></rect>
+<rect x="576.26" y="820" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="576.36" y="820" width="230.88" height="11" fill="#287fb8"><title>metadata read API: 4.646 ms</title></rect>
+<rect x="807.24" y="820" width="7.59" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.153 ms</title></rect>
+<rect x="814.83" y="820" width="80.53" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.620 ms</title></rect>
+<text x="20" y="845" fill="#222">Shard 48</text>
+<rect x="571.44" y="835" width="5.05" height="11" fill="#aaa"><title>task queue: 0.102 ms</title></rect>
+<rect x="576.49" y="835" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="576.60" y="835" width="224.35" height="11" fill="#287fb8"><title>metadata read API: 4.514 ms</title></rect>
+<rect x="800.95" y="835" width="10.88" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.219 ms</title></rect>
+<rect x="811.83" y="835" width="80.04" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.611 ms</title></rect>
+<text x="20" y="860" fill="#222">Shard 49</text>
+<rect x="571.90" y="850" width="4.45" height="11" fill="#aaa"><title>task queue: 0.089 ms</title></rect>
+<rect x="576.35" y="850" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="576.48" y="850" width="223.88" height="11" fill="#287fb8"><title>metadata read API: 4.505 ms</title></rect>
+<rect x="800.36" y="850" width="11.45" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.230 ms</title></rect>
+<rect x="811.81" y="850" width="81.19" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.634 ms</title></rect>
+<text x="20" y="875" fill="#222">Shard 50</text>
+<rect x="572.23" y="865" width="4.22" height="11" fill="#aaa"><title>task queue: 0.085 ms</title></rect>
+<rect x="576.45" y="865" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="576.56" y="865" width="311.72" height="11" fill="#287fb8"><title>metadata read API: 6.272 ms</title></rect>
+<rect x="888.28" y="865" width="8.39" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.169 ms</title></rect>
+<rect x="896.67" y="865" width="76.51" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.539 ms</title></rect>
+<text x="20" y="890" fill="#222">Shard 51</text>
+<rect x="572.38" y="880" width="4.20" height="11" fill="#aaa"><title>task queue: 0.084 ms</title></rect>
+<rect x="576.58" y="880" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.004 ms</title></rect>
+<rect x="576.77" y="880" width="314.50" height="11" fill="#287fb8"><title>metadata read API: 6.328 ms</title></rect>
+<rect x="891.27" y="880" width="7.70" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.155 ms</title></rect>
+<rect x="898.97" y="880" width="76.42" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.538 ms</title></rect>
+<text x="20" y="905" fill="#222">Shard 52</text>
+<rect x="572.70" y="895" width="4.06" height="11" fill="#aaa"><title>task queue: 0.082 ms</title></rect>
+<rect x="576.76" y="895" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="576.89" y="895" width="309.11" height="11" fill="#287fb8"><title>metadata read API: 6.220 ms</title></rect>
+<rect x="886.00" y="895" width="7.84" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.158 ms</title></rect>
+<rect x="893.84" y="895" width="76.50" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.539 ms</title></rect>
+<text x="20" y="920" fill="#222">Shard 53</text>
+<rect x="572.89" y="910" width="4.04" height="11" fill="#aaa"><title>task queue: 0.081 ms</title></rect>
+<rect x="576.93" y="910" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="577.06" y="910" width="310.47" height="11" fill="#287fb8"><title>metadata read API: 6.247 ms</title></rect>
+<rect x="887.53" y="910" width="7.63" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.154 ms</title></rect>
+<rect x="895.17" y="910" width="74.84" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.506 ms</title></rect>
+<text x="20" y="935" fill="#222">Shard 54</text>
+<rect x="573.13" y="925" width="3.90" height="11" fill="#aaa"><title>task queue: 0.078 ms</title></rect>
+<rect x="577.03" y="925" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="577.12" y="925" width="229.17" height="11" fill="#287fb8"><title>metadata read API: 4.611 ms</title></rect>
+<rect x="806.29" y="925" width="8.94" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.180 ms</title></rect>
+<rect x="815.23" y="925" width="78.80" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.586 ms</title></rect>
+<text x="20" y="950" fill="#222">Shard 55</text>
+<rect x="573.46" y="940" width="4.10" height="11" fill="#aaa"><title>task queue: 0.082 ms</title></rect>
+<rect x="577.56" y="940" width="0.93" height="11" fill="#666"><title>reserve metadata: 0.019 ms</title></rect>
+<rect x="578.48" y="940" width="311.55" height="11" fill="#287fb8"><title>metadata read API: 6.269 ms</title></rect>
+<rect x="890.03" y="940" width="7.75" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.156 ms</title></rect>
+<rect x="897.78" y="940" width="75.31" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.515 ms</title></rect>
+<text x="20" y="965" fill="#222">Shard 56</text>
+<rect x="573.65" y="955" width="4.21" height="11" fill="#aaa"><title>task queue: 0.085 ms</title></rect>
+<rect x="577.86" y="955" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="577.96" y="955" width="307.84" height="11" fill="#287fb8"><title>metadata read API: 6.194 ms</title></rect>
+<rect x="885.80" y="955" width="7.82" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.157 ms</title></rect>
+<rect x="893.62" y="955" width="76.43" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.538 ms</title></rect>
+<rect x="15" y="968" width="985" height="15" fill="#fff1d9"/>
+<text x="20" y="980" fill="#222">Shard 57 (last)</text>
+<rect x="574.36" y="970" width="3.65" height="11" fill="#aaa"><title>task queue: 0.073 ms</title></rect>
+<rect x="578.01" y="970" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="578.11" y="970" width="315.93" height="11" fill="#287fb8"><title>metadata read API: 6.357 ms</title></rect>
+<rect x="894.04" y="970" width="6.57" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.132 ms</title></rect>
+<rect x="900.62" y="970" width="77.53" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.560 ms</title></rect>
+<text x="20" y="995" fill="#222">Shard 58</text>
+<rect x="574.55" y="985" width="4.63" height="11" fill="#aaa"><title>task queue: 0.093 ms</title></rect>
+<rect x="579.19" y="985" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="579.33" y="985" width="306.82" height="11" fill="#287fb8"><title>metadata read API: 6.174 ms</title></rect>
+<rect x="886.15" y="985" width="8.76" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.176 ms</title></rect>
+<rect x="894.91" y="985" width="75.44" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.518 ms</title></rect>
+<text x="20" y="1010" fill="#222">Shard 59</text>
+<rect x="574.77" y="1000" width="5.73" height="11" fill="#aaa"><title>task queue: 0.115 ms</title></rect>
+<rect x="580.50" y="1000" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="580.62" y="1000" width="305.25" height="11" fill="#287fb8"><title>metadata read API: 6.142 ms</title></rect>
+<rect x="885.88" y="1000" width="8.07" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.162 ms</title></rect>
+<rect x="893.95" y="1000" width="75.81" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.525 ms</title></rect>
+<text x="20" y="1025" fill="#222">Shard 60</text>
+<rect x="575.03" y="1015" width="7.46" height="11" fill="#aaa"><title>task queue: 0.150 ms</title></rect>
+<rect x="582.49" y="1015" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="582.60" y="1015" width="307.17" height="11" fill="#287fb8"><title>metadata read API: 6.181 ms</title></rect>
+<rect x="889.77" y="1015" width="7.73" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.156 ms</title></rect>
+<rect x="897.51" y="1015" width="74.84" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.506 ms</title></rect>
+<text x="20" y="1040" fill="#222">Shard 61</text>
+<rect x="575.35" y="1030" width="7.95" height="11" fill="#aaa"><title>task queue: 0.160 ms</title></rect>
+<rect x="583.30" y="1030" width="0.94" height="11" fill="#666"><title>reserve metadata: 0.019 ms</title></rect>
+<rect x="584.24" y="1030" width="304.05" height="11" fill="#287fb8"><title>metadata read API: 6.118 ms</title></rect>
+<rect x="888.29" y="1030" width="7.57" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.152 ms</title></rect>
+<rect x="895.86" y="1030" width="77.79" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.565 ms</title></rect>
+<text x="20" y="1055" fill="#222">Shard 62</text>
+<rect x="575.64" y="1045" width="8.31" height="11" fill="#aaa"><title>task queue: 0.167 ms</title></rect>
+<rect x="583.96" y="1045" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.003 ms</title></rect>
+<rect x="584.09" y="1045" width="299.74" height="11" fill="#287fb8"><title>metadata read API: 6.031 ms</title></rect>
+<rect x="883.82" y="1045" width="8.70" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.175 ms</title></rect>
+<rect x="892.52" y="1045" width="73.84" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.486 ms</title></rect>
+<text x="20" y="1070" fill="#222">Shard 63</text>
+<rect x="575.85" y="1060" width="8.97" height="11" fill="#aaa"><title>task queue: 0.181 ms</title></rect>
+<rect x="584.83" y="1060" width="0.30" height="11" fill="#666"><title>reserve metadata: 0.002 ms</title></rect>
+<rect x="584.93" y="1060" width="302.99" height="11" fill="#287fb8"><title>metadata read API: 6.097 ms</title></rect>
+<rect x="887.92" y="1060" width="7.44" height="11" fill="#2b9b72"><title>copy/validate/repair metadata: 0.150 ms</title></rect>
+<rect x="895.36" y="1060" width="77.86" height="11" fill="#945eb0"><title>rebuild records/indexes: 1.567 ms</title></rect>
+<text x="20" y="1110" fill="#222">Times are relative to this one open. Rows overlap; do not add durations across shards.</text>
+<text x="20" y="1130" fill="#222">Serial shard initialization occurs before any recovery task is dispatched.</text>
+</svg>

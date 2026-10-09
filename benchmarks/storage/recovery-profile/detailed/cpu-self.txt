@@ -1,0 +1,53 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 25K of event 'cycles:uk' (time slices: 446495.030635761,446499.041846869)
+# Event count (approx.): 16866636329
+#
+# Overhead Symbol IPC [IPC Coverage]
+# ........ .................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................... ....................
+#
+ 55.60% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> - -
+ 4.95% [.] <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert_entry::{closure#0}> - -
+ 4.00% [.] __memcpy_sve - -
+ 3.91% [.] __aarch64_swp4_rel - -
+ 3.48% [.] feuer_storage::disk_cache::page_format::encode_page - -
+ 3.05% [.] __memset_zva64 - -
+ 2.95% [.] __aarch64_swp4_rel - -
+ 2.60% [k] __arch_clear_user - -
+ 2.16% [.] malloc_consolidate - -
+ 2.06% [.] malloc - -
+ 1.59% [k] __pi_clear_page - -
+ 1.46% [.] _int_malloc - -
+ 1.12% [.] <hashbrown::raw::RawTable<(feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>)>>::reserve_rehash::<hashbrown::map::make_hasher<feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>, rustc_hash::FxBuildHasher>::{closure#0}> - -
+ 0.81% [.] unlink_chunk.isra.0 - -
+ 0.74% [.] __aarch64_cas4_acq - -
+ 0.64% [.] <feuer_storage::disk_cache::DiskCacheShard>::insert_entry - -
+ 0.59% [.] <feuer_storage::allocation::DiskChunkAllocator>::hold_chunks_for_recovered_payload - -
+ 0.55% [.] __aarch64_cas4_acq - -
+ 0.51% [k] folio_batch_move_lru - -
+ 0.44% [k] __pte_offset_map_lock - -
+ 0.32% [k] el0_da - -
+ 0.27% [.] <hashbrown::raw::RawTable<(u64, (feuer_storage::allocation::ReservedChunks, usize))>>::reserve_rehash::<hashbrown::map::make_hasher<u64, (feuer_storage::allocation::ReservedChunks, usize), rustc_hash::FxBuildHasher>::{closure#0}> - -
+ 0.26% [.] feuer_storage::disk_cache::page_format::validate_page - -
+ 0.23% [k] try_to_wake_up - -
+ 0.14% [.] __aarch64_ldadd8_relax - -
+ 0.14% [k] do_page_fault - -
+ 0.14% [.] <alloc::collections::btree::map::entry::VacantEntry<u64, feuer_storage::disk_cache::DiskEntry>>::insert_entry - -
+ 0.14% [k] finish_task_switch.isra.0 - -
+ 0.13% [.] __rustc::__rust_alloc - -
+ 0.13% [k] mas_walk - -
+ 0.13% [.] <feuer_storage::allocation::DiskChunkAllocator>::reserve_chunk_numbers - -
+ 0.13% [.] __memcpy_generic - -
+ 0.13% [k] __lruvec_stat_mod_folio - -
+ 0.12% [k] rmqueue_bulk - -
+ 0.12% [k] ext4_es_lookup_extent - -
+ 0.12% [k] task_rq_unlock - -
+ 0.10% [k] gup_fast_fallback - -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

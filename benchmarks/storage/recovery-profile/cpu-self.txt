@@ -1,0 +1,53 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 124K of event 'cycles:uk'
+# Event count (approx.): 33502959420
+#
+# Overhead Symbol IPC [IPC Coverage]
+# ........ .......................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................... ....................
+#
+ 55.72% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> - -
+ 5.08% [.] <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert_entry::{closure#0}> - -
+ 4.41% [.] __aarch64_swp4_rel - -
+ 3.50% [.] feuer_storage::disk_cache::page_format::encode_page - -
+ 3.19% [.] __memset_zva64 - -
+ 2.70% [.] __memcpy_sve - -
+ 2.69% [.] __aarch64_swp4_rel - -
+ 2.40% [k] __arch_clear_user - -
+ 2.11% [.] malloc_consolidate - -
+ 2.08% [.] malloc - -
+ 1.63% [.] _int_malloc - -
+ 1.37% [k] __pi_clear_page - -
+ 1.04% [.] <hashbrown::raw::RawTable<(feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>)>>::reserve_rehash::<hashbrown::map::make_hasher<feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>, rustc_hash::FxBuildHasher>::{closure#0}> - -
+ 0.74% [.] unlink_chunk.isra.0 - -
+ 0.71% [.] __aarch64_cas4_acq - -
+ 0.65% [.] <feuer_storage::disk_cache::DiskCacheShard>::insert_entry - -
+ 0.64% [k] __pte_offset_map_lock - -
+ 0.52% [k] el0_da - -
+ 0.52% [k] folio_batch_move_lru - -
+ 0.45% [.] <feuer_storage::allocation::DiskChunkAllocator>::hold_chunks_for_recovered_payload - -
+ 0.44% [.] __aarch64_cas4_acq - -
+ 0.25% [.] feuer_storage::disk_cache::page_format::validate_page - -
+ 0.25% [k] finish_task_switch.isra.0 - -
+ 0.24% [.] <hashbrown::raw::RawTable<(u64, (feuer_storage::allocation::ReservedChunks, usize))>>::reserve_rehash::<hashbrown::map::make_hasher<u64, (feuer_storage::allocation::ReservedChunks, usize), rustc_hash::FxBuildHasher>::{closure#0}> - -
+ 0.22% [k] do_page_fault - -
+ 0.21% [k] try_to_wake_up - -
+ 0.21% [k] mas_walk - -
+ 0.17% [.] __aarch64_ldadd8_relax - -
+ 0.17% [.] <feuer_storage::allocation::DiskChunkAllocator>::reserve_chunk_numbers - -
+ 0.16% [.] <alloc::collections::btree::map::entry::VacantEntry<u64, feuer_storage::disk_cache::DiskEntry>>::insert_entry - -
+ 0.14% [.] __memcpy_generic - -
+ 0.14% [.] __rustc::__rdl_alloc - -
+ 0.13% [k] gup_fast_fallback - -
+ 0.13% [k] __lruvec_stat_mod_folio - -
+ 0.12% [k] rwsem_spin_on_owner - -
+ 0.11% [.] memcpy@plt - -
+ 0.10% [k] ext4_es_lookup_extent - -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

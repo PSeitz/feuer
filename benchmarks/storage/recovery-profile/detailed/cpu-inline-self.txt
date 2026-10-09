@@ -1,0 +1,65 @@
+# 25216 samples, 16866636329 sampled cycles; DWARF inline expansion via addr2line -i
+# Inclusive percentages overlap; self percentages are mutually exclusive.
+  18.273%   3082061044 <core::slice::iter::Iter<feuer_storage::disk_cache::metadata::EntryMetadataLocation> as core::iter::traits::iterator::Iterator>::next
+  10.086%   1701095574 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<feuer_storage::disk_cache::metadata::EntryMetadataLocation>
+   7.989%   1347535133 <feuer_storage::disk_cache::metadata::EntryMetadataLocation as core::cmp::Ord>::cmp
+   6.852%   1155732946 __aarch64_swp4_rel
+   4.548%    767025058 <alloc::collections::btree::map::BTreeMap<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert
+   3.996%    674030997 __memcpy_sve
+   3.046%    513798904 __memset_zva64
+   2.601%    438625579 __arch_clear_user
+   2.536%    427780773 <[u8]>::split_at_checked
+   2.431%    410025267 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::LeafOrInternal>>::keys
+   2.160%    364299033 malloc_consolidate
+   2.062%    347868337 malloc
+   1.998%    337068565 <alloc::collections::btree::map::entry::VacantEntry<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert_entry
+   1.955%    329737627 <u32 as core::cmp::Ord>::cmp
+   1.838%    309929855 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Internal>, alloc::collections::btree::node::marker::Edge>>::descend
+   1.738%    293119780 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<feuer_storage::disk_cache::metadata::EntryMetadataLocation>
+   1.692%    285308509 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert::<alloc::alloc::Global>
+   1.585%    267364001 __pi_clear_page
+   1.549%    261274222 <core::ptr::non_null::NonNull<feuer_storage::disk_cache::metadata::EntryMetadataLocation>>::add
+   1.465%    247090228 _int_malloc
+   1.290%    217629071 __aarch64_cas4_acq
+   0.907%    153033086 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>>::as_leaf_ptr
+   0.847%    142833156 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert_entry::{closure#0}>
+   0.837%    141128514 <feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}
+   0.809%    136448164 unlink_chunk.isra.0
+   0.634%    106882708 <u8 as core::array::equality::SpecArrayEq<u8, 48>>::spec_eq
+   0.602%    101517295 core::core_arch::aarch64::neon::generated::vcltz_s8
+   0.506%     85279013 folio_batch_move_lru
+   0.465%     78473478 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_fit
+   0.444%     74890108 __pte_offset_map_lock
+   0.392%     66136090 <u64>::wrapping_add
+   0.362%     61060279 <alloc::collections::btree::map::BTreeMap<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::entry
+   0.327%     55162928 <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::LeafOrInternal>>::force
+   0.320%     54019553 el0_da
+   0.278%     46929335 core::ptr::read::<core::ptr::Packed<[u64; 4]>>
+   0.270%     45602348 <core::iter::adapters::enumerate::Enumerate<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<[u8; 4096]>, core::slice::iter::Iter<[u8; 48]>, <feuer_storage::disk_cache::metadata::MetadataChunk>::entry_metadata_records::{closure#0}>> as core::iter::traits::iterator::Iterator>::next
+   0.239%     40294669 core::intrinsics::unlikely
+   0.233%     39368492 try_to_wake_up
+   0.226%     38131080 <alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>>::entry
+   0.222%     37373310 <feuer_storage::allocation::DiskChunkAllocator>::hold_chunks_for_recovered_payload
+   0.201%     33842031 <hashbrown::control::bitmask::BitMask>::lowest_set_bit
+   0.185%     31276808 <core::option::Option<core::slice::iter::Iter<[u8; 48]>>>::as_mut
+   0.168%     28361851 core::ptr::read::<core::ptr::non_null::NonNull<alloc::collections::btree::node::LeafNode<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>>
+   0.156%     26228880 ??
+   0.153%     25880485 <*const u8>::add
+   0.142%     23902048 __aarch64_ldadd8_relax
+   0.138%     23252189 do_page_fault
+   0.135%     22796225 finish_task_switch.isra.0
+   0.134%     22521654 __rustc::__rust_alloc
+   0.131%     22179083 mas_walk
+   0.131%     22048328 core::ptr::copy_nonoverlapping::<u8>
+   0.129%     21785748 __memcpy_generic
+   0.129%     21689356 __lruvec_stat_mod_folio
+   0.124%     20913360 rmqueue_bulk
+   0.123%     20814992 core::intrinsics::rotate_left::<u64>
+   0.122%     20497520 ext4_es_lookup_extent
+   0.118%     19895982 <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::DormantMut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::KV>>::awaken
+   0.117%     19714491 task_rq_unlock
+   0.115%     19318459 <u64>::wrapping_mul
+   0.114%     19161036 <feuer_storage::disk_cache::DiskCacheShard>::insert_entry
+   0.107%     18112782 <alloc::collections::btree::map::entry::VacantEntry<u64, feuer_storage::disk_cache::DiskEntry>>::insert_entry
+   0.106%     17940616 <core::mem::maybe_uninit::MaybeUninit<feuer_storage::disk_cache::metadata::EntryMetadataLocation>>::write
+   0.103%     17322621 gup_fast_fallback

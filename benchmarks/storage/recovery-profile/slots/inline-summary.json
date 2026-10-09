@@ -1,0 +1,12 @@
+{
+  "samples": 23196,
+  "cycles": 9932710587,
+  "executable_pcs": 1073,
+  "kernel_percent": 54.9851016916577,
+  "fault_percent": {
+    "total": 42.80501873843634,
+    "zeroing aligned buffers": 20.874193402087496,
+    "other": 2.0136254273004925,
+    "writing metadata slots": 19.917199909048353
+  }
+}

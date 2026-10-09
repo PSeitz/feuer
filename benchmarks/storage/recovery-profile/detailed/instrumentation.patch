@@ -1,0 +1,132 @@
+--- a/feuer-storage/src/lib.rs
++++ b/feuer-storage/src/lib.rs
+@@ -13,0 +14,3 @@
++#[cfg(test)]
++#[path = "disk_cache/recovery/profile.rs"]
++mod recovery_profile;
+--- a/feuer-storage/src/file.rs
++++ b/feuer-storage/src/file.rs
+@@ -120,0 +121 @@
++            crate::recovery_profile::event("state_submit", usize::MAX);
+@@ -122 +123,6 @@
+-                .spawn_blocking(move || open_file_state(directory, capacity, buffer_pool, metrics, io_queues))
++                .spawn_blocking(move || {
++                    crate::recovery_profile::event("state_begin", usize::MAX);
++                    let result = open_file_state(directory, capacity, buffer_pool, metrics, io_queues);
++                    crate::recovery_profile::event("state_end", usize::MAX);
++                    result
++                })
+@@ -128,0 +135 @@
++            crate::recovery_profile::event("probe_begin", usize::MAX);
+@@ -134,0 +142 @@
++            crate::recovery_profile::event("probe_end", usize::MAX);
+--- a/feuer-storage/src/disk_cache.rs
++++ b/feuer-storage/src/disk_cache.rs
+@@ -283,0 +284 @@
++        crate::recovery_profile::event("shards_ready", usize::MAX);
+@@ -290,0 +292 @@
++            crate::recovery_profile::event("task_enqueue", index);
+--- a/feuer-storage/src/disk_cache/recovery.rs
++++ b/feuer-storage/src/disk_cache/recovery.rs
+@@ -16,0 +17 @@
++        crate::recovery_profile::event("task_begin", shard_index);
+@@ -20 +21,2 @@
+-        shard.load_metadata_chain(&self.file, shard_disk_range.start).await;
++        shard.load_metadata_chain(&self.file, shard_disk_range.start, shard_index).await;
++        crate::recovery_profile::event("load_end", shard_index);
+@@ -24,0 +27 @@
++        crate::recovery_profile::event("records_start", shard_index);
+@@ -48,0 +52 @@
++        crate::recovery_profile::event("records_end", shard_index);
+@@ -49,0 +54 @@
++        crate::recovery_profile::event("task_end", shard_index);
+@@ -55 +60 @@
+-    async fn load_metadata_chain(&self, file: &DataFile, mut address: u64) {
++    async fn load_metadata_chain(&self, file: &DataFile, mut address: u64, shard_index: usize) {
+@@ -61,0 +67 @@
++            crate::recovery_profile::event("read_begin", shard_index);
+@@ -64,0 +71 @@
++            crate::recovery_profile::event("read_end", shard_index);
+@@ -73,0 +81 @@
++            crate::recovery_profile::event("copy_end", shard_index);
+@@ -81,0 +90 @@
++            crate::recovery_profile::event("validate_end", shard_index);
+--- a/feuer-storage/src/disk_cache/recovery/benchmark.rs
++++ b/feuer-storage/src/disk_cache/recovery/benchmark.rs
+@@ -168,0 +169 @@
++        runner.get_plugin_manager().replace_plugin(crate::recovery_profile::ProfileRecovery::default());
+--- /dev/null
++++ b/feuer-storage/src/disk_cache/recovery/profile.rs
+@@ -0,0 +1,72 @@
++//! Profiling-only phase timestamps and perf gating in an isolated checkout.
++use std::{any::Any, io::{BufRead, Write}, sync::{Mutex, atomic::{AtomicBool, Ordering}}};
++use binggan::plugins::{EventListener, PluginEvents};
++
++static ACTIVE: AtomicBool = AtomicBool::new(false);
++static EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
++struct Event { stage: &'static str, shard: usize, ns: u64, cpu_ns: u64, tid: i64 }
++pub fn clock(clock: libc::clockid_t) -> u64 {
++    let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
++    assert_eq!(unsafe { libc::clock_gettime(clock, time.as_mut_ptr()) }, 0);
++    let time = unsafe { time.assume_init() };
++    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
++}
++pub fn event(stage: &'static str, shard: usize) {
++    if ACTIVE.load(Ordering::Relaxed) {
++        let row = Event { stage, shard, ns: clock(libc::CLOCK_MONOTONIC), cpu_ns: clock(libc::CLOCK_THREAD_CPUTIME_ID), tid: unsafe { libc::syscall(libc::SYS_gettid) } };
++        EVENTS.lock().unwrap().push(row);
++    }
++}
++fn process_cpu_ns() -> u64 {
++    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
++    assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) }, 0);
++    let usage = unsafe { usage.assume_init() };
++    [usage.ru_utime, usage.ru_stime].into_iter().map(|t| t.tv_sec as u64 * 1_000_000_000 + t.tv_usec as u64 * 1000).sum()
++}
++fn read_bytes() -> u64 {
++    std::fs::read_to_string("/proc/self/io").unwrap().lines().find_map(|s| s.strip_prefix("read_bytes: ").map(|s| s.parse().unwrap())).unwrap()
++}
++fn sampling(name: &str, command: &str) {
++    let path = std::env::var(format!("RECOVERY_{name}_FIFO")).unwrap();
++    let mut control = std::fs::File::options().write(true).open(&path).unwrap();
++    let ack = std::fs::File::open(format!("{path}.ack")).unwrap();
++    writeln!(control, "{command}").unwrap();
++    let mut response = String::new();
++    assert!(std::io::BufReader::new(ack).read_line(&mut response).unwrap() > 0);
++    assert_eq!(response.trim(), "ack");
++}
++#[derive(Default)]
++pub struct ProfileRecovery { round: usize, cpu_before: u64, bytes_before: u64 }
++impl EventListener for ProfileRecovery {
++    fn prio(&self) -> u32 { u32::MAX }
++    fn name(&self) -> &'static str { "profile_recovery" }
++    fn on_event(&mut self, event: PluginEvents<'_>) {
++        match event {
++            PluginEvents::BenchStart { .. } => {
++                self.round += 1;
++                { let mut events = EVENTS.lock().unwrap(); events.clear(); events.reserve(1024); }
++                if self.round > 10 { sampling("CPU", "enable"); }
++                if self.round > 50 { sampling("TRACE", "enable"); }
++                self.bytes_before = read_bytes();
++                self.cpu_before = process_cpu_ns();
++                ACTIVE.store(true, Ordering::Relaxed);
++                crate::recovery_profile::event("open_start", usize::MAX);
++            }
++            PluginEvents::BenchStop { duration, .. } => {
++                crate::recovery_profile::event("open_end", usize::MAX);
++                ACTIVE.store(false, Ordering::Relaxed);
++                let cpu = process_cpu_ns() - self.cpu_before;
++                if self.round > 50 { sampling("TRACE", "disable"); }
++                if self.round > 10 { sampling("CPU", "disable"); }
++                let bytes = read_bytes() - self.bytes_before;
++                let mode = if self.round <= 10 { "phases" } else if self.round <= 50 { "cpu" } else { "trace" };
++                println!("OPEN,{},{mode},{duration},{cpu},{bytes},{}", self.round, std::process::id());
++                for e in EVENTS.lock().unwrap().iter() {
++                    println!("PHASE,{},{},{},{},{},{}", self.round, e.stage, e.shard, e.ns, e.cpu_ns, e.tid);
++                }
++            }
++            _ => {}
++        }
++    }
++    fn as_any(&mut self) -> &mut dyn Any { self }
++}

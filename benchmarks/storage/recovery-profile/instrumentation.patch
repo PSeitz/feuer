@@ -1,0 +1,149 @@
+--- a/feuer-storage/src/disk_cache/recovery/benchmark.rs
++++ b/feuer-storage/src/disk_cache/recovery/benchmark.rs
+@@ -11,0 +12,2 @@
++
++include!("profile.rs");
+@@ -163,0 +166,10 @@
++        let (registry, backend) = registry();
++        let io_metrics = IoMetrics::new(&backend);
++        runner.get_plugin_manager().replace_plugin(ProfileRecovery {
++            registry,
++            reads_before: 0.0,
++            read_bytes_before: 0.0,
++            read_seconds_before: 0.0,
++            cpu_before: 0.0,
++            round: 0,
++        });
+@@ -174 +186 @@
+-                .block_on(DiskCache::open(directory.path(), capacity, IoMetrics::noop()))
++                .block_on(DiskCache::open(directory.path(), capacity, io_metrics.clone()))
+--- /dev/null
++++ b/feuer-storage/src/disk_cache/recovery/profile.rs
+@@ -0,0 +1,127 @@
++// Profiling-only instrumentation, injected into an isolated copy of the committed benchmark.
++use crate::test_metrics::{registry, value};
++use std::io::{BufRead, Write};
++
++fn cpu_seconds() -> f64 {
++    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
++    // SAFETY: getrusage initializes the supplied writable structure on success.
++    assert_eq!(
++        unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
++        0
++    );
++    let usage = unsafe { usage.assume_init() };
++    [usage.ru_utime, usage.ru_stime]
++        .into_iter()
++        .map(|time| time.tv_sec as f64 + time.tv_usec as f64 / 1_000_000.0)
++        .sum()
++}
++
++fn sampling(command: &str) {
++    for path in std::env::var("RECOVERY_PERF_FIFOS").unwrap().split(',') {
++        let mut control = std::fs::File::options().write(true).open(path).unwrap();
++        let ack = std::fs::File::open(format!("{path}.ack")).unwrap();
++        writeln!(control, "{command}").unwrap();
++        let mut response = String::new();
++        assert!(
++            std::io::BufReader::new(ack)
++                .read_line(&mut response)
++                .unwrap()
++                > 0
++        );
++        assert_eq!(response.trim(), "ack");
++    }
++}
++
++struct ProfileRecovery {
++    registry: prometheus::Registry,
++    reads_before: f64,
++    read_bytes_before: f64,
++    read_seconds_before: f64,
++    cpu_before: f64,
++    round: usize,
++}
++
++impl ProfileRecovery {
++    fn read_seconds(&self) -> f64 {
++        let family = self
++            .registry
++            .gather()
++            .into_iter()
++            .find(|family| family.name() == "feuer_disk_io_duration_seconds")
++            .unwrap();
++        family
++            .get_metric()
++            .iter()
++            .find(|metric| {
++                metric
++                    .get_label()
++                    .iter()
++                    .any(|label| label.name() == "operation" && label.value() == "read")
++            })
++            .unwrap()
++            .get_histogram()
++            .get_sample_sum()
++    }
++}
++
++impl EventListener for ProfileRecovery {
++    fn prio(&self) -> u32 {
++        u32::MAX
++    }
++    fn name(&self) -> &'static str {
++        "profile_recovery"
++    }
++    fn on_event(&mut self, event: PluginEvents<'_>) {
++        match event {
++            PluginEvents::BenchStart { .. } => {
++                self.reads_before = value(
++                    &self.registry,
++                    "feuer_disk_io_total",
++                    &[("operation", "read"), ("outcome", "success")],
++                );
++                self.read_bytes_before = value(
++                    &self.registry,
++                    "feuer_disk_io_bytes_total",
++                    &[("operation", "read")],
++                );
++                self.read_seconds_before = self.read_seconds();
++                sampling("enable");
++                self.cpu_before = cpu_seconds();
++            }
++            PluginEvents::BenchStop { duration, .. } => {
++                let cpu = cpu_seconds() - self.cpu_before;
++                sampling("disable");
++                let reads = value(
++                    &self.registry,
++                    "feuer_disk_io_total",
++                    &[("operation", "read"), ("outcome", "success")],
++                ) - self.reads_before;
++                let bytes = value(
++                    &self.registry,
++                    "feuer_disk_io_bytes_total",
++                    &[("operation", "read")],
++                ) - self.read_bytes_before;
++                let read_seconds = self.read_seconds() - self.read_seconds_before;
++                self.round += 1;
++                println!(
++                    "PROFILE,{},{duration},{cpu:.9},{reads:.0},{bytes:.0},{read_seconds:.9}",
++                    self.round
++                );
++                assert_eq!(reads, 64.0);
++                assert_eq!(bytes, 64.0 * CHUNK_BYTES as f64);
++                assert_eq!(
++                    value(
++                        &self.registry,
++                        "feuer_disk_io_total",
++                        &[("operation", "read"), ("outcome", "error")]
++                    ),
++                    0.0
++                );
++            }
++            _ => {}
++        }
++    }
++    fn as_any(&mut self) -> &mut dyn Any {
++        self
++    }
++}

@@ -101,6 +101,65 @@ entries and 1,152 metadata chunks. It is an artificial many-small-entries worklo
 **not representative of this recorded download population**. The current 100-GB
 command uses the recorded frequencies instead.
 
+### Retest after replacing the free-position B-tree
+
+An unprofiled run on the idle `m8g-32cpu-local-ssd-2` used the same fixture and ten
+repeated opens. The tested implementation stores decoded metadata in contiguous
+slot arrays, with a free list linked through unused slots; it is not just a
+standalone `Vec` of free positions. No production source was changed for this test.
+
+| Metric | Previous unprofiled retest | Slot-array retest |
+| --- | ---: | ---: |
+| Mean open/recovery | 16.2023 ms | **14.5452 ms** |
+| Median open/recovery | 15.6655 ms | **14.4567 ms** |
+| Minimum / maximum | 14.9665 / 20.3673 ms | 13.3344 / 16.1602 ms |
+
+Mean latency is 10.2% lower and median latency 7.7% lower than the previous
+[unprofiled retest](recovery-rebench.log). Mean latency is 6.5% below the original
+15.556-ms measurement. These are historical comparisons, not a matched isolated
+change: revisions differ beyond the free-position representation, and ten opens
+do not establish statistical significance. This run does not measure recovery
+CPU separately; the earlier 62.75% inclusive CPU attribution was not a wall-time
+percentage and does not predict a corresponding wall-time reduction.
+
+The fixture again contained 80,778 entries, 99,971,787,650 payload bytes and 64
+metadata chunks. Actual disk occupation was 110,779,355,136 bytes. All ten timed
+opens plus the reporting open verified successfully; the fixture and its dedicated
+temporary parent were removed. Ordinary storage tests: **127 passed, 1 ignored**.
+Whole-process measurements, including fixture creation, verification and teardown:
+61.20 s wall, 12.27 s user CPU, 6.87 s system CPU, and 4,878,704 KiB peak RSS
+(4.65 GiB). [Captured output](recovery-slots.log),
+[OS resource measurements](recovery-slots-time.txt).
+A subsequent [profile of this exact snapshot](recovery-profile/slots/README.md)
+separates CPU, wall-time phases, scheduler waits and physical SSD service.
+
+Snapshot: `b77db4c2b6d3a834e25b99e523825886399bc059` plus working-tree patch
+SHA-256 `0e62cfa0aab382b00364fa4a238d513209102d76b6cb429581f4d894a73cfd86`.
+Lockfile SHA-256:
+`95cc47f11e13839bf0ee33b395107cd70aa78886a0694266fb40b44dc7de04e8`.
+The exact source, patch, binary, build/test logs and host snapshots remain at
+`/home/ubuntu/feuer-recovery-slots.qIH8qF`. Release build with configured debug
+information; no profiler, extra frame-pointer flags or allocator preload.
+
+### Retest with lowest-free-slot scanning — 3b37ccc
+
+Revision `3b37ccc91be7883f5c555dc0199f95cdf3364926` replaces free-list linking with
+free-slot counting and lowest-position scanning. On the idle SSD host, the same
+100-GB fixture and ten unprofiled opens produced **13.5524 ms mean / 13.8193 ms
+median**, range **10.1087–14.7891 ms**. Mean is 6.8% below the preceding 14.5452-ms
+run, median 4.4% below; this is a historical comparison, not an isolated randomized
+experiment. All opens verified; **128 tests passed, 1 ignored**; fixture removed.
+
+Whole-test resources, including setup and verification: **60.73 s wall**, **12.36 s
+user / 6.63 s system CPU**, **4,913,792 KiB peak RSS**. Disk occupation remained
+110,779,355,136 bytes. [Output](recovery-scan.log),
+[resource measurements](recovery-scan-time.txt),
+[detailed profile and provenance](recovery-profile/scan/README.md).
+
+The profile shows free-slot bookkeeping falling from 7.069 to **1.936 CPU-ms/open**,
+but total process CPU did not improve in that recording (116.411 → 118.509 ms).
+Slot size remains **64 bytes**; this revision does not reduce slot-array memory.
+
 ## Small control cases
 
 Without `RECOVERY_100_GB`, the small fixed-size controls still use distinct keys

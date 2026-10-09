@@ -1,0 +1,45 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 25K of event 'cycles:uk' (time slices: 446495.030635761,446499.041846869)
+# Event count (approx.): 16866636329
+#
+# Overhead Symbol Source:Line IPC [IPC Coverage]
+# ........ .................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................... ......................................... ....................
+#
+ 18.27% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> macros.rs:180 - -
+ 10.07% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> search.rs:226 - -
+ 7.99% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> metadata.rs:13 - -
+ 3.91% [.] __aarch64_swp4_rel :0 - -
+ 3.32% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> map.rs:1051 - -
+ 2.93% [.] __aarch64_swp4_rel lse.S:208 - -
+ 2.63% [.] __memcpy_sve memcpy_sve.S:128 - -
+ 2.52% [.] feuer_storage::disk_cache::page_format::encode_page mod.rs:2157 - -
+ 2.45% [.] __memset_zva64 memset.S:127 - -
+ 2.43% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> node.rs:396 - -
+ 1.95% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> cmp.rs:2011 - -
+ 1.74% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> search.rs:57 - -
+ 1.67% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> entry.rs:460 - -
+ 1.62% [.] <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert_entry::{closure#0}> node.rs:962 - -
+ 1.58% [k] __arch_clear_user __arch_clear_user+52 - -
+ 1.55% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> non_null.rs:614 - -
+ 1.54% [k] __pi_clear_page __pi_clear_page+52 - -
+ 1.40% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> node.rs:1115 - -
+ 1.23% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> search.rs:0 - -
+ 1.19% [.] malloc_consolidate malloc.c:4850 - -
+ 0.94% [.] malloc malloc.c:3334 - -
+ 0.87% [.] __memcpy_sve memcpy_sve.S:125 - -
+ 0.73% [.] __aarch64_cas4_acq lse.S:154 - -
+ 0.70% [.] unlink_chunk.isra.0 malloc.c:1616 - -
+ 0.68% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> recovery.rs:0 - -
+ 0.63% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> equality.rs:157 - -
+ 0.55% [.] __aarch64_cas4_acq :0 - -
+ 0.51% [k] folio_batch_move_lru folio_batch_move_lru+276 - -
+ 0.50% [.] <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert_entry::{closure#0}> node.rs:0 - -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

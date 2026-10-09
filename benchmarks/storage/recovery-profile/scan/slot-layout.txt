@@ -1,0 +1,9 @@
+    <a1164>   DW_AT_name        : (indirect string, offset: 0x413069): Option<feuer_storage::disk_cache::metadata::EntryMetadata>
+    <a1168>   DW_AT_byte_size   : 64
+    <a1169>   DW_AT_accessibility: 1	(public)
+    <a116a>   DW_AT_alignment   : 16
+ <4><a116b>: Abbrev Number: 14 (DW_TAG_variant_part)
+    <a116c>   DW_AT_discr       : <0xa1170>
+ <5><a1170>: Abbrev Number: 15 (DW_TAG_member)
+    <a1171>   DW_AT_type        : <0xb78c6>
+    <a1175>   DW_AT_alignment   : 16

@@ -1,0 +1,91 @@
+# 23196 samples, 9932710587 sampled cycles; DWARF inline expansion via addr2line -i
+# Inclusive percentages overlap; self percentages are mutually exclusive.
+  12.186%   1210365360 __pi_clear_page
+   9.258%    919590260 __aarch64_swp4_rel
+   7.547%    749605411 core::mem::replace::<core::option::Option<feuer_storage::disk_cache::metadata::EntryMetadataLocation>>
+   5.589%    555166162 folio_batch_move_lru
+   5.277%    524166667 __pte_offset_map_lock
+   4.130%    410215360 __arch_clear_user
+   4.022%    399536560 el0_da
+   3.574%    354988038 <feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}
+   3.123%    310159108 __memset_zva64
+   2.245%    223030040 <u8 as core::array::equality::SpecArrayEq<u8, 48>>::spec_eq
+   1.884%    187135773 do_page_fault
+   1.795%    178281594 <alloc::vec::Vec<feuer_storage::disk_cache::metadata::MetadataSlot>>::extend_desugared::<core::iter::adapters::map::Map<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<[u8; 4096]>, &[[u8; 48]], <feuer_storage::disk_cache::DiskCacheShard>::load_metadata_chain::{closure#0}::{closure#1}>, <feuer_storage::disk_cache::DiskCacheShard>::load_metadata_chain::{closure#0}::{closure#2}>>
+   1.736%    172407302 mas_walk
+   1.597%    158622360 rmqueue_bulk
+   1.400%    139087634 core::ptr::write::<feuer_storage::disk_cache::metadata::MetadataSlot>
+   1.275%    126657831 __aarch64_cas4_acq
+   1.238%    122920296 __lruvec_stat_mod_folio
+   1.123%    111508015 _int_malloc
+   1.010%    100289824 <u8 as core::array::equality::SpecArrayEq<u8, 8>>::spec_eq
+   0.957%     95093696 <feuer_storage::disk_cache::metadata::MetadataPages>::link_free_slots
+   0.891%     88514578 rmqueue.isra.0
+   0.817%     81120763 core::core_arch::aarch64::neon::generated::vcltz_s8
+   0.798%     79215574 get_mem_cgroup_from_mm
+   0.783%     77766344 core::sync::atomic::atomic_compare_exchange::<u32>
+   0.654%     64934161 malloc
+   0.593%     58870907 __mem_cgroup_charge
+   0.578%     57460185 percpu_counter_add_batch
+   0.573%     56904297 <alloc::vec::Vec<feuer_storage::disk_cache::metadata::MetadataSlot> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<feuer_storage::disk_cache::metadata::MetadataSlot, core::iter::adapters::map::Map<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<[u8; 4096]>, &[[u8; 48]], <feuer_storage::disk_cache::DiskCacheShard>::load_metadata_chain::{closure#0}::{closure#1}>, <feuer_storage::disk_cache::DiskCacheShard>::load_metadata_chain::{closure#0}::{closure#2}>>>::from_iter
+   0.564%     56016046 __mod_node_page_state
+   0.547%     54359097 mod_memcg_lruvec_state
+   0.547%     54349138 folios_put_refs
+   0.547%     54313641 __alloc_frozen_pages_noprof
+   0.547%     54306048 __rmqueue_pcplist
+   0.510%     50671441 get_page_from_freelist
+   0.496%     49239024 try_charge_memcg
+   0.489%     48546993 __folio_batch_add_and_move
+   0.463%     45995761 __handle_mm_fault
+   0.432%     42884245 vma_start_read
+   0.419%     41596385 css_rstat_updated
+   0.418%     41508064 do_anonymous_page
+   0.417%     41395704 core::intrinsics::unlikely
+   0.380%     37792678 <alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>>::entry
+   0.355%     35298182 finish_task_switch.isra.0
+   0.342%     34000095 try_to_wake_up
+   0.331%     32896824 memcg_rstat_updated.part.0
+   0.318%     31551611 __memcpy_generic
+   0.313%     31105074 zone_statistics
+   0.310%     30777793 <hashbrown::control::bitmask::BitMask>::lowest_set_bit
+   0.301%     29893886 <core::option::Option<core::slice::iter::Iter<[u8; 48]>>>::as_mut
+   0.289%     28744403 <u64>::wrapping_add
+   0.284%     28243007 charge_memcg
+   0.236%     23395602 __aarch64_ldadd8_relax
+   0.230%     22826503 handle_pte_fault
+   0.219%     21759024 handle_mm_fault
+   0.219%     21758514 post_alloc_hook
+   0.208%     20664002 gup_fast_fallback
+   0.200%     19912254 <core::ptr::non_null::NonNull<feuer_storage::disk_cache::metadata::MetadataSlot> as core::cmp::PartialEq>::eq
+   0.196%     19439029 el0_svc
+   0.191%     18991898 <feuer_storage::allocation::FreeChunks>::remove_free_chunks
+   0.190%     18872472 ___pte_offset_map
+   0.188%     18693556 ext4_es_lookup_extent
+   0.186%     18464184 alloc_anon_folio
+   0.175%     17383606 get_task_policy.part.0
+   0.175%     17351041 <alloc::collections::btree::map::entry::VacantEntry<u64, feuer_storage::disk_cache::DiskEntry>>::insert_entry
+   0.171%     17010460 core::ptr::copy_nonoverlapping::<u8>
+   0.164%     16327345 task_rq_unlock
+   0.155%     15426991 <feuer_storage::allocation::DiskChunkAllocator>::hold_chunks_for_recovered_payload
+   0.152%     15090304 lock_vma_under_rcu
+   0.148%     14694755 core::ptr::read::<core::ptr::Unaligned<[u64; 4]>>
+   0.146%     14486346 alloc_pages_mpol
+   0.145%     14436954 <core::iter::adapters::map::Map<core::iter::adapters::flatten::FlatMap<core::slice::iter::Iter<[u8; 4096]>, &[[u8; 48]], <feuer_storage::disk_cache::DiskCacheShard>::load_metadata_chain::{closure#0}::{closure#1}>, <feuer_storage::disk_cache::DiskCacheShard>::load_metadata_chain::{closure#0}::{closure#2}> as core::iter::traits::iterator::Iterator>::next
+   0.140%     13909812 folio_add_new_anon_rmap
+   0.138%     13741444 __folio_mod_stat
+   0.137%     13630695 <feuer_storage::disk_cache::DiskCacheShard>::insert_entry
+   0.135%     13376516 __folio_throttle_swaprate
+   0.134%     13287721 pte_offset_map_rw_nolock
+   0.127%     12651478 <alloc::collections::btree::map::entry::VacantEntry<u64, u64>>::insert_entry
+   0.127%     12648698 <hashbrown::raw::FullBucketsIndices as core::iter::traits::iterator::Iterator>::next
+   0.126%     12545880 core::sync::atomic::atomic_load::<usize>
+   0.126%     12478977 get_vma_policy
+   0.125%     12436014 <usize as core::slice::index::SliceIndex<[feuer_storage::disk_cache::metadata::MetadataChunk]>>::index_mut
+   0.123%     12243537 __pi_memset_generic
+   0.120%     11967579 percpu_ref_get_many
+   0.119%     11784639 vma_alloc_folio_noprof
+   0.116%     11538391 core::ptr::write::<(u64, (feuer_storage::allocation::ReservedChunks, usize))>
+   0.113%     11204678 rcu_all_qs
+   0.113%     11200207 page_counter_try_charge
+   0.105%     10463932 std::panicking::panic_count::count_is_zero
+   0.101%     10063968 <core::ops::range::Range<usize> as core::iter::range::RangeIteratorImpl>::spec_next

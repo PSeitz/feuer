@@ -1,0 +1,60 @@
+{
+  "commit": "1bcc3c3",
+  "host": "m8g-32cpu-local-ssd-2",
+  "profiled_opens": 100,
+  "process_id": 584253,
+  "cpu_samples": 124193,
+  "lost_cpu_samples": 0,
+  "metadata_reads": 6400,
+  "opening_probe_reads": 100,
+  "unmatched_target_requests": 0,
+  "wall_ms": {
+    "count": 100,
+    "mean": 25.59508324,
+    "median": 24.5046145,
+    "p95": 33.405754,
+    "minimum": 16.86748,
+    "maximum": 35.920179
+  },
+  "process_cpu_ms": {
+    "count": 100,
+    "mean": 152.05935,
+    "median": 149.284,
+    "p95": 155.132,
+    "minimum": 139.549,
+    "maximum": 506.695
+  },
+  "process_cpu_to_wall_ratio": 5.9409593856042475,
+  "api_metadata_read_ms": {
+    "count": 100,
+    "mean": 7.6848953528125,
+    "median": 7.2539488046875,
+    "p95": 9.758586328125,
+    "minimum": 5.178274015625,
+    "maximum": 9.967587859375
+  },
+  "kernel_metadata_read_ms": {
+    "count": 6400,
+    "mean": 5.350558722047936,
+    "median": 5.301815486745909,
+    "p95": 7.786169997416437,
+    "minimum": 1.514296978712082,
+    "maximum": 10.488959029316902
+  },
+  "kernel_opening_probe_ms": {
+    "count": 100,
+    "mean": 3.760655631776899,
+    "median": 3.8817659951746464,
+    "p95": 6.783270975574851,
+    "minimum": 0.32496300991624594,
+    "maximum": 7.596446026582271
+  },
+  "metadata_inflight_ms": {
+    "count": 100,
+    "mean": 10.049977309536189,
+    "median": 9.858821984380484,
+    "p95": 13.41072702780366,
+    "minimum": 6.186134007293731,
+    "maximum": 13.563430984504521
+  }
+}

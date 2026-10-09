@@ -1,0 +1,381 @@
+{
+  "phases": {
+    "opens": 10,
+    "wall_ms": {
+      "count": 10,
+      "mean": 15.0568414,
+      "median": 15.165905,
+      "p95": 15.798651,
+      "minimum": 14.18794,
+      "maximum": 15.798651
+    },
+    "cpu_ms": {
+      "count": 10,
+      "mean": 129.3107,
+      "median": 131.45850000000002,
+      "p95": 135.917,
+      "minimum": 108.36,
+      "maximum": 135.917
+    },
+    "physical_read_bytes": {
+      "count": 10,
+      "mean": 4460544,
+      "median": 4460544.0,
+      "p95": 4460544,
+      "minimum": 4460544,
+      "maximum": 4460544
+    },
+    "critical": {
+      "file task queue": {
+        "wall_ms": 0.0525355
+      },
+      "file and ring setup": {
+        "wall_ms": 0.3018758,
+        "cpu_ms": 0.3016587
+      },
+      "resume opening": {
+        "wall_ms": 0.0128617
+      },
+      "opening probe API": {
+        "wall_ms": 0.1367127,
+        "cpu_ms": 0.0123525
+      },
+      "construct 64 shards": {
+        "wall_ms": 6.345072,
+        "cpu_ms": 6.3458356
+      },
+      "dispatch and schedule last shard": {
+        "wall_ms": 1.1199121
+      },
+      "reserve metadata": {
+        "wall_ms": 0.0018919,
+        "cpu_ms": 0.0017523999999999999
+      },
+      "metadata read API": {
+        "wall_ms": 5.1529228,
+        "cpu_ms": 0.4750123
+      },
+      "validate and decode metadata slots": {
+        "wall_ms": 1.6120860000000001,
+        "cpu_ms": 1.6122055
+      },
+      "metadata bookkeeping": {
+        "wall_ms": 0.0023982,
+        "cpu_ms": 0.0020924
+      },
+      "rebuild records and indexes": {
+        "wall_ms": 0.2748076,
+        "cpu_ms": 0.2751156
+      },
+      "count free slots": {
+        "wall_ms": 0.0202785,
+        "cpu_ms": 0.0201063
+      },
+      "finish shard": {
+        "wall_ms": 0.0008426,
+        "cpu_ms": 0.0007223
+      },
+      "join and finish": {
+        "wall_ms": 0.0248321
+      }
+    },
+    "shard_cpu_ms": {
+      "read": 32.54591,
+      "decode": 63.1907355,
+      "records": 18.532361299999998,
+      "count": 1.4690501
+    }
+  },
+  "cpu": {
+    "opens": 40,
+    "wall_ms": {
+      "count": 40,
+      "mean": 19.60004425,
+      "median": 19.7435335,
+      "p95": 21.680755,
+      "minimum": 16.184934,
+      "maximum": 22.173051
+    },
+    "cpu_ms": {
+      "count": 40,
+      "mean": 131.3917,
+      "median": 130.44799999999998,
+      "p95": 141.304,
+      "minimum": 122.554,
+      "maximum": 141.88
+    },
+    "physical_read_bytes": {
+      "count": 40,
+      "mean": 4460544,
+      "median": 4460544.0,
+      "p95": 4460544,
+      "minimum": 4460544,
+      "maximum": 4460544
+    },
+    "critical": {
+      "file task queue": {
+        "wall_ms": 0.076372825
+      },
+      "file and ring setup": {
+        "wall_ms": 0.32334785,
+        "cpu_ms": 0.3231168
+      },
+      "resume opening": {
+        "wall_ms": 0.025086175
+      },
+      "opening probe API": {
+        "wall_ms": 0.235951075,
+        "cpu_ms": 0.025140475
+      },
+      "construct 64 shards": {
+        "wall_ms": 11.233375425,
+        "cpu_ms": 11.23112265
+      },
+      "dispatch and schedule last shard": {
+        "wall_ms": 0.989662725
+      },
+      "reserve metadata": {
+        "wall_ms": 0.002124725,
+        "cpu_ms": 0.002304425
+      },
+      "metadata read API": {
+        "wall_ms": 5.175746475,
+        "cpu_ms": 0.498593925
+      },
+      "validate and decode metadata slots": {
+        "wall_ms": 1.17139025,
+        "cpu_ms": 1.013770975
+      },
+      "metadata bookkeeping": {
+        "wall_ms": 0.003085525,
+        "cpu_ms": 0.002808025
+      },
+      "rebuild records and indexes": {
+        "wall_ms": 0.30439155,
+        "cpu_ms": 0.304697125
+      },
+      "count free slots": {
+        "wall_ms": 0.024880375,
+        "cpu_ms": 0.02472865
+      },
+      "finish shard": {
+        "wall_ms": 0.000850925,
+        "cpu_ms": 0.000719575
+      },
+      "join and finish": {
+        "wall_ms": 0.0359205
+      }
+    },
+    "shard_cpu_ms": {
+      "read": 35.047795,
+      "decode": 51.726378075,
+      "records": 20.381857975,
+      "count": 1.8011027250000002
+    }
+  },
+  "trace": {
+    "opens": 50,
+    "wall_ms": {
+      "count": 50,
+      "mean": 14.79375594,
+      "median": 14.4553095,
+      "p95": 20.987959,
+      "minimum": 10.607002,
+      "maximum": 21.193571
+    },
+    "cpu_ms": {
+      "count": 50,
+      "mean": 118.509,
+      "median": 118.3125,
+      "p95": 127.076,
+      "minimum": 110.558,
+      "maximum": 129.22
+    },
+    "physical_read_bytes": {
+      "count": 50,
+      "mean": 4460544,
+      "median": 4460544.0,
+      "p95": 4460544,
+      "minimum": 4460544,
+      "maximum": 4460544
+    },
+    "critical": {
+      "file task queue": {
+        "wall_ms": 0.08533117999999999
+      },
+      "file and ring setup": {
+        "wall_ms": 0.31769428,
+        "cpu_ms": 0.31743698,
+        "running": 0.31769428,
+        "sleeping": 0.0,
+        "runnable": 0.0,
+        "unknown": 0.0
+      },
+      "resume opening": {
+        "wall_ms": 0.02954708
+      },
+      "opening probe API": {
+        "wall_ms": 0.23916156,
+        "cpu_ms": 0.025713,
+        "running": 0.02373108,
+        "sleeping": 0.21337644,
+        "runnable": 0.00205404,
+        "unknown": 0.0
+      },
+      "construct 64 shards": {
+        "wall_ms": 6.67734072,
+        "cpu_ms": 6.67809648,
+        "running": 6.67734072,
+        "sleeping": 0.0,
+        "runnable": 0.0,
+        "unknown": 0.0
+      },
+      "dispatch and schedule last shard": {
+        "wall_ms": 0.99376236
+      },
+      "reserve metadata": {
+        "wall_ms": 0.010002239999999999,
+        "cpu_ms": 0.00244852,
+        "running": 0.00262268,
+        "sleeping": 0.00028974,
+        "runnable": 0.00708982,
+        "unknown": 0.0
+      },
+      "metadata read API": {
+        "wall_ms": 5.46983996,
+        "cpu_ms": 0.48467186,
+        "running": 0.48414118,
+        "sleeping": 4.53582212,
+        "runnable": 0.44987666,
+        "unknown": 0.0
+      },
+      "validate and decode metadata slots": {
+        "wall_ms": 0.5845592,
+        "cpu_ms": 0.53721832,
+        "running": 0.54067124,
+        "sleeping": 0.0,
+        "runnable": 0.043887960000000004,
+        "unknown": 0.0
+      },
+      "metadata bookkeeping": {
+        "wall_ms": 0.00350808,
+        "cpu_ms": 0.00322754,
+        "running": 0.00350808,
+        "sleeping": 0.0,
+        "runnable": 0.0,
+        "unknown": 0.0
+      },
+      "rebuild records and indexes": {
+        "wall_ms": 0.32562272,
+        "cpu_ms": 0.30622998,
+        "running": 0.30626346,
+        "sleeping": 0.00067176,
+        "runnable": 0.018687500000000003,
+        "unknown": 0.0
+      },
+      "count free slots": {
+        "wall_ms": 0.02272714,
+        "cpu_ms": 0.0225624,
+        "running": 0.02272714,
+        "sleeping": 0.0,
+        "runnable": 0.0,
+        "unknown": 0.0
+      },
+      "finish shard": {
+        "wall_ms": 0.00124412,
+        "cpu_ms": 0.00111682,
+        "running": 0.00124412,
+        "sleeping": 0.0,
+        "runnable": 0.0,
+        "unknown": 0.0
+      },
+      "join and finish": {
+        "wall_ms": 0.03586938
+      }
+    },
+    "shard_cpu_ms": {
+      "read": 34.16310368,
+      "decode": 44.882199639999996,
+      "records": 20.1438006,
+      "count": 1.9356735800000002
+    }
+  },
+  "io": {
+    "reads": 3250,
+    "metadata_kernel_ms": {
+      "count": 3200,
+      "mean": 1.7622262321875,
+      "median": 1.628231,
+      "p95": 3.321828,
+      "minimum": 0.206912,
+      "maximum": 4.360203
+    },
+    "probe_kernel_ms": {
+      "count": 50,
+      "mean": 0.12242028,
+      "median": 0.1206295,
+      "p95": 0.138323,
+      "minimum": 0.111283,
+      "maximum": 0.152622
+    },
+    "block_requests": 6450,
+    "foreign_block_requests": 4,
+    "block_latency_ms": {
+      "count": 6450,
+      "mean": 0.2282895280620155,
+      "median": 0.1871485,
+      "p95": 0.44435,
+      "minimum": 0.06655,
+      "maximum": 0.643534
+    },
+    "block_bytes_per_open": 4460544.0,
+    "block_window_ms": {
+      "count": 50,
+      "mean": 12.23346618,
+      "median": 12.103826000000002,
+      "p95": 17.809201,
+      "minimum": 8.130672,
+      "maximum": 18.309812
+    },
+    "api_metadata_read_ms": {
+      "count": 3200,
+      "mean": 4.383894050625,
+      "median": 4.6140165,
+      "p95": 5.615638,
+      "minimum": 0.706211,
+      "maximum": 7.140567
+    },
+    "api_metadata_read_cpu_ms": {
+      "count": 3200,
+      "mean": 0.533798495,
+      "median": 0.5398765,
+      "p95": 0.691635,
+      "minimum": 0.216372,
+      "maximum": 0.886579
+    },
+    "block_inflight_union_ms": {
+      "count": 50,
+      "mean": 2.27286288,
+      "median": 2.266712,
+      "p95": 2.532341,
+      "minimum": 1.998098,
+      "maximum": 2.563744
+    },
+    "metadata_block_window_ms": {
+      "count": 50,
+      "mean": 4.037253,
+      "median": 3.7361435,
+      "p95": 5.188952,
+      "minimum": 3.467871,
+      "maximum": 5.276068
+    },
+    "metadata_kernel_window_ms": {
+      "count": 50,
+      "mean": 5.43621262,
+      "median": 5.450804,
+      "p95": 5.987658,
+      "minimum": 4.447378,
+      "maximum": 6.098641
+    }
+  }
+}

@@ -1,0 +1,20 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 25K of event 'cycles:uk' (time slices: 446495.030635761,446499.041846869)
+# Event count (approx.): 16866636329
+#
+# Overhead Command
+# ........ ...............
+#
+ 90.57% tokio-rt-worker
+ 6.09% disk_cache::rec
+ 3.33% feuer-read-io
+ 0.00% feuer-write-io
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

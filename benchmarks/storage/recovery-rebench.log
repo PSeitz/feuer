@@ -1,0 +1,11 @@
+
+running 1 test
+unknown option: '--ignored'
+Fixture: 99971787650 payload bytes, 64 metadata chunks, 110779346944 disk bytes, 274877906944 capacity bytes
+disk recovery
+source download sizes / 80778 entries / 64 shards
+test disk_cache::recovery::benchmark::benchmark_recovery has been running for over 60 seconds
+open        Avg: 16.2023ms     Median: 15.6655ms     [14.9665ms .. 20.3673ms]    Output: 80_778
+test disk_cache::recovery::benchmark::benchmark_recovery ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 128 filtered out; finished in 60.64s

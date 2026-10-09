@@ -1,0 +1,119 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 25K of event 'cycles:uk' (time slices: 446495.030635761,446499.041846869)
+# Event count (approx.): 16866636329
+#
+# Children Self Symbol IPC [IPC Coverage]
+# ........ ........ .................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................... ....................
+#
+ 100.00% 0.00% [.] start_thread - -
+ 100.00% 0.00% [.] thread_start - -
+ 100.00% 0.00% [.] <std::sys::thread::unix::Thread>::new::thread_start - -
+ 90.56% 0.00% [.] <tokio::runtime::blocking::pool::Inner>::run - -
+ 90.56% 0.00% [.] <std::thread::lifecycle::spawn_unchecked<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} - -
+ 90.56% 0.00% [.] std::sys::backtrace::__rust_begin_short_backtrace::<<tokio::runtime::blocking::pool::Spawner>::spawn_thread::{closure#0}, ()> - -
+ 90.02% 0.00% [.] <tokio::runtime::task::harness::Harness<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll - -
+ 89.95% 0.02% [.] <tokio::runtime::task::core::Core<tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}>, tokio::runtime::blocking::schedule::BlockingSchedule>>::poll - -
+ 89.93% 0.01% [.] <tokio::runtime::blocking::task::BlockingTask<<feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#1}> as core::future::future::Future>::poll - -
+ 89.89% 0.00% [.] <tokio::runtime::handle::Handle>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> - -
+ 89.76% 55.60% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCacheInner>::recover_shard::{closure#0}> - -
+ 10.09% 0.01% [.] <feuer_memory::buffer::AlignedBuffer>::allocate_zeroed - -
+ 10.08% 0.01% [.] __rustc::__rdl_alloc_zeroed - -
+ 9.45% 4.95% [.] <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<feuer_storage::disk_cache::metadata::EntryMetadataLocation, alloc::collections::btree::set_val::SetValZST>>::insert_entry::{closure#0}> - -
+ 9.07% 0.00% [k] el0t_64_sync - -
+ 9.07% 0.00% [k] el0t_64_sync_handler - -
+ 7.90% 2.06% [.] malloc - -
+ 7.54% 3.05% [.] __memset_zva64 - -
+ 6.09% 0.00% [.] <binggan::bench::InputWithBenchmark<(), usize> as binggan::bench::Bench>::exec_bench - -
+ 6.09% 0.00% [.] <binggan::bench_runner::BenchRunner>::run_group - -
+ 6.09% 0.00% [.] <feuer_storage::disk_cache::recovery::benchmark::benchmark_recovery::{closure#0} as core::ops::function::FnOnce<()>>::call_once - -
+ 6.09% 0.00% [.] <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} - -
+ 6.09% 0.00% [.] alloca::trampoline::<alloca::with_alloca<(), <binggan::bench_runner::BenchRunner>::run_sequential::{closure#0}>::{closure#0}> - -
+ 6.09% 0.00% [.] c_with_alloca - -
+ 6.09% 0.00% [.] feuer_storage::disk_cache::recovery::benchmark::benchmark_recovery - -
+ 6.09% 0.00% [.] std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> - -
+ 6.09% 0.00% [.] test::__rust_begin_short_backtrace::<core::result::Result<(), alloc::string::String>, fn() -> core::result::Result<(), alloc::string::String>> - -
+ 6.09% 0.00% [.] test::run_test::{closure#0} - -
+ 5.98% 0.00% [.] feuer_storage::disk_cache::recovery::benchmark::benchmark_recovery::{closure#2} - -
+ 5.97% 0.00% [.] <tokio::runtime::runtime::Runtime>::block_on::<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}> - -
+ 5.97% 0.00% [.] <tokio::runtime::park::CachedParkThread>::block_on::<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}> - -
+ 5.97% 0.00% [.] tokio::runtime::context::runtime::enter_runtime::<<tokio::runtime::scheduler::multi_thread::MultiThread>::block_on<<feuer_storage::disk_cache::DiskCache>::open<&std::path::Path>::{closure#0}>::{closure#0}, core::result::Result<feuer_storage::disk_cache::DiskCache, feuer_storage::disk_cache::DiskCacheError>> - -
+ 5.96% 0.00% [.] <feuer_storage::disk_cache::DiskCache>::open::<&std::path::Path>::{closure#0} - -
+ 5.77% 0.64% [.] <feuer_storage::disk_cache::DiskCacheShard>::insert_entry - -
+ 5.68% 0.00% [.] <alloc::vec::Vec<feuer_storage::disk_cache::DiskCacheShard> as alloc::vec::spec_from_iter::SpecFromIter<feuer_storage::disk_cache::DiskCacheShard, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>>>>::from_iter - -
+ 5.68% 0.00% [.] core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, feuer_storage::disk_cache::DiskCacheShard, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>, <core::result::Result<alloc::boxed::Box<[feuer_storage::disk_cache::DiskCacheShard]>, feuer_storage::error::DataFileError> as core::iter::traits::collect::FromIterator<core::result::Result<feuer_storage::disk_cache::DiskCacheShard, feuer_storage::error::DataFileError>>>::from_iter<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>>::{closure#0}, alloc::boxed::Box<[feuer_storage::disk_cache::DiskCacheShard]>> - -
+ 5.67% 0.00% [.] <core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}> as core::iter::traits::iterator::Iterator>::try_fold::<(), <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::ops::range::Range<usize>, <feuer_storage::disk_cache::DiskCache>::open_with_retention_scorer<&std::path::Path>::{closure#0}::{closure#0}>, core::result::Result<core::convert::Infallible, feuer_storage::error::DataFileError>> as core::iter::traits::iterator::Iterator>::try_fold<(), core::iter::traits::iterator::Iterator::try_for_each::call<feuer_storage::disk_cache::DiskCacheShard, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>::Break>::{closure#0}, core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>>::{closure#0}, core::ops::control_flow::ControlFlow<core::ops::control_flow::ControlFlow<feuer_storage::disk_cache::DiskCacheShard>>> - -
+ 5.63% 0.00% [.] <feuer_storage::disk_cache::small_entry_buffer::BufferedSmallEntryChunk>::new - -
+ 5.17% 0.59% [.] <feuer_storage::allocation::DiskChunkAllocator>::hold_chunks_for_recovered_payload - -
+ 4.69% 0.01% [.] <tracing::instrument::Instrumented<<feuer_storage::file::DataFile>::read_at::{closure#0}::{closure#0}> as core::future::future::Future>::poll - -
+ 4.68% 0.01% [.] <feuer_storage::file::DataFile>::read_slice::{closure#0} - -
+ 4.66% 0.01% [.] <feuer_storage::uring::ReadQueue>::read::{closure#0} - -
+ 4.55% 1.46% [.] _int_malloc - -
+ 4.53% 0.10% [k] el0_svc - -
+ 4.51% 0.32% [k] el0_da - -
+ 4.50% 0.02% [.] <feuer_memory::buffer::BufferPool>::allocate - -
+ 4.33% 0.00% [k] do_el0_svc - -
+ 4.33% 0.01% [k] el0_svc_common.constprop.0 - -
+ 4.32% 0.04% [k] invoke_syscall - -
+ 4.20% 0.02% [k] do_mem_abort - -
+ 4.18% 0.01% [k] do_translation_fault - -
+ 4.16% 0.14% [k] do_page_fault - -
+ 4.04% 3.48% [.] feuer_storage::disk_cache::page_format::encode_page - -
+ 4.00% 4.00% [.] __memcpy_sve - -
+ 3.96% 0.06% [.] syscall - -
+ 3.91% 3.91% [.] __aarch64_swp4_rel - -
+ 3.85% 0.04% [k] handle_mm_fault - -
+ 3.77% 0.04% [k] __handle_mm_fault - -
+ 3.74% 0.02% [k] handle_pte_fault - -
+ 3.64% 0.04% [k] do_anonymous_page - -
+ 3.61% 0.14% [.] <alloc::collections::btree::map::entry::VacantEntry<u64, feuer_storage::disk_cache::DiskEntry>>::insert_entry - -
+ 3.33% 0.00% [.] <std::thread::lifecycle::spawn_unchecked<<feuer_storage::uring::IoQueueHandle>::new::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} - -
+ 3.33% 0.01% [.] <feuer_storage::uring::IoQueue>::process_requests_until_disconnected - -
+ 3.33% 0.00% [.] std::sys::backtrace::__rust_begin_short_backtrace::<<feuer_storage::uring::IoQueueHandle>::new::{closure#1}, ()> - -
+ 3.17% 0.00% [.] <io_uring::submit::Submitter>::submit_and_wait - -
+ 3.14% 0.00% [k] __do_sys_io_uring_enter - -
+ 3.14% 0.00% [k] __arm64_sys_io_uring_enter - -
+ 3.13% 0.00% [k] io_submit_sqes - -
+ 3.05% 0.00% [k] io_issue_sqe - -
+ 3.05% 0.00% [k] io_read - -
+ 3.04% 0.00% [k] __io_issue_sqe - -
+ 3.04% 0.00% [k] __io_read - -
+ 3.04% 0.00% [k] ext4_file_read_iter - -
+ 3.03% 0.00% [k] __iomap_dio_rw - -
+ 3.03% 0.00% [k] iomap_dio_rw - -
+ 3.00% 0.01% [.] __posix_memalign - -
+ 3.00% 0.00% [.] _mid_memalign.isra.0 - -
+ 2.97% 0.01% [.] _int_memalign - -
+ 2.95% 2.95% [.] __aarch64_swp4_rel - -
+ 2.92% 2.16% [.] malloc_consolidate - -
+ 2.88% 0.00% [k] iomap_dio_iter - -
+ 2.60% 2.60% [k] __arch_clear_user - -
+ 2.60% 0.00% [k] iomap_dio_hole_iter - -
+ 2.17% 0.04% [k] alloc_anon_folio - -
+ 1.97% 0.01% [k] vma_alloc_folio_noprof - -
+ 1.96% 0.00% [k] vma_alloc_zeroed_movable_folio - -
+ 1.93% 0.01% [k] folio_alloc_mpol_noprof - -
+ 1.91% 0.01% [k] alloc_pages_mpol - -
+ 1.91% 0.04% [k] __alloc_frozen_pages_noprof - -
+ 1.86% 0.04% [k] get_page_from_freelist - -
+ 1.59% 1.59% [k] __pi_clear_page - -
+ 1.38% 0.08% [.] <feuer_storage::allocation::DiskChunkAllocator>::reserve_chunks_at - -
+ 1.27% 1.12% [.] <hashbrown::raw::RawTable<(feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>)>>::reserve_rehash::<hashbrown::map::make_hasher<feuer_types::ObjectKeyHash, alloc::collections::btree::map::BTreeMap<u64, feuer_storage::disk_cache::DiskEntry>, rustc_hash::FxBuildHasher>::{closure#0}> - -
+ 0.81% 0.81% [.] unlink_chunk.isra.0 - -
+ 0.75% 0.74% [.] __aarch64_cas4_acq - -
+ 0.60% 0.02% [k] folio_add_lru - -
+ 0.60% 0.01% [k] folio_add_lru_vma - -
+ 0.58% 0.04% [k] __folio_batch_add_and_move - -
+ 0.57% 0.02% [k] __arm64_sys_futex - -
+ 0.56% 0.13% [.] <feuer_storage::allocation::DiskChunkAllocator>::reserve_chunk_numbers - -
+ 0.55% 0.02% [k] do_futex - -
+ 0.55% 0.51% [k] folio_batch_move_lru - -
+ 0.55% 0.55% [.] __aarch64_cas4_acq - -
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
