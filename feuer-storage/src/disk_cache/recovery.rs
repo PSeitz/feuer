@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use super::{
-    metadata::{EntryMetadata, EntryMetadataLocation, FREE_SLOT, MetadataChunk, MetadataSlot},
+    metadata::{EntryMetadata, EntryMetadataLocation, MetadataChunk},
     page_format::*,
     *,
 };
@@ -30,7 +30,7 @@ impl DiskCacheInner {
         for chunk_index in 0..metadata.chunks.len() {
             for entry_index in 0..ENTRIES_PER_METADATA_CHUNK {
                 let slot = &mut metadata.chunks[chunk_index].slots[entry_index];
-                let MetadataSlot::Entry(entry_metadata) = *slot else {
+                let Some(entry_metadata) = *slot else {
                     continue;
                 };
                 let payload = entry_metadata.payload_address
@@ -42,7 +42,7 @@ impl DiskCacheInner {
                     || shard.allocator.hold_chunks_for_recovered_payload(&payload).is_none()
                 {
                     // Rejected records stay on disk until a later change rewrites their page.
-                    *slot = FREE_SLOT;
+                    *slot = None;
                     continue;
                 }
                 let location = EntryMetadataLocation {
@@ -53,7 +53,7 @@ impl DiskCacheInner {
                 shard.insert_entry(&mut disk_index, &mut metadata, entry_metadata.key, entry);
             }
         }
-        metadata.relink_free_slots();
+        metadata.reset_free_slots();
     }
 }
 
@@ -86,7 +86,7 @@ impl DiskCacheShard {
                         contents[..PAGE_CONTENT_BYTES].as_chunks::<ENTRY_METADATA_BYTES>().0
                     })
                 })
-                .map(|bytes| decode_entry_metadata(bytes).map_or(FREE_SLOT, MetadataSlot::Entry))
+                .map(decode_entry_metadata)
                 .collect();
             let next_chunk_address =
                 validate_page(link_page, NEXT_CHUNK_PAGE_TAG).map(|contents| read_u64(contents, 0));

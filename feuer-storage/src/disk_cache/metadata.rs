@@ -7,7 +7,7 @@ use std::{collections::BTreeSet, time::Duration};
 use super::{page_format::*, *};
 
 /// The location of one entry's metadata, ordered by metadata chunk then entry within that chunk.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct EntryMetadataLocation {
     /// Index into `MetadataPages::chunks`, in metadata-chain order.
     pub(super) chunk_index: u32,
@@ -31,28 +31,21 @@ pub(super) struct EntryMetadata {
     pub(super) payload_checksum: u64,
 }
 
-/// One entry's metadata, or a free slot linked to the next free slot. Free slots are written as zeros.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) enum MetadataSlot {
-    Entry(EntryMetadata),
-    Free { next_free: Option<EntryMetadataLocation> },
-}
-
-pub(super) const FREE_SLOT: MetadataSlot = MetadataSlot::Free { next_free: None };
-
-/// Metadata chunks, the list of free slots linked through them, and dirty-page tracking.
+/// Metadata chunks with free-slot accounting and dirty-page tracking.
 #[derive(Default)]
 pub(super) struct MetadataPages {
     pub(super) chunks: Vec<MetadataChunk>,
     pub(super) dirty_pages: BTreeSet<MetadataPageLocation>,
-    first_free: Option<EntryMetadataLocation>,
+    /// No slot before this location is free.
+    free_slot_search_start: EntryMetadataLocation,
     free_slot_count: usize,
 }
 
 /// One reserved metadata chunk: its entry metadata slots in disk order, and the next chunk's address.
+/// Free slots are `None` and written as zeros.
 pub(super) struct MetadataChunk {
     pub(super) reserved_chunk: ReservedChunks,
-    pub(super) slots: Box<[MetadataSlot]>,
+    pub(super) slots: Box<[Option<EntryMetadata>]>,
     /// The next metadata chunk's disk address, or `NO_CHUNK` at the end of the chain.
     pub(super) next_chunk_address: u64,
 }
@@ -73,7 +66,7 @@ impl MetadataChunk {
         let mut contents = [0; PAGE_CONTENT_BYTES];
         let slots = &self.slots[page_index * ENTRIES_PER_METADATA_PAGE..][..ENTRIES_PER_METADATA_PAGE];
         for (bytes, slot) in contents.as_chunks_mut().0.iter_mut().zip(slots) {
-            if let MetadataSlot::Entry(entry) = slot {
+            if let Some(entry) = slot {
                 encode_entry_metadata(bytes, entry);
             }
         }
@@ -88,15 +81,26 @@ impl MetadataChunk {
 }
 
 impl MetadataPages {
-    /// Stores one entry's metadata in the most recently freed slot and marks its page for writing.
+    /// Stores one entry's metadata in the first free slot and marks its page for writing.
+    /// Earliest reuse lets live metadata claim reused payload chunks before stale metadata.
     /// Panics without a free slot; callers reserve slots with `ensure_free_slots`.
     pub(super) fn store_entry_metadata(&mut self, entry: EntryMetadata) -> EntryMetadataLocation {
-        let location = self.first_free.expect("a free metadata slot");
-        let MetadataSlot::Free { next_free } = std::mem::replace(self.slot_mut(location), MetadataSlot::Entry(entry))
-        else {
-            unreachable!("the free list links only free slots");
+        let mut start = self.free_slot_search_start;
+        let location = loop {
+            let slots = &self.chunks[start.chunk_index as usize].slots[start.entry_index as usize..];
+            if let Some(offset) = slots.iter().position(Option::is_none) {
+                break EntryMetadataLocation {
+                    entry_index: start.entry_index + offset as u16,
+                    ..start
+                };
+            }
+            start = EntryMetadataLocation {
+                chunk_index: start.chunk_index + 1,
+                entry_index: 0,
+            };
         };
-        self.first_free = next_free;
+        *self.slot_mut(location) = Some(entry);
+        self.free_slot_search_start = location;
         self.free_slot_count -= 1;
         self.mark_page_dirty(location);
         location
@@ -104,10 +108,8 @@ impl MetadataPages {
 
     /// Frees one entry's slot for reuse and marks its page for rewriting without the entry.
     pub(super) fn free_entry_metadata(&mut self, location: EntryMetadataLocation) {
-        let next_free = self.first_free;
-        let freed = std::mem::replace(self.slot_mut(location), MetadataSlot::Free { next_free });
-        assert!(matches!(freed, MetadataSlot::Entry(_)), "metadata slot freed twice");
-        self.first_free = Some(location);
+        assert!(self.slot_mut(location).take().is_some(), "metadata slot freed twice");
+        self.free_slot_search_start = self.free_slot_search_start.min(location);
         self.free_slot_count += 1;
         self.mark_page_dirty(location);
     }
@@ -117,44 +119,31 @@ impl MetadataPages {
         self.free_slot_count
     }
 
-    /// Grows capacity for one payload write (at most 256 entries); publication consumes slots under the entry-index
-    /// lock.
+    /// Grows capacity for one payload write (at most 256 entries); publication consumes slots under the entry-index lock.
     pub(super) fn ensure_free_slots(&mut self, count: usize, allocator: &DiskChunkAllocator) -> Option<()> {
         if self.free_slot_count < count {
             let reserved_chunk = allocator.reserve_chunks(1)?;
             self.set_last_chunk_link(reserved_chunk.disk_byte_range().start);
-            let chunk_index = self.chunks.len();
             self.chunks.push(MetadataChunk {
                 reserved_chunk,
-                slots: vec![FREE_SLOT; ENTRIES_PER_METADATA_CHUNK].into(),
+                slots: vec![None; ENTRIES_PER_METADATA_CHUNK].into(),
                 next_chunk_address: NO_CHUNK,
             });
-            self.mark_link_page_dirty(chunk_index);
-            self.link_free_slots(chunk_index);
+            self.mark_link_page_dirty(self.chunks.len() - 1);
+            self.free_slot_count += ENTRIES_PER_METADATA_CHUNK;
         }
         Some(())
     }
 
-    /// Rebuilds the free list from all free slots, in ascending location order.
-    pub(super) fn relink_free_slots(&mut self) {
-        self.first_free = None;
-        self.free_slot_count = 0;
-        self.link_free_slots(0);
-    }
-
-    /// Links the free slots of chunks from `first_chunk_index` on ahead of the free list, in ascending order.
-    fn link_free_slots(&mut self, first_chunk_index: usize) {
-        for (chunk_index, chunk) in self.chunks.iter_mut().enumerate().skip(first_chunk_index).rev() {
-            for (entry_index, slot) in chunk.slots.iter_mut().enumerate().rev() {
-                if let MetadataSlot::Free { next_free } = slot {
-                    *next_free = self.first_free.replace(EntryMetadataLocation {
-                        chunk_index: chunk_index as u32,
-                        entry_index: entry_index as u16,
-                    });
-                    self.free_slot_count += 1;
-                }
-            }
-        }
+    /// Recounts free slots after recovery and searches for them from the first slot.
+    pub(super) fn reset_free_slots(&mut self) {
+        self.free_slot_search_start = EntryMetadataLocation::default();
+        self.free_slot_count = self
+            .chunks
+            .iter()
+            .flat_map(|chunk| &chunk.slots)
+            .filter(|slot| slot.is_none())
+            .count();
     }
 
     pub(super) fn set_last_chunk_link(&mut self, address: u64) {
@@ -164,7 +153,7 @@ impl MetadataPages {
         }
     }
 
-    fn slot_mut(&mut self, location: EntryMetadataLocation) -> &mut MetadataSlot {
+    fn slot_mut(&mut self, location: EntryMetadataLocation) -> &mut Option<EntryMetadata> {
         &mut self.chunks[location.chunk_index as usize].slots[location.entry_index as usize]
     }
 

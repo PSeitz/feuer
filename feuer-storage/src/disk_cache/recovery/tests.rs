@@ -136,7 +136,7 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
         metadata.chunks[location.chunk_index as usize].slots[location.entry_index as usize]
     };
     let entry_metadata = slot(&metadata);
-    assert!(matches!(entry_metadata, metadata::MetadataSlot::Entry(_)));
+    assert!(entry_metadata.is_some());
     drop(entry); // Must not lock metadata or release the allocator's payload.
     assert_eq!(slot(&metadata), entry_metadata);
     assert!(shard.allocator.reserve_chunks(1).is_none());
