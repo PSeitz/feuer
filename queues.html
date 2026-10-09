@@ -395,7 +395,7 @@ let (tx, rx) = mpsc::sync_channel(4096);</code></pre>
     break 'prepare;
 }
 
-// Read-first condition; fallback tries the other queue:
+// Check the read queue first, then try the other queue as a fallback:
 (self.read_inflight as f64)
     &lt; self.write_inflight as f64 * self.weight</code></pre>
                   </details>
@@ -428,7 +428,7 @@ let (tx, rx) = mpsc::sync_channel(4096);</code></pre>
                     <summary>Code · worker loop</summary>
                     <a class="source-label" href="foyer/foyer-storage/src/io/engine/uring.rs#L283">foyer/foyer-storage/src/io/engine/uring.rs:283–365 (condensed)</a>
                     <pre><code>loop {
-    // Try both channels; prepare up to io_depth.
+    // Try both channels and prepare up to io_depth requests.
     if self.read_inflight + self.write_inflight &gt; 0 {
         self.uring.submit().unwrap();
     }
@@ -436,7 +436,7 @@ let (tx, rx) = mpsc::sync_channel(4096);</code></pre>
         // Decrement the direction's in-flight count.
         // Send the result through the request's oneshot.
     }
-    // Immediately repeat; no idle wait here.
+    // Repeat immediately without sleeping.
 }</code></pre>
                   </details>
                 </div>

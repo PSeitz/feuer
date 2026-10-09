@@ -91,7 +91,7 @@ def main():
         finally:
             iostat.terminate()
             iostat.wait()
-    # Remove only files created by this run; retain data and logs on failure.
+    # Remove only files created by this run. Retain data and logs on failure.
     for name in ('read.bin', 'write.bin'):
         (bench.DATA / name).unlink()
     bench.DATA.rmdir()

@@ -37,11 +37,11 @@ mod tests;
 pub(crate) struct IoQueueHandle {
     // Every request on this queue has this direction.
     operation: IoOperation,
-    // Sends admitted requests; taken on drop to signal shutdown before joining.
+    // Sends admitted requests. Dropping the sender signals shutdown before joining.
     sender: Option<mpsc::SyncSender<IoRequest>>,
     // Shared eventfd wakes the queue for new work or shutdown.
     wake_fd: Arc<OwnedFd>,
-    // Queue thread; taken and joined on drop so submitted I/O drains first.
+    // The queue thread is taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
     // Queue-local budgets, enforced before allocating or queueing work.
     admission: Arc<IoAdmissionBudgets>,
@@ -186,7 +186,7 @@ impl AsRef<[u8]> for AlignedIoBuffer {
     }
 }
 
-// SAFETY: AlignedIoBuffer uniquely owns its allocation; moving it does not move the allocation.
+// SAFETY: AlignedIoBuffer uniquely owns its allocation. Moving it does not move the allocation.
 unsafe impl Send for AlignedIoBuffer {}
 
 impl Drop for AlignedIoBuffer {
@@ -202,11 +202,11 @@ struct IoRequest {
     operation: IoOperation,
     // Aligned physical start, used for kernel offsets.
     offset: u64,
-    // Aligned memory for disk reads/writes; kept alive until I/O completes.
+    // Aligned memory for disk reads and writes, kept alive until I/O completes.
     io_buffer: AlignedIoBuffer,
     // Bytes completed, allowing aligned short-I/O continuations.
     completed_bytes: usize,
-    // Caller result channel; taken on finish/failure, also detects cancellation.
+    // The caller's result channel is taken on completion or failure and also detects cancellation.
     reply: Option<oneshot::Sender<io::Result<Bytes>>>,
     // Holds request admission until this request is dropped.
     _request_permit: OwnedSemaphorePermit,
@@ -305,19 +305,19 @@ impl IoRequest {
 struct IoQueue {
     // Closes budgets on exit to release admission waiters.
     admission: Arc<IoAdmissionBudgets>,
-    // Thread-owned kernel submission/completion queues; no cross-thread ring access.
+    // Thread-owned kernel submission and completion queues. Only this thread accesses the ring.
     ring: IoUring,
-    // Direct-I/O payload file; taken to retain ownership on abnormal exit.
+    // Owns the direct-I/O payload file, which is taken to retain ownership on abnormal exit.
     file: Option<Arc<File>>,
-    // Shared directory lock; both queues must drain before it can be released.
+    // Shared directory lock, released only after both queues drain.
     directory_lock: Option<Arc<File>>,
     // Eventfd polled alongside the ring so new work need not wait for completion.
     wake_fd: Arc<OwnedFd>,
-    // Incoming admitted requests; disconnection starts draining shutdown.
+    // Incoming admitted requests. Disconnection starts draining shutdown.
     receiver: mpsc::Receiver<IoRequest>,
-    // Unsubmitted requests in arrival order; callers prevent conflicting I/O.
+    // Unsubmitted requests in arrival order. Callers prevent conflicting I/O.
     pending: VecDeque<IoRequest>,
-    // Owns in-flight requests through completion; CQEs identify their slot indices.
+    // Owns in-flight requests through completion. CQEs identify their slot indices.
     active: Vec<Option<IoRequest>>,
 }
 
@@ -357,8 +357,8 @@ impl IoQueue {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error),
             }
-            // A short submission must be retried before sleeping; queued SQEs might
-            // otherwise have no completion capable of waking us.
+            // Retry a short submission before sleeping. Otherwise, queued SQEs might
+            // have no completion capable of waking us.
             if !self.ring.submission().is_empty() {
                 continue;
             }
@@ -429,7 +429,7 @@ impl IoQueue {
         }
         if fds[1].revents & libc::POLLIN != 0 {
             let mut value = 0u64;
-            // SAFETY: value is writable for the required eight bytes; eventfd is nonblocking.
+            // SAFETY: value is writable for the required eight bytes. eventfd is nonblocking.
             unsafe { libc::read(self.wake_fd.as_raw_fd(), (&mut value as *mut u64).cast(), 8) };
         }
         Ok(())

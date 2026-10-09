@@ -26,7 +26,7 @@ pub(super) const ENTRY_METADATA_PAGES_PER_CHUNK: usize = CHUNK_BYTES as usize / 
 pub(super) const ENTRIES_PER_METADATA_CHUNK: usize = ENTRY_METADATA_PAGES_PER_CHUNK * ENTRIES_PER_METADATA_PAGE;
 pub(super) const NO_CHUNK: u64 = u64::MAX;
 
-/// The reserved content-checksum field is zero; each page is validated independently.
+/// The reserved content-checksum field is zero. Each page is validated independently.
 pub(super) fn encode_page(page: &mut [u8], page_tag: &[u8; 8], entry_count: u64, contents: &[u8]) {
     assert_eq!(page.len(), METADATA_PAGE_BYTES);
     assert!(contents.len() <= PAGE_CONTENT_BYTES);
@@ -38,8 +38,8 @@ pub(super) fn encode_page(page: &mut [u8], page_tag: &[u8; 8], entry_count: u64,
     page[..8].copy_from_slice(&checksum.to_le_bytes());
 }
 
-/// Validates one complete metadata page. The tag identifies the writer's format;
-/// an intact checksum lets readers rely on its field, padding, and alignment guarantees.
+/// Validates one complete metadata page. The tag identifies the writer's format.
+/// An intact checksum lets readers rely on its field, padding, and alignment guarantees.
 pub(super) fn validate_page<'a>(page: &'a [u8], page_tag: &[u8; 8]) -> Option<&'a [u8]> {
     if page[24..32] != *page_tag || page[..8] != XxHash64::oneshot(0, &page[8..]).to_le_bytes() {
         return None;

@@ -43,7 +43,7 @@ fn physical_read_bytes() -> u64 {
         .unwrap()
 }
 
-/// Return the cache only after recovery finishes; retain the underlying open time for comparison.
+/// Return the cache only after recovery finishes and retain the underlying open time for comparison.
 async fn open_and_wait_for_recovery(directory: &Path, capacity: u64, metrics: Arc<IoMetrics>) -> (DiskCache, f64) {
     let started = Instant::now();
     let cache = DiskCache::open(directory, capacity, metrics).await.unwrap();

@@ -5,13 +5,13 @@ use feuer_types::{ByteRange, ObjectKeyHash};
 
 /// Scores how valuable a cached byte range is to retain.
 ///
-/// Scores must be finite; the lowest-scoring eligible sampled entry is evicted.
+/// Scores must be finite. The lowest-scoring eligible sampled entry is evicted.
 /// Normalization is up to the scorer. `charged_bytes` is memory allocation charge
 /// or disk payload length, possibly zero.
-/// Both tiers share the scorer; it may own application metadata keyed by [`ObjectKeyHash`].
+/// Both tiers share the scorer. It may own application metadata keyed by [`ObjectKeyHash`].
 /// Calls run concurrently under shard locks: avoid I/O, cache re-entry, and holding
 /// application locks across cache operations if scoring acquires those locks.
-/// Sampling, trimming, and removal remain cache-owned; custom metadata does not.
+/// The cache owns sampling, trimming, and removal. The application owns custom metadata.
 pub trait RetentionScorer: Send + Sync {
     /// Returns the retention score for one object's cached range and tier-specific byte charge.
     fn score(
@@ -27,7 +27,7 @@ pub trait RetentionScorer: Send + Sync {
 /// Empty entries use a one-byte denominator to keep scores finite.
 #[derive(Debug, Default)]
 pub struct RetrievalCostScorer {
-    /// Fixed source-request cost in equivalent transferred bytes; defaults to zero.
+    /// Fixed source-request cost in equivalent transferred bytes. Defaults to zero.
     /// Zero scores only requested bytes.
     pub fixed_retrieval_equivalent_bytes: u64,
 }

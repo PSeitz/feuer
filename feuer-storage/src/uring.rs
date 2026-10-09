@@ -55,7 +55,7 @@ pub(crate) struct DataFileAndDirectoryLock {
 /// One read queue and one write queue shared by independent caches on the same SSD.
 ///
 /// All attached files share 64 active reads and 8 active writes, plus waiting channels
-/// for another 64 reads and 8 writes. Requests run in arrival order; there is no per-cache fairness.
+/// for another 64 reads and 8 writes. Requests run in arrival order. There is no per-cache fairness.
 /// File ownership and read-buffer pools remain independent. Idle queues retain no files.
 /// Dropping the last queue owner drains submitted I/O and joins both threads, which can block.
 #[derive(Clone)]
@@ -91,11 +91,11 @@ impl IoQueues {
 
 /// A handle that submits I/O requests and owns the queue thread's lifetime.
 struct IoQueueHandle {
-    // Sends admitted requests; taken on drop to signal shutdown before joining.
+    // Sends admitted requests. Dropping the sender signals shutdown before joining.
     sender: Option<mpsc::Sender<IoRequest>>,
     // Shared eventfd wakes the queue for new work or shutdown.
     wake_fd: Arc<OwnedFd>,
-    // Queue thread; taken and joined on drop so submitted I/O drains first.
+    // The queue thread is taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
 }
 
@@ -232,7 +232,7 @@ impl WriteQueue {
     }
 
     /// Writes bytes with zero padding to fill `length`, splitting at the request-size limit.
-    /// Aligned payload slices are used directly; only other bytes need a copy.
+    /// Aligned payload slices are used directly. Only other bytes need a copy.
     pub(crate) async fn write_padded(&self, offset: u64, length: usize, bytes: &Bytes) -> io::Result<()> {
         for start in (0..length).step_by(MAX_IO_REQUEST_BYTES) {
             let request_length = (length - start).min(MAX_IO_REQUEST_BYTES);
@@ -262,7 +262,7 @@ enum IoBuffers {
     Read(AlignedBuffer),
     Write {
         // Borrow the aligned payload prefix and copy only the remainder into a padded,
-        // aligned buffer. Either buffer may be empty; only nonempty buffers are submitted.
+        // aligned buffer. Either buffer may be empty. Only nonempty buffers are submitted.
         bytes: [Bytes; 2],
         vectors: [libc::iovec; 2],
     },
@@ -270,7 +270,7 @@ enum IoBuffers {
 
 impl IoBuffers {
     /// Takes the aligned prefix and copies the rest with zero padding.
-    /// This prepares memory only; it does not issue a disk write.
+    /// This prepares memory only. It does not issue a disk write.
     fn from_write_bytes(length: usize, mut bytes: Bytes) -> io::Result<Self> {
         assert!(bytes.len() <= length && length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         let aligned_length = if (bytes.as_ptr() as usize).is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
@@ -332,7 +332,7 @@ impl IoBuffers {
 }
 
 // SAFETY: read allocations and immutable Bytes stay at stable addresses when moved.
-// Only the queue submits pointers; write descriptors stay in its fixed active slots.
+// Only the queue submits pointers. Write descriptors stay in its fixed active slots.
 unsafe impl Send for IoBuffers {}
 
 /// An io_uring write request's failure, disk byte range, and buffer alignment.
@@ -351,17 +351,17 @@ struct WriteRequestError {
     hint: &'static str,
 }
 
-/// One I/O request, owning its buffers through completion; writes cover both buffers.
+/// One I/O request, owning its buffers through completion. Writes cover both buffers.
 struct IoRequest {
     // Each request retains its target file and lock until completion, including on cancellation.
     files: Arc<DataFileAndDirectoryLock>,
     // Exclusive disk end of this request, unchanged by short completions.
     disk_end: u64,
-    // Aligned memory for disk reads/writes; kept alive until I/O completes.
+    // Aligned memory for disk reads and writes, kept alive until I/O completes.
     buffers: IoBuffers,
     // Remaining byte range within the I/O buffers to read into or write from.
     buffer_range: Range<usize>,
-    // Caller result channel; taken on finish/failure, also detects cancellation.
+    // The caller's result channel is taken on completion or failure and also detects cancellation.
     reply: Option<oneshot::Sender<io::Result<Option<AlignedBuffer>>>>,
 }
 
@@ -401,7 +401,7 @@ impl IoRequest {
             .user_data(request_index as u64)
     }
 
-    /// Advances the remaining buffer range after a kernel completion; EINTR leaves it unchanged.
+    /// Advances the remaining buffer range after a kernel completion. EINTR leaves it unchanged.
     fn apply_completion_result(&mut self, result: i32) -> io::Result<()> {
         if result == -libc::EINTR {
             return Ok(());
@@ -448,7 +448,7 @@ impl IoRequest {
         )
     }
 
-    /// Returns the completed read buffer; writes release their buffers before reporting success.
+    /// Returns the completed read buffer. Writes release their buffers before reporting success.
     fn send_result(self, result: io::Result<()>) {
         drop(self.files);
         let _ = self.reply.unwrap().send(result.map(|()| match self.buffers {
@@ -459,13 +459,13 @@ impl IoRequest {
 }
 
 struct IoQueue {
-    // Thread-owned kernel submission/completion queues; no cross-thread ring access.
+    // Thread-owned kernel submission and completion queues. Only this thread accesses the ring.
     ring: IoUring,
     // Eventfd polled alongside the ring so new work need not wait for completion.
     wake_fd: Arc<OwnedFd>,
-    // Holds up to active.len() waiting requests; receive only when the active array has room.
+    // Holds up to active.len() waiting requests. Receive only when the active array has room.
     receiver: mpsc::Receiver<IoRequest>,
-    // Fixed addresses for in-flight buffers and write descriptors; completions identify slot indexes.
+    // Fixed addresses for in-flight buffers and write descriptors. Completions identify slot indexes.
     active: Box<[Option<IoRequest>]>,
 }
 
@@ -509,8 +509,8 @@ impl IoQueue {
                 }
                 Err(error) => return Err(error),
             }
-            // A short submission must be retried before sleeping; queued SQEs might
-            // otherwise have no completion capable of waking us.
+            // Retry a short submission before sleeping. Otherwise, queued SQEs might
+            // have no completion capable of waking us.
             if !self.ring.submission().is_empty() {
                 continue;
             }
@@ -597,7 +597,7 @@ impl IoQueue {
         }
         if fds[1].revents & libc::POLLIN != 0 {
             let mut wake_count = 0u64;
-            // SAFETY: wake_count is writable for the required eight bytes; eventfd is nonblocking.
+            // SAFETY: wake_count is writable for the required eight bytes. eventfd is nonblocking.
             unsafe { libc::read(self.wake_fd.as_raw_fd(), (&mut wake_count as *mut u64).cast(), 8) };
         }
         Ok(())

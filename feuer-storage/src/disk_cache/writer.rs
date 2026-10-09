@@ -1,4 +1,4 @@
-//! Writes and publishes payload runs with one eviction budget per run; only publication consumes metadata slots.
+//! Writes and publishes payload runs with one eviction budget per run. Only publication consumes metadata slots.
 
 use super::*;
 
@@ -25,7 +25,7 @@ impl DiskCacheShard {
             let mut budget = MAX_EVICTION_CHUNKS;
             let chunks = loop {
                 let mut pages = self.metadata_pages.lock().unwrap();
-                // Establish the metadata chain before payloads; leave all metadata slots free during I/O.
+                // Establish the metadata chain before writing payloads. Leave all metadata slots free during I/O.
                 let chunks = pages
                     .ensure_free_slots(entries.len(), &self.allocator)
                     .and_then(|()| self.allocator.reserve_chunks(count));

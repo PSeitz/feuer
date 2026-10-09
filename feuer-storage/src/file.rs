@@ -55,7 +55,7 @@ struct DataFileState {
 /// retains I/O buffers until completion, but holds no disk reservations.
 ///
 /// Capacity must be a positive multiple of 4096. Opening fails
-/// if io_uring or verified O_DIRECT alignment is unavailable; there is no fallback.
+/// if io_uring or verified O_DIRECT alignment is unavailable. There is no fallback.
 /// Dropping the last queue owner drains submitted I/O and joins both threads, which can block.
 /// With shared queues, dropping one file does not wait for other files' I/O. Its pending requests
 /// retain its file and lock until completion.
@@ -144,7 +144,7 @@ impl DataFile {
     /// Reads exactly the requested bytes with at most two partial alignment pages
     /// of overhead. The result may retain alignment padding in its backing allocation.
     /// Callers must either prevent overlapping writes or validate the returned
-    /// bytes against an expected checksum; see [`DataFile`]'s concurrency contract.
+    /// bytes against an expected checksum. See [`DataFile`]'s concurrency contract.
     pub async fn read_at(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
         self.measure_io(IoOperation::Read, offset, length, async {
             check_range_fits_file(IoOperation::Read, offset, length as u64, self.state.capacity)?;
@@ -157,7 +157,7 @@ impl DataFile {
     }
 
     /// Reads one contiguous payload, omitting final alignment padding, and returns its backing capacity.
-    /// The caller supplies the aligned payload address; even empty payloads occupy one alignment page.
+    /// The caller supplies the aligned payload address. Even empty payloads occupy one alignment page.
     pub(crate) async fn read_payload(&self, address: u64, length: usize) -> DataFileResult<(Bytes, usize)> {
         self.measure_io(IoOperation::Read, address, length, self.read_slice(address, length))
             .await
@@ -181,11 +181,11 @@ impl DataFile {
         (buffer.into_bytes(), copied_capacity)
     }
 
-    /// Writes bytes at a 4096-byte-aligned offset; the byte count must also be a multiple of 4096.
+    /// Writes bytes at a 4096-byte-aligned offset. The byte count must also be a multiple of 4096.
     ///
-    /// Retains aligned byte slices directly; copies unaligned inputs into aligned
+    /// Retains aligned byte slices directly and copies unaligned inputs into aligned
     /// buffers of at most 1 MiB each. Dropping this future may leave a partial write
-    /// and does not stop submitted writes; see [`DataFile`]'s concurrency contract.
+    /// and does not stop submitted writes. See [`DataFile`]'s concurrency contract.
     /// Publish a cached byte range only after success.
     ///
     /// # Panics
@@ -683,7 +683,7 @@ mod tests {
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
         let mut tasks = Vec::new();
         let shared_pages = Arc::new(tokio::sync::Mutex::new(()));
-        // Callers serialize access to shared pages; page-disjoint I/O runs concurrently.
+        // Callers serialize access to shared pages. I/O on disjoint pages runs concurrently.
         for i in 0..256u64 {
             let file = file.clone();
             let shared_pages = shared_pages.clone();
@@ -760,7 +760,7 @@ mod tests {
         use std::os::fd::FromRawFd;
 
         // A memory-backed file has no usable disk direct-I/O alignment.
-        // SAFETY: name is NUL-terminated; memfd_create returns a fresh descriptor.
+        // SAFETY: name is NUL-terminated. memfd_create returns a fresh descriptor.
         let fd = unsafe { libc::memfd_create(c"feuer-alignment-test".as_ptr(), libc::MFD_CLOEXEC) };
         assert!(fd >= 0);
         // SAFETY: fd was just created and has no other owner.

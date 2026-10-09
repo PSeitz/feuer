@@ -1,7 +1,7 @@
 //! Request history for immutable objects and byte ranges, independent of cache contents.
 //!
 //! Keeps decayed request counts and recent request events. Consumers interpret this
-//! evidence; history does not assign retrieval costs or make retention decisions.
+//! evidence. History does not assign retrieval costs or make retention decisions.
 
 use std::{
     collections::VecDeque,
@@ -19,7 +19,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 const ACCESS_HISTORY_SHARDS: usize = 64;
 
 /// Standalone request history shared by both cache tiers, independent of their shards and entries.
-/// Object keys select one of 64 independently locked history maps; the request clock remains global.
+/// Object keys select one of 64 independently locked history maps. The request clock remains global.
 /// Every distinct key and requested-range counter lasts for this object's lifetime, even after
 /// cache eviction. Trimming retains at most `MAX_ACCESS_EVENTS_PER_KEY` events per object key.
 /// History is not persisted across restarts.
@@ -51,7 +51,7 @@ impl ObjectAccessHistories {
     pub fn record_access(&self, key: &ObjectKeyHash, requested: impl Into<Option<ByteRange>>) {
         let mut objects = self.shard(key).lock().unwrap();
         // Assign the clock under the shard lock so this key's updates cannot arrive out of order.
-        // The atomic only measures request age; the shard mutex protects the history itself.
+        // The atomic only measures request age. The shard mutex protects the history itself.
         let clock = self.request_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
         objects.entry(*key).or_default().record(requested, clock);
     }
@@ -62,11 +62,11 @@ impl ObjectAccessHistories {
         self.request_count.load(AtomicOrdering::Relaxed)
     }
 
-    /// Reads distinct request counters in insertion order and one global request-clock value.
-    /// `None` denotes whole-object demand; unknown keys supply an empty slice.
-    /// Counters are borrowed without copying or allocation. Consumers can filter requests
-    /// before calling [`DecayedAccessCount::decayed_count`] with the supplied clock.
-    /// The key's shard stays locked during `read`; do not re-enter this history from it.
+    /// Calls `read` with the key's distinct request counters in insertion order and the global request count.
+    /// `None` denotes whole-object demand. Unknown keys supply an empty slice.
+    /// Counters are borrowed without copying or allocation. Filter requests before calling
+    /// [`DecayedAccessCount::decayed_count`] with the supplied request count to skip unnecessary decay work.
+    /// The key's shard stays locked during `read`. Do not re-enter this history from the callback.
     pub fn with_access_counts<T>(
         &self,
         key: &ObjectKeyHash,
@@ -95,13 +95,13 @@ impl ObjectAccessHistories {
 
 /// Maximum exact access events in one object key's range-trimming history.
 /// Reads `FEUER_MAX_ACCESS_EVENTS_PER_KEY` once on first use, defaulting to 64.
-/// Accepts size suffixes as multipliers; panics unless the result is positive and fits `usize`.
+/// Accepts size suffixes as multipliers. Panics unless the result is positive and fits `usize`.
 pub static MAX_ACCESS_EVENTS_PER_KEY: LazyLock<usize> = LazyLock::new(|| {
     read_env_number("FEUER_MAX_ACCESS_EVENTS_PER_KEY", 64, 1).unwrap_or_else(|error| panic!("{error}"))
 });
 /// Maximum age in requests across all keys that still contributes to range trimming.
 /// Reads `FEUER_MAX_ACCESS_AGE_ACCESSES` once on first use, defaulting to 262,144.
-/// Accepts size suffixes as multipliers; panics unless the result is positive and fits `u64`.
+/// Accepts size suffixes as multipliers. Panics unless the result is positive and fits `u64`.
 pub static MAX_ACCESS_AGE_ACCESSES: LazyLock<u64> = LazyLock::new(|| {
     read_env_number("FEUER_MAX_ACCESS_AGE_ACCESSES", 262_144, 1).unwrap_or_else(|error| panic!("{error}"))
 });
@@ -115,7 +115,7 @@ struct RangeAccess {
 
 /// Half-life of access counts, in requests across all keys.
 /// Reads `FEUER_ACCESS_COUNT_HALF_LIFE` once on first use, defaulting to 262,144.
-/// Accepts size suffixes as multipliers; panics unless the result is positive and fits `u64`.
+/// Accepts size suffixes as multipliers. Panics unless the result is positive and fits `u64`.
 pub static ACCESS_COUNT_HALF_LIFE: LazyLock<u64> = LazyLock::new(|| {
     read_env_number("FEUER_ACCESS_COUNT_HALF_LIFE", 262_144, 1).unwrap_or_else(|error| panic!("{error}"))
 });
@@ -130,7 +130,7 @@ pub struct DecayedAccessCount {
 impl DecayedAccessCount {
     /// Evaluates the count at the supplied request clock, without modifying it.
     /// Earlier clocks leave the count unchanged. Decay uses an approximation that is
-    /// up to 6.15% high per evaluation; errors can compound across recorded updates.
+    /// up to 6.15% high per evaluation. Errors can compound across recorded updates.
     #[inline]
     pub fn decayed_count(&self, access_clock: u64) -> f64 {
         // Age is measured in requests across all keys, not wall-clock time.
@@ -143,8 +143,8 @@ impl DecayedAccessCount {
         }
 
         // Approximate 2^(-age) through IEEE-754 bits: the exponent gives powers of two,
-        // and the mantissa interpolates between them. Each decay is up to ~6.15% high;
-        // repeated updates can compound that error.
+        // and the mantissa interpolates between them. Each decay is up to ~6.15% high.
+        // Repeated updates can compound that error.
         let exponent_bias = 127.0;
         let mantissa_scale = (1u32 << 23) as f64;
         let float_bits = ((exponent_bias - half_lives_elapsed) * mantissa_scale) as u32;

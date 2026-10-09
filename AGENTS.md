@@ -9,6 +9,10 @@ If its necessity is unclear, ask before implementing. Prefer the smallest correc
 Code has a contract, which is a set of guarantees and invariants. We should document and rely on the contract, not
 obscure it with additional checks, that contradict the contract.
 
+# Comments
+
+Do not use semicolons in comments. Keep comments clear, precise, and grammatically correct.
+
 # Linux SSD testing
 
 Machine: `ssh m8g-32cpu-local-ssd-2`. Use this host for SSD tests and benchmarks.

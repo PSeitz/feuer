@@ -62,7 +62,7 @@ impl DiskCacheShard {
     async fn load_metadata_chain(&self, file: &DataFile, mut address: u64) {
         let mut metadata = metadata::MetadataPages::default();
         while address != NO_CHUNK {
-            // The writer aligns links; reservations enforce current shard bounds and stop cycles.
+            // The writer aligns links. Reservations enforce current shard bounds and stop cycles.
             let Some(mut reserved_chunk) = self.allocator.reserve_chunks_at(address / CHUNK_BYTES, 1) else {
                 break;
             };
@@ -112,7 +112,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 }
 
 /// Decodes one record from a validated page. The writer guarantees
-/// representable ranges and aligned payloads; all-zero records are unused.
+/// representable ranges and aligned payloads. All-zero records are unused.
 fn decode_entry_metadata(bytes: &RawMetadataBytes) -> Option<EntryMetadata> {
     if bytes == &[0; ENTRY_METADATA_BYTES] {
         return None;

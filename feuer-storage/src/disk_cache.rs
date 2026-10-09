@@ -53,7 +53,7 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 /// hold entry records and links between metadata chunks. Each shard's chain starts at its first chunk.
 /// Entries have plain payload bytes, 4-KiB-aligned storage, and a checksum in their entry metadata.
 /// Reads verify the whole covering entry, returning only requested bytes. Reuse requires a wholly free chunk.
-/// The key hash selects an independently allocated shard; admission may fail despite space elsewhere.
+/// The key hash selects an independently allocated shard. Admission may fail despite space elsewhere.
 ///
 /// Pressure eviction uses sampled retention scores, defaulting to retrieval value per payload byte.
 /// Opening waits for all shards to recover before making the cache available.
@@ -94,7 +94,7 @@ struct DiskEntryIndex {
 /// One entry's object range, payload disk address and checksum, metadata, eviction position, and shared read.
 struct DiskEntry {
     // In-flight deduplication: concurrent readers share one disk read and checksum verification.
-    // Only concurrent callers retain the result; the index must not cache payload bytes.
+    // Only concurrent callers retain the result. The index must not cache payload bytes.
     in_flight_read: Weak<PayloadRead>,
     eviction_position: usize,
     object_range: ByteRange,
@@ -120,7 +120,7 @@ pub enum DiskCacheError {
     /// Raw storage failed.
     #[error(transparent)]
     DataFile(#[from] DataFileError),
-    /// The task performing a disk write failed; submitted I/O may still finish.
+    /// The task performing a disk write failed. Submitted I/O may still finish.
     #[error("disk write task failed: {0}")]
     WriteTaskFailed(#[source] tokio::task::JoinError),
 }
@@ -137,21 +137,21 @@ impl fmt::Debug for DiskCache {
 /// Optional settings and shared resources for opening a disk cache.
 /// Defaults use no-op metrics, private history and queues, no buffer pooling, and retrieval-cost scoring.
 pub struct DiskCacheOptions {
-    /// Backing filename within the cache directory; defaults to `data`.
+    /// Backing filename within the cache directory. Defaults to `data`.
     /// Must be a single filename, without NUL bytes or the reserved `.feuer.` prefix.
     pub file_name: String,
     /// Raw file I/O metrics.
     pub io_metrics: Arc<IoMetrics>,
     /// Disk-cache lookup, write, and capacity metrics.
     pub metrics: Arc<DiskMetrics>,
-    /// Request history consulted for retention decisions. Insertion and `get` do not record accesses;
-    /// public request handling records once before lookup.
+    /// Request history consulted for retention decisions. Insertion and `get` do not record accesses.
+    /// Public request handling records once before lookup.
     pub access_histories: Arc<ObjectAccessHistories>,
-    /// Maximum candidates inspected per eviction decision; must be positive.
+    /// Maximum candidates inspected per eviction decision. Must be positive.
     pub reclaim_sample_size: usize,
     /// Aligned buffer pool for reads, normally shared with the memory cache.
     pub buffer_pool: Arc<BufferPool>,
-    /// I/O queues shared with other caches; `None` creates dedicated queues.
+    /// I/O queues shared with other caches. `None` creates dedicated queues.
     pub io_queues: Option<crate::IoQueues>,
     /// Retention scorer, also applied to recovered entries.
     pub retention_scorer: Arc<dyn RetentionScorer>,
@@ -252,7 +252,8 @@ impl DiskCache {
         .map_err(DiskCacheError::WriteTaskFailed)?
     }
 
-    /// Buffers small entries; full/no-fit chunks and larger entries write immediately.
+    /// Buffers small entries. Full chunks, chunks with no room for the next entry,
+    /// and larger entries write immediately.
     /// Holds completion state until publication or discard. Cancellation may leave submitted I/O running.
     pub async fn write(
         &self,
@@ -285,8 +286,8 @@ impl DiskCache {
     /// Allocation failure keeps the original slice.
     /// Returns the final backing buffer's capacity too. Concurrent callers share the entry read.
     /// Missing entries and read or checksum failures are misses.
-    /// `None` requests the whole object. Do not mix whole-object and range requests for a key;
-    /// whole-object keys must contain only complete objects starting at zero.
+    /// `None` requests the whole object. Do not mix whole-object and range requests for a key.
+    /// Whole-object keys must contain only complete objects starting at zero.
     pub async fn fetch_from_disk(
         &self,
         key: &ObjectKeyHash,
@@ -296,7 +297,7 @@ impl DiskCache {
         let started = Instant::now();
         let metrics = &self.disk.metrics;
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
-        // Do not wait on a busy buffer; flushing chunks may miss until disk publication.
+        // Do not wait on a busy buffer. Flushing chunks may miss until disk publication.
         if let Ok(pending) = shard.buffered_small_entry_chunk.try_lock()
             && let Some(bytes) = pending.get(key, requested)
         {
@@ -354,7 +355,7 @@ impl DiskCacheShard {
 
     /// Samples up to `reclaim_sample_size` entries and evicts at most one that fits the remaining chunk budget.
     /// Returns whether sampling occurred, even if no entry was evicted.
-    /// Consumes one attempt when sampling; removed entries consume their chunk count. Neighbors are not evicted.
+    /// Sampling consumes one attempt. Removed entries consume their chunk count. Neighbors are not evicted.
     /// The allocator releases removed payloads without waiting for metadata writes or readers.
     fn sample_and_evict_entry(
         &self,
@@ -426,7 +427,7 @@ impl DiskEntry {
     }
 
     fn chunk_count(&self) -> u64 {
-        // Small payloads stay within one chunk; larger payloads start at a chunk boundary.
+        // Small payloads stay within one chunk. Larger payloads start at a chunk boundary.
         self.object_range.len().max(1).div_ceil(CHUNK_BYTES)
     }
 }

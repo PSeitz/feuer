@@ -2,7 +2,7 @@
 #
 #     <type>[optional scope]: <description>
 #
-# ... where valid types and scopes can be found below; for example:
+# Valid types and scopes are listed below. For example:
 #
 #     build(maven): One level down for native profile
 #

@@ -32,8 +32,8 @@ struct TieredMemoryDiskCacheInner {
 /// A cloneable handle to one Feuer cache.
 ///
 /// Lookups check memory, then integrity-checked disk, then the per-call callback.
-/// Disk writes are best-effort; a full 512-entry queue skips new writes. Zero disk capacity disables disk;
-/// otherwise opening requires Linux direct I/O and io_uring, and waits for metadata recovery.
+/// Disk writes are best-effort. A full 512-entry queue skips new writes. Zero disk capacity disables disk.
+/// Otherwise, opening requires Linux direct I/O and io_uring and waits for metadata recovery.
 #[derive(Clone)]
 pub struct TieredMemoryDiskCache {
     inner: Arc<TieredMemoryDiskCacheInner>,
@@ -54,9 +54,9 @@ impl TieredMemoryDiskCache {
     /// Otherwise requires Tokio, io_uring and direct I/O, locks the backing file,
     /// and waits for metadata recovery. Disk failures never fall back to memory.
     ///
-    /// `metrics_registry: None` disables metrics; `io_queues: None` creates dedicated queues.
-    /// Metrics and queues can be supplied independently. A shared registry aggregates metrics;
-    /// labels contain no object identities or cache names.
+    /// `metrics_registry: None` disables metrics. `io_queues: None` creates dedicated queues.
+    /// Metrics and queues can be supplied independently. A shared registry aggregates metrics.
+    /// Labels contain no object identities or cache names.
     /// Pass clones of the same [`IoQueues`] to caches on the same SSD to share I/O concurrency.
     /// Contents, capacities, eviction, buffer pools, file locks, and background-write queues
     /// remain independent. Zero disk capacity ignores the queues.
@@ -123,7 +123,7 @@ impl TieredMemoryDiskCache {
     }
 
     /// Delivers complete, uncompressed binary trace packages as [`Bytes`] for this handle and its clones.
-    /// Requires Tokio. Persist bytes unchanged; the receiver owns retries and error reporting.
+    /// Requires Tokio. Persist bytes unchanged. The receiver owns retries and error reporting.
     pub fn with_trace<F, Fut>(mut self, callback: F) -> Self
     where
         F: FnMut(Bytes) -> Fut + Send + 'static,
@@ -177,7 +177,7 @@ impl TieredMemoryDiskCache {
     /// only the requested bytes to memory, copying if the destination allocation
     /// saves at least 25% of backing capacity. Otherwise, or if allocation fails,
     /// it retains the original slice. On a miss in both tiers, `callback` is
-    /// invoked exactly once by this call; Feuer performs no leader election,
+    /// invoked exactly once by this call. Feuer performs no leader election,
     /// waiter coordination, or source retry. A successful callback must return
     /// one valid [`Download`] covering `requested_range`. The memory target is
     /// soft, so callback results are not rejected solely for exceeding it.
@@ -570,7 +570,7 @@ mod tests {
         wait_for_buffered(&cache, &key, source.downloaded_range()).await;
         assert_eq!(history.request_count(), 1);
 
-        // The same key selects the same memory shard; an oversized disjoint range
+        // The same key selects the same memory shard. An oversized disjoint range
         // forces the original download out without contributing an access.
         cache.inner.memory.insert(
             ObjectKeyHash::from(key.as_str()),

@@ -10,7 +10,7 @@ use crate::uring;
 pub struct ReadQueue(uring::ReadQueue);
 
 impl ReadQueue {
-    /// Owns an already-open read-only file; does not create, resize, or write it.
+    /// Owns an already-open read-only file without creating, resizing, or writing it.
     pub fn new(file: File) -> io::Result<Self> {
         // SAFETY: F_GETFL only queries flags of the live descriptor.
         let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };

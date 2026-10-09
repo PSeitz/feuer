@@ -9,9 +9,9 @@ use thiserror::Error;
 
 /// Explicit capacities and location for one Feuer cache.
 ///
-/// `disk_capacity` includes metadata and alignment overhead; zero disables the disk tier.
+/// `disk_capacity` includes metadata and alignment overhead. Zero disables the disk tier.
 /// When disk is disabled, `directory` and `file_name` are unused.
-/// `memory_capacity` is a soft eviction target divided among the in-memory shards; oversized entries
+/// `memory_capacity` is a soft eviction target divided among the in-memory shards. Oversized entries
 /// can make entry allocation charges exceed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheConfig {
@@ -28,8 +28,8 @@ impl CacheConfig {
     /// Creates a cache configuration with no implicit capacity defaults.
     ///
     /// Reads `FEUER_RECLAIM_SAMPLE_SIZE` for the eviction candidate limit, defaulting
-    /// to 64 when unset. Accepts size suffixes as multipliers (e.g. `1KiB` for 1024);
-    /// the result must be positive and fit `usize`.
+    /// to 64 when unset. Accepts size suffixes as multipliers (e.g. `1KiB` for 1024).
+    /// The result must be positive and fit `usize`.
     /// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT` for the idle buffer ceiling, defaulting
     /// to 7 when unset. The percentage must be between 0 and 100.
     pub fn new(
@@ -54,7 +54,7 @@ impl CacheConfig {
         })
     }
 
-    /// Sets the backing filename within the cache directory; defaults to `data`.
+    /// Sets the backing filename within the cache directory. Defaults to `data`.
     /// Different filenames allow independent caches in the same directory.
     /// Must be a single filename, without NUL bytes or the reserved `.feuer.` prefix.
     pub fn with_file_name(mut self, file_name: impl Into<String>) -> Result<Self, CacheConfigError> {
@@ -89,9 +89,9 @@ impl CacheConfig {
         Ok(self)
     }
 
-    /// Sets the fixed source-request cost in equivalent transferred bytes; defaults to zero.
+    /// Sets the fixed source-request cost in equivalent transferred bytes. Defaults to zero.
     /// Zero scores only requested bytes. For example, 125 ms at 80 MB/s is 10,000,000 bytes.
-    /// Applies to the default scorer in both tiers; ignored when supplying a custom scorer.
+    /// Applies to the default scorer in both tiers. Ignored when supplying a custom scorer.
     pub fn with_fixed_retrieval_equivalent_bytes(mut self, bytes: u64) -> Self {
         self.fixed_retrieval_equivalent_bytes = bytes;
         self
@@ -122,7 +122,7 @@ impl CacheConfig {
         &self.file_name
     }
 
-    /// Returns the configured disk capacity in bytes; zero disables the disk tier.
+    /// Returns the configured disk capacity in bytes. Zero disables the disk tier.
     pub const fn disk_capacity(&self) -> u64 {
         self.disk_capacity
     }

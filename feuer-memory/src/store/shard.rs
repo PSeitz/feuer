@@ -13,7 +13,7 @@ pub(super) const MIN_REQUESTS_BEFORE_RANGE_TRIM: u64 = 64;
 
 /// An entry's payload bytes, object range, allocation charge, candidate index, and request count at insertion.
 struct MemoryEntry {
-    /// Exact object interval, payload, and allocation charge; lookup results share this allocation.
+    /// Exact object interval, payload, and allocation charge. Lookup results share this allocation.
     download: Download,
     /// Index of this entry's candidate in the list sampled for trimming or eviction.
     candidate_index: usize,

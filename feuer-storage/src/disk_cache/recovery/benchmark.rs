@@ -1,4 +1,4 @@
-//! Repeated-open recovery benchmark; see benchmarks/storage/recovery.md.
+//! Repeated-open recovery benchmark. See benchmarks/storage/recovery.md.
 
 use std::{any::Any, cell::RefCell, os::unix::fs::MetadataExt, rc::Rc};
 
@@ -117,7 +117,7 @@ fn benchmark_recovery() {
     let cases = if std::env::var_os("RECOVERY_100_GB").is_some() {
         vec![(trace_download_sizes(), 256 * 1024, "source download sizes")]
     } else {
-        // 50k entries span three metadata chunks on one shard; 100k grow all four chains.
+        // 50k entries span three metadata chunks on one shard. 100k grow all four chains.
         [(0, 128), (10_000, 128), (50_000, 240), (50_000, 512), (100_000, 512)]
             .map(|(entries, chunks)| (vec![4096; entries], chunks, "4-KiB entries"))
             .into()

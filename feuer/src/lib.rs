@@ -26,5 +26,5 @@ pub use feuer_storage::{DiskCacheError, IoQueues};
 pub use feuer_types::{ByteRange, Download, DownloadError, InvalidByteRange, ObjectKeyHash};
 
 /// The complete UTF-8 identity supplied at the public cache boundary.
-/// Internally only its XXH3-128 hash is stored; collisions are not verified against full keys.
+/// Internally only its XXH3-128 hash is stored. Collisions are not verified against full keys.
 pub type ObjectKey = String;

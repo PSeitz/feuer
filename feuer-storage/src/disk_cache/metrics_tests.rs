@@ -320,7 +320,7 @@ async fn checksum_failures_remove_entries_but_io_errors_preserve_them() {
     );
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
     assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
-    // Only metadata remains reserved; payload reuse does not wait for invalidation writes.
+    // Only metadata remains reserved. Payload reuse does not wait for invalidation writes.
     assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 1.0);
     cache.insert_batch(vec![(key, download(4))]).await.unwrap();
     std::fs::OpenOptions::new()
@@ -376,7 +376,7 @@ async fn pressure_eviction_and_write_failure_record_each_entry_outcome() {
     assert!(cache.covers_range(&"small".into(), ByteRange::new(0, 1).unwrap()));
     cache.discard_pending().await;
     assert_eq!(outcome("canceled"), 1.0);
-    // The small entry never reserved disk space; discard only releases its buffered bytes and accounting.
+    // The small entry never reserved disk space. Discarding it only releases its buffered bytes and accounting.
     assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 4.0);
     assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 1.0);
 }

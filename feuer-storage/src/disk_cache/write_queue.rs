@@ -72,7 +72,7 @@ impl DiskCache {
     }
 
     // The worker owns no sender or idle disk reference. Closing the last handle drains
-    // queued writes; dropping their disk references then discards any remaining partial chunks.
+    // queued writes. Dropping their disk references then discards any remaining partial chunks.
     pub(super) async fn write_queued(mut receiver: mpsc::Receiver<PendingDiskWrite>) {
         while let Some(PendingDiskWrite {
             disk,

@@ -175,7 +175,7 @@ fn resource_pressure_retries_pending_submissions() {
                     }
                     2 => Err(io::Error::from_raw_os_error(libc::EINTR)),
                     // Accept only one request so EAGAIN also occurs with a partially consumed SQ.
-                    // SAFETY: active slots own all SQE pointers; this submits one ordinary request.
+                    // SAFETY: active slots own all SQE pointers. This submits one ordinary request.
                     3 => unsafe { ring.submitter().enter::<libc::sigset_t>(1, 0, 0, None) },
                     _ => ring.submit(),
                 }

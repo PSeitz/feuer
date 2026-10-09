@@ -49,7 +49,7 @@ pub(crate) fn bucket_index(length: usize) -> usize {
 /// Default maximum share of memory capacity occupied by idle buffers across all buckets.
 pub(crate) const DEFAULT_IDLE_BUFFER_POOL_PERCENT: u64 = 7;
 
-/// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT`, defaulting to 7 when unset; it must be between 0 and 100.
+/// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT`, defaulting to 7 when unset. It must be between 0 and 100.
 pub fn read_idle_buffer_pool_percent() -> Result<u64, String> {
     let name = "FEUER_IDLE_BUFFER_POOL_PERCENT";
     let percent = read_env_number(name, DEFAULT_IDLE_BUFFER_POOL_PERCENT, 0)?;
@@ -142,7 +142,7 @@ impl BufferPool {
             while state.idle_bytes > idle_limit
                 && let Some(buffer) = self.take_idle_buffer(&mut state, index)
             {
-                // Idle buffers have no pool reference; dropping them frees their allocations.
+                // Idle buffers have no pool reference. Dropping them frees their allocations.
                 drop(buffer);
             }
         }
@@ -202,7 +202,7 @@ impl AlignedBuffer {
         let layout = Self::layout(length)?;
         #[cfg(target_os = "linux")]
         if length > MAX_FIXED_BUFFER_BYTES {
-            // SAFETY: length is nonzero and valid; anonymous private pages are initialized to zero.
+            // SAFETY: length is nonzero and valid. Anonymous private pages are initialized to zero.
             let ptr = unsafe {
                 libc::mmap(
                     std::ptr::null_mut(),
@@ -245,7 +245,7 @@ impl AlignedBuffer {
         let layout = Self::layout(capacity)?;
         #[cfg(target_os = "linux")]
         let ptr = {
-            // SAFETY: this buffer owns an anonymous mapping; both sizes are nonzero and valid.
+            // SAFETY: this buffer owns an anonymous mapping. Both sizes are nonzero and valid.
             let ptr = unsafe { libc::mremap(self.ptr.as_ptr().cast(), old_capacity, capacity, libc::MREMAP_MAYMOVE) };
             if ptr == libc::MAP_FAILED {
                 return Err(io::Error::last_os_error());
@@ -264,7 +264,7 @@ impl AlignedBuffer {
         };
         #[cfg(not(target_os = "linux"))]
         let ptr = {
-            // SAFETY: ptr was allocated with self.layout; the new size is valid for its alignment.
+            // SAFETY: ptr was allocated with self.layout. The new size is valid for its alignment.
             let ptr = NonNull::new(unsafe { realloc(self.ptr.as_ptr(), self.layout, capacity) })
                 .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer resize failed"))?;
             if capacity > old_capacity {

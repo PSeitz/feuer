@@ -50,7 +50,7 @@ def main():
                 for size, rq, wq in cases:
                     name = f'r{repeat}-bs{size}-rq{rq}-wq{wq}'
                     print(name, flush=True)
-                    # Adjacent controls each repeat; fio measures completion latency, not API latency.
+                    # Run adjacent controls for each repeat. fio measures completion latency, not API latency.
                     if (size, rq, wq) in [(4096, 1, 0), (4096, 64, 0), (1048576, 32, 0), (1048576, 0, 32)]:
                         writing = wq > 0
                         fio('fio-' + name, ['--rw=' + ('write' if writing else 'randread'),

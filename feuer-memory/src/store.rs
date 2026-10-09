@@ -32,13 +32,13 @@ const MAX_SHARDS: usize = 64;
 /// consult it for retention decisions but never record accesses or remove history.
 ///
 /// Cached allocations and idle read buffers share the configured capacity.
-/// Each shard evicts locally against its share before insertion; admission also
+/// Each shard evicts locally against its share before insertion. Admission also
 /// frees idle buffers when needed. An allocation larger than its shard's target
 /// is cached after that shard is emptied, so total usage can exceed capacity.
 /// Victims are selected shard-locally by retention score, defaulting to recent modeled
 /// retrieval value per charged allocation byte.
-/// A rotating sample selects one victim;
-/// if its observed requests form a useful smaller payload, Feuer trims that victim
+/// A rotating sample selects one victim.
+/// If its observed requests form a useful smaller payload, Feuer trims that victim
 /// outside the shard lock.
 pub struct MemoryCache {
     /// Independently locked partitions selected by complete object identity.
@@ -82,7 +82,7 @@ impl MemoryCache {
     }
 
     /// Creates a cache with an explicit shard count for controlled benchmarks.
-    /// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT`; panics if it is invalid.
+    /// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT`. Panics if it is invalid.
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
     pub fn with_shards_for_benchmark(capacity: u64, num_shards: usize) -> Self {
@@ -146,8 +146,8 @@ impl MemoryCache {
     }
 
     /// Looks up one covering entry without recording an access.
-    /// `None` requests the whole object. Do not mix whole-object and range requests for a key;
-    /// whole-object keys must contain only complete objects starting at zero.
+    /// `None` requests the whole object. Do not mix whole-object and range requests for a key.
+    /// Whole-object keys must contain only complete objects starting at zero.
     pub fn get(&self, object_key: &ObjectKeyHash, requested: impl Into<Option<ByteRange>>) -> Option<Bytes> {
         let shard_index = self.shard_index(object_key);
         self.shards[shard_index].lock().get(object_key, requested.into())

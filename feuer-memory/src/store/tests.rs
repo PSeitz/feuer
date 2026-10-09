@@ -306,7 +306,7 @@ fn reclaim_sampling_advances_past_contained_ranges() {
         ));
         assert_eq!(shard.entry_count(), expected_entries);
     }
-    // The partial overlap is eligible; the two ranges fully contained in the incoming download were skipped.
+    // The partial overlap is eligible. The two ranges fully contained in the incoming download were skipped.
     assert!(matches!(
         shard.try_admit_or_reclaim(&key, &replacement, &cache, false),
         InsertOrReclaimResult::Complete(true)

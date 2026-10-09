@@ -9,7 +9,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use feuer::{ByteRange, CacheConfig, Download, TieredMemoryDiskCache};
 
     let directory = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "trace".to_owned()));
-    // Each receiver numbers its own files; require a fresh directory.
+    // Each receiver numbers its own files. Require a fresh directory.
     std::fs::create_dir(&directory)?;
     let mut file_number = 0u64;
     let (sender, mut results) = tokio::sync::mpsc::unbounded_channel();
@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Download::new(0, Bytes::from_static(b"data"))
         })
         .await?;
-    // This example expects one package; the receiver waits for its own write result.
+    // This example expects one package. The receiver waits for its own write result.
     drop(cache);
     results
         .recv()

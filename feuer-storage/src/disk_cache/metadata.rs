@@ -1,6 +1,6 @@
-//! Inserts and removals update entry metadata slots under the metadata mutex; one periodic writer
+//! Inserts and removals update entry metadata slots under the metadata mutex. One periodic writer
 //! encodes dirty pages, releases the mutex, then writes them sequentially. Changes during I/O remain dirty.
-//! Failed writes are not retried. No stable-storage sync or shutdown flush; recovery is best-effort.
+//! Failed writes are not retried. There is no stable-storage sync or shutdown flush. Recovery is best-effort.
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -83,7 +83,7 @@ impl MetadataChunk {
 impl MetadataPages {
     /// Stores one entry's metadata in the first free slot and marks its page for writing.
     /// Earliest reuse lets live metadata claim reused payload chunks before stale metadata.
-    /// Panics without a free slot; callers reserve slots with `ensure_free_slots`.
+    /// Panics without a free slot. Callers reserve slots with `ensure_free_slots`.
     pub(super) fn store_entry_metadata(&mut self, entry: EntryMetadata) -> EntryMetadataLocation {
         let mut start = self.free_slot_search_start;
         let location = loop {
@@ -119,7 +119,8 @@ impl MetadataPages {
         self.free_slot_count
     }
 
-    /// Grows capacity for one payload write (at most 256 entries); publication consumes slots under the entry-index lock.
+    /// Grows capacity for one payload write (at most 256 entries).
+    /// Publication consumes slots under the entry-index lock.
     pub(super) fn ensure_free_slots(&mut self, count: usize, allocator: &DiskChunkAllocator) -> Option<()> {
         if self.free_slot_count < count {
             let reserved_chunk = allocator.reserve_chunks(1)?;

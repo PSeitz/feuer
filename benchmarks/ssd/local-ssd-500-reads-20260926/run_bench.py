@@ -62,7 +62,7 @@ write_bw_log={OUT / 'writer'}
 log_avg_msec=500
 ''')
     summaries = []
-    # Reverse QD order in round 2; compare both states in each round.
+    # Reverse QD order in round 2. Compare both states in each round.
     for repeat in [1, 2]:
         for background in [False, True]:
             writer = None

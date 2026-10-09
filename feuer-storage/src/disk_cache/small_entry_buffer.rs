@@ -1,4 +1,4 @@
-//! Each shard owns an initialized small-entry buffer; disk space is reserved only when writing.
+//! Each shard owns an initialized small-entry buffer. Disk space is reserved only when writing.
 
 use super::{writer::BufferedEntry, *};
 use feuer_memory::AlignedBuffer;
@@ -23,7 +23,7 @@ impl DiskCache {
         self.disk.flush().await
     }
 
-    /// Discards buffered entries without writing them; retains each shard's initialized buffer.
+    /// Discards buffered entries without writing them and retains each shard's initialized buffer.
     pub async fn discard_pending(&self) {
         for shard in &self.disk.shards {
             shard.buffered_small_entry_chunk.lock().await.entries.clear();
@@ -32,7 +32,7 @@ impl DiskCache {
 }
 
 impl DiskCacheInner {
-    /// Keeps the disk alive only while flushing; direct and queued writes share this timer.
+    /// Keeps the disk alive only while flushing. Direct and queued writes share this timer.
     pub(super) async fn flush_payload_periodically(disk: Weak<Self>) {
         let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + FLUSH_INTERVAL, FLUSH_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

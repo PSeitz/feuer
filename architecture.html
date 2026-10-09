@@ -488,7 +488,7 @@
     history.replaceState(null, '', location.pathname + location.search);
   });
 
-  // Source links stay ordinary links; in-page links reveal their target and ancestors.
+  // Source links stay ordinary links. In-page links reveal their target and ancestors.
   function reveal(hash) {
     const target = document.getElementById(hash.slice(1));
     if (!target) return;

@@ -28,7 +28,7 @@ pub(crate) enum DiskWriteQueueOutcome {
 }
 
 /// Disk range lookup, write queue, payload writes and whole-chunk capacity metrics.
-/// All labels have fixed values; gauges aggregate caches sharing a registry.
+/// All labels have fixed values. Gauges aggregate caches sharing a registry.
 #[derive(Debug)]
 pub struct DiskMetrics {
     lookup_count: [BoxedCounter; 4],

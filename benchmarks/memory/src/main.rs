@@ -327,7 +327,7 @@ impl ReplayReport {
         self.traffic.hit_bytes as f64 / self.traffic.requested_bytes.max(1) as f64
     }
 
-    /// Returns the source-cost savings ratio against fetching every exact request; extra bytes can make it negative.
+    /// Returns the source-cost savings ratio against fetching every exact request. Extra bytes can make it negative.
     fn source_cost_savings_ratio(&self) -> f64 {
         let fixed_cost = u128::from(SOURCE_FIXED_EQUIVALENT_BYTES);
         let uncached_source_cost =

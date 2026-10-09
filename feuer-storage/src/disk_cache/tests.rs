@@ -125,7 +125,7 @@ async fn metadata_changes_after_copying_remain_dirty() {
     let shard = &cache.disk.shards[0];
     let mut writer = Box::pin(shard.write_dirty_metadata_pages(&cache.disk.file));
     let completion = std::future::poll_fn(|cx| Poll::Ready(writer.as_mut().poll(cx))).await;
-    // The copy is taken on the first poll; the mutex is released even if I/O is still pending.
+    // The copy is taken on the first poll. The mutex is released even if I/O is still pending.
     assert!(shard.metadata_pages.try_lock().unwrap().dirty_pages.is_empty());
     cache.insert(second, download(0, 1)).await.unwrap();
     assert!(cache.get(&second, range(0, 1)).await.is_some());
@@ -427,7 +427,7 @@ async fn pressure_reclaims_shared_and_exclusive_chunks_during_mixed_size_churn()
             .map(|(i, length)| (ObjectKeyHash::from(format!("{cycle}-{i}")), download(cycle * 7, length)))
             .collect();
         assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
-        // The final region remains published; admitting it may evict earlier entries in the same batch.
+        // The final region remains published. Admitting it may evict earlier entries in the same batch.
         let (key, source) = inputs.last().unwrap();
         assert_eq!(cache.get(key, source.downloaded_range()).await.unwrap(), source.bytes());
         for (key, source) in inputs {
@@ -458,7 +458,7 @@ async fn eviction_preserves_a_newer_replacement() {
         .await
         .unwrap();
     cache.insert(key, download(0, 300)).await.unwrap();
-    // Both payload chunks are occupied; evict the neighbor in the old shared chunk.
+    // Both payload chunks are occupied. Evict the neighbor in the old shared chunk.
     assert!(
         cache
             .insert(ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize))
@@ -612,7 +612,7 @@ async fn eviction_respects_sample_size_and_keeps_first_sampled_on_ties() {
         if sample_size == 1 {
             cache.access_histories().record_access(&newer, range(0, 1));
         }
-        // Sample the newer entry first; a one-entry sample must not consider the cheaper older entry.
+        // Sample the newer entry first. A one-entry sample must not consider the cheaper older entry.
         cache.disk.shards[0].entry_index.lock().unwrap().next_sample_start = usize::MAX;
         assert!(
             cache
@@ -653,7 +653,7 @@ async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
     let original_cost = decayed_retrieval_cost(&histories, &key, range(0, 100), 0);
     assert!(original_cost > 0.0);
     assert_eq!(decayed_retrieval_cost(&histories, &key, range(200, 300), 0), 0.0);
-    // Successful lookups are recorded explicitly; raw storage reads/writes do not double-count.
+    // Successful lookups are recorded explicitly. Raw storage reads and writes do not double-count.
     assert!(cache.get(&key, range(0, 1)).await.is_some());
     assert_eq!(histories.request_count(), 3);
     for _ in 0..*ACCESS_COUNT_HALF_LIFE {
@@ -1040,7 +1040,7 @@ async fn entry_metadata_space_is_charged_and_failed_reservations_roll_back() {
     let key = ObjectKeyHash::from("fits exactly");
     assert!(cache.insert(key, download(7, CHUNK_BYTES as usize)).await.unwrap());
     assert!(cache.disk.shards[0].allocator.reserve_chunks(1).is_none());
-    // A two-chunk entry cannot fit this shard; do not evict the existing entry in vain.
+    // A two-chunk entry cannot fit this shard. Do not evict the existing entry in vain.
     assert!(
         !cache
             .insert(ObjectKeyHash::from("oversized"), download(0, CHUNK_BYTES as usize + 1))
@@ -1223,7 +1223,7 @@ async fn a_short_read_is_a_miss_not_unverified_bytes() {
 #[tokio::test]
 async fn failed_multi_chunk_write_keeps_earlier_entries_and_releases_its_storage() {
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
-    // The first exclusive entry succeeds; the large entry's reserved range exceeds the file.
+    // The first exclusive entry succeeds. The large entry's reserved range exceeds the file.
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
     disk.shards[0].allocator = DiskChunkAllocator::for_disk_range(0..4 * CHUNK_BYTES);
     let cache = DiskCache {

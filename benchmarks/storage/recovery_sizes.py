@@ -14,7 +14,7 @@ PAGE_BYTES = 4096
 sizes = defaultdict(lambda: [0, 0])
 for (length,) in struct.iter_unpack("<Q", Path(sys.argv[1]).read_bytes()):
     aligned = (max(1, length) + PAGE_BYTES - 1) // PAGE_BYTES * PAGE_BYTES
-    # Keep subchunk alignment sizes distinct; larger downloads have the same whole-chunk count.
+    # Keep subchunk alignment sizes distinct. Larger downloads have the same whole-chunk count.
     key = (0, aligned) if aligned < CHUNK_BYTES else (1, (aligned + CHUNK_BYTES - 1) // CHUNK_BYTES)
     sizes[key][0] += length
     sizes[key][1] += 1

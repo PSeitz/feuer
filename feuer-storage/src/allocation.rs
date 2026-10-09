@@ -112,7 +112,7 @@ impl DiskChunkAllocator {
     }
 
     /// Keeps a recovered payload's chunks reserved until that payload is released.
-    /// Packed payloads share one chunk; standalone payloads start at a chunk boundary.
+    /// Packed payloads share one chunk. Standalone payloads start at a chunk boundary.
     /// Rejects conflicts and payloads outside this allocator's shard.
     pub(super) fn hold_chunks_for_recovered_payload(&self, payload_range: &Range<u64>) -> Option<()> {
         let first_chunk_number = payload_range.start / CHUNK_BYTES;
