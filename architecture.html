@@ -144,7 +144,7 @@
     </header>
 
     <section class="flow" aria-label="Lookup order">
-      <div class="flow-header"><span class="eyebrow">The read path</span><small>First covering hit wins. Every success returns the exact requested range.</small></div>
+      <div class="flow-header"><span class="eyebrow">The read path</span><small>First covering hit wins. Zero disk capacity skips disk.</small></div>
       <div class="flow-path">
         <a href="#memory"><strong>Memory</strong><small>Cached byte ranges</small></a>
         <span class="arrow">miss<b aria-hidden="true">→</b></span>
@@ -171,7 +171,8 @@
           <details class="branch">
             <summary><code>TieredMemoryDiskCache</code><small>Checks memory, then disk, then your download callback</small></summary>
             <div class="content">
-              <p>Call <code>get_or_fetch</code> with an object key, a byte range, and a function that downloads missing data. It returns the requested bytes. Each request is counted before looking in the cache, even if it later fails or is canceled.</p>
+              <p><code>TieredMemoryDiskCache</code> is a cloneable handle. Call <code>get_or_fetch</code> with an object key, a byte range, and a function that downloads missing data. It returns exactly the requested bytes. Each request is counted before looking in the cache, even if it later fails or is canceled.</p>
+              <p><code>get_or_fetch_object</code> returns a complete object without requiring its length; its callback returns <code>Bytes</code>, including empty objects. Do not mix whole-object and range lookups for the same key, including after reopening: whole-object hits treat the stored entry's length as the object length.</p>
               <p>The public boundary hashes the key's UTF-8 bytes once with seed-zero XXH3-128. Both tiers and request history use only that 128-bit identity; full keys are not stored or checked for collisions.</p>
               <ol><li>Check memory for one range covering the request.</li><li>On a miss, read and verify a covering disk entry. Promote only the requested bytes to memory.</li><li>On another miss, invoke this call's download callback and validate its coverage.</li></ol>
               <details class="deeper"><summary>What happens after a successful download?</summary><div>
@@ -196,11 +197,11 @@
             <summary><code>DiskCache</code> background writes<small>Queues downloads without delaying lookups</small></summary>
             <div class="content">
               <p><code>DiskCache</code> owns the background-write queue and accepts entries without waiting for queue space. A full or closed queue skips the write, not the successful lookup.</p>
-              <dl><dt>Pending entry limit</dt><dd>256</dd><dt>Small-entry cutoff</dt><dd>Aligned size &lt;128 KiB</dd><dt>Workers</dt><dd>1</dd><dt>Queued + active payload byte cap</dt><dd>None</dd></dl>
+              <dl><dt>Queued entry limit</dt><dd>512 per cache</dd><dt>Small-entry cutoff</dt><dd>Aligned size &lt;512 KiB</dd><dt>Workers</dt><dd>1</dd><dt>Queued + active payload byte cap</dt><dd>None</dd></dl>
               <details class="deeper"><summary>Buffering, publication, and cancellation</summary><div>
                 <p>Each queued write carries its download and key hash. Queued and active writes proceed independently of memory retention. Publication rechecks disk containment under the disk index lock.</p>
                 <p>Writers own reserved chunks while awaiting payload I/O. Canceling a writer can release those chunks while submitted I/O continues; late writes can cause checksum misses after reuse.</p>
-                <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by all insertion paths and readable before flushing. Payload chunks are reserved at flush time; metadata positions are taken only at publication. Insufficient metadata capacity discards the whole written payload. Busy/flushing chunks may miss until publication. Full/no-fit chunks and the buffer component's independent 60-second timer trigger flushing for all insertion paths. Larger entries write separately; closing discards pending chunks.</p>
+                <p>Each shard always owns an initialized 1-MiB small-entry buffer, shared by all insertion paths and readable before flushing. Payload chunks are reserved at flush time; metadata positions are taken only at publication. Insufficient metadata capacity discards the whole written payload. Busy/flushing chunks may miss until publication. Full/no-fit chunks and the buffer component's independent 60-second timer trigger flushing for all insertion paths. Larger entries write separately. Closing drains queued writes, then discards remaining partial chunks.</p>
               </div></details>
               <a class="source" href="feuer-storage/src/disk_cache/write_queue.rs">feuer-storage/src/disk_cache/write_queue.rs · background writes</a>
             </div>
@@ -224,7 +225,7 @@
               <details class="deeper"><summary>Index structure and admission rules</summary><div>
                 <p><code>ObjectEntries</code> owns the ordered ranges. Each <code>MemoryEntry</code> holds its byte range, <code>Bytes</code>, allocation charge, candidate slot, and admission request clock. Entries are identified by key hash and exact range, not an entry ID or generation. Request history is stored separately and shared by both tiers.</p>
                 <p>If the bytes are already cached, the new copy is skipped. A larger range replaces smaller entries it fully contains. Ranges that overlap only partly can both stay cached.</p>
-                <p>Default shard count: four times available parallelism, capped at 64, with a minimum of one.</p>
+                <p>Default shard count: four times available parallelism, capped at 64; four if parallelism is unavailable.</p>
               </div></details>
               <a class="source" href="feuer-memory/src/store/shard.rs">feuer-memory/src/store/shard.rs</a>
             </div>
@@ -233,7 +234,7 @@
             <summary>Memory usage<small>Cached bytes and reusable read buffers share the memory target</small></summary>
             <div class="content">
               <p>The cache retains reference-counted <code>Bytes</code>. Hits return slices sharing their allocations; there is <strong>no dedicated slab or arena allocator</strong> for cached payloads.</p>
-              <p>The memory target covers cached data and unused read buffers kept for reuse. For data read from disk, the cache copies the requested slice only if the destination buffer saves at least 25% of backing capacity, then counts the chosen buffer's whole capacity. If allocation fails, it retains the original slice. For downloads, it counts the known backing capacity, or the payload length when capacity is unknown. Each shard gets a share of the target, but can exceed it to keep one oversized entry.</p>
+              <p>The memory target covers cached data and unused read buffers kept for reuse. For data read from disk, the cache copies the requested slice only if the destination buffer saves at least 25% of backing capacity, then counts the chosen buffer's whole capacity. If allocation fails, it retains the original slice. Downloads default to a payload-length charge. <code>Download::with_allocation_charge</code> supplies known backing capacity, and <code>AlignedBuffer::into_download</code> preserves the pool buffer's whole-capacity charge. Each shard gets a share of the target, but can exceed it to keep one oversized entry.</p>
               <details class="deeper"><summary>Why the target is not an RSS limit</summary><div>
                 <ul><li>Caller-held slices survive eviction and may keep a larger allocation alive.</li><li>Metadata and access histories add memory beyond payload accounting.</li><li>Pending disk writes and I/O buffers have separate ownership and accounting.</li><li>The memory cache owns one aligned buffer pool, charged to the same capacity.</li></ul>
                 <a href="#io-buffers">Explore aligned I/O buffers →</a>
@@ -244,14 +245,14 @@
           <details class="branch">
             <summary>Range trimming<small>Keep useful subranges rather than the whole download</small></summary>
             <div class="content">
-              <p>When memory is full, the cache chooses an entry to remove. If only parts of it have been requested, it can copy those parts into smaller buffers and discard the rest. Otherwise, it removes the whole entry.</p>
+              <p>When memory is full, the cache chooses an entry to remove. If only parts of it have been requested, it can copy those parts into smaller buffers and discard the rest. Otherwise, it removes the whole entry. Whole-object entries are evicted rather than trimmed.</p>
               <dl><dt>Trimming grace</dt><dd>64 requests across all keys</dd><dt>Minimum payload saving</dt><dd>30%</dd></dl>
               <details class="deeper"><summary>Copy outside the lock, validate before publishing</summary><div>
                 <p>Overlapping or adjacent observed intervals are merged and copied into independent <code>Bytes</code>. Copying occurs outside the shard lock.</p>
                 <p>Publication requires the exact source key and range to remain cached. Reinsertion of that immutable range, changes to neighboring ranges, and new requests do not invalidate the copy. Replacement ranges already covered by another entry are skipped. If the source disappeared or was replaced by a different range, admission falls back to eviction.</p>
                 <p>There is no periodic compaction. Caller-held slices remain valid.</p>
               </div></details>
-              <a class="source" href="feuer-memory/src/store/range_trim.rs">feuer-memory/src/store/range_trim.rs · RangeTrimPlan</a>
+              <a class="source" href="feuer-memory/src/store/range_trim.rs">feuer-memory/src/store/range_trim.rs · plan_range_trim</a>
             </div>
           </details>
         </div>
@@ -268,11 +269,11 @@
           <details class="branch">
             <summary><code>DiskCache</code><small>Finds stored byte ranges and verifies their checksums</small></summary>
             <div class="content">
-              <p><code>DiskCache</code> keeps a lookup table in RAM: object key hash and byte range → payload region, checksum, and metadata slot. Each <code>DiskCacheShard</code> has its own table (<code>DiskEntryIndex</code>), chunk allocator, small-entry buffer, and cached metadata pages protected by a mutex.</p>
+              <p><code>DiskCache</code> keeps a lookup table in RAM: object key hash and byte range → payload region, checksum, and metadata slot. Each <code>DiskCacheShard</code> has its own table (<code>DiskEntryIndex</code>), chunk allocator, small-entry buffer, and typed metadata slots with dirty-page tracking. The index, metadata, and buffer have separate locks.</p>
               <p>A stored-entry hit verifies the <strong>whole covering entry</strong>, then returns the requested slice. It does not load neighboring entries or metadata. A hit in the shard's unfinished small-entry buffer copies only the requested bytes without disk I/O.</p>
               <details class="deeper"><summary>Concurrent reads and integrity failures</summary><div>
                 <p>Concurrent readers of the same stored entry share a <code>OnceCell</code> result containing verified bytes or failure. The index holds only a weak reference, so it is not a persistent payload cache.</p>
-                <p>I/O errors or checksum failures remove matching indexed entries and return a miss. Readers retain an address and expected checksum, not disk ownership. Eviction can release chunks while a read is outstanding; validation is subject to checksum collisions.</p>
+                <p>I/O errors return a miss without removing the entry. A checksum failure removes the indexed entry at that key and range start, which may discard a racing replacement too. Readers retain an address and expected checksum, not disk ownership. Eviction can release chunks while a read is outstanding; validation is subject to checksum collisions.</p>
                 <p>Whole-entry verification means small subrange requests may read much more than the requested bytes.</p>
                 <p>Disk shard count is capacity divided by 128 MiB, clamped to 1–64. Each shard owns a fixed consecutive disk byte range; its count is independent of memory and history shards.</p>
               </div></details>
@@ -298,7 +299,7 @@
               <p>The allocator keeps a free list in RAM. Writers call <code>reserve_chunks()</code> before payload I/O. <code>ReservedChunks</code> owns one consecutive run of whole chunks and returns it to the free list when dropped.</p>
               <p>At publication, the allocator retains the reservation with a count of payloads using it. Removing the last payload releases the chunks immediately, without waiting for readers or metadata writes. Metadata chunks have separate reservations.</p>
               <details class="deeper"><summary>Example: reading an entry in chunk 7</summary><div>
-                <ol><li>A reader finds the entry and copies its address, range, and expected checksum.</li><li>Eviction removes the entry and releases its payload's use of the chunks. Its metadata slot becomes reusable; the old on-disk record is not invalidated.</li><li>Once the last payload is removed, a writer can reserve and overwrite the chunks, even while the read is outstanding.</li><li>The reader verifies its owned RAM buffer against the expected checksum. A mismatch becomes a cache miss.</li></ol>
+                <ol><li>A reader finds the entry and copies its address, range, and expected checksum.</li><li>Eviction removes the entry and releases its payload's use of the chunks. Its metadata slot becomes reusable and its page is marked dirty for rewriting without the record. The old on-disk record can remain until that write succeeds.</li><li>Once the last payload is removed, a writer can reserve and overwrite the chunks, even while the read is outstanding.</li><li>The reader verifies its owned RAM buffer against the expected checksum. A mismatch becomes a cache miss.</li></ol>
                 <p>The I/O queue retains buffers through completion, not disk reservations. Canceling a writer can release space before submitted I/O finishes; a late write may overwrite reused bytes. Checksums detect uncertain data subject to collisions.</p>
                 <p>Multiple reads can run concurrently. Returned bytes live in RAM and retain no disk reservation.</p>
               </div></details>
@@ -309,10 +310,10 @@
             <summary>Batch packing &amp; disk format<small>Immutable payload chunks, separate mutable metadata</small></summary>
             <div class="content">
               <p>The writer groups small entries into immutable <strong>1-MiB payload chunks</strong>, with 4-KiB-aligned addresses and storage lengths. Each entry occupies one contiguous byte range with no metadata gaps, even across chunk boundaries.</p>
-              <p>Separate <strong>1-MiB metadata chunks</strong> contain checksummed 4-KiB pages. Their cached records are updated under the shard's metadata mutex; the sole metadata writer copies dirty pages and releases the mutex before I/O. Payload writes complete before publication and in-memory metadata updates; a separate writer persists dirty metadata every second.</p>
+              <p>Separate <strong>1-MiB metadata chunks</strong> contain checksummed 4-KiB pages. Their records are kept as typed slots under the shard's metadata mutex; the sole metadata writer encodes and checksums dirty pages under that lock, then releases it before I/O. Payload writes complete before publication and in-memory metadata updates; a separate writer persists dirty metadata every second.</p>
               <details class="deeper"><summary>Packing constraints and persistent metadata</summary><div>
-                <ul><li>Entries with aligned size below 128 KiB are copied into per-shard chunk buffers; their incoming bytes are released.</li><li>Larger entries own consecutive whole chunks exclusively, including unused tails. Written payload chunks cannot be appended to.</li><li>The v13 format stores fixed 48-byte records: 128-bit key hash, object range start and length, payload address, and seed-zero XXHash64 payload checksum. Payload length equals the object range length; storage length is at least 4 KiB and rounds up to 4 KiB, including for empty payloads.</li><li>The first 255 metadata pages hold 84 records each: 21,420 entries per metadata chunk. The final 4-KiB page stores the next metadata chunk address. Every page has its own seed-zero XXHash64 checksum.</li><li>Metadata chunks stay reserved while open; slots from removed entries are reused across batches without clearing their old records. An active shard needs at least one metadata chunk in addition to payload chunks. A one-chunk cache has no room for payloads.</li><li>Cached metadata pages and free-slot bookkeeping consume RAM outside the memory-cache target. Sharing a metadata chunk does not couple payload-chunk lifetimes.</li></ul>
-                <p class="callout">The periodic writer writes later dirty metadata chunks before links pointing to them, but removal does not invalidate old records and failed metadata writes are not retried. No fsync, fdatasync, or shutdown metadata flush is issued; completion is not a crash-durability or power-loss ordering guarantee. Older formats are not migrated.</p>
+                <ul><li>Entries with aligned size below 512 KiB are copied into per-shard chunk buffers; their incoming bytes are released.</li><li>Larger entries own consecutive whole chunks exclusively, including unused tails. Written payload chunks cannot be appended to.</li><li>The v13 format stores fixed 48-byte records: 128-bit key hash, object range start and length, payload address, and seed-zero XXHash64 payload checksum. Payload length equals the object range length; storage length is at least 4 KiB and rounds up to 4 KiB, including for empty payloads.</li><li>The first 255 metadata pages hold 84 records each: 21,420 entries per metadata chunk. The final 4-KiB page stores the next metadata chunk address. Every page has its own seed-zero XXHash64 checksum.</li><li>Metadata chunks stay reserved while open. Removal clears the in-memory slot and marks its page dirty; the writer encodes free slots as zeros. Publication reuses the earliest free slot in recovery scan order. An active shard needs at least one metadata chunk in addition to payload chunks. A one-chunk cache has no room for payloads.</li><li>Typed metadata slots and dirty-page bookkeeping consume RAM outside the memory-cache target. Sharing a metadata chunk does not couple payload-chunk lifetimes.</li></ul>
+                <p class="callout">The periodic writer writes later dirty metadata chunks before links pointing to them. Removal does not wait for those writes, and failed metadata writes are not retried. No fsync, fdatasync, or shutdown metadata flush is issued; completion is not a crash-durability or power-loss ordering guarantee. Older formats are not migrated.</p>
               </div></details>
               <a class="source" href="format.md">format.md · disk format v13</a>
               <a class="source" href="feuer-storage/src/disk_cache/metadata.rs">feuer-storage/src/disk_cache/metadata.rs · periodic metadata writes</a>
@@ -326,7 +327,7 @@
               <details class="deeper"><summary>Metadata-only reads, validation, and repair</summary><div>
                 <p>Each chain starts at its shard's first chunk and follows last-page links, with one 1-MiB read per metadata chunk. Recovery never scans payload chunks. There is no inventory file, periodic address checkpoint, or persistent free-space map.</p>
                 <p>All metadata chunks in a shard are reserved before entry records can claim payload chunks. Page checksums and format tags establish the writer's contract; decoding does not recheck range arithmetic or alignment. Payload reservations enforce shard bounds and exclude metadata chunks, and recovery checks key-hash shard identity. Overlapping stale records can share payload reservations; duplicate starts and contained ranges are removed while rebuilding the index.</p>
-                <p>Zero-filled chunks, read failures, invalid addresses, cycles, or corrupt links end the chain. Corrupt record pages are discarded independently. Broken links are repaired by subsequent metadata writes. Discarded record pages are cleared in RAM and rewritten only when reused; stale records can survive payload reuse.</p>
+                <p>Zero-filled chunks, read failures, invalid addresses, cycles, or corrupt links end the chain. Corrupt record pages are discarded independently. Broken links are repaired by subsequent metadata writes. Corrupt pages and rejected records become free slots in RAM; they remain on disk until a later change rewrites their page. Stale records can survive payload reuse.</p>
                 <p>Payload checksums are verified on hits, not during recovery. Missing or torn payloads become misses. Closing does not invalidate live records or flush pending metadata. Recovery remains best-effort, not durable storage.</p>
               </div></details>
               <a class="source" href="feuer-storage/src/disk_cache/recovery.rs">feuer-storage/src/disk_cache/recovery.rs</a>
@@ -346,7 +347,7 @@
           <details class="branch">
             <summary><code>DataFile</code><small>Reads and writes the backing file using Linux direct I/O</small></summary>
             <div class="content">
-              <p><code>DataFile</code> opens the backing file with <code>O_DIRECT</code> and exclusively locks the cache directory. Linux, usable io_uring, and compatible alignment support are required; there is no buffered fallback.</p>
+              <p><code>DataFile</code> opens the backing file with <code>O_DIRECT</code> and takes an exclusive lock for that filename. The default <code>data</code> file uses <code>.feuer.lock</code>; other filenames use <code>.feuer.&lt;filename&gt;.lock</code>, allowing independent caches in one directory. Linux, usable io_uring, and compatible <code>STATX_DIOALIGN</code> support are required; there is no buffered fallback.</p>
               <details class="deeper"><summary>Alignment, splitting, and caller responsibilities</summary><div>
                 <ul><li>Reads accept arbitrary ranges; physical reads round outward to 4 KiB and results are sliced.</li><li>Write offsets and lengths must be multiples of 4 KiB.</li><li>Large operations are split into requests of at most 1 MiB of physical I/O.</li><li>The file layer does not protect disk regions from reuse. Callers must prevent conflicting access or validate bytes against expected checksums and accept mismatches as misses.</li><li>Multi-request operations are not atomic. Completion is not a crash-durability guarantee.</li></ul>
               </div></details>
@@ -356,12 +357,14 @@
           <details class="branch">
             <summary><code>ReadQueue</code> &amp; <code>WriteQueue</code><small>Send reads and writes to separate io_uring workers</small></summary>
             <div class="content">
-              <p>Reads and writes each have a bounded waiting channel, active request slots, an io_uring ring, and a worker thread. Arrival order determines scheduling, not completion order. Neither queue checks for overlapping disk ranges.</p>
+              <p>Reads and writes each have a waiting channel, active request slots, an io_uring ring, and a worker thread. Pass clones of <code>IoQueues::new()?</code> to <code>open</code> to share these queues and limits across independent caches; <code>None</code> creates dedicated queues. Arrival order determines scheduling, not completion order; there is no per-cache fairness or overlap checking.</p>
+              <p>Contents, capacities, eviction, history, buffer pools, file locks, and background-write queues remain independent. Idle shared queues retain no files.</p>
               <dl><dt>Active read slots / waiting channel</dt><dd>64 / 64 requests</dd><dt>Active write slots / waiting channel</dt><dd>8 / 8 requests</dd><dt>Maximum bytes per I/O request</dt><dd>1 MiB</dd><dt>Separate I/O-byte budget</dt><dd>None</dd></dl>
               <details class="deeper"><summary>Admission and completion lifetime</summary><div>
-                <p>Normal submissions reserve channel capacity before preparing request buffers. Startup recovery uses the same admission before allocating each metadata-read buffer. A payload read allocates its whole-entry buffer before submitting 1-MiB slices sequentially, so queue slot limits do not cap total read-buffer memory.</p>
-                <p>An eventfd wakes workers for new requests or shutdown; no busy polling or registered buffers are used. Submitted buffers survive caller cancellation. Last-handle drop drains and joins the workers.</p>
-                <p>Abnormal driver failure retains uncertain active buffers and the directory lock until process exit rather than risk unsafe reuse.</p>
+                <p>Normal submissions reserve channel capacity before preparing request buffers. A payload read reserves its first position before allocating the whole-entry buffer, then submits 1-MiB slices sequentially with fresh reservations. Startup recovery uses the same admission before allocating each metadata-read buffer. Queue slot limits do not cap total read-buffer memory.</p>
+                <p>An eventfd wakes workers for new requests or shutdown; no busy polling or registered buffers are used. Temporary submission pressure (<code>EAGAIN</code>) waits up to 1 ms before retrying; interrupted and short submissions are retried too.</p>
+                <p>Submitted buffers and their target file and lock survive caller cancellation through completion. Dropping one cache does not stop shared queues; dropping the last queue owner drains and joins the workers. Returned bytes retain no file or queue.</p>
+                <p>Abnormal driver failure retains uncertain active buffers and their target files and locks until process exit rather than risk unsafe reuse.</p>
               </div></details>
               <a class="source" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · IoQueueHandle / IoQueue</a>
             </div>
@@ -369,12 +372,13 @@
           <details class="branch" id="io-buffers">
             <summary><code>AlignedBuffer</code> &amp; <code>BufferPool</code><small>Allocate and reuse aligned memory for direct I/O</small></summary>
             <div class="content">
-              <p>Direct I/O needs memory addresses aligned to 4 KiB. <code>AlignedBuffer</code> allocates that memory. <code>BufferPool</code> keeps unused buffers in ten sizes so later reads can reuse them. A read returns only the requested bytes. Promotion copies them only if the destination allocation saves at least 25% of backing capacity; otherwise, or if allocation fails, it retains the original slice. Caching counts the retained buffer's whole capacity. Whole-entry reads and checksum verification are unchanged.</p>
-              <dl><dt>Allocation capacities</dt><dd>32 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB, 8 MiB, 16 MiB, 32 MiB, 64 MiB</dd><dt>Shared budget</dt><dd>Memory-cache capacity, including cached entries</dd><dt>Total idle cap</dt><dd>7% of memory capacity by default, shared by all buckets; no per-bucket caps or reservations</dd><dt>Above 64 MiB</dt><dd>One shared bucket; reuse grows to fit and shrinks only when capacity is at least 10% larger than requested</dd></dl>
+              <p>Direct I/O needs memory addresses aligned to 4 KiB. <code>AlignedBuffer</code> allocates that memory. <code>BufferPool</code> keeps unused buffers in thirteen fixed sizes plus one bucket above 64 MiB so later reads and downloads can reuse them. A read returns only the requested bytes. Promotion copies them only if the destination allocation saves at least 25% of backing capacity; otherwise, or if allocation fails, it retains the original slice. Caching counts the retained buffer's whole capacity. Whole-entry reads and checksum verification are unchanged.</p>
+              <dl><dt>Allocation capacities</dt><dd>32 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB, 3 MiB, 4 MiB, 8 MiB, 12 MiB, 16 MiB, 24 MiB, 32 MiB, 64 MiB</dd><dt>Shared budget</dt><dd>Memory-cache capacity, including cached entries</dd><dt>Total idle cap</dt><dd>7% of memory capacity by default, shared by all buckets; no per-bucket caps or reservations</dd><dt>Above 64 MiB</dt><dd>One shared bucket; reuse grows to fit and shrinks only when capacity is at least 10% larger than requested</dd></dl>
               <details class="deeper"><summary>Allocation lifetime and configuration</summary><div>
+                <p>Downloaders can use <code>cache.allocate_buffer(length)</code>, fill <code>as_mut_slice()</code>, and return <code>into_download(start)</code> without copying. Disk reads and these downloads share the same pool; a buffer returns only after its last owner releases it. Other downloaders may still return unaligned <code>Bytes</code>.</p>
                 <p>On Linux, buffers over 64 MiB use <code>mmap</code>, <code>mremap</code>, and <code>munmap</code>. Other buffers use <code>alloc_zeroed</code> and matching <code>dealloc</code>. After the last owner releases a buffer, it returns to its cache's pool only if both the idle pool and the shared memory budget have room; otherwise it is freed.</p>
                 <p>The I/O queue owns the buffer through completion, including after caller cancellation, but holds no disk reservation. Returned results retain only RAM and do not keep the pool alive.</p>
-                <p><code>FEUER_IDLE_BUFFER_POOL_PERCENT</code> sets the idle ceiling (0–100; default 7). Zero disables idle retention. Cached entries take priority: admission frees idle buffers as needed, and returns never evict entries.</p>
+                <p><code>CacheConfig::new</code> reads <code>FEUER_IDLE_BUFFER_POOL_PERCENT</code> for the idle ceiling (0–100; default 7); <code>with_idle_buffer_pool_percent</code> overrides it per cache. Zero disables idle retention. Cached entries take priority: admission frees idle buffers as needed, and returns never evict entries.</p>
                 <p class="callout">Writes reuse aligned input slices or allocate unpooled scratch buffers. Active reads and caller-only results remain outside the retention budget. Standalone storage without a memory cache retains no idle buffers.</p>
               </div></details>
               <a class="source" href="feuer-memory/src/buffer.rs">feuer-memory/src/buffer.rs · AlignedBuffer / BufferPool</a>
@@ -396,8 +400,8 @@
             <div class="content">
               <p><code>ObjectAccessHistories</code> remembers which byte ranges people request and how often. Memory and disk use the same history when choosing entries to remove. <code>get_or_fetch</code> records each request before lookup, including failures and cancellations. Adding or removing cached data does not change that history.</p>
               <details class="deeper"><summary>Two histories with different purposes</summary><div>
-                <p><strong>Scoring counters:</strong> decayed counts per exact requested range. Default half-life is 262,144 requests across all keys. Distinct keys and range counters are never removed or capped during the history object's lifetime, even after both tiers evict the data.</p>
-                <p><strong>Trimming history:</strong> a separate bounded event history. Defaults retain up to 64 events per object, aged out after 262,144 requests across all keys.</p>
+                <p><strong>Scoring counters:</strong> decayed counts per exact requested range or whole-object demand. Default half-life is 262,144 requests across all keys. Distinct keys and range counters are never removed or capped during the history object's lifetime, even after both tiers evict the data.</p>
+                <p><strong>Trimming history:</strong> a separate event history. Defaults retain up to 64 events per object, aged out after 262,144 requests across all keys. Whole-object events do not supply partial ranges for trimming.</p>
                 <p>History uses 64 independently locked maps and one global request clock, separate from memory and disk shard counts. It is not persisted; aging is request-based, not wall-clock-based.</p>
               </div></details>
               <a class="source" href="feuer-historian/src/lib.rs">feuer-historian/src/lib.rs · ObjectAccessHistories</a>
@@ -406,11 +410,12 @@
           <details class="branch">
             <summary>Value scoring &amp; sampled eviction<small>Prefer more avoided retrieval cost per byte</small></summary>
             <div class="content">
-              <p>Only requests fully contained in an entry contribute to its value:</p>
-              <code class="formula">Σ decayed_count × (fixed_request_cost + requested_bytes)<br>──────────────────────────────────────<br>entry_bytes</code>
-              <p>Both tiers sample candidates and choose the lowest value per byte. Memory divides by the entry's charged allocation capacity; disk divides by payload length. Memory may trim that victim; disk removes selected entries.</p>
+              <p>The default <code>RetrievalCostScorer</code> credits requests fully contained in an entry; whole-object demand uses the cached object's payload length:</p>
+              <code class="formula">Σ decayed_count × (fixed_request_cost + requested_bytes)<br>──────────────────────────────────────<br>max(charged_bytes, 1)</code>
+              <p>Both tiers sample candidates and choose the lowest score. The default scorer divides by charged allocation capacity in memory and payload length on disk, with a one-byte minimum for empty entries. Memory may trim that victim; disk removes selected entries.</p>
+              <p><code>open_with_retention_scorer</code> accepts an <code>Arc&lt;dyn RetentionScorer&gt;</code> shared by both tiers. Custom scorers receive the key hash, cached range, tier-specific byte charge, and history. Scores must be finite; higher scores favor retention. Scoring runs concurrently under shard locks, so avoid I/O and cache re-entry. Application-owned scoring metadata is not persisted or removed on eviction.</p>
               <details class="deeper"><summary>Defaults and what the score excludes</summary><div>
-                <ul><li>Sample size: 64 live candidates per decision, configurable.</li><li>Fixed request cost: 10,000,000 equivalent bytes by default; zero scores bytes only.</li><li>Both tiers maintain dense candidate lists sampled in rotation; removal leaves no stale-candidate backlog.</li><li>Disk alignment, metadata, and chunk overhead do not enter the payload-only score.</li><li>Tier-aware memory valuation based on disk residency is not implemented.</li></ul>
+                <ul><li>Sample size: 64 live candidates per decision, configurable.</li><li>Fixed request cost: 10,000,000 equivalent bytes by default; zero scores bytes only.</li><li>Both tiers maintain dense candidate lists sampled in rotation; removal leaves no stale-candidate backlog.</li><li>Disk alignment, metadata, and chunk overhead do not enter the payload-only score.</li><li>The default scorer does not account for disk residency when valuing memory.</li></ul>
                 <p>Settings include <code>FEUER_RECLAIM_SAMPLE_SIZE</code>, <code>FEUER_ACCESS_COUNT_HALF_LIFE</code>, and <code>FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES</code>.</p>
               </div></details>
               <a class="source" href="feuer-memory/src/retention.rs">feuer-memory/src/retention.rs · shared scoring</a>
@@ -424,15 +429,16 @@
           <span class="component-label"><span class="number">06</span><span class="crate">cross-cutting</span></span>
           <h3>Types, runtime &amp; visibility</h3>
           <span class="description">The types and settings you use, the metrics you can collect, and the current limitations.</span>
-          <span class="child-count">3 components · expand to explore</span>
+          <span class="child-count">4 components · expand to explore</span>
         </summary>
         <div class="component-body">
           <details class="branch">
             <summary>Types &amp; configuration<small>Keys, byte ranges, downloads, and cache settings</small></summary>
             <div class="content">
-              <ul><li><code>ObjectKey</code>: public UTF-8 string identifying immutable content.</li><li><code>ObjectKeyHash</code>: internal seed-zero XXH3-128 identity shared by both tiers, history, and recovery; full-key collision checks are not performed.</li><li><code>ByteRange</code>: an exact half-open byte interval, possibly empty.</li><li><code>Download</code>: starting offset plus bytes, possibly empty, with a derived range.</li><li><code>CacheConfig</code>: cache directory, fixed disk capacity, memory target, and reclaim sample size.</li></ul>
+              <ul><li><code>ObjectKey</code>: public UTF-8 string identifying immutable content.</li><li><code>ObjectKeyHash</code>: internal seed-zero XXH3-128 identity shared by both tiers, history, and recovery; full-key collision checks are not performed.</li><li><code>ByteRange</code>: an exact half-open byte interval, possibly empty.</li><li><code>Download</code>: starting offset plus bytes, possibly empty, with a derived range.</li><li><code>CacheConfig</code>: cache directory and filename, disk capacity, positive memory target, reclaim sample size, and idle buffer percentage. Zero disk capacity disables disk and ignores the directory, filename, and I/O queues.</li></ul>
               <details class="deeper"><summary>Opening a cache</summary><div>
-                <p>Public opening is asynchronous, requires a Tokio runtime, and waits for all disk shards to recover. On Linux, requested disk capacity must be at least 1 MiB and at most i64::MAX bytes; storage rounds it down to whole 1-MiB chunks, including alignment and metadata overhead. Other platforms use only the memory tier and callback.</p>
+                <p><code>open(config, metrics_registry, io_queues)</code> is asynchronous and available only on Linux. With disk enabled, it requires Tokio and waits for all disk shards to recover; opening failures do not silently fall back to memory. Disk capacity must be at least 1 MiB and at most i64::MAX bytes, rounded down to whole 1-MiB chunks including alignment and metadata overhead. Zero disk capacity opens a memory-only cache without disk I/O or a Tokio requirement.</p>
+                <p><code>with_file_name</code> selects a single filename (default <code>data</code>), without NUL bytes or the reserved <code>.feuer.</code> prefix. Distinct filenames permit independent caches in the same directory; concurrent opens of the same file fail.</p>
               </div></details>
               <a class="source" href="feuer/src/lib.rs">feuer/src/lib.rs · public types</a>
               <a class="source" href="feuer-types/src/lib.rs">feuer-types/src/lib.rs · ObjectKeyHash</a>
@@ -442,7 +448,7 @@
           <details class="branch">
             <summary>Metrics<small>Observe tier outcomes, pressure, capacity, and I/O</small></summary>
             <div class="content">
-              <p>Passing a <code>mixtrics</code> registry to <code>open</code> wires it through all layers. Without one, metrics are no-ops; your application handles export.</p>
+              <p>Passing a <code>mixtrics</code> registry to <code>open</code> wires it through all layers. Without one, metrics are no-ops; your application handles export. Metrics and queue sharing are independent. Sharing a registry aggregates metrics across caches; use separate registries for per-cache metrics.</p>
               <details class="deeper"><summary>What is instrumented?</summary><div>
                 <ul><li>Lookup outcomes, latency, and served bytes.</li><li>Memory payload accounting, eviction, and trimming.</li><li>Disk-write admission, skips, queue pressure, and terminal outcomes.</li><li>Disk capacity states, indexed payload, packing, and integrity failures.</li><li>Data-file I/O outcomes, bytes, latency, read sizes, and aligned-buffer pool accounting.</li></ul>
                 <p>Labels are bounded and do not contain object identities or cache names. Gauges track queued writes, buffer ownership, and reserved chunks.</p>
@@ -451,9 +457,18 @@
             </div>
           </details>
           <details class="branch">
+            <summary>Access tracing<small>Async delivery of binary request and outcome packages</small></summary>
+            <div class="content">
+              <p><code>with_trace(callback)</code> requires Tokio and registers an async receiver for this handle and its clones. Each lookup emits a start and a completed outcome; cancellation can leave an unmatched start. Payloads are not traced; object keys are hashed, not anonymized.</p>
+              <p>A 65,536-event queue waits when full. One worker delivers serially at 8 MiB or when all trace handles are dropped; there is no timer. Trace memory is outside cache capacity, and slow delivery can delay lookups. Receiver errors stop delivery without changing lookup results; the receiver owns persistence and retries. Last-handle drop sends the tail asynchronously without waiting, so runtime shutdown can lose it.</p>
+              <a class="source" href="access-trace.md">access-trace.md · FETR v1 and receiver contract</a>
+              <a class="source" href="feuer/src/access_trace.rs">feuer/src/access_trace.rs · Trace</a>
+            </div>
+          </details>
+          <details class="branch">
             <summary>Current boundaries<small>What this implementation does not provide yet</small></summary>
             <div class="content">
-              <ul><li><strong>No crash-durability guarantee.</strong> Open waits for best-effort recovery; writes are not synchronized to stable storage.</li><li><strong>No buffered I/O mode.</strong> The disk tier requires Linux direct I/O and io_uring.</li><li><strong>No built-in source client, download coalescing, or retry scheduler.</strong> Those belong to your callback.</li><li><strong>No hard total-memory cap.</strong> Active reads, caller-held buffers, queued writes, cached metadata pages, and uncapped request-history counters sit outside the memory-cache target.</li><li><strong>No multi-entry range assembly.</strong> One cached entry must cover a request.</li></ul>
+              <ul><li><strong>No crash-durability guarantee.</strong> Open waits for best-effort recovery; writes are not synchronized to stable storage.</li><li><strong>No buffered I/O mode.</strong> The disk tier requires Linux direct I/O and io_uring.</li><li><strong>No built-in source client, download coalescing, or retry scheduler.</strong> Those belong to your callback.</li><li><strong>No hard total-memory cap.</strong> Active reads and downloads, caller-held buffers, pending disk writes, typed metadata slots, trace buffers, and uncapped request-history counters sit outside the memory-cache target.</li><li><strong>No multi-entry range assembly.</strong> One cached entry must cover a request.</li></ul>
               <p>The disk layout and allocator remain experimental; this explorer describes the current implementation, not a stable on-disk interface.</p>
               <a class="source" href="implementation-status.md">implementation-status.md · implemented and remaining work</a>
             </div>
@@ -461,7 +476,7 @@
         </div>
       </details>
     </div>
-    <footer><span>Feuer architecture explorer · source-linked implementation snapshot</span><span><a href="README.md">README</a> &nbsp; / &nbsp; <a href="#top">Back to overview ↑</a></span></footer>
+    <footer><span>Feuer architecture explorer · source snapshot <code>f474ff4</code></span><span><a href="README.md">README</a> &nbsp; / &nbsp; <a href="#top">Back to overview ↑</a></span></footer>
   </main>
 </div>
 <script>
