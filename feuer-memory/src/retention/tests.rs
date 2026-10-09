@@ -67,12 +67,15 @@ fn exact_and_expanded_scores_match_btree_counts() {
         histories.record_access(&key, range(start, end));
     }
     histories.record_access(&key, range(u64::MAX - 1, u64::MAX));
-    let reference = histories.with_access_counts(&key, |counts, clock| {
-        counts
+    let reference = histories.read_request_counts(&key, |request_counts, request_clock| {
+        request_counts
             .iter()
-            .map(|(requested, count)| {
+            .map(|(requested, request_count)| {
                 let requested = requested.unwrap();
-                ((requested.start(), requested.end()), count.decayed_count(clock))
+                (
+                    (requested.start(), requested.end()),
+                    request_count.decayed_count(request_clock),
+                )
             })
             .collect::<std::collections::BTreeMap<_, _>>()
     });

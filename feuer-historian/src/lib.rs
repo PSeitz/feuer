@@ -49,11 +49,11 @@ impl ObjectAccessHistories {
     /// Cache insertion and eviction do not record or remove history.
     /// `None` records whole-object demand. Do not mix whole-object and range requests for a key.
     pub fn record_access(&self, key: &ObjectKeyHash, requested: impl Into<Option<ByteRange>>) {
-        let mut objects = self.shard(key).lock().unwrap();
+        let mut histories = self.shard(key).lock().unwrap();
         // Assign the clock under the shard lock so this key's updates cannot arrive out of order.
         // The atomic only measures request age. The shard mutex protects the history itself.
-        let clock = self.request_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-        objects.entry(*key).or_default().record(requested, clock);
+        let request_clock = self.request_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+        histories.entry(*key).or_default().record(requested, request_clock);
     }
 
     /// Number of requests recorded across all keys and cache tiers.
@@ -62,28 +62,32 @@ impl ObjectAccessHistories {
         self.request_count.load(AtomicOrdering::Relaxed)
     }
 
-    /// Calls `read` with the key's distinct request counters in insertion order and the global request count.
-    /// `None` denotes whole-object demand. Unknown keys supply an empty slice.
-    /// Counters are borrowed without copying or allocation. Filter requests before calling
-    /// [`DecayedAccessCount::decayed_count`] with the supplied request count to skip unnecessary decay work.
-    /// The key's shard stays locked during `read`. Do not re-enter this history from the callback.
-    pub fn with_access_counts<T>(
+    /// Reads one object's request counts
+    /// Each pair contains a requested byte range and its counter. `None` means a whole-object request.
+    ///
+    /// The callback borrows the pairs without copying or allocation and receives the global request count.
+    /// Use that count as the clock for [`DecayedAccessCount::decayed_count`], after filtering requests if needed.
+    ///
+    /// # Locking
+    /// The history shard stays locked during the callback.
+    /// Do not re-enter this history from the callback.
+    pub fn read_request_counts<T>(
         &self,
         key: &ObjectKeyHash,
-        read: impl FnOnce(&[(Option<ByteRange>, DecayedAccessCount)], u64) -> T,
+        read_counts: impl FnOnce(&[(Option<ByteRange>, DecayedAccessCount)], u64) -> T,
     ) -> T {
-        let objects = self.shard(key).lock().unwrap();
-        let counts = objects
+        let histories = self.shard(key).lock().unwrap();
+        let request_counts = histories
             .get(key)
-            .map_or(&[][..], |history| history.access_counts.as_slice());
-        read(counts, self.request_count())
+            .map_or(&[][..], |history| history.request_counts.as_slice());
+        read_counts(request_counts, self.request_count())
     }
 
     /// Snapshots recent requested byte ranges, including repeats but excluding whole-object requests.
     /// Later accesses do not invalidate the snapshot.
     pub fn recent_requested_ranges(&self, key: &ObjectKeyHash) -> Vec<ByteRange> {
-        let objects = self.shard(key).lock().unwrap();
-        objects.get(key).map_or_else(Vec::new, |history| {
+        let histories = self.shard(key).lock().unwrap();
+        histories.get(key).map_or_else(Vec::new, |history| {
             history.recent_requested_ranges(self.request_count()).collect()
         })
     }
@@ -120,7 +124,7 @@ pub static ACCESS_COUNT_HALF_LIFE: LazyLock<u64> = LazyLock::new(|| {
     read_env_number("FEUER_ACCESS_COUNT_HALF_LIFE", 262_144, 1).unwrap_or_else(|error| panic!("{error}"))
 });
 
-/// A request count weighted by age in requests across all object keys.
+/// A request count that decays as requests accumulate across all object keys.
 #[derive(Default)]
 pub struct DecayedAccessCount {
     count: f64,
@@ -132,11 +136,11 @@ impl DecayedAccessCount {
     /// Earlier clocks leave the count unchanged. Decay uses an approximation that is
     /// up to 6.15% high per evaluation. Errors can compound across recorded updates.
     #[inline]
-    pub fn decayed_count(&self, access_clock: u64) -> f64 {
+    pub fn decayed_count(&self, request_clock: u64) -> f64 {
         // Age is measured in requests across all keys, not wall-clock time.
         // An earlier clock leaves the count unchanged rather than increasing it.
-        let elapsed_accesses = access_clock.saturating_sub(self.observed_at_access);
-        let half_lives_elapsed = elapsed_accesses as f64 / *ACCESS_COUNT_HALF_LIFE as f64;
+        let requests_since_update = request_clock.saturating_sub(self.observed_at_access);
+        let half_lives_elapsed = requests_since_update as f64 / *ACCESS_COUNT_HALF_LIFE as f64;
 
         if half_lives_elapsed >= 126.0 {
             return 0.0; // Discard negligible counts rather than constructing subnormal floats.
@@ -158,37 +162,37 @@ impl DecayedAccessCount {
 #[derive(Default)]
 struct RangeAccessHistory {
     events: VecDeque<RangeAccess>,
-    access_count_indices: FxHashMap<Option<ByteRange>, usize>,
+    request_count_indices: FxHashMap<Option<ByteRange>, usize>,
     // Each counter is stored once: indexed for recording, scanned for scoring.
-    access_counts: Vec<(Option<ByteRange>, DecayedAccessCount)>,
+    request_counts: Vec<(Option<ByteRange>, DecayedAccessCount)>,
 }
 
 impl RangeAccessHistory {
-    fn record(&mut self, range: impl Into<Option<ByteRange>>, access_clock: u64) {
+    fn record(&mut self, range: impl Into<Option<ByteRange>>, request_clock: u64) {
         let range = range.into();
-        let count_index = *self.access_count_indices.entry(range).or_insert_with(|| {
-            let count_index = self.access_counts.len();
-            self.access_counts.push((range, DecayedAccessCount::default()));
+        let count_index = *self.request_count_indices.entry(range).or_insert_with(|| {
+            let count_index = self.request_counts.len();
+            self.request_counts.push((range, DecayedAccessCount::default()));
             count_index
         });
-        let access_count = &mut self.access_counts[count_index].1;
-        access_count.count = access_count.decayed_count(access_clock) + 1.0;
-        access_count.observed_at_access = access_clock;
+        let request_count = &mut self.request_counts[count_index].1;
+        request_count.count = request_count.decayed_count(request_clock) + 1.0;
+        request_count.observed_at_access = request_clock;
         if self.events.len() == *MAX_ACCESS_EVENTS_PER_KEY {
             self.events.pop_front();
         }
         self.events.push_back(RangeAccess {
             count_index,
-            observed_at_access: access_clock,
+            observed_at_access: request_clock,
         });
     }
 
     /// Iterates requested byte ranges from events within the trimming age limit, including repeats.
-    pub fn recent_requested_ranges(&self, access_clock: u64) -> impl Iterator<Item = ByteRange> + '_ {
+    pub fn recent_requested_ranges(&self, request_clock: u64) -> impl Iterator<Item = ByteRange> + '_ {
         self.events
             .iter()
-            .skip_while(move |event| access_clock.saturating_sub(event.observed_at_access) > *MAX_ACCESS_AGE_ACCESSES)
-            .filter_map(|event| self.access_counts[event.count_index].0)
+            .skip_while(move |event| request_clock.saturating_sub(event.observed_at_access) > *MAX_ACCESS_AGE_ACCESSES)
+            .filter_map(|event| self.request_counts[event.count_index].0)
     }
 }
 

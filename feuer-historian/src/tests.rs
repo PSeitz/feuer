@@ -4,10 +4,10 @@ fn range(start: u64, end: u64) -> ByteRange {
     ByteRange::new(start, end).unwrap()
 }
 
-fn range_count(history: &RangeAccessHistory, requested: ByteRange, clock: u64) -> f64 {
-    history.access_counts[history.access_count_indices[&Some(requested)]]
+fn range_count(history: &RangeAccessHistory, requested: ByteRange, request_clock: u64) -> f64 {
+    history.request_counts[history.request_count_indices[&Some(requested)]]
         .1
-        .decayed_count(clock)
+        .decayed_count(request_clock)
 }
 
 fn environment_test_command(test: &str) -> std::process::Command {
@@ -107,9 +107,9 @@ fn access_age_environment_override() {
 fn history_needs_no_cached_entry_and_keeps_distinct_counters() {
     let histories = ObjectAccessHistories::new();
     let key = ObjectKeyHash::from("object");
-    histories.with_access_counts(&key, |counts, clock| {
-        assert!(counts.is_empty());
-        assert_eq!(clock, 0);
+    histories.read_request_counts(&key, |request_counts, request_clock| {
+        assert!(request_counts.is_empty());
+        assert_eq!(request_clock, 0);
     });
     assert!(histories.recent_requested_ranges(&key).is_empty());
     assert!(histories.shards.iter().all(|shard| shard.lock().unwrap().is_empty()));
@@ -118,16 +118,16 @@ fn history_needs_no_cached_entry_and_keeps_distinct_counters() {
         histories.record_access(&key, range(2, 3));
     }
     assert!(!histories.recent_requested_ranges(&key).contains(&range(0, 1)));
-    histories.with_access_counts(&key, |counts, clock| {
-        assert_eq!(counts.len(), 2);
-        assert_eq!(counts[0].0, Some(range(0, 1)));
-        assert_eq!(counts[1].0, Some(range(2, 3)));
-        assert!(counts[0].1.decayed_count(clock) > 0.0);
-        assert_eq!(clock, *MAX_ACCESS_EVENTS_PER_KEY as u64 + 2);
+    histories.read_request_counts(&key, |request_counts, request_clock| {
+        assert_eq!(request_counts.len(), 2);
+        assert_eq!(request_counts[0].0, Some(range(0, 1)));
+        assert_eq!(request_counts[1].0, Some(range(2, 3)));
+        assert!(request_counts[0].1.decayed_count(request_clock) > 0.0);
+        assert_eq!(request_clock, *MAX_ACCESS_EVENTS_PER_KEY as u64 + 2);
     });
     let objects = histories.shard(&key).lock().unwrap();
     assert_eq!(objects.len(), 1);
-    assert_eq!(objects[&key].access_counts.len(), 2);
+    assert_eq!(objects[&key].request_counts.len(), 2);
 }
 
 #[test]
@@ -146,7 +146,7 @@ fn concurrent_recording_deduplicates_ranges_and_counts_every_request() {
     let objects = histories.shard(&ObjectKeyHash::from("object")).lock().unwrap();
     assert_eq!(objects.len(), 1);
     let actual = &objects[&ObjectKeyHash::from("object")];
-    assert_eq!(actual.access_counts.len(), 1);
+    assert_eq!(actual.request_counts.len(), 1);
     let mut expected = RangeAccessHistory::default();
     for clock in 1..=8000 {
         expected.record(range(0, 1), clock);
@@ -170,9 +170,9 @@ fn another_history_shard_can_record_and_read_while_one_is_locked() {
         let _locked = histories.shard(&locked_key).lock().unwrap();
         scope.spawn(|| {
             histories.record_access(&other, range(0, 1));
-            histories.with_access_counts(&other, |counts, clock| {
-                assert_eq!(counts.len(), 1);
-                assert_eq!(counts[0].1.decayed_count(clock), 1.0);
+            histories.read_request_counts(&other, |request_counts, request_clock| {
+                assert_eq!(request_counts.len(), 1);
+                assert_eq!(request_counts[0].1.decayed_count(request_clock), 1.0);
             });
             assert_eq!(histories.recent_requested_ranges(&other), vec![range(0, 1)]);
             done.send(()).unwrap();
@@ -202,7 +202,7 @@ fn concurrent_keys_share_one_clock_and_keep_ordered_events() {
     for key in &keys {
         let objects = histories.shard(key).lock().unwrap();
         let history = &objects[key];
-        assert_eq!(history.access_counts.len(), 1);
+        assert_eq!(history.request_counts.len(), 1);
         assert!(history.events.iter().map(|event| event.observed_at_access).is_sorted());
     }
 }
@@ -216,9 +216,9 @@ fn all_keys_advance_the_same_clock_without_expiring_counters() {
         histories.record_access(&ObjectKeyHash::from("other"), range(0, 1));
     }
     assert!(histories.recent_requested_ranges(&old).is_empty());
-    assert_eq!(histories.shard(&old).lock().unwrap()[&old].access_counts.len(), 1);
+    assert_eq!(histories.shard(&old).lock().unwrap()[&old].request_counts.len(), 1);
     histories.record_access(&old, range(0, 1));
-    assert_eq!(histories.shard(&old).lock().unwrap()[&old].access_counts.len(), 1);
+    assert_eq!(histories.shard(&old).lock().unwrap()[&old].request_counts.len(), 1);
 }
 
 #[test]
@@ -227,10 +227,10 @@ fn whole_object_requests_share_one_counter_and_have_no_byte_range_events() {
     let key = ObjectKeyHash::from("whole");
     histories.record_access(&key, None);
     histories.record_access(&key, None);
-    histories.with_access_counts(&key, |counts, clock| {
-        assert_eq!(counts.len(), 1);
-        assert_eq!(counts[0].0, None);
-        assert_eq!(clock, 2);
+    histories.read_request_counts(&key, |request_counts, request_clock| {
+        assert_eq!(request_counts.len(), 1);
+        assert_eq!(request_counts[0].0, None);
+        assert_eq!(request_clock, 2);
     });
     assert!(histories.recent_requested_ranges(&key).is_empty());
 }
@@ -256,35 +256,35 @@ fn exact_counts_stay_indexed_when_the_vec_grows() {
         history.record(range(start, start + 1), 0);
     }
     history.record(first, *ACCESS_COUNT_HALF_LIFE);
-    assert_eq!(history.access_counts.len(), 257);
+    assert_eq!(history.request_counts.len(), 257);
     let recent = history.recent_requested_ranges(*ACCESS_COUNT_HALF_LIFE);
     assert_eq!(recent.last(), Some(first));
-    assert_eq!(history.access_count_indices.len(), 257);
-    for (&requested, &index) in &history.access_count_indices {
-        assert_eq!(history.access_counts[index].0, requested);
+    assert_eq!(history.request_count_indices.len(), 257);
+    for (&requested, &index) in &history.request_count_indices {
+        assert_eq!(history.request_counts[index].0, requested);
     }
     assert_eq!(range_count(&history, first, *ACCESS_COUNT_HALF_LIFE), 1.5);
 }
 
 #[test]
 fn decayed_count_never_increases_and_relative_error_is_at_most_6_15_percent() {
-    let accesses = DecayedAccessCount {
+    let request_count = DecayedAccessCount {
         count: 1.0,
         observed_at_access: 1,
     };
-    assert_eq!(accesses.decayed_count(0), 1.0);
+    assert_eq!(request_count.decayed_count(0), 1.0);
     let mut previous = 1.0;
     for sample in 0..=256 {
-        let elapsed_accesses = *ACCESS_COUNT_HALF_LIFE * sample / 64;
-        let actual = accesses.decayed_count(1 + elapsed_accesses);
-        let exact = (-(elapsed_accesses as f64) / *ACCESS_COUNT_HALF_LIFE as f64).exp2();
+        let requests_since_update = *ACCESS_COUNT_HALF_LIFE * sample / 64;
+        let actual = request_count.decayed_count(1 + requests_since_update);
+        let exact = (-(requests_since_update as f64) / *ACCESS_COUNT_HALF_LIFE as f64).exp2();
         assert!(actual <= previous);
         assert!(actual >= exact * (1.0 - 1e-7));
         assert!(actual <= exact * 1.0615);
         previous = actual;
     }
-    assert_eq!(accesses.decayed_count(1 + *ACCESS_COUNT_HALF_LIFE * 126), 0.0);
-    assert_eq!(accesses.decayed_count(u64::MAX), 0.0);
+    assert_eq!(request_count.decayed_count(1 + *ACCESS_COUNT_HALF_LIFE * 126), 0.0);
+    assert_eq!(request_count.decayed_count(u64::MAX), 0.0);
 }
 
 #[test]

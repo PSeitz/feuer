@@ -63,7 +63,7 @@ pub fn sample_candidates<'a, T>(
     from_start.iter().chain(before_start).take(sample_size)
 }
 
-/// Sums retrieval costs for contained requests, weighted by decayed access counts.
+/// Sums retrieval costs for contained requests, weighted by decayed request counts.
 /// Whole-object requests use the cached payload length. Unknown keys have zero cost.
 /// Eviction divides this cost by the memory allocation charge or disk payload length.
 pub fn decayed_retrieval_cost(
@@ -72,14 +72,14 @@ pub fn decayed_retrieval_cost(
     cached_range: ByteRange,
     fixed_retrieval_equivalent_bytes: u64,
 ) -> f64 {
-    histories.with_access_counts(key, |counts, clock| {
+    histories.read_request_counts(key, |request_counts, request_clock| {
         let fixed_retrieval_cost = fixed_retrieval_equivalent_bytes as f64;
-        counts
+        request_counts
             .iter()
-            .map(|(requested, access_count)| (requested.unwrap_or(cached_range), access_count))
+            .map(|(requested, request_count)| (requested.unwrap_or(cached_range), request_count))
             .filter(|(requested_range, _)| cached_range.contains(*requested_range))
-            .map(|(requested_range, access_count)| {
-                access_count.decayed_count(clock) * (fixed_retrieval_cost + requested_range.len() as f64)
+            .map(|(requested_range, request_count)| {
+                request_count.decayed_count(request_clock) * (fixed_retrieval_cost + requested_range.len() as f64)
             })
             .sum()
     })
