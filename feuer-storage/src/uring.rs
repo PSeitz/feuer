@@ -261,6 +261,8 @@ fn queue_stopped_error() -> io::Error {
 enum IoBuffers {
     Read(AlignedBuffer),
     Write {
+        // Borrow the aligned payload prefix and copy only the remainder into a padded,
+        // aligned buffer. Either buffer may be empty; only nonempty buffers are submitted.
         bytes: [Bytes; 2],
         vectors: [libc::iovec; 2],
     },
@@ -302,17 +304,26 @@ impl IoBuffers {
             }
             Self::Write { bytes, vectors } => {
                 let mut bytes_to_skip = range.start;
-                for (bytes, vector) in bytes.iter().zip(vectors.iter_mut()) {
+                let mut vector_count = 0;
+                for bytes in bytes.iter() {
                     let skip = bytes_to_skip.min(bytes.len());
                     bytes_to_skip -= skip;
                     let remaining_bytes = &bytes[skip..];
-                    *vector = libc::iovec {
+                    if remaining_bytes.is_empty() {
+                        continue;
+                    }
+                    vectors[vector_count] = libc::iovec {
                         iov_base: remaining_bytes.as_ptr().cast_mut().cast(),
                         iov_len: remaining_bytes.len(),
                     };
+                    vector_count += 1;
                 }
-                // The request owns both descriptors; empty slices transfer no bytes.
-                opcode::Writev::new(fd, vectors.as_ptr(), vectors.len() as u32)
+                vectors[vector_count..].fill(libc::iovec {
+                    iov_base: std::ptr::null_mut(),
+                    iov_len: 0,
+                });
+                // XFS checks empty vectors' addresses too, so omit them from the request.
+                opcode::Writev::new(fd, vectors.as_ptr(), vector_count as u32)
                     .offset(offset)
                     .build()
             }
