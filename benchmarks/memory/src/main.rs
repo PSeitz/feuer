@@ -4,13 +4,14 @@ use std::{
     collections::HashMap,
     fs,
     path::Path,
+    sync::{Arc, LazyLock},
     time::{Duration, Instant},
 };
 
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use feuer_historian::{ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY};
-use feuer_memory::{MemoryCache, retention::FIXED_RETRIEVAL_EQUIVALENT_BYTES};
+use feuer_memory::{MemoryCache, retention::RetrievalCostScorer};
 use feuer_types::{
     ByteRange, Download, ObjectKeyHash,
     config::{parse_config_number, read_env_number},
@@ -19,6 +20,15 @@ use foyer_memory::{Cache as FoyerCache, CacheBuilder, CostAwareConfig, S3FifoCon
 
 const PINNED_FOYER_REVISION: &str = "14c2d88b9d7dd2135bfc723d0967debb59532b4b";
 const SOURCE_FIXED_EQUIVALENT_BYTES: u64 = 10_000_000;
+// Keep the replay's source-cost assumption explicit rather than relying on the cache default.
+static FIXED_RETRIEVAL_EQUIVALENT_BYTES: LazyLock<u64> = LazyLock::new(|| {
+    read_env_number(
+        "FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES",
+        SOURCE_FIXED_EQUIVALENT_BYTES,
+        0,
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+});
 /// Per-eviction comparison budget, matched to Feuer's candidate sample.
 const FOYER_COST_SAMPLE_SIZE: usize = 64;
 const TRACE_FILE: &str = "access_pattern.ndjson";
@@ -156,7 +166,11 @@ struct FeuerReplayCache {
 impl FeuerReplayCache {
     fn new(capacity: usize, num_shards: usize) -> Self {
         Self {
-            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards),
+            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards).with_retention_scorer(Arc::new(
+                RetrievalCostScorer {
+                    fixed_retrieval_equivalent_bytes: *FIXED_RETRIEVAL_EQUIVALENT_BYTES,
+                },
+            )),
         }
     }
 }

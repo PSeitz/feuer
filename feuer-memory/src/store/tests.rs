@@ -829,7 +829,7 @@ fn access_history_survives_removal_reinsertion_and_cache_drop() {
     assert!(cache.get(&key, range(0, 1)).is_some());
     assert_eq!(history.request_count(), 2, "raw lookups do not record requests");
     drop(cache);
-    assert!(decayed_retrieval_cost(&history, &key, range(0, 1)) > 0.0);
+    assert!(decayed_retrieval_cost(&history, &key, range(0, 1), 0) > 0.0);
 }
 
 #[test]

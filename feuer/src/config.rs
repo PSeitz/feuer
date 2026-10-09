@@ -21,6 +21,7 @@ pub struct CacheConfig {
     memory_capacity: u64,
     reclaim_sample_size: usize,
     idle_buffer_pool_percent: u64,
+    fixed_retrieval_equivalent_bytes: u64,
 }
 
 impl CacheConfig {
@@ -43,6 +44,7 @@ impl CacheConfig {
         Ok(Self {
             directory: directory.into(),
             file_name: "data".to_owned(),
+            fixed_retrieval_equivalent_bytes: 0,
             disk_capacity,
             memory_capacity,
             reclaim_sample_size: read_env_number("FEUER_RECLAIM_SAMPLE_SIZE", RECLAIM_SAMPLE_SIZE, 1)
@@ -85,6 +87,19 @@ impl CacheConfig {
         }
         self.idle_buffer_pool_percent = percent;
         Ok(self)
+    }
+
+    /// Sets the fixed source-request cost in equivalent transferred bytes; defaults to zero.
+    /// Zero scores only requested bytes. For example, 125 ms at 80 MB/s is 10,000,000 bytes.
+    /// Applies to the default scorer in both tiers; ignored when supplying a custom scorer.
+    pub fn with_fixed_retrieval_equivalent_bytes(mut self, bytes: u64) -> Self {
+        self.fixed_retrieval_equivalent_bytes = bytes;
+        self
+    }
+
+    /// Returns the fixed source-request cost in equivalent transferred bytes.
+    pub const fn fixed_retrieval_equivalent_bytes(&self) -> u64 {
+        self.fixed_retrieval_equivalent_bytes
     }
 
     /// Returns the maximum idle buffers as a percentage of memory capacity.
@@ -253,6 +268,14 @@ mod tests {
                 Err(CacheConfigError::InvalidIdleBufferPoolPercent)
             );
         }
+    }
+
+    #[test]
+    fn configures_fixed_retrieval_cost() {
+        let config = CacheConfig::new("cache", 1, 1).unwrap();
+        assert_eq!(config.fixed_retrieval_equivalent_bytes(), 0);
+        let config = config.with_fixed_retrieval_equivalent_bytes(10_000_000);
+        assert_eq!(config.fixed_retrieval_equivalent_bytes(), 10_000_000);
     }
 
     #[test]

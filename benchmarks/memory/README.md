@@ -148,8 +148,9 @@ policy or Feuer's decayed scoring counters. Larger event histories increase
 metadata memory and range-trimming work.
 
 `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` changes Feuer's fixed per-request scoring
-credit (default `10000000`). It is read once per process and accepts nonnegative
-`u64` integers, including `0` for bytes-only scoring. For example:
+credit (default `10000000`) in this replay only; the library defaults to zero.
+It is read once per process and accepts nonnegative byte counts with size suffixes,
+including `0` for bytes-only scoring. For example:
 
 ```bash
 FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES=0 FEUER_MAX_ACCESS_EVENTS_PER_KEY=256 \

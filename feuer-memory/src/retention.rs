@@ -1,9 +1,7 @@
 //! Shared retention policy for the memory and disk tiers.
 
-use std::sync::LazyLock;
-
 use feuer_historian::ObjectAccessHistories;
-use feuer_types::{ByteRange, ObjectKeyHash, config::read_env_number};
+use feuer_types::{ByteRange, ObjectKeyHash};
 
 /// Scores how valuable a cached byte range is to retain.
 ///
@@ -28,7 +26,11 @@ pub trait RetentionScorer: Send + Sync {
 /// Scores cached ranges by decayed retrieval cost per charged byte.
 /// Empty entries use a one-byte denominator to keep scores finite.
 #[derive(Debug, Default)]
-pub struct RetrievalCostScorer;
+pub struct RetrievalCostScorer {
+    /// Fixed source-request cost in equivalent transferred bytes; defaults to zero.
+    /// Zero scores only requested bytes.
+    pub fixed_retrieval_equivalent_bytes: u64,
+}
 
 impl RetentionScorer for RetrievalCostScorer {
     fn score(
@@ -38,7 +40,8 @@ impl RetentionScorer for RetrievalCostScorer {
         charged_bytes: u64,
         histories: &ObjectAccessHistories,
     ) -> f64 {
-        decayed_retrieval_cost(histories, key, cached_range) / charged_bytes.max(1) as f64
+        decayed_retrieval_cost(histories, key, cached_range, self.fixed_retrieval_equivalent_bytes)
+            / charged_bytes.max(1) as f64
     }
 }
 
@@ -60,19 +63,17 @@ pub fn sample_candidates<'a, T>(
     from_start.iter().chain(before_start).take(sample_size)
 }
 
-/// Fixed source-request cost as equivalent transferred bytes; zero scores only bytes.
-/// Reads `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` once on first use, defaulting to
-/// 10,000,000 (125 ms at 80 MB/s). Accepts size suffixes; panics unless the value fits `u64`.
-pub static FIXED_RETRIEVAL_EQUIVALENT_BYTES: LazyLock<u64> = LazyLock::new(|| {
-    read_env_number("FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES", 10_000_000, 0).unwrap_or_else(|error| panic!("{error}"))
-});
-
 /// Sums retrieval costs for contained requests, weighted by decayed access counts.
 /// Whole-object requests use the cached payload length. Unknown keys have zero cost.
 /// Eviction divides this cost by the memory allocation charge or disk payload length.
-pub fn decayed_retrieval_cost(histories: &ObjectAccessHistories, key: &ObjectKeyHash, cached_range: ByteRange) -> f64 {
+pub fn decayed_retrieval_cost(
+    histories: &ObjectAccessHistories,
+    key: &ObjectKeyHash,
+    cached_range: ByteRange,
+    fixed_retrieval_equivalent_bytes: u64,
+) -> f64 {
     histories.with_access_counts(key, |counts, clock| {
-        let fixed_retrieval_cost = *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64;
+        let fixed_retrieval_cost = fixed_retrieval_equivalent_bytes as f64;
         counts
             .iter()
             .map(|(requested, access_count)| (requested.unwrap_or(cached_range), access_count))

@@ -154,6 +154,10 @@ For each request fully contained in a cached range, the retrieval cost adds:
 decayed access count × (fixed request cost + requested bytes)
 ```
 
+Fixed request cost defaults to `0`; set it per cache with
+`CacheConfig::with_fixed_retrieval_equivalent_bytes(n)`. Both tiers use this setting
+unless a custom scorer is supplied.
+
 Each started request records its requested range or whole-object demand once, before any lookup,
 in `feuer-historian`, shared by both tiers. Historian supplies request counts and recent events;
 retrieval-cost scoring belongs to the shared retention policy in `feuer-memory`.
@@ -192,13 +196,12 @@ Scoring runs under shard locks; keep it short and do not re-enter the cache.
 | `FEUER_ACCESS_COUNT_HALF_LIFE` | `262144` | Score decay half-life in requests across all keys. |
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Trimming event age limit in requests across all keys. |
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Maximum trimming events per key. |
-| `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Fixed request cost in equivalent bytes. `0` scores bytes only. |
 | `FEUER_IDLE_BUFFER_POOL_PERCENT` | `7` | Maximum idle buffers as a percentage of memory capacity, shared by all buckets. Range 0–100; `0` disables idle retention. |
 
 Values accept integers or size suffixes such as `8KiB`, `1.5 GiB`, and `5GB`.
 Binary suffixes use powers of 1024 and decimal suffixes use powers of 1000.
 Suffixes work for counts too: `FEUER_ACCESS_COUNT_HALF_LIFE=8KiB` means 8192 accesses.
-The first four settings require positive values. The rest allow zero.
+The first four settings require positive values. The idle buffer percentage allows zero.
 
 `CacheConfig::new` reads the sample size and idle buffer percentage, returning an error
 for invalid values. `.with_reclaim_sample_size(n)` and `.with_idle_buffer_pool_percent(n)`
@@ -238,10 +241,11 @@ small/medium/large settings are no longer read.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
+| `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES` | `10000000` | Replay-only fixed request cost in equivalent bytes; passed explicitly to Feuer's scorer. |
 | `COALESCING_DISTANCE_BYTES` | `10000000` | Merge requests with gaps below this size. |
 | `WHOLE_SPLIT_THRESHOLD_BYTES` | `8MiB` | Download whole objects below this size. |
 
-Both accept the same size suffixes and allow zero.
+All accept the same size suffixes and allow zero.
 
 ## Metrics
 

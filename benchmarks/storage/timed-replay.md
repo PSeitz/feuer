@@ -82,6 +82,9 @@ FEUER_RECLAIM_SAMPLE_SIZE=64
 FEUER_IDLE_BUFFER_POOL_PERCENT=7
 ```
 
+New revisions no longer read `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES`; the harness must
+set `CacheConfig::with_fixed_retrieval_equivalent_bytes(256000)` to match the older revisions.
+
 Requires `libjemalloc2`, `iostat`, `pidstat`, `/usr/bin/time`, and Python 3.
 Run the private harness's `run-disk-comparison.sh RUN_ROOT 180`. It runs pressure
 baseline/candidate, then no-pressure candidate/baseline. It refuses existing

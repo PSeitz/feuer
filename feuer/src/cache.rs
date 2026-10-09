@@ -66,7 +66,10 @@ impl TieredMemoryDiskCache {
         metrics_registry: Option<&BoxedRegistry>,
         io_queues: Option<IoQueues>,
     ) -> Result<Self, DiskCacheError> {
-        Self::open_with_retention_scorer(config, metrics_registry, io_queues, Arc::new(RetrievalCostScorer)).await
+        let scorer = Arc::new(RetrievalCostScorer {
+            fixed_retrieval_equivalent_bytes: config.fixed_retrieval_equivalent_bytes(),
+        });
+        Self::open_with_retention_scorer(config, metrics_registry, io_queues, scorer).await
     }
 
     /// Opens a cache with one application-provided scorer shared by memory and disk.

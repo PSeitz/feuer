@@ -105,7 +105,7 @@ impl MemoryCache {
         Self {
             shards,
             access_histories: Arc::new(ObjectAccessHistories::new()),
-            retention_scorer: Arc::new(RetrievalCostScorer),
+            retention_scorer: Arc::new(RetrievalCostScorer::default()),
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             buffer_pool,
         }

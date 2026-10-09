@@ -167,7 +167,7 @@ impl Default for DiskCacheOptions {
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             buffer_pool: BufferPool::unpooled(),
             io_queues: None,
-            retention_scorer: Arc::new(RetrievalCostScorer),
+            retention_scorer: Arc::new(RetrievalCostScorer::default()),
         }
     }
 }
