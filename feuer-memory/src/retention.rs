@@ -25,6 +25,20 @@ pub trait RetentionScorer: Send + Sync {
 
 /// Scores cached ranges by decayed retrieval cost per charged byte.
 /// Empty entries use a one-byte denominator to keep scores finite.
+///
+/// For repeated requests for one exact range contained in the cached entry:
+/// `score = decayed_count * (fixed_retrieval_equivalent_bytes + requested_bytes) / max(charged_bytes, 1)`.
+/// With the default fixed cost of zero and a nonempty request whose size equals the byte charge,
+/// the score equals the decayed count. Using the default half-life and current decay approximation:
+///
+/// | Matching request frequency | Score approached immediately after a matching request |
+/// | --- | ---: |
+/// | Every request | 524,288 |
+/// | Every second request | 262,144 |
+///
+/// Larger byte charges reduce the score. A fixed retrieval cost increases it.
+/// Different ranges on the same object have separate counters. The score sums contributions
+/// only from requests contained in the cached entry.
 #[derive(Debug, Default)]
 pub struct RetrievalCostScorer {
     /// Fixed source-request cost in equivalent transferred bytes. Defaults to zero.

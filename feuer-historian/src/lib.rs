@@ -133,8 +133,43 @@ pub struct DecayedAccessCount {
 
 impl DecayedAccessCount {
     /// Evaluates the count at the supplied request clock, without modifying it.
-    /// Earlier clocks leave the count unchanged. Decay uses an approximation that is
+    /// The result is between zero and the count stored at the last update, inclusive.
+    /// It is not normalized to [0, 1]. Each matching request decays the stored count
+    /// and adds one, so repeated requests can make it exceed one.
+    ///
+    /// Age is measured in requests across all object keys, not wall-clock time.
+    /// With the default half-life of 262,144 requests, starting at one with no further matching requests:
+    ///
+    /// | Additional requests across all keys | Value |
+    /// | ---: | ---: |
+    /// | 0 | 1 |
+    /// | 262,144 | 0.5 |
+    /// | 524,288 | 0.25 |
+    ///
+    /// After 126 half-lives without an update, the result is zero.
+    /// Earlier clocks return the stored count unchanged.
+    ///
+    /// Decay approximates `count * 2^(-requests_since_update / half_life)` and is
     /// up to 6.15% high per evaluation. Errors can compound across recorded updates.
+    ///
+    /// # Repeated requests
+    ///
+    /// Requests for the same object key and exact range update the count as
+    /// `next = retained_fraction * previous + 1`. With equally spaced matching requests,
+    /// the count after each update approaches `1 / (1 - retained_fraction)`.
+    /// These examples use the default half-life and this implementation's approximation:
+    ///
+    /// | Matching request frequency | Retained fraction per update | Count approached after each update |
+    /// | --- | ---: | ---: |
+    /// | Every request | `1 - 1/524288` | 524,288 |
+    /// | Every second request | `1 - 1/262144` | 262,144 |
+    /// | Every 128,000 requests | 0.755859375 | 4.096 |
+    /// | Every 131,072 requests | 0.75 | 4 |
+    ///
+    /// At 131,072 requests apart, the counts after matching requests are
+    /// `1 -> 1.75 -> 2.3125 -> 2.734375 -> ... -> 4`.
+    /// Between matching requests, a count near 4 decays toward 3 before the next update adds one.
+    /// At 128,000 requests apart, the corresponding limits are 4.096 after adding one and 3.096 before.
     #[inline]
     pub fn decayed_count(&self, request_clock: u64) -> f64 {
         // Age is measured in requests across all keys, not wall-clock time.
