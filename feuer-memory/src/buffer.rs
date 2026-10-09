@@ -11,6 +11,7 @@ use std::{
 use std::alloc::realloc;
 
 use bytes::Bytes;
+use feuer_types::config::read_env_number;
 use parking_lot::Mutex;
 
 use crate::MemoryMetrics;
@@ -46,7 +47,17 @@ pub(crate) fn bucket_index(length: usize) -> usize {
 }
 
 /// Default maximum share of memory capacity occupied by idle buffers across all buckets.
-pub const DEFAULT_IDLE_BUFFER_POOL_PERCENT: u64 = 7;
+pub(crate) const DEFAULT_IDLE_BUFFER_POOL_PERCENT: u64 = 7;
+
+/// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT`, defaulting to 7 when unset; it must be between 0 and 100.
+pub fn read_idle_buffer_pool_percent() -> Result<u64, String> {
+    let name = "FEUER_IDLE_BUFFER_POOL_PERCENT";
+    let percent = read_env_number(name, DEFAULT_IDLE_BUFFER_POOL_PERCENT, 0)?;
+    if percent > 100 {
+        return Err(format!("{name} must be between 0 and 100"));
+    }
+    Ok(percent)
+}
 
 /// Idle aligned buffers and the cached-allocation charges sharing one cache's budget.
 /// Active allocations and caller-only results are not charged to this budget.

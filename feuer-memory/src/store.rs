@@ -13,7 +13,8 @@ use rustc_hash::FxBuildHasher;
 
 use self::shard::{InsertOrReclaimResult, MemoryCacheShard};
 use crate::{
-    BufferPool, DEFAULT_IDLE_BUFFER_POOL_PERCENT, MemoryMetrics,
+    BufferPool, MemoryMetrics,
+    buffer::DEFAULT_IDLE_BUFFER_POOL_PERCENT,
     retention::{RECLAIM_SAMPLE_SIZE, RetentionScorer, RetrievalCostScorer},
 };
 
@@ -81,10 +82,13 @@ impl MemoryCache {
     }
 
     /// Creates a cache with an explicit shard count for controlled benchmarks.
+    /// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT`; panics if it is invalid.
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
     pub fn with_shards_for_benchmark(capacity: u64, num_shards: usize) -> Self {
-        Self::with_shard_count(BufferPool::new(capacity, MemoryMetrics::noop()), num_shards)
+        let percent = crate::read_idle_buffer_pool_percent().unwrap_or_else(|error| panic!("{error}"));
+        let buffer_pool = BufferPool::with_idle_buffer_pool_percent(capacity, MemoryMetrics::noop(), percent);
+        Self::with_shard_count(buffer_pool, num_shards)
     }
 
     fn with_shard_count(buffer_pool: Arc<BufferPool>, num_shards: usize) -> Self {
