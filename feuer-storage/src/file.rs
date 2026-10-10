@@ -41,7 +41,8 @@ struct DataFileState {
 /// Files opened with shared [`crate::IoQueues`] share these limits and threads.
 /// Queues schedule in arrival order without checking for conflicts.
 /// Submission order does not guarantee completion order.
-/// Each I/O request transfers at most 1 MiB. Request limits do not bound full read-result allocations.
+/// Each I/O request transfers at most 1 MiB. Reads queue multiple pieces concurrently into one
+/// allocation. Request limits do not bound full read-result allocations.
 ///
 /// # Caller-owned concurrency and cancellation
 ///
@@ -50,9 +51,10 @@ struct DataFileState {
 /// conflicting access or validate returned buffers against expected checksums and
 /// accept mismatches as cache misses.
 ///
-/// Dropping an I/O future does not cancel submitted kernel I/O. An abandoned write
-/// can overwrite a reused region, even after a newer write completes. The queue
-/// retains I/O buffers until completion, but holds no disk reservations.
+/// Dropping an I/O future skips requests still in the channel and stops completion retries,
+/// but does not cancel submitted kernel I/O. An abandoned write can overwrite a reused region,
+/// even after a newer write completes. The queue retains I/O buffers until completion,
+/// but holds no disk reservations.
 ///
 /// Capacity must be a positive multiple of 4096. Opening fails
 /// if io_uring or verified O_DIRECT alignment is unavailable. There is no fallback.

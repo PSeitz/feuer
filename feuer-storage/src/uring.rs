@@ -143,19 +143,19 @@ impl IoQueueHandle {
             .map_err(|_| queue_stopped_error())
     }
 
-    /// Submits the admitted request and waits for a read buffer, write success, or an I/O error.
-    async fn submit_and_wait(
+    /// Submits the admitted request and returns its completion receiver.
+    fn submit_request(
         &self,
         files: Arc<DataFileAndDirectoryLock>,
         offset: u64,
         buffers: IoBuffers,
         buffer_range: Range<usize>,
         permit: mpsc::Permit<'_, IoRequest>,
-    ) -> io::Result<Option<AlignedBuffer>> {
+    ) -> oneshot::Receiver<io::Result<Option<Arc<ReadBuffer>>>> {
         let (result_sender, result_receiver) = oneshot::channel();
         permit.send(IoRequest::new(files, offset, buffers, buffer_range, result_sender));
         wake_queue(&self.wake_fd);
-        result_receiver.await.map_err(|_| queue_stopped_error())?
+        result_receiver
     }
 }
 
@@ -188,30 +188,29 @@ impl ReadQueue {
         self.buffer_pool.allocate(length)
     }
 
-    /// Reads into one allocation, splitting at the request-size limit, and returns its capacity.
+    /// Queues disjoint 1-MiB pieces into one allocation before waiting for their completions.
     pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<(Bytes, usize)> {
-        let mut permit = self.handle.reserve_request().await?;
-        let mut buffer = self.allocate_buffer(length)?;
-        let mut start = 0;
-        loop {
+        let mut permit = Some(self.handle.reserve_request().await?);
+        let buffer = ReadBuffer::new(self.allocate_buffer(length)?);
+        let mut replies = Vec::with_capacity(length.div_ceil(MAX_IO_REQUEST_BYTES));
+        for start in (0..length).step_by(MAX_IO_REQUEST_BYTES) {
+            let permit = match permit.take() {
+                Some(permit) => permit,
+                None => self.handle.reserve_request().await?,
+            };
             let end = (start + MAX_IO_REQUEST_BYTES).min(length);
-            buffer = self
-                .handle
-                .submit_and_wait(
-                    self.files.clone(),
-                    offset + start as u64,
-                    IoBuffers::Read(buffer),
-                    start..end,
-                    permit,
-                )
-                .await?
-                .expect("read completion returns its buffer");
-            if end == length {
-                break;
-            }
-            start = end;
-            permit = self.handle.reserve_request().await?;
+            replies.push(self.handle.submit_request(
+                self.files.clone(),
+                offset + start as u64,
+                IoBuffers::Read(buffer.clone()),
+                start..end,
+                permit,
+            ));
         }
+        for reply in replies {
+            reply.await.map_err(|_| queue_stopped_error())??;
+        }
+        let buffer = buffer.into_buffer();
         let capacity = buffer.capacity();
         Ok((buffer.into_bytes(), capacity))
     }
@@ -240,14 +239,15 @@ impl WriteQueue {
             let permit = self.handle.reserve_request().await?;
             let buffers = IoBuffers::from_write_bytes(request_length, bytes.slice(start.min(end)..end))?;
             self.handle
-                .submit_and_wait(
+                .submit_request(
                     self.files.clone(),
                     offset + start as u64,
                     buffers,
                     0..request_length,
                     permit,
                 )
-                .await?;
+                .await
+                .map_err(|_| queue_stopped_error())??;
         }
         Ok(())
     }
@@ -257,9 +257,36 @@ fn queue_stopped_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "io_uring queue stopped")
 }
 
+/// One read's allocation and pointer, shared only by requests writing disjoint byte ranges.
+struct ReadBuffer {
+    buffer: AlignedBuffer,
+    ptr: *mut u8,
+    length: usize,
+}
+
+impl ReadBuffer {
+    fn new(mut buffer: AlignedBuffer) -> Arc<Self> {
+        let bytes = buffer.as_mut_slice();
+        Arc::new(Self {
+            ptr: bytes.as_mut_ptr(),
+            length: bytes.len(),
+            buffer,
+        })
+    }
+
+    fn into_buffer(self: Arc<Self>) -> AlignedBuffer {
+        Arc::try_unwrap(self).ok().expect("all read requests completed").buffer
+    }
+}
+
+// SAFETY: requests write disjoint ranges through the captured pointer. No byte references
+// are created until every request releases its owner and into_buffer recovers exclusive ownership.
+unsafe impl Send for ReadBuffer {}
+unsafe impl Sync for ReadBuffer {}
+
 /// Buffers owned by a read or vectored write until completion.
 enum IoBuffers {
-    Read(AlignedBuffer),
+    Read(Arc<ReadBuffer>),
     Write {
         // Borrow the aligned payload prefix and copy only the remainder into a padded,
         // aligned buffer. Either buffer may be empty. Only nonempty buffers are submitted.
@@ -298,8 +325,8 @@ impl IoBuffers {
     fn submission_entry(&mut self, fd: types::Fd, offset: u64, range: Range<usize>) -> squeue::Entry {
         match self {
             Self::Read(buffer) => {
-                // The active request exclusively owns this destination through completion.
-                let ptr = buffer.as_mut_slice()[range.start..range.end].as_mut_ptr();
+                // Other requests may be writing disjoint ranges in the same allocation.
+                let ptr = buffer.ptr.wrapping_add(range.start);
                 opcode::Read::new(fd, ptr, range.len() as u32).offset(offset).build()
             }
             Self::Write { bytes, vectors } => {
@@ -362,7 +389,7 @@ struct IoRequest {
     // Remaining byte range within the I/O buffers to read into or write from.
     buffer_range: Range<usize>,
     // The caller's result channel is taken on completion or failure and also detects cancellation.
-    reply: Option<oneshot::Sender<io::Result<Option<AlignedBuffer>>>>,
+    reply: Option<oneshot::Sender<io::Result<Option<Arc<ReadBuffer>>>>>,
 }
 
 impl IoRequest {
@@ -371,14 +398,14 @@ impl IoRequest {
         offset: u64,
         buffers: IoBuffers,
         buffer_range: Range<usize>,
-        reply: oneshot::Sender<io::Result<Option<AlignedBuffer>>>,
+        reply: oneshot::Sender<io::Result<Option<Arc<ReadBuffer>>>>,
     ) -> Self {
         assert!(offset.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES as u64));
         assert!(buffer_range.start.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         let length = buffer_range.len();
         assert!(length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         if let IoBuffers::Read(buffer) = &buffers {
-            assert!(buffer_range.end <= buffer.as_ref().len());
+            assert!(buffer_range.end <= buffer.length);
         }
         assert!(length > 0 && length <= MAX_IO_REQUEST_BYTES);
         Self {
@@ -483,14 +510,7 @@ impl IoQueue {
         loop {
             // Release the completion-queue borrow before retrying a short request.
             while let Some(completion) = { self.ring.completion().next() } {
-                let request_index = completion.user_data() as usize;
-                let request = self.active[request_index]
-                    .as_mut()
-                    .expect("completion for inactive request");
-                match request.apply_completion_result(completion.result()) {
-                    Ok(()) if !request.buffer_range.is_empty() => self.queue_active_request(request_index),
-                    result => self.active[request_index].take().unwrap().send_result(result),
-                }
+                self.complete_request(completion.user_data(), completion.result());
             }
             self.receive_requests();
             if self.receiver.is_closed() && self.receiver.is_empty() && self.active.iter().all(Option::is_none) {
@@ -515,6 +535,19 @@ impl IoQueue {
                 continue;
             }
             self.wait_for_completion_or_wakeup(-1)?;
+        }
+    }
+
+    fn complete_request(&mut self, user_data: u64, result: i32) {
+        let request_index = user_data as usize;
+        let request = self.active[request_index]
+            .as_mut()
+            .expect("completion for inactive request");
+        match request.apply_completion_result(result) {
+            Ok(()) if !request.buffer_range.is_empty() && !request.reply.as_ref().unwrap().is_closed() => {
+                self.queue_active_request(request_index)
+            }
+            result => self.active[request_index].take().unwrap().send_result(result),
         }
     }
 

@@ -2,7 +2,7 @@ use std::{fs::OpenOptions, future::Future, os::unix::fs::OpenOptionsExt, task::C
 
 use super::*;
 
-type IoResultReceiver = oneshot::Receiver<io::Result<Option<AlignedBuffer>>>;
+type IoResultReceiver = oneshot::Receiver<io::Result<Option<Arc<ReadBuffer>>>>;
 
 fn request(
     files: &Arc<DataFileAndDirectoryLock>,
@@ -16,7 +16,7 @@ fn request(
         buffer.as_mut_slice().fill(0x99);
         IoBuffers::from_write_bytes(length, buffer.into_bytes()).unwrap()
     } else {
-        IoBuffers::Read(buffer_pool().allocate(length).unwrap())
+        IoBuffers::Read(ReadBuffer::new(buffer_pool().allocate(length).unwrap()))
     };
     (
         IoRequest::new(files.clone(), offset, buffers, 0..length, reply),
@@ -188,7 +188,7 @@ fn resource_pressure_retries_pending_submissions() {
             let buffer = reply.try_recv().unwrap().unwrap();
             assert_eq!(buffer.is_some(), operation == IoOperation::Read);
             if let Some(buffer) = buffer {
-                assert_eq!(buffer.as_ref(), &[0; DIRECT_IO_ALIGNMENT_BYTES]);
+                assert_eq!(buffer.into_buffer().as_ref(), &[0; DIRECT_IO_ALIGNMENT_BYTES]);
             }
         }
     }
@@ -471,7 +471,7 @@ fn canceled_submitted_write_retains_buffers_on_queue_failure() {
     drop(sender);
     read_queue.process_requests_until_disconnected().unwrap();
     assert_eq!(
-        reply.try_recv().unwrap().unwrap().unwrap().as_ref(),
+        reply.try_recv().unwrap().unwrap().unwrap().into_buffer().as_ref(),
         &[0x99; DIRECT_IO_ALIGNMENT_BYTES]
     );
 }
@@ -577,15 +577,32 @@ async fn queue_exit_releases_admission_waiters_and_queued_requests() {
 
 #[test]
 fn canceled_queued_requests_drain_on_shutdown_without_submission() {
-    let (mut queue, sender, files) = queue();
-    let (request, reply) = request(&files, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
-    sender.try_send(request).unwrap();
-    drop(reply);
-    drop(sender);
-    queue.process_requests_until_disconnected().unwrap();
-    assert!(queue.receiver.is_empty());
-    assert!(queue.active.iter().all(Option::is_none));
-    assert!(queue.ring.submission().is_empty());
+    for operation in [IoOperation::Read, IoOperation::Write] {
+        let (mut queue, sender, files) = queue();
+        let (request, reply) = request(&files, operation, 0, DIRECT_IO_ALIGNMENT_BYTES);
+        sender.try_send(request).unwrap();
+        drop(reply);
+        drop(sender);
+        queue.process_requests_until_disconnected().unwrap();
+        assert!(queue.receiver.is_empty());
+        assert!(queue.active.iter().all(Option::is_none));
+        assert!(queue.ring.submission().is_empty());
+    }
+}
+
+#[test]
+fn canceled_requests_do_not_retry_short_io_or_eintr() {
+    for operation in [IoOperation::Read, IoOperation::Write] {
+        for result in [DIRECT_IO_ALIGNMENT_BYTES as i32, -libc::EINTR] {
+            let (mut queue, _sender, files) = queue();
+            let (request, reply) = request(&files, operation, 0, 2 * DIRECT_IO_ALIGNMENT_BYTES);
+            queue.active[0] = Some(request);
+            drop(reply);
+            queue.complete_request(0, result);
+            assert!(queue.active[0].is_none());
+            assert!(queue.ring.submission().is_empty());
+        }
+    }
 }
 
 #[test]
@@ -595,13 +612,13 @@ fn finished_read_transfers_buffer_ownership() {
     let IoBuffers::Read(buffer) = &mut read.buffers else {
         unreachable!()
     };
-    buffer.as_mut_slice().fill(0x99);
-    let ptr = buffer.as_ref().as_ptr();
+    Arc::get_mut(buffer).unwrap().buffer.as_mut_slice().fill(0x99);
+    let ptr = buffer.ptr.cast_const();
     read.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap();
     assert!(read.buffer_range.is_empty());
     read.send_result(Ok(()));
 
-    let bytes = reply.try_recv().unwrap().unwrap().unwrap().into_bytes();
+    let bytes = reply.try_recv().unwrap().unwrap().unwrap().into_buffer().into_bytes();
     assert_eq!(bytes.as_ptr(), ptr);
     assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
     let slice = bytes.slice(1..);
@@ -625,7 +642,7 @@ fn error_completion_releases_the_read_buffer() {
         .open(temporary.path())
         .unwrap();
     let (mut read, mut reply) = request(&files, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
-    read.buffers = IoBuffers::Read(buffer);
+    read.buffers = IoBuffers::Read(ReadBuffer::new(buffer));
     sender.try_send(read).unwrap();
     drop(sender);
     queue.process_requests_until_disconnected().unwrap();
@@ -645,10 +662,18 @@ fn error_completion_releases_the_read_buffer() {
 }
 
 #[tokio::test]
-async fn multi_request_reads_reuse_one_allocation_after_a_padded_write() {
-    let (_, _, files) = queue();
+async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
+    let (mut queue, sender, files) = queue();
     let pool = buffer_pool();
-    let read = ReadQueue::new(files.clone(), pool.clone()).unwrap();
+    let read = ReadQueue {
+        handle: Arc::new(IoQueueHandle {
+            sender: Some(sender),
+            wake_fd: queue.wake_fd.clone(),
+            thread: None,
+        }),
+        files: files.clone(),
+        buffer_pool: pool.clone(),
+    };
     let write = WriteQueue::new(files).unwrap();
     let length = MAX_IO_REQUEST_BYTES;
     let mut payload = AlignedBuffer::allocate_zeroed(length + 18).unwrap();
@@ -662,13 +687,92 @@ async fn multi_request_reads_reuse_one_allocation_after_a_padded_write() {
     buffer.as_mut_slice().fill(0x55);
     let address = buffer.as_ref().as_ptr() as usize;
     drop(buffer);
-    let (bytes, capacity) = read.read(0, 3 * length).await.unwrap();
+    let mut future = Box::pin(read.read(0, 3 * length));
+    assert!(
+        future
+            .as_mut()
+            .poll(&mut Context::from_waker(std::task::Waker::noop()))
+            .is_pending()
+    );
+    queue.receive_requests();
+    assert_eq!(queue.ring.submission().len(), 3);
+    for (index, request) in queue.active.iter().flatten().enumerate() {
+        assert_eq!(request.buffer_range, index * length..(index + 1) * length);
+    }
+    queue.ring.submit_and_wait(3).unwrap();
+    let mut completions: Vec<_> = queue.ring.completion().collect();
+    completions.sort_unstable_by_key(|c| std::cmp::Reverse(c.user_data()));
+    for completion in completions {
+        assert_eq!(completion.result(), length as i32);
+        queue.complete_request(completion.user_data(), completion.result());
+    }
+    assert!(queue.ring.submission().is_empty());
+    let (bytes, capacity) = future.await.unwrap();
     assert_eq!(capacity, 3 * length);
     assert_eq!(pool.idle_bytes(), 0);
     assert_eq!(bytes.as_ptr() as usize, address);
     assert_eq!(&bytes[..length], &vec![0x99; length]);
     assert_eq!(&bytes[length..length + 17], &[0x77; 17]);
     assert!(bytes[length + 17..].iter().all(|&byte| byte == 0));
+}
+
+#[tokio::test]
+async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_error() {
+    for fail in [false, true] {
+        let (mut queue, sender, files) = queue();
+        let length = (MAX_IN_FLIGHT_READS + 1) * MAX_IO_REQUEST_BYTES;
+        files.file.set_len(length as u64).unwrap();
+        let weak_files = Arc::downgrade(&files);
+        let pool = feuer_memory::MemoryCache::new(4 * 1024 * 1024 * 1024).buffer_pool();
+        let read = ReadQueue {
+            handle: Arc::new(IoQueueHandle {
+                sender: Some(sender),
+                wake_fd: queue.wake_fd.clone(),
+                thread: None,
+            }),
+            files,
+            buffer_pool: pool.clone(),
+        };
+        let mut future = Box::pin(read.read(0, length));
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        while queue.receiver.len() < MAX_IN_FLIGHT_READS {
+            assert!(future.as_mut().poll(&mut context).is_pending());
+            tokio::task::yield_now().await; // Replenish Tokio's cooperative polling budget.
+        }
+        queue.receive_requests();
+        assert_eq!(queue.ring.submission().len(), MAX_IN_FLIGHT_READS);
+        assert!(future.as_mut().poll(&mut context).is_pending());
+        assert_eq!(queue.receiver.len(), 1);
+        queue.receive_requests(); // The full active array leaves the last piece waiting.
+        assert_eq!(queue.receiver.len(), 1);
+        queue.ring.submit_and_wait(MAX_IN_FLIGHT_READS).unwrap();
+        let mut completions: Vec<_> = queue.ring.completion().collect();
+        completions.sort_unstable_by_key(|c| c.user_data());
+        for completion in &completions {
+            assert_eq!(completion.result(), MAX_IO_REQUEST_BYTES as i32);
+        }
+        if fail {
+            let completion = completions.remove(0);
+            queue.complete_request(completion.user_data(), -libc::EIO);
+            let std::task::Poll::Ready(Err(error)) = future.as_mut().poll(&mut context) else {
+                panic!("read error was not returned");
+            };
+            assert_eq!(error.raw_os_error(), Some(libc::EIO));
+        }
+        drop(future);
+        drop(read);
+        for completion in completions {
+            assert!(weak_files.upgrade().is_some());
+            assert_eq!(pool.idle_bytes(), 0);
+            queue.complete_request(completion.user_data(), completion.result());
+            queue.receive_requests(); // Discard the canceled queued piece when a slot opens.
+        }
+        assert!(queue.active.iter().all(Option::is_none));
+        assert!(queue.receiver.is_empty());
+        assert!(queue.ring.submission().is_empty());
+        assert!(weak_files.upgrade().is_none());
+        assert_eq!(pool.idle_bytes(), length as u64);
+    }
 }
 
 #[test]
@@ -681,7 +785,7 @@ fn canceled_read_retains_destination_but_not_disk_reservation_until_completion()
     let (mut read, reply) = request(&files, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
     let buffer = pool.allocate(2 * DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     let address = buffer.as_ref().as_ptr();
-    read.buffers = IoBuffers::Read(buffer);
+    read.buffers = IoBuffers::Read(ReadBuffer::new(buffer));
     read.buffer_range = DIRECT_IO_ALIGNMENT_BYTES..2 * DIRECT_IO_ALIGNMENT_BYTES;
     drop(region);
     sender.try_send(read).unwrap();
@@ -859,12 +963,18 @@ fn completion_state_handles_short_io_and_errors() {
 }
 
 #[test]
-#[should_panic(expected = "buffer_range.end <= buffer.as_ref().len()")]
+#[should_panic(expected = "buffer_range.end <= buffer.length")]
 fn rejects_read_into_spare_capacity() {
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     let buffer = buffer_pool().allocate(page).unwrap();
     let (reply, _receive) = oneshot::channel();
-    IoRequest::new(data_file(), 0, IoBuffers::Read(buffer), 0..2 * page, reply);
+    IoRequest::new(
+        data_file(),
+        0,
+        IoBuffers::Read(ReadBuffer::new(buffer)),
+        0..2 * page,
+        reply,
+    );
 }
 
 #[test]

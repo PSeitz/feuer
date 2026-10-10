@@ -193,6 +193,13 @@ async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation()
             .await
             .is_pending()
     );
+    let mut canceled = Box::pin(cache.get(&key, ByteRange::new(10, 11).unwrap()));
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(canceled.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    drop(canceled); // Canceling a waiter must leave the other readers' initialization intact.
     assert_eq!(Arc::strong_count(&read), 3);
     let weak = Arc::downgrade(&read);
     drop(initializer);
