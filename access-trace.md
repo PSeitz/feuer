@@ -3,6 +3,7 @@
 Register an async closure with `cache.with_trace(callback)` before sharing the
 cache. The callback receives complete, uncompressed packages as `bytes::Bytes`;
 persist them unchanged. See [the file receiver](feuer/examples/trace_to_disk.rs).
+Read and replay FETR packages with [the replay tools](benchmarks/replay/README.md).
 
 - Clones share IDs and a 65,536-event queue. A full queue waits, never drops.
   One worker delivers serially when the batch reaches 8 MiB (at most one event over),

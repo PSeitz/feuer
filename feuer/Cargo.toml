@@ -12,6 +12,9 @@ license.workspace = true
 readme.workspace = true
 exclude.workspace = true
 
+[features]
+benchmark = []
+
 [dependencies]
 bytes = { workspace = true }
 feuer-historian = { workspace = true }

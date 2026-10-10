@@ -167,7 +167,7 @@ impl TieredMemoryDiskCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Bytes, E>>,
     {
-        self.lookup(object_key, None, || async {
+        self.lookup_by_hash(ObjectKeyHash::from(object_key), None, || async {
             callback()
                 .await
                 .map(|bytes| Download::new(0, bytes).expect("an object length fits in u64"))
@@ -208,12 +208,30 @@ impl TieredMemoryDiskCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Download, E>>,
     {
-        self.lookup(object_key, Some(requested_range), callback).await
+        self.lookup_by_hash(ObjectKeyHash::from(object_key), Some(requested_range), callback)
+            .await
     }
 
-    async fn lookup<F, Fut, E>(
+    /// Replays a recorded object identity without hashing it a second time.
+    /// Otherwise identical to [`Self::get_or_fetch`].
+    #[cfg(feature = "benchmark")]
+    #[doc(hidden)]
+    pub async fn get_or_fetch_by_hash<F, Fut, E>(
         &self,
-        object_key: crate::ObjectKey,
+        object_key: ObjectKeyHash,
+        requested_range: ByteRange,
+        callback: F,
+    ) -> Result<Bytes, GetOrFetchError<E>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Download, E>>,
+    {
+        self.lookup_by_hash(object_key, Some(requested_range), callback).await
+    }
+
+    async fn lookup_by_hash<F, Fut, E>(
+        &self,
+        object_key: ObjectKeyHash,
         requested: Option<ByteRange>,
         callback: F,
     ) -> Result<Bytes, GetOrFetchError<E>>
@@ -221,7 +239,6 @@ impl TieredMemoryDiskCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Download, E>>,
     {
-        let object_key = ObjectKeyHash::from(object_key);
         self.inner
             .memory
             .access_histories()

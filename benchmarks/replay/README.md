@@ -1,0 +1,88 @@
+# FETR access-trace replay
+
+Reads the current [FETR v1 format](../../access-trace.md) without converting object
+hashes into strings. Accepts one `.feuer` package or a `.tar.zst` archive containing
+packages from one trace session. Archives are read directly, without extraction.
+The older QWFA format and its derived `requests.bin`/`objects.txt` inputs remain
+in the private `../replay-feuer/` workspace.
+
+## Workload
+
+Replay defaults to the **first 180 seconds of recorded request arrivals**.
+The prefix is half-open and begins at the earliest recorded start. Starts are
+sorted by timestamp, then request ID. Reading scans all packages twice to join
+outcomes that arrive after the selected prefix, while retaining only selected
+starts. Archives containing multiple session directories are rejected because
+request IDs and clock origins are session-local.
+
+Only request starts drive the replay. The configured cache determines hits,
+misses, eviction, admission, and disk writes independently of recorded outcomes.
+Recorded outcome counts and unmatched starts are reported separately for diagnostics.
+An unmatched start is not an established cache miss. Replay executes **every selected
+start with a successful synthetic exact-range download** on a replay miss,
+including starts originally failed or incomplete. This measures demand under that
+assumption, not original cancellation, source latency, retry/coalescing behavior,
+expanded downloads, or the original cache's initial contents. Replays start empty.
+The decoder accepts whole-object events, including empty objects, but replay
+rejects the unknown-length `0..u64::MAX` sentinel rather than allocate it.
+Parseable packages do not establish trace completeness or detect missing packages.
+
+Keep private traces, object identities, and raw results **outside this repository**.
+Nothing from the historical experiment directories is needed to build this tool.
+
+## Replay cache configurations (Linux)
+
+One executable uses the real `TieredMemoryDiskCache` for all configurations:
+**`--disk-bytes 0` disables disk, a positive capacity enables it.** Request timing,
+concurrency, synthetic downloads, and metrics collection are identical in both cases.
+There is no separate memory-policy simulator or disk build feature. Opening the
+real cache currently requires Linux, even when disk is disabled.
+
+The timestamp-paced replay was migrated from the private workspace. One sender
+preserves original arrival timing, with one consumer per available CPU. Only request
+descriptors are queued. Every synthetic source miss independently allocates
+zero-filled payload bytes. Recorded hashes enter through the cache's
+`benchmark`-feature API, without a second hash.
+
+```sh
+cargo build --locked --release -p feuer-replay --bin replay
+# With fresh cache and output directories:
+target/release/replay \
+  --input /private/path/searcher-0.tar.zst \
+  --cache-dir /mnt/local-ssd/fresh-replay-cache \
+  --output /private/path/fresh-results \
+  --memory-bytes 17179869184 --disk-bytes 0 \
+  --trace-seconds 180
+```
+
+To test memory and disk together, use the same executable and trace with a positive
+`--disk-bytes`, for example `137438953472` (128 GiB), and fresh directories.
+Defaults: 16 GiB memory, disk disabled, and 256,000 fixed retrieval-equivalent bytes.
+Configure the latter with `--fixed-retrieval-equivalent-bytes`. Eviction sample size,
+buffer retention, and access-history settings use the current cache environment
+variables, just as in the application.
+
+Replay writes all registered cache/process metrics in `metrics.prom`, phase
+snapshots in `before.prom`, `requests-finished.prom`, and `settled.prom`, and
+exact sender/queue/service/completion latency distributions in `summary.csv`.
+It verifies exactly-once completion. The five-second observation tail is not a
+forced drain, flush, or durability guarantee.
+
+Use `ssh m8g-32cpu-local-ssd-2` for SSD tests and follow
+[the timed replay procedure](../storage/timed-replay.md) for allocator matching,
+host checks, OS/device measurements, and reporting. Do not run a full capture or
+additional comparison repetitions without an explicit request. Historical pinned
+comparisons continue to use their historical harness and inputs.
+
+## Validation
+
+```sh
+cargo test --locked -p feuer-replay
+cargo clippy --locked -p feuer-replay --all-targets -- -D warnings
+```
+
+On Linux, these include round trips through the current writer, recorded-hash
+lookup checks, sender timing tests, and replaying the same input with disk disabled
+and enabled. Decoder tests cover malformed packages, all event kinds, chronological
+prefixes, cross-package outcome joins, incomplete requests, mixed sessions, and
+duplicate/inconsistent events.

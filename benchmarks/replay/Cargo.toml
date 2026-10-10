@@ -1,0 +1,31 @@
+[package]
+name = "feuer-replay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+bytes.workspace = true
+clap.workspace = true
+feuer-types.workspace = true
+rustc-hash.workspace = true
+tar = "0.4"
+zstd = "0.13"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+feuer = { path = "../../feuer", features = ["benchmark"] }
+async-channel = "2"
+mixtrics = { workspace = true, features = ["prometheus"] }
+prometheus = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
