@@ -82,9 +82,9 @@ impl RangeTrimSource {
 
 /// Replacement payloads from trimming a cached range, awaiting the source-range check.
 pub(super) struct RangeTrimReplacement {
-    object_key: ObjectKeyHash,
+    pub(super) object_key: ObjectKeyHash,
     source_range: ByteRange,
-    payloads: Box<[Download]>,
+    pub(super) payloads: Vec<Download>,
 }
 
 /// Result of trying to insert a download or reclaim space:
@@ -299,7 +299,8 @@ impl MemoryCacheShard {
     }
 
     /// Publishes copied range trimming output only if the exact source range is still cached.
-    pub(super) fn publish_range_trim(&mut self, replacement: RangeTrimReplacement, request_count: u64) -> bool {
+    /// Retains only newly published payloads for the compaction callback.
+    pub(super) fn publish_range_trim(&mut self, replacement: &mut RangeTrimReplacement, request_count: u64) -> bool {
         // Objects are immutable: reinsertion and neighboring-range changes do not invalidate the bytes.
         // New requests may change the desirability of the plan, but do not invalidate it.
         let used_bytes_before_trim = self.used_bytes;
@@ -308,17 +309,18 @@ impl MemoryCacheShard {
         }
         self.remove_entry(&replacement.object_key, replacement.source_range.start());
 
-        for download in replacement.payloads {
+        replacement.payloads.retain(|download| {
             if self
                 .entries_by_key
                 .get(&replacement.object_key)
                 .and_then(|entries| entries.covering_entry(download.downloaded_range()))
                 .is_some()
             {
-                continue;
+                return false;
             }
-            self.insert_entry(replacement.object_key, download, request_count);
-        }
+            self.insert_entry(replacement.object_key, download.clone(), request_count);
+            true
+        });
 
         let reclaimed_bytes = used_bytes_before_trim - self.used_bytes;
         self.buffer_pool.metrics.record_range_trim(reclaimed_bytes);

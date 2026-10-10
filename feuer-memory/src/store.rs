@@ -47,6 +47,7 @@ pub struct MemoryCache {
     retention_scorer: Arc<dyn RetentionScorer>,
     reclaim_sample_size: usize,
     buffer_pool: Arc<BufferPool>,
+    compaction_callback: Option<Box<dyn Fn(ObjectKeyHash, Download) + Send + Sync>>,
 }
 
 impl fmt::Debug for MemoryCache {
@@ -108,6 +109,7 @@ impl MemoryCache {
             retention_scorer: Arc::new(RetrievalCostScorer::default()),
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             buffer_pool,
+            compaction_callback: None,
         }
     }
 
@@ -121,6 +123,15 @@ impl MemoryCache {
     pub fn with_reclaim_sample_size(mut self, sample_size: usize) -> Self {
         assert!(sample_size > 0, "reclaim sample size must be greater than zero");
         self.reclaim_sample_size = sample_size;
+        self
+    }
+
+    /// Receives each range published by compaction, outside the memory shard lock.
+    pub fn with_compaction_callback(
+        mut self,
+        callback: impl Fn(ObjectKeyHash, Download) + Send + Sync + 'static,
+    ) -> Self {
+        self.compaction_callback = Some(Box::new(callback));
         self
     }
 
@@ -179,12 +190,17 @@ impl MemoryCache {
                 InsertOrReclaimResult::Trim(source) => {
                     // Payload copying is deliberately outside the shard lock.
                     // Publication checks that the exact source range is still cached, not history.
-                    let replacement = source.copy_replacement_payloads();
+                    let mut replacement = source.copy_replacement_payloads();
                     let request_count = self.access_histories.request_count();
                     // If the source disappeared, fall back to eviction so admission cannot starve.
                     allow_range_trim = self.shards[shard_index]
                         .lock()
-                        .publish_range_trim(replacement, request_count);
+                        .publish_range_trim(&mut replacement, request_count);
+                    if allow_range_trim && let Some(callback) = &self.compaction_callback {
+                        for download in replacement.payloads {
+                            callback(replacement.object_key, download);
+                        }
+                    }
                 }
             }
         }

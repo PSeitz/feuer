@@ -112,10 +112,15 @@ The backing file is exclusively locked while open. Lookups first check the shard
 then read disk and verify the covering entry's checksum. Both promote requested bytes to memory.
 Busy/flushing chunks may miss until publication; corrupt or uncertain disk reads are misses.
 
+Exact-range downloads and whole objects are queued for disk immediately after memory admission.
+Expanded downloads stay memory-only until successful compaction queues their retained ranges.
+Compaction still requires memory pressure and a 64-request grace period, so expanded entries
+that never compact are never written to disk.
+
 `DiskCache` owns the 512-entry background-write queue and its buffer-flush timer. Entries below
 512 KiB aligned size share 1-MiB chunks, flushed on full/no-fit or every 60 seconds. Each shard always holds
 an initialized 1-MiB buffer; disk space is reserved only when flushing. Larger entries write
-separately. Closing discards partial chunks. Queue pressure can skip writes; memory eviction does not.
+separately. Closing discards partial chunks. Queue pressure can skip writes. Memory eviction does not cancel queued writes.
 
 Metadata is stored separately. Queued and active payload bytes have no byte limit. A payload chunk
 can be reused after its last entry is removed; readers verify checksums rather than delay

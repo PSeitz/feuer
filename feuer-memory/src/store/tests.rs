@@ -692,7 +692,13 @@ fn range_trim_waits_for_grace_and_pressure_without_recording_accesses() {
 
 #[test]
 fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
-    let cache = cache(10);
+    let compacted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let received = compacted.clone();
+    let cache = cache(10).with_compaction_callback(move |key, download| {
+        received
+            .lock()
+            .push((key, download.downloaded_range(), download.bytes().clone()));
+    });
     let key = ObjectKeyHash::from("download");
     insert(&cache, key, download(range(10, 20), Bytes::from_static(b"abcdefghij")));
     cache.access_histories.record_access(&key, range(11, 13));
@@ -700,6 +706,7 @@ fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
     for _ in 2..MIN_REQUESTS_BEFORE_RANGE_TRIM {
         cache.access_histories.record_access(&key, range(11, 13));
     }
+    assert!(compacted.lock().is_empty());
 
     insert(
         &cache,
@@ -711,6 +718,13 @@ fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
     assert_eq!(cache.get(&key, range(11, 13)).unwrap(), Bytes::from_static(b"bc"));
     assert_eq!(cache.get(&key, range(17, 19)).unwrap(), Bytes::from_static(b"hi"));
     assert!(cache.get(&key, range(13, 17)).is_none());
+    assert_eq!(
+        *compacted.lock(),
+        [
+            (key, range(11, 13), Bytes::from_static(b"bc")),
+            (key, range(17, 19), Bytes::from_static(b"hi")),
+        ]
+    );
 }
 
 #[test]
@@ -756,7 +770,7 @@ fn range_trim_requires_only_the_exact_source_range() {
             };
             source
         };
-        let replacement = trim_source.copy_replacement_payloads();
+        let mut replacement = trim_source.copy_replacement_payloads();
         match change {
             0 => {
                 assert!(cache.remove(&key, range(0, 10)));
@@ -784,9 +798,15 @@ fn range_trim_requires_only_the_exact_source_range() {
         cache.access_histories.record_access(&key, range(6, 8));
         let used_bytes_before_trim = shard.used_bytes();
         assert_eq!(
-            shard.publish_range_trim(replacement, cache.access_histories.request_count()),
+            shard.publish_range_trim(&mut replacement, cache.access_histories.request_count()),
             published
         );
+        if change == 4 {
+            assert!(
+                replacement.payloads.is_empty(),
+                "covered ranges are not published again"
+            );
+        }
         drop(shard);
         assert!(accessed_ranges(&cache, &key).contains(&range(6, 8)));
         assert_eq!(cache.used_bytes(), expected_bytes);

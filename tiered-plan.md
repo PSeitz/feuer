@@ -14,7 +14,7 @@ Its purpose is to reduce source requests, lookup latency, and retrieval cost wit
 boundaries onto callers. On a miss, an application callback may coalesce work or prefetch a downloaded range
 larger than the request. Feuer indexes that exact interval so later contained requests can reuse it, while
 tracking which bytes are actually requested so unused prefetched data does not have to remain in memory. The
-broader download may still be stored on disk for future subrange reads.
+broader download stays memory-only until compaction publishes retained ranges for disk admission.
 
 Feuer is a performance layer, not authoritative storage. The application owns object identity, source access,
 and download coordination. Feuer owns cache retention, range lookup, integrity-checked disk reads, and
@@ -239,7 +239,9 @@ Access history is only policy input: newer accesses do not invalidate a trimming
 
 `DiskCache` owns the best-effort write queue and buffer-flush timer; a full queue skips new writes.
 
-- A download admitted to memory may be scheduled for a disk write.
+- Exact-range downloads and whole objects admitted to memory are queued immediately.
+  Expanded downloads are queued only as retained ranges after successful memory compaction.
+  Expanded entries that never compact are never written to disk.
 - The pending-write queue holds at most 512 entries. Queued and active payload bytes have no byte limit
   and are outside the memory-cache capacity.
 - Under queue pressure, the internal policy may skip or replace a disk-write candidate. This never fails

@@ -83,7 +83,7 @@ impl TieredMemoryDiskCache {
     ) -> Result<Self, DiskCacheError> {
         let noop_metrics_registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         let metrics_registry = metrics_registry.unwrap_or(&noop_metrics_registry);
-        let memory = MemoryCache::with_metrics(
+        let mut memory = MemoryCache::with_metrics(
             config.memory_capacity(),
             MemoryMetrics::new(metrics_registry),
             config.idle_buffer_pool_percent(),
@@ -111,6 +111,13 @@ impl TieredMemoryDiskCache {
                 .await?,
             )
         };
+        if let Some(disk) = disk.clone() {
+            memory = memory.with_compaction_callback(move |key, download| {
+                if !disk.covers_range(&key, download.downloaded_range()) {
+                    disk.enqueue_if_space_available(key, download);
+                }
+            });
+        }
         Ok(Self {
             inner: Arc::new(TieredMemoryDiskCacheInner {
                 config,
@@ -184,7 +191,9 @@ impl TieredMemoryDiskCache {
     ///
     /// Every started request records `requested_range` exactly once, before checking either tier.
     /// Failures and cancellation after the request starts still count. Downloaded-range
-    /// insertion is separate and creates no access.
+    /// insertion is separate and creates no access. Expanded downloads reach disk only
+    /// after memory compaction publishes their retained ranges. Exact-range downloads
+    /// and whole objects are queued immediately, subject to queue capacity.
     /// The returned [`Bytes`] contains exactly the request and may share the
     /// download's allocation.
     ///
@@ -287,7 +296,9 @@ impl TieredMemoryDiskCache {
             if disk.covers_range(&object_key, downloaded_range) {
                 metrics.disk_write_already_covered.increase(1);
             } else if self.inner.memory.insert(object_key, download.clone()) {
-                disk.enqueue_if_space_available(object_key, download);
+                if downloaded_range == requested_range {
+                    disk.enqueue_if_space_available(object_key, download);
+                }
             } else {
                 metrics.disk_write_redundant.increase(1);
             }
@@ -426,14 +437,14 @@ mod tests {
         );
         cache
             .get_or_fetch(key.clone(), range(1, 3), || async {
-                Ok::<_, Infallible>(Download::new(0, Bytes::from_static(b"abcd")).unwrap())
+                Ok::<_, Infallible>(Download::new(1, Bytes::from_static(b"bc")).unwrap())
             })
             .await
             .unwrap();
-        wait_for_buffered(&cache, &key, range(0, 4)).await;
+        wait_for_buffered(&cache, &key, range(1, 3)).await;
         cache.inner.disk.as_ref().unwrap().flush().await.unwrap();
         cache
-            .get_or_fetch(key.clone(), range(0, 2), || async {
+            .get_or_fetch(key.clone(), range(1, 3), || async {
                 Err::<Download, _>("memory hit must not fetch")
             })
             .await
@@ -555,8 +566,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buffered_hit_after_memory_pressure_promotes_only_request_and_records_once() {
-        let (_directory, cache) = cache(32).await;
+    async fn expanded_download_reaches_disk_only_after_compaction() {
+        let directory = tempfile::tempdir().unwrap();
+        let (registry, backend) = registry();
+        let cache = TieredMemoryDiskCache::open(
+            CacheConfig::new(directory.path(), 4 << 20, 32).unwrap(),
+            Some(&backend),
+            None,
+        )
+        .await
+        .unwrap();
         let key = String::from("object");
         let history = cache.inner.memory.access_histories();
         let source = Download::new(10, Bytes::from_static(b"abcdefghij")).unwrap();
@@ -567,11 +586,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"defg"));
-        wait_for_buffered(&cache, &key, source.downloaded_range()).await;
+        assert_eq!(
+            value(&registry, "feuer_disk_write_queue_total", &[("outcome", "queued")]),
+            0.0
+        );
         assert_eq!(history.request_count(), 1);
+        let hash = ObjectKeyHash::from(key.as_str());
+        history.record_access(&hash, range(18, 20));
+        for _ in 1..64 {
+            history.record_access(&hash, range(13, 17));
+        }
+        assert_eq!(
+            value(&registry, "feuer_disk_write_queue_total", &[("outcome", "queued")]),
+            0.0
+        );
 
-        // The same key selects the same memory shard. An oversized disjoint range
-        // forces the original download out without contributing an access.
+        // The same key selects the same shard. Pressure compacts the source,
+        // then evicts its retained ranges to admit this oversized download.
         cache.inner.memory.insert(
             ObjectKeyHash::from(key.as_str()),
             Download::new(100, Bytes::from(vec![0; 64])).unwrap(),
@@ -583,7 +614,17 @@ mod tests {
                 .get(&ObjectKeyHash::from(key.as_str()), range(13, 17))
                 .is_none()
         );
-        for accesses in [2, 3] {
+        for retained in [range(13, 17), range(18, 20)] {
+            wait_for_buffered(&cache, &key, retained).await;
+        }
+        let disk = cache.inner.disk.as_ref().unwrap();
+        assert!(!disk.covers_range(&hash, source.downloaded_range()));
+        assert!(!disk.covers_range(&hash, range(17, 18)));
+        assert_eq!(
+            value(&registry, "feuer_disk_write_queue_total", &[("outcome", "queued")]),
+            2.0
+        );
+        for accesses in [66, 67] {
             let hit = cache
                 .get_or_fetch(key.clone(), range(13, 17), || async {
                     Err::<Download, _>("callback must not run")
@@ -594,6 +635,9 @@ mod tests {
             assert_eq!(history.request_count(), accesses);
         }
         assert_eq!(cache.inner.memory.used_bytes(), 4);
+        disk.flush().await.unwrap();
+        assert_eq!(disk.get(&hash, range(13, 17)).await.unwrap(), result);
+        assert_eq!(disk.get(&hash, range(18, 20)).await.unwrap(), Bytes::from_static(b"ij"));
     }
 
     #[tokio::test]

@@ -180,8 +180,8 @@ checks passed for the changed files.
   but not limited or charged to the memory-cache capacity.
 - Each shard owns its small-entry chunk; one worker submits downloads and drives the 60-second flush sweep.
   Larger entries write separately. Queue saturation skips candidates; closing discards partial chunks.
-- Queued writes are discarded if their exact key and range are no longer cached in memory. Reinsertion of
-  the same immutable range allows an earlier write to proceed.
+- Exact-range downloads and whole objects are queued after memory admission. Expanded downloads stay
+  memory-only until successful compaction queues newly published ranges outside the memory shard lock.
 - Small entries release incoming buffers after copying into aligned chunk buffers; larger writes own downloads.
   Admitted entries may publish after memory eviction; publication rechecks only disk containment.
   Neither publication nor disk eviction takes a memory shard lock.
