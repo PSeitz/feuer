@@ -1,6 +1,6 @@
 # FETR access-trace replay
 
-Reads the current [FETR v1 format](../../access-trace.md) without converting object
+Reads the current [FETR v1 format](../access-trace.md) without converting object
 hashes into strings. Accepts one `.feuer` package or a `.tar.zst` archive containing
 packages from one trace session. Archives are read directly, without extraction.
 The older QWFA format and its derived `requests.bin`/`objects.txt` inputs remain
@@ -69,7 +69,7 @@ It verifies exactly-once completion. The five-second observation tail is not a
 forced drain, flush, or durability guarantee.
 
 Use `ssh m8g-32cpu-local-ssd-2` for SSD tests and follow
-[the timed replay procedure](../storage/timed-replay.md) for allocator matching,
+[the timed replay procedure](../benchmarks/storage/timed-replay.md) for allocator matching,
 host checks, OS/device measurements, and reporting. Do not run a full capture or
 additional comparison repetitions without an explicit request. Historical pinned
 comparisons continue to use their historical harness and inputs.

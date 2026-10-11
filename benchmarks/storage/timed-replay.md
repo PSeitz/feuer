@@ -7,7 +7,7 @@ and raw artifacts in that workspace or on the authorized host. Publish only
 identifier-free commands and results.
 
 For current FETR captures, the maintained reader and replayer are now in
-[`benchmarks/replay`](../replay/README.md). Replay reads single-session `.tar.zst`
+[`feuer-replay`](../../feuer-replay/README.md). Replay reads single-session `.tar.zst`
 archives directly and uses the same executable with disk disabled or enabled.
 The pinned historical comparisons below retain their original private harness
 and derived inputs, which are not the FETR format.

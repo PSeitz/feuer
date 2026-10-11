@@ -2,10 +2,10 @@
 resolver = "2"
 members = [
   "benchmarks/memory",
-  "benchmarks/replay",
   "feuer",
   "feuer-historian",
   "feuer-memory",
+  "feuer-replay",
   "feuer-storage",
   "feuer-types",
 ]
