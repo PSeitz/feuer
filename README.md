@@ -2,8 +2,9 @@
 
 Scared of burning your S3 budget? Feuer will take care of that.
 
-Feuer is a Rust cache for S3. It checks memory, then disk, and calls your async
-download function on a miss. Requests can cover any byte range without
+Feuer is a Rust cache for immutable data, including S3 objects and expensive
+computed results. It checks memory, then disk, and calls your async fetch or
+computation function on a miss. Requests can cover any byte range without
 alignment requirements.
 
 The disk tier requires Linux, io_uring, and direct I/O. Opening waits for best-effort
@@ -150,7 +151,37 @@ requirement imposed by Feuer; the configured memory target is not an RSS limit.
 
 ## Eviction
 
-Both tiers sample eligible entries and evict the lowest retention score.
+### Retention objective
+
+The objective is to reduce retrieval cost, not maximize memory and disk hit
+percentages independently. Treat memory retrieval as approximately free relative
+to I/O. Moving a disk hit into memory lowers disk's hit percentage but avoids a
+paid read. Combined cache hit rates measure source avoidance, not total cost.
+
+Model disk and source retrieval separately, with fixed costs per request and
+transfer costs per byte:
+
+```text
+retrieval cost = disk_requests × disk_fixed_cost + disk_bytes × disk_byte_cost
+              + source_requests × source_fixed_cost + source_bytes × source_byte_cost
+```
+
+SSD random access generally has a lower fixed latency than S3. When their
+throughputs are similar, byte-transfer costs can be similar, while S3 GET charges
+add a per-request cost. Calibrate the model for the actual source and use a
+consistent cost unit rather than adding latency and monetary charges directly.
+The source may be S3, another cache, or computation. Its cost is the work needed
+to obtain a missing result, not necessarily its original precomputation cost.
+
+Retention should favor expected retrieval cost saved per charged byte. A memory
+entry avoids the disk or source work that would otherwise serve its requests.
+A disk entry saves source retrieval cost minus the disk read cost, for requests
+that reach disk. Evaluate these benefits alongside eviction CPU and latency.
+
+### Current scoring
+
+The current policy is an approximation of that objective, not a tier-specific
+cost model. Both tiers sample eligible entries and evict the lowest retention score.
 The default `RetrievalCostScorer` divides modeled retrieval cost by charged bytes:
 allocation capacity in memory, payload length on disk (at least one byte for empty entries).
 For each request fully contained in a cached range, the retrieval cost adds:
