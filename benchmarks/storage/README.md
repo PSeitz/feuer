@@ -2,6 +2,8 @@
 
 For the real two-tier cache comparison, use the separate
 [timestamp-paced SSD replay instructions](timed-replay.md).
+The [recorded request-size histogram](request-sizes.md) covers the full FETR
+capture, including a detailed breakdown of requests at most 4 KiB.
 
 Implementation: [`feuer-storage/examples/direct_io.rs`](../../feuer-storage/examples/direct_io.rs).
 Initial FIFO-driver results: [`direct-io-20260925.csv`](direct-io-20260925.csv).
