@@ -47,7 +47,43 @@ multiple I/O requests and checksum work. Memory fallback cost depends on whether
 the object would be served from disk or the source. Source cost can vary by
 object and need not be proportional to bytes.
 
-Placement hypotheses:
+### Per-object, per-tier costs
+
+Estimate avoided retrieval cost for each object in each tier, rather than
+assuming cost is linear in payload length. Disk-read cost depends on aligned
+bytes, the number of I/O requests, fixed latency, and checksum work. Memory
+capacity cost depends on the actual allocation charge, including bucket rounding.
+Retention value combines expected demand with avoided cost per charged byte.
+
+The smallest pooled memory bucket is 32 KiB. For entries charged at their pooled
+backing capacity:
+
+| Payload | Disk bytes read | Memory allocation charge |
+| --- | ---: | ---: |
+| 10 bytes | 4 KiB | 32 KiB |
+| 4 KiB | 4 KiB | 32 KiB |
+| 32 KiB | 32 KiB | 32 KiB |
+| 40 KiB | 40 KiB | 256 KiB |
+
+Disk alignment and memory buckets make the model stepped, not simply
+proportional to payload bytes. A compact 10-byte memory entry can have high
+retention value because it avoids a full disk operation for little memory.
+A 10-byte entry with a 32-KiB pool charge instead has roughly the same memory
+charge and disk-read cost as a 4-KiB entry with that charge, at equal demand.
+
+Downloads created through `AlignedBuffer::into_download` and disk promotions
+charge backing capacity. `Download::new` defaults to payload-length charges
+unless the application supplies a capacity. Use the entry's actual charge, not
+an assumed bucket size.
+
+Per-object modeling does not necessarily require a stored cost field. Predicted
+disk costs can be derived from existing entry metadata and calibrated disk
+parameters. Source cost may also follow a size-based model. Application-owned
+per-object metadata is needed when source work cannot be inferred, such as
+equally sized results with different recomputation costs. Memory and disk still
+need distinct avoided-cost models because their fallback paths differ.
+
+### Placement hypotheses
 
 - **Objects around 4 KiB:** test keeping their disk copies while evicting them
   from memory when the modeled fallback cost is low. Their payload fits the
