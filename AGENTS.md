@@ -16,9 +16,8 @@ Do not use semicolons in comments. Keep comments clear, precise, and grammatical
 # Linux SSD testing
 
 Machine: `ssh m8g-32cpu-local-ssd-2`. Use this host for SSD tests and benchmarks.
-Replay comparisons must use the same jemalloc version for both revisions.
 Follow [the timed SSD replay instructions](benchmarks/storage/timed-replay.md).
-Use matched 180-second trace prefixes; do not launch full traces or extra repetitions
+Replay 10m capture by default. Do not launch extra repetitions
 without an explicit request. Present the captured metrics, not only runtime/write counts.
 From the project checkout on that host:
 
