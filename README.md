@@ -151,78 +151,12 @@ requirement imposed by Feuer; the configured memory target is not an RSS limit.
 
 ## Eviction
 
-### Retention objective
+Both tiers sample eligible entries and evict the lowest retention score.
+The default scorer uses decayed request cost per charged byte. Applications can
+supply a custom scorer with per-object cost metadata.
 
-The objective is to reduce retrieval cost, not maximize memory and disk hit
-percentages independently. Treat memory retrieval as approximately free relative
-to I/O. Moving a disk hit into memory lowers disk's hit percentage but avoids a
-paid read. Combined cache hit rates measure source avoidance, not total cost.
-
-Model disk and source retrieval separately, with fixed costs per request and
-transfer costs per byte:
-
-```text
-retrieval cost = disk_requests × disk_fixed_cost + disk_bytes × disk_byte_cost
-              + source_requests × source_fixed_cost + source_bytes × source_byte_cost
-```
-
-SSD random access generally has a lower fixed latency than S3. When their
-throughputs are similar, byte-transfer costs can be similar, while S3 GET charges
-add a per-request cost. Calibrate the model for the actual source and use a
-consistent cost unit rather than adding latency and monetary charges directly.
-The source may be S3, another cache, or computation. Its cost is the work needed
-to obtain a missing result, not necessarily its original precomputation cost.
-
-Retention should favor expected retrieval cost saved per charged byte. A memory
-entry avoids the disk or source work that would otherwise serve its requests.
-A disk entry saves source retrieval cost minus the disk read cost, for requests
-that reach disk. Evaluate these benefits alongside eviction CPU and latency.
-
-### Current scoring
-
-The current policy is an approximation of that objective, not a tier-specific
-cost model. Both tiers sample eligible entries and evict the lowest retention score.
-The default `RetrievalCostScorer` divides modeled retrieval cost by charged bytes:
-allocation capacity in memory, payload length on disk (at least one byte for empty entries).
-For each request fully contained in a cached range, the retrieval cost adds:
-
-```text
-decayed access count × (fixed request cost + requested bytes)
-```
-
-Fixed request cost defaults to `0`; set it per cache with
-`CacheConfig::with_fixed_retrieval_equivalent_bytes(n)`. Both tiers use this setting
-unless a custom scorer is supplied.
-
-Each started request records its requested range or whole-object demand once, before any lookup,
-in `feuer-historian`, shared by both tiers. Historian supplies request counts and recent events;
-retrieval-cost scoring belongs to the shared retention policy in `feuer-memory`.
-Whole-object scores use the cached object's payload length;
-whole-object entries are evicted rather than trimmed to partial ranges.
-Failed requests, invalid downloads, and requests canceled after starting all count as demand.
-History hashes object keys into 64 independently locked maps, separate from cache shards.
-One atomic request clock across all history shards preserves global request-age decay.
-Raw cache reads, insertions, and evictions do not record accesses or delete history.
-
-History keeps every distinct `(object key, requested range)` counter for its lifetime,
-even after both tiers evict the object. Repeated exact requests update the same counter. This metadata
-has no capacity limit and is not persisted across restarts; its memory grows with distinct keys and ranges.
-Scores still decay, measured in requests across all keys.
-
-Memory may trim an entry to previously requested ranges instead of evicting it.
-Trimming uses recent-access events with per-object count and age limits, not the full counter set.
-A trimming plan uses a history snapshot; newer accesses do not invalidate it. Cached-range changes
-are still checked before publishing bytes copied outside the memory shard lock.
-
-### Custom retention scores
-
-Pass an `Arc<dyn RetentionScorer>` to
-`TieredMemoryDiskCache::open_with_retention_scorer(config, metrics, io_queues, scorer)`.
-Both tiers share it. The scorer can own computation costs keyed by
-`ObjectKeyHash::from(key.as_str())` and combine them with the supplied historian's demand.
-Higher finite scores favor retention; any byte normalization belongs to the scorer.
-Application metadata is neither persisted nor removed by the cache, including on eviction.
-Scoring runs under shard locks; keep it short and do not re-enter the cache.
+See [eviction policy and cost-model ideas](eviction.md) for current scoring,
+access history, and proposed tier-specific retrieval costs.
 
 ## Environment variables
 
