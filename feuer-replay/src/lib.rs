@@ -102,20 +102,25 @@ pub struct TraceRequests {
 }
 
 /// Reads a single `.feuer` package or a `.tar.zst` archive containing one trace session.
-/// Selects a half-open original-time prefix and joins outcomes, including those outside the prefix.
+/// Selects all starts or a half-open original-time prefix when `seconds` is provided.
+/// Joins outcomes, including those outside the prefix.
 /// Scans twice so memory usage follows selected starts rather than the full event history.
 /// Whole-object requests are decoded but cannot be replayed without a known object length.
-pub fn load_requests(path: &Path, seconds: u64) -> Result<TraceRequests> {
+pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests> {
     let duration = seconds
-        .checked_mul(1_000_000_000)
-        .filter(|&ns| ns > 0)
-        .ok_or("trace seconds must be positive and fit in nanoseconds")?;
+        .map(|seconds| {
+            seconds
+                .checked_mul(1_000_000_000)
+                .filter(|&ns| ns > 0)
+                .ok_or("trace seconds must be positive and fit in nanoseconds")
+        })
+        .transpose()?;
     let mut first = u64::MAX;
     let mut requests = Vec::new();
     visit_events(path, |event| {
         if event.kind == 0 {
             first = first.min(event.time_ns);
-            if event.time_ns - first < duration {
+            if duration.is_none_or(|duration| event.time_ns - first < duration) {
                 requests.push(Request {
                     request_id: event.request_id,
                     time_ns: event.time_ns,
@@ -126,7 +131,7 @@ pub fn load_requests(path: &Path, seconds: u64) -> Result<TraceRequests> {
         }
         Ok(())
     })?;
-    requests.retain(|request| request.time_ns - first < duration);
+    requests.retain(|request| duration.is_none_or(|duration| request.time_ns - first < duration));
     if requests.is_empty() {
         return Err("selected trace has no request starts".into());
     }
@@ -316,11 +321,13 @@ mod tests {
                         event(1, 1, 101),
                         event(0, 4, 1_000_000_100),
                         event(4, 4, 1_000_000_101),
+                        event(0, 5, 181_000_000_100),
+                        event(1, 5, 181_000_000_101),
                     ]),
                 ),
             ],
         );
-        let trace = load_requests(&path, 1).unwrap();
+        let trace = load_requests(&path, Some(1)).unwrap();
         assert_eq!(
             trace
                 .requests
@@ -331,6 +338,18 @@ mod tests {
         );
         assert_eq!(trace.requests[0].object_key, event(0, 1, 0).object_key);
         assert_eq!(trace.outcomes, [0, 1, 0, 1, 0, 0]);
+        assert_eq!(trace.incomplete, 1);
+
+        let trace = load_requests(&path, None).unwrap();
+        assert_eq!(
+            trace
+                .requests
+                .iter()
+                .map(|r| (r.request_id, r.time_ns))
+                .collect::<Vec<_>>(),
+            [(1, 0), (3, 0), (2, 500), (4, 1_000_000_000), (5, 181_000_000_000)]
+        );
+        assert_eq!(trace.outcomes, [0, 2, 0, 1, 1, 0]);
         assert_eq!(trace.incomplete, 1);
     }
 
@@ -345,7 +364,7 @@ mod tests {
                 ("b/0.feuer", package(&[event(0, 2, 1)])),
             ],
         );
-        assert!(load_requests(&path, 1).is_err());
+        assert!(load_requests(&path, Some(1)).is_err());
         let path = dir.path().join("trace.feuer");
         let mut mismatched = event(1, 1, 1);
         mismatched.object_key = ObjectKeyHash(7);
@@ -355,13 +374,14 @@ mod tests {
             vec![event(0, 1, 0), mismatched],
         ] {
             std::fs::write(&path, package(&events)).unwrap();
-            assert!(load_requests(&path, 1).is_err());
+            assert!(load_requests(&path, Some(1)).is_err());
         }
-        assert!(load_requests(&path, 0).is_err());
+        assert!(load_requests(&path, Some(0)).is_err());
+        assert!(load_requests(&path, Some(u64::MAX)).is_err());
         let mut whole = event(0, 1, 0);
         whole.requested = ByteRange::new(0, u64::MAX).unwrap();
         std::fs::write(&path, package(&[whole])).unwrap();
-        assert!(load_requests(&path, 1).is_err());
+        assert!(load_requests(&path, Some(1)).is_err());
     }
 
     #[test]
@@ -376,7 +396,7 @@ mod tests {
             ..start
         };
         std::fs::write(&path, package(&[start, outcome])).unwrap();
-        let trace = load_requests(&path, 1).unwrap();
+        let trace = load_requests(&path, None).unwrap();
         assert!(trace.requests[0].range.is_empty());
         assert_eq!(trace.outcomes[4], 1);
         assert_eq!(trace.incomplete, 0);

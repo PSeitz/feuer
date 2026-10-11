@@ -70,7 +70,7 @@ async fn decodes_current_writer_and_preserves_hashes_in_tiered_replay() -> Resul
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("trace.feuer");
     std::fs::write(&path, package)?;
-    let trace = load_requests(&path, 180)?;
+    let trace = load_requests(&path, None)?;
     assert_eq!(trace.requests.len(), 5);
     assert_eq!(trace.incomplete, 1);
     assert_eq!(trace.outcomes, [0, 1, 0, 1, 1, 1]);

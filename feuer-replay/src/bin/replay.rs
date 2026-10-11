@@ -35,9 +35,9 @@ mod linux {
         /// Disk capacity in bytes. Zero disables disk without changing request scheduling or metrics.
         #[arg(long, default_value_t = 0)]
         disk_bytes: u64,
-        /// Half-open original-time prefix. Never accelerates the sender.
-        #[arg(long, default_value_t = 180)]
-        trace_seconds: u64,
+        /// Limit arrivals to a half-open original-time prefix. Omit to replay the full trace.
+        #[arg(long)]
+        trace_seconds: Option<u64>,
         #[arg(long, default_value_t = 256_000)]
         fixed_retrieval_equivalent_bytes: u64,
     }
@@ -269,6 +269,18 @@ mod linux {
     mod tests {
         use super::*;
         use feuer_types::{ByteRange, ObjectKeyHash};
+
+        #[test]
+        fn trace_prefix_is_optional() {
+            let args = ["replay", "--input=trace.feuer", "--cache-dir=cache", "--output=results"];
+            assert_eq!(Args::try_parse_from(args).unwrap().trace_seconds, None);
+            assert_eq!(
+                Args::try_parse_from(args.into_iter().chain(["--trace-seconds", "180"]))
+                    .unwrap()
+                    .trace_seconds,
+                Some(180)
+            );
+        }
 
         #[test]
         fn sender_preserves_timing_order_and_equal_timestamps() {

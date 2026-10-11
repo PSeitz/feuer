@@ -8,10 +8,10 @@ in the private `../replay-feuer/` workspace.
 
 ## Workload
 
-Replay defaults to the **first 180 seconds of recorded request arrivals**.
-The prefix is half-open and begins at the earliest recorded start. Starts are
-sorted by timestamp, then request ID. Reading scans all packages twice to join
-outcomes that arrive after the selected prefix, while retaining only selected
+Replay defaults to **all recorded request arrivals**. Use `--trace-seconds N`
+to select a half-open original-time prefix beginning at the earliest recorded start.
+Starts are sorted by timestamp, then request ID. Reading scans all packages twice
+to join outcomes that arrive after a selected prefix, while retaining only selected
 starts. Archives containing multiple session directories are rejected because
 request IDs and clock origins are session-local.
 
@@ -46,7 +46,7 @@ zero-filled payload bytes. Recorded hashes enter through the cache's
 
 ```sh
 cargo build --locked --release -p feuer-replay --bin replay
-# With fresh cache and output directories:
+# Example 180-second prefix with fresh cache and output directories:
 target/release/replay \
   --input /private/path/searcher-0.tar.zst \
   --cache-dir /mnt/local-ssd/fresh-replay-cache \
@@ -84,5 +84,5 @@ cargo clippy --locked -p feuer-replay --all-targets -- -D warnings
 On Linux, these include round trips through the current writer, recorded-hash
 lookup checks, sender timing tests, and replaying the same input with disk disabled
 and enabled. Decoder tests cover malformed packages, all event kinds, chronological
-prefixes, cross-package outcome joins, incomplete requests, mixed sessions, and
-duplicate/inconsistent events.
+prefixes and full captures, cross-package outcome joins, incomplete requests,
+mixed sessions, and duplicate/inconsistent events.
