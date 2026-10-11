@@ -12,21 +12,13 @@ entry sizes, or SSD traffic**. No cache replay was needed for these results.
 
 ## Full histogram
 
-Byte-denominated intervals include both endpoints. KiB/MiB intervals exclude
-their lower bound and include their upper bound. There were no zero-length
-requests. Percentages are rounded independently.
+Intervals exclude their lower bound and include their upper bound, except the
+first row, which includes 1 byte. There were no zero-length requests.
+Percentages are rounded independently.
 
 | Requested size | Requests | Request share | Requested-byte share |
 | --- | ---: | ---: | ---: |
-| 1–16 bytes | 475,451 | 2.74% | <0.0001% |
-| 17–32 bytes | 253 | <0.01% | <0.0001% |
-| 33–64 bytes | 59,011 | 0.34% | <0.0001% |
-| 65–128 bytes | 99,760 | 0.57% | <0.0001% |
-| 129–256 bytes | 7,893 | 0.05% | <0.0001% |
-| 257–512 bytes | 27,071 | 0.16% | <0.0001% |
-| 513–1,024 bytes | 1,138,373 | 6.55% | 0.0025% |
-| 1,025–2,048 bytes | 733,867 | 4.22% | 0.0041% |
-| 2,049–4,096 bytes | 4,354,498 | 25.07% | 0.0434% |
+| 1 byte–4 KiB | 6,896,177 | 39.70% | 0.05% |
 | >4–16 KiB | 732,220 | 4.22% | 0.01% |
 | >16–64 KiB | 1,148,123 | 6.61% | 0.14% |
 | >64–256 KiB | 2,588,104 | 14.90% | 1.44% |
@@ -56,8 +48,20 @@ linear percentile method, not estimated from histogram buckets.
 
 ## Detail within ≤4 KiB
 
-Requests ≤4 KiB total **6,896,177 (39.70% of all requests)** and account for
-**0.05% of requested bytes**. Of these requests, **63.14% were 2,049–4,096 bytes**.
+This bucket contains **6,896,177 requests (39.70% of all requests)**.
+Both byte endpoints in the table below are inclusive.
+
+| Requested bytes | Requests | Share of ≤4-KiB requests | Share of all requests |
+| --- | ---: | ---: | ---: |
+| 1–16 | 475,451 | 6.89% | 2.74% |
+| 17–32 | 253 | <0.01% | <0.01% |
+| 33–64 | 59,011 | 0.86% | 0.34% |
+| 65–128 | 99,760 | 1.45% | 0.57% |
+| 129–256 | 7,893 | 0.11% | 0.05% |
+| 257–512 | 27,071 | 0.39% | 0.16% |
+| 513–1,024 | 1,138,373 | 16.51% | 6.55% |
+| 1,025–2,048 | 733,867 | 10.64% | 4.22% |
+| 2,049–4,096 | 4,354,498 | 63.14% | 25.07% |
 
 Within this bucket, median / p95 / p99 were **2,589 / 3,971 / 4,046 bytes**.
 These percentiles use the smallest exact length reaching the cumulative count.
