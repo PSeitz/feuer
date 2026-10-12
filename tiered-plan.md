@@ -166,7 +166,7 @@ lookup, regardless of its eventual outcome. Disk reads and writes do not record 
 Distinct counters survive all cache evictions for the history object's lifetime and have no capacity limit.
 It is not persisted: recovered entries start without pre-restart access evidence.
 
-Every admission gets a short, deterministic shard-local grace before compaction. Policy keeps no separate
+Every admission gets a grace of 64 requests across all keys before compaction. Policy keeps no separate
 prefetch-promotion state: exact-range access counts drive retention, while recent request events drive compaction.
 Grace never protects a cached range from pressure eviction.
 
@@ -221,9 +221,9 @@ in-process lifetime, independently of cache shards and eviction. Counter metadat
 For range trimming only, history keeps at most 64 exact events per object by default
 (`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this). Events expire after 262,144 later
 requests across all keys by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this).
-Once its grace of 64 requests across all keys expires, that same
-victim is trimmed when separate copies of its observed request ranges can release at least 30% of its payload.
-Otherwise it is evicted.
+Once its grace of 64 requests across all keys expires, that same victim is always trimmed when separate copies
+of its observed request ranges reduce payload bytes, without a minimum savings percentage. If there are no
+contained requests or the copies do not reduce payload bytes, it is evicted. Grace never prevents eviction.
 Compaction creates one exact-size entry per distinct observed request range, without merging overlapping,
 adjacent, or contained ranges. Savings count every copy of overlapping bytes. Compaction creates no access
 and leaves caller-held slices valid.
@@ -374,8 +374,8 @@ The MVP is complete when tests demonstrate that:
   bound never-requested prefetch.
 - a broader memory admission cannot be compacted until 64 requests across all keys have elapsed, while
   pressure may still evict it.
-- after that grace, pressure can trim the selected victim to its observed exact requests without separate
-  promotion or prefetch-reuse state.
+- after that grace, pressure trims the selected victim to its observed exact requests whenever their separate
+  copies reduce payload bytes, without a minimum savings percentage or separate promotion or prefetch-reuse state.
 - returned `Bytes` may safely outlive cache eviction.
 - shard pressure evicts toward each shard's assigned target, while an oversized download empties its shard and remains cached even when aggregate cached payload bytes exceed the configured target.
 - pressure-driven in-memory compaction can release unrequested cached payload without changing results, and

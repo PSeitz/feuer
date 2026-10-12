@@ -66,8 +66,9 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 - A dense rotating candidate ring supplies a shared sample of at most 64 live entries per pressure decision.
   The victim has the lowest retrieval value per charged allocation byte, with object key and range breaking ties.
   Registration and removal are constant-work and leave no stale candidate backlog.
-- After a grace of 64 requests across all keys, the selected victim is trimmed to observed requests if
-  separate copies release at least 30% of its payload. Otherwise it is evicted. Grace never prevents eviction.
+- After a grace of 64 requests across all keys, the selected victim is always trimmed to observed requests
+  when separate copies reduce payload bytes, without a minimum savings percentage. Otherwise it is evicted.
+  Grace never prevents eviction.
 - Compaction copies each distinct observed request range into an independent, exact-size entry, without merging
   overlapping, adjacent, or contained ranges. Savings count every copy of overlapping bytes. It updates
   accounting and metrics, creates no access, and leaves caller-held slices valid.

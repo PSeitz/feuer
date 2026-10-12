@@ -1,11 +1,8 @@
 use feuer_types::ByteRange;
 
-/// Minimum percentage of source payload bytes that range trimming must save.
-const MIN_RANGE_TRIM_SAVINGS_PERCENT: u128 = 30;
-
 /// Plans replacement ranges from requests fully contained in `source_range`.
 /// Deduplicates requests without merging overlapping, adjacent, or contained ranges.
-/// Returns no plan if no requests remain or savings from the separate copies fall below the minimum.
+/// Returns no plan if no requests remain or the separate copies do not reduce payload bytes.
 pub(super) fn plan_range_trim(
     source_range: ByteRange,
     mut requested_ranges: Vec<ByteRange>,
@@ -15,9 +12,7 @@ pub(super) fn plan_range_trim(
     requested_ranges.dedup();
 
     let replacement_bytes: u128 = requested_ranges.iter().map(|range| u128::from(range.len())).sum();
-    let reclaimed_bytes = u128::from(source_range.len()).checked_sub(replacement_bytes)?;
-    (!requested_ranges.is_empty()
-        && reclaimed_bytes * 100 >= u128::from(source_range.len()) * MIN_RANGE_TRIM_SAVINGS_PERCENT)
+    (!requested_ranges.is_empty() && replacement_bytes < u128::from(source_range.len()))
         .then(|| requested_ranges.into_boxed_slice())
 }
 
@@ -53,7 +48,11 @@ mod tests {
 
     #[test]
     fn savings_count_each_copy_of_overlapping_bytes() {
-        assert!(plan_range_trim(range(0, 10), vec![range(1, 5), range(2, 6)]).is_none());
+        assert_eq!(
+            *plan_range_trim(range(0, 10), vec![range(1, 5), range(2, 6)]).unwrap(),
+            [range(1, 5), range(2, 6)]
+        );
+        assert!(plan_range_trim(range(0, 10), vec![range(0, 5), range(4, 9)]).is_none());
         assert!(plan_range_trim(range(0, 10), vec![range(0, 7), range(1, 8)]).is_none());
         assert!(plan_range_trim(range(0, u64::MAX), vec![range(0, u64::MAX), range(1, u64::MAX)]).is_none());
         assert_eq!(
@@ -63,22 +62,20 @@ mod tests {
     }
 
     #[test]
-    fn range_trim_savings_round_up_without_overflow() {
-        for (source_bytes, minimum_saved_bytes) in [(9, 3), (u64::MAX, 5_534_023_222_112_865_485)] {
+    fn trims_even_one_byte_without_overflow() {
+        for source_bytes in [9, u64::MAX] {
             let source = range(0, source_bytes);
-            let replacement_end = source_bytes - minimum_saved_bytes;
-            assert!(plan_range_trim(source, vec![range(0, replacement_end + 1)]).is_none());
-            let replacements = plan_range_trim(source, vec![range(0, replacement_end)]).unwrap();
-            assert_eq!(*replacements, [range(0, replacement_end)]);
+            assert!(plan_range_trim(source, vec![source]).is_none());
+            let requested = range(0, source_bytes - 1);
+            assert_eq!(*plan_range_trim(source, vec![requested]).unwrap(), [requested]);
         }
     }
 
     #[test]
-    fn skips_empty_or_low_savings_plans() {
+    fn skips_plans_without_requests_or_byte_reduction() {
         assert!(plan_range_trim(range(0, 8), Vec::new()).is_none());
         assert!(plan_range_trim(range(0, 8), vec![range(8, 10)]).is_none());
-        assert!(plan_range_trim(range(0, 8), vec![range(1, 8)]).is_none());
-        assert!(plan_range_trim(range(0, 8), vec![range(2, 8)]).is_none());
-        assert!(plan_range_trim(range(0, 8), vec![range(3, 8)]).is_some());
+        assert!(plan_range_trim(range(0, 8), vec![range(0, 8)]).is_none());
+        assert!(plan_range_trim(range(0, 0), vec![range(0, 0)]).is_none());
     }
 }

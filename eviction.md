@@ -139,7 +139,9 @@ even after both tiers evict the object. Repeated exact requests update the same 
 has no capacity limit and is not persisted across restarts. Its memory grows with distinct keys and ranges.
 Scores still decay, measured in requests across all keys.
 
-Memory may trim an entry to previously requested ranges instead of evicting it.
+Under memory pressure, after a grace of 64 requests across all keys, memory trims the selected
+entry to previously requested ranges when their separate copies reduce payload bytes.
+There is no minimum savings percentage. Otherwise it evicts the entry. Grace never prevents eviction.
 Trimming uses recent-access events with per-object count and age limits, not the full counter set.
 A trimming plan uses a history snapshot. Newer accesses do not invalidate it. Cached-range changes
 are still checked before publishing bytes copied outside the memory shard lock.

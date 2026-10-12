@@ -69,8 +69,9 @@ throughput, not end-to-end cache latency.
   decaying with a 262,144-request half-life across all keys by default. Sampled eviction
   compares decayed retrieval value per payload byte, crediting requests fully
   covered by each cached range. Trimming uses a separate history of at most 64 events per object by default.
-  After a 64-request grace, pressure trims the selected victim to its observed
-  request ranges when useful. The replay driver records requests before lookup in standalone history;
+  After a 64-request grace, pressure trims the selected victim to its observed request ranges whenever
+  their separate copies reduce payload bytes, without a minimum savings percentage.
+  The replay driver records requests before lookup in standalone history;
   distinct counters survive all cache evictions for the duration of the run.
 - `foyer-native-exact-key`: requested ranges are native Foyer keys. The
   complete callback payload is stored under that exact request key, but

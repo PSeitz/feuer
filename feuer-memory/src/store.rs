@@ -38,8 +38,8 @@ const MAX_SHARDS: usize = 64;
 /// Victims are selected shard-locally by retention score, defaulting to recent modeled
 /// retrieval value per charged allocation byte.
 /// A rotating sample selects one victim.
-/// If its observed requests form a useful smaller payload, Feuer trims that victim
-/// outside the shard lock.
+/// After a grace of 64 requests across all keys, Feuer trims that victim outside
+/// the shard lock whenever separate copies of its observed requests reduce payload bytes.
 pub struct MemoryCache {
     /// Independently locked partitions selected by complete object identity.
     shards: Box<[Mutex<MemoryCacheShard>]>,

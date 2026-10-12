@@ -645,17 +645,21 @@ fn stale_frequency_decays_below_recent_accesses() {
 }
 
 #[test]
-fn range_trim_waits_for_grace_and_pressure_without_recording_accesses() {
-    let early_pressure = cache(10);
-    let early_key = ObjectKeyHash::from("early-download");
-    early_pressure.insert(early_key, download(range(0, 10), Bytes::from_static(b"abcdefghij")));
-    early_pressure.access_histories.record_access(&early_key, range(2, 4));
-    insert(
-        &early_pressure,
-        ObjectKeyHash::from("early-pressure"),
-        download(range(0, 2), Bytes::from_static(b"xy")),
-    );
-    assert!(early_pressure.get(&early_key, range(2, 4)).is_none());
+fn range_trim_waits_for_grace_and_pressure_and_reclaims_one_byte() {
+    for requests in [1, MIN_REQUESTS_BEFORE_RANGE_TRIM - 1] {
+        let early_pressure = cache(10);
+        let early_key = ObjectKeyHash::from("early-download");
+        early_pressure.insert(early_key, download(range(0, 10), Bytes::from_static(b"abcdefghij")));
+        for _ in 0..requests {
+            early_pressure.access_histories.record_access(&early_key, range(1, 10));
+        }
+        insert(
+            &early_pressure,
+            ObjectKeyHash::from("early-pressure"),
+            download(range(0, 1), Bytes::from_static(b"x")),
+        );
+        assert!(early_pressure.get(&early_key, range(1, 10)).is_none());
+    }
 
     let (registry, backend) = crate::test_metrics::registry();
     let cache = cache_with_metrics(10, MemoryMetrics::new(&backend));
@@ -664,30 +668,36 @@ fn range_trim_waits_for_grace_and_pressure_without_recording_accesses() {
     let original = Bytes::from_static(b"abcdefghij");
     insert(&cache, key, download(range(0, 10), original.clone()));
 
-    let returned = cache.get(&key, range(2, 4)).unwrap();
-    assert_eq!(returned, Bytes::from_static(b"cd"));
-    assert_eq!(returned.as_ptr(), original.slice(2..).as_ptr());
-    for _ in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM {
-        cache.access_histories.record_access(&key, range(2, 4));
+    let returned = cache.get(&key, range(1, 10)).unwrap();
+    assert_eq!(returned, Bytes::from_static(b"bcdefghij"));
+    assert_eq!(returned.as_ptr(), original.slice(1..).as_ptr());
+    cache.access_histories.record_access(&key, range(1, 10));
+    for _ in 1..MIN_REQUESTS_BEFORE_RANGE_TRIM {
+        cache
+            .access_histories
+            .record_access(&ObjectKeyHash::from("clock"), range(0, 1));
     }
-    let history_len = (*MAX_ACCESS_EVENTS_PER_KEY).min(MIN_REQUESTS_BEFORE_RANGE_TRIM as usize);
     assert_eq!(cache.used_bytes(), 10);
-    assert_eq!(access_history_len(&cache, &key), history_len);
-    insert(&cache, incoming, download(range(0, 2), Bytes::from_static(b"xy")));
+    assert!(cache.contains_entry(&key, range(0, 10)), "trimming requires pressure");
+    insert(&cache, incoming, download(range(0, 1), Bytes::from_static(b"x")));
 
-    assert_eq!(cache.used_bytes(), 4);
+    assert_eq!(cache.used_bytes(), 10);
     assert_eq!(cache.entry_count(), 2);
     assert_eq!(
         crate::test_metrics::value(&registry, "feuer_memory_eviction_triggering_insertions_total", &[]),
         0.0
     );
-    assert_eq!(returned, Bytes::from_static(b"cd"));
-    let bytes_after_trim = cache.get(&key, range(2, 4)).unwrap();
-    assert_eq!(bytes_after_trim, Bytes::from_static(b"cd"));
-    assert_ne!(bytes_after_trim.as_ptr(), original.slice(2..).as_ptr());
+    assert_eq!(
+        crate::test_metrics::value(&registry, "feuer_memory_compacted_payload_bytes_total", &[]),
+        1.0
+    );
+    assert_eq!(returned, Bytes::from_static(b"bcdefghij"));
+    let bytes_after_trim = cache.get(&key, range(1, 10)).unwrap();
+    assert_eq!(bytes_after_trim, Bytes::from_static(b"bcdefghij"));
+    assert_ne!(bytes_after_trim.as_ptr(), original.slice(1..).as_ptr());
     assert!(cache.get(&key, range(0, 1)).is_none());
-    assert_eq!(access_history_len(&cache, &key), history_len);
-    assert!(accessed_ranges(&cache, &key).iter().all(|seen| *seen == range(2, 4)));
+    assert_eq!(accessed_ranges(&cache, &key), vec![range(1, 10)]);
+    assert_eq!(cache.access_histories.request_count(), MIN_REQUESTS_BEFORE_RANGE_TRIM);
 }
 
 #[test]

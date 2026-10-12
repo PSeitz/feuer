@@ -115,7 +115,8 @@ Busy/flushing chunks may miss until publication; corrupt or uncertain disk reads
 
 Exact-range downloads and whole objects are queued for disk immediately after memory admission.
 Expanded downloads stay memory-only until successful compaction queues their retained ranges.
-Compaction still requires memory pressure and a 64-request grace period, so expanded entries
+Compaction requires memory pressure and a 64-request grace period. After that grace, it trims whenever
+the retained ranges reduce payload bytes, without a minimum savings percentage. Expanded entries
 that never compact are never written to disk.
 
 `DiskCache` owns the 512-entry background-write queue and its buffer-flush timer. Entries below
