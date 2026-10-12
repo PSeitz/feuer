@@ -152,11 +152,11 @@ For a controlled cache-engine comparison, callback download ranges and applicati
 constant. Prefetch and downloaded-range selection are evaluated in a separate end-to-end benchmark that
 charges each strategy for its actual source GETs and downloaded bytes.
 
-The retention objective is expected future source or lower-tier retrieval time avoided per byte,
-not raw object hit rate. The shared policy values each exact access at the modeled fixed source-request
-cost plus its requested bytes, then divides recent retrieval value by the memory allocation charge or disk
-payload length. Alignment, metadata and chunk overhead still consume physical disk capacity but do not
-enter the score's denominator. Repeated access must
+The retention objective is expected future source or lower-tier retrieval cost avoided per byte,
+not raw object hit rate. The [retrieval-cost scorer](eviction.md#current-scoring) divides decayed
+avoided cost by memory allocation charge or disk payload length. Applications can provide
+separate memory and disk models using the same caller-demand history. Alignment, metadata and
+chunk overhead consume physical disk capacity but do not enter the score's denominator. Repeated access must
 increase retention value, stale evidence must eventually expire, and only the exact requested interval receives
 observed-access credit. Requested ranges may overlap. A cached range sums the decayed retrieval credit of every
 distinct requested range it fully contains; partial overlap alone receives no credit. Exact repeats update one counter.
@@ -173,9 +173,9 @@ Grace never protects a cached range from pressure eviction.
 Prefetched bytes count toward the memory target and disk capacity, and compaction grace never blocks admission
 or pressure eviction.
 
-The internal policy must distinguish whether a range has no disk copy, has a queued or active disk write, or is
-available on disk so it can value a memory hit that avoids disk differently from one that avoids source I/O.
-The MVP does not require online cost measurement or a public policy interface.
+Residency-aware memory scoring would need to distinguish absent, pending, and usable disk copies.
+The current linear scorer does not inspect disk residency.
+Applications can supply custom `RetentionScorer` implementations. The MVP does not require online cost measurement.
 
 Comparative claims use the same workload, capacities, cold-cache start, concurrency, and source model. The
 required baseline is native Foyer at a pinned revision and reported tuning. The controlled benchmark reports
@@ -409,7 +409,7 @@ The MVP is complete when tests demonstrate that:
 - more than one `Download` returned by one callback.
 - physical difference-only storage for partially overlapping downloads.
 - guaranteed assembly from multiple cached ranges.
-- public policy plug-ins or online disk-versus-network cost measurement.
+- online disk-versus-network cost measurement.
 - hard process-RSS guarantees, including callback and caller-held memory.
 - online disk-capacity resize.
 - native multi-volume placement.

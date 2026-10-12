@@ -5,21 +5,41 @@ fn range(start: u64, end: u64) -> ByteRange {
 }
 
 #[test]
-fn fixed_retrieval_cost_is_explicit() {
+fn retrieval_cost_uses_fixed_and_per_byte_costs() {
     let histories = ObjectAccessHistories::new();
     let key = ObjectKeyHash::from("object");
     histories.record_access(&key, range(0, 4));
-    assert_eq!(RetrievalCostScorer::default().fixed_retrieval_equivalent_bytes, 0);
-    for fixed_cost in [0, 1_000_000, 10_000_000, u64::MAX] {
+    assert_eq!(RetrievalCostScorer::default().fixed_cost, 0.0);
+    assert_eq!(RetrievalCostScorer::default().cost_per_byte, 1.0);
+    for (fixed_cost, cost_per_byte) in [(0.0, 1.0), (256_000.0, 1.0), (2.0, 0.5), (4.0, 0.0)] {
         let scorer = RetrievalCostScorer {
-            fixed_retrieval_equivalent_bytes: fixed_cost,
+            fixed_cost,
+            cost_per_byte,
         };
         assert_eq!(
             scorer.score(&key, range(0, 8), 8, &histories),
-            (fixed_cost as f64 + 4.0) / 8.0
+            (fixed_cost + 4.0 * cost_per_byte) / 8.0
         );
         assert_eq!(scorer.score(&key, range(4, 8), 4, &histories), 0.0);
     }
+}
+
+#[test]
+fn negative_savings_do_not_cancel_useful_requests() {
+    let histories = ObjectAccessHistories::new();
+    let key = ObjectKeyHash::from("object");
+    histories.record_access(&key, range(0, 1));
+    histories.record_access(&key, range(0, 10));
+    histories.record_access(&key, range(20, 21));
+    let scorer = RetrievalCostScorer {
+        fixed_cost: 4.0,
+        cost_per_byte: -1.0,
+    };
+    let demand = decayed_retrieval_cost(&histories, &key, range(0, 1), 0.0, 1.0);
+    assert_eq!(scorer.score(&key, range(0, 10), 10, &histories), demand * 3.0 / 10.0);
+    assert_eq!(scorer.score(&key, range(2, 10), 8, &histories), 0.0);
+    histories.record_access(&ObjectKeyHash(1), None);
+    assert_eq!(scorer.score(&ObjectKeyHash(1), range(0, 10), 10, &histories), 0.0);
 }
 
 #[test]
@@ -46,7 +66,8 @@ fn whole_object_requests_score_the_stored_length() {
     histories.record_access(&key, None);
     for fixed_cost in [0, 10_000_000] {
         let scorer = RetrievalCostScorer {
-            fixed_retrieval_equivalent_bytes: fixed_cost,
+            fixed_cost: fixed_cost as f64,
+            ..Default::default()
         };
         for cached_range in [range(0, 0), range(0, 100)] {
             let cost = fixed_cost as f64 + cached_range.len() as f64;
@@ -86,7 +107,7 @@ fn exact_and_expanded_scores_match_btree_counts() {
                 .filter(|&(&(_, requested_end), _)| requested_end <= end)
                 .map(|(&(start, end), count)| count * (fixed_cost as f64 + (end - start) as f64))
                 .sum();
-            let actual = decayed_retrieval_cost(&histories, &key, range(start, end), fixed_cost);
+            let actual = decayed_retrieval_cost(&histories, &key, range(start, end), fixed_cost as f64, 1.0);
             // Sums follow insertion order rather than sorted range order.
             assert!(
                 (actual - expected).abs() <= expected.abs() * 1e-12,
@@ -95,11 +116,17 @@ fn exact_and_expanded_scores_match_btree_counts() {
         }
     }
     assert_eq!(
-        decayed_retrieval_cost(&histories, &ObjectKeyHash::from("unknown"), range(0, 1), fixed_cost),
+        decayed_retrieval_cost(
+            &histories,
+            &ObjectKeyHash::from("unknown"),
+            range(0, 1),
+            fixed_cost as f64,
+            1.0
+        ),
         0.0
     );
     assert_eq!(
-        decayed_retrieval_cost(&histories, &key, range(u64::MAX - 1, u64::MAX), fixed_cost),
+        decayed_retrieval_cost(&histories, &key, range(u64::MAX - 1, u64::MAX), fixed_cost as f64, 1.0),
         fixed_cost as f64 + 1.0
     );
 }

@@ -174,7 +174,8 @@ mod linux {
         let opening = Instant::now();
         let config = CacheConfig::new(&args.cache_dir, args.disk_bytes, args.memory_bytes)?;
         let scorer = Arc::new(RetrievalCostScorer {
-            fixed_retrieval_equivalent_bytes: args.fixed_retrieval_equivalent_bytes,
+            fixed_cost: args.fixed_retrieval_equivalent_bytes as f64,
+            ..Default::default()
         });
         let cache = TieredMemoryDiskCache::open_with_retention_scorer(config, Some(&metrics), None, scorer).await?;
         writeln!(summary, "open_seconds,{}", opening.elapsed().as_secs_f64())?;

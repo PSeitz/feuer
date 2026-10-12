@@ -79,6 +79,28 @@ impl TieredMemoryDiskCache {
         io_queues: Option<IoQueues>,
         retention_scorer: Arc<dyn RetentionScorer>,
     ) -> Result<Self, DiskCacheError> {
+        Self::open_with_retention_scorers(
+            config,
+            metrics_registry,
+            io_queues,
+            retention_scorer.clone(),
+            retention_scorer,
+        )
+        .await
+    }
+
+    /// Opens a cache with separate memory and disk retention scorers.
+    /// Both receive the same caller-demand history. Disk demand is not conditional on memory misses.
+    /// Scorers cannot inspect the other tier's residency by re-entering the cache.
+    /// See [`Self::open`] for resources and [`RetentionScorer`] for the scoring contract.
+    #[cfg(target_os = "linux")]
+    pub async fn open_with_retention_scorers(
+        config: CacheConfig,
+        metrics_registry: Option<&BoxedRegistry>,
+        io_queues: Option<IoQueues>,
+        memory_scorer: Arc<dyn RetentionScorer>,
+        disk_scorer: Arc<dyn RetentionScorer>,
+    ) -> Result<Self, DiskCacheError> {
         let noop_metrics_registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         let metrics_registry = metrics_registry.unwrap_or(&noop_metrics_registry);
         let mut memory = MemoryCache::with_metrics(
@@ -87,7 +109,7 @@ impl TieredMemoryDiskCache {
             config.idle_buffer_pool_percent(),
         )
         .with_reclaim_sample_size(config.eviction().sample_size())
-        .with_retention_scorer(retention_scorer.clone());
+        .with_retention_scorer(memory_scorer);
         let disk = if config.disk_capacity() == 0 {
             None
         } else {
@@ -103,7 +125,7 @@ impl TieredMemoryDiskCache {
                         reclaim_sample_size: config.eviction().sample_size(),
                         buffer_pool: memory.buffer_pool(),
                         io_queues,
-                        retention_scorer,
+                        retention_scorer: disk_scorer,
                     },
                 )
                 .await?,
@@ -362,7 +384,7 @@ mod tests {
     use crate::test_metrics::{registry, value};
 
     #[tokio::test]
-    async fn custom_scorer_and_history_are_shared_by_both_tiers() {
+    async fn tier_scorers_receive_entry_sizes_and_shared_history() {
         use crate::ObjectAccessHistories;
         use std::sync::Mutex;
 
@@ -389,11 +411,13 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let scorer = Arc::new(ScoredEntries::default());
-        let cache = TieredMemoryDiskCache::open_with_retention_scorer(
+        let disk_scorer = Arc::new(ScoredEntries::default());
+        let cache = TieredMemoryDiskCache::open_with_retention_scorers(
             CacheConfig::new(directory.path(), 3 << 20, 1).unwrap(),
             None,
             None,
             scorer.clone(),
+            disk_scorer.clone(),
         )
         .await
         .unwrap();
@@ -409,12 +433,11 @@ mod tests {
         let history = Arc::as_ptr(cache.inner.memory.access_histories()) as usize;
         assert_eq!(
             *scorer.0.lock().unwrap(),
-            [
-                (key, range(0, 1), 100, history),
-                (key, range(10, 11), 100, history),
-                (key, range(0, 1), 1, history),
-                (key, range(10, 11), 1, history),
-            ]
+            [(key, range(0, 1), 100, history), (key, range(10, 11), 100, history)]
+        );
+        assert_eq!(
+            *disk_scorer.0.lock().unwrap(),
+            [(key, range(0, 1), 1, history), (key, range(10, 11), 1, history)]
         );
         assert!(disk.get(&key, range(0, 1)).await.is_some());
         assert!(disk.get(&key, range(10, 11)).await.is_none());

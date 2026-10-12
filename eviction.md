@@ -108,21 +108,25 @@ that pipeline or increasing capacities.
 
 ## Current scoring
 
-The current policy is an approximation of the objective, not a tier-specific
-cost model. Both tiers sample eligible entries and evict the lowest retention score.
-The default `RetrievalCostScorer` divides modeled retrieval cost by `entry_size_bytes`:
-allocation capacity in memory, payload length on disk (at least one byte for empty entries).
+Both tiers sample eligible entries and evict the lowest retention score.
+`RetrievalCostScorer` divides modeled avoided retrieval cost by `entry_size_bytes`:
+allocation charge in memory, payload length on disk (at least one byte for empty entries).
 For each request fully contained in a cached range, the retrieval cost adds:
 
 ```text
-decayed access count × (fixed request cost + requested bytes)
+decayed access count × max(fixed_cost + requested_bytes × cost_per_byte, 0)
 ```
 
-Fixed request cost defaults to `0`. Set `RetrievalCostScorer.fixed_retrieval_equivalent_bytes`
-and pass the scorer to `open_with_retention_scorer`. Scoring parameters belong to the scorer.
-`CacheConfig` keeps candidate sampling settings in `SampledEvictionConfig`, separate from
-resource settings. The default scorer does not model aligned disk reads or store
-per-object source costs.
+Defaults are `fixed_cost = 0` and `cost_per_byte = 1`. Setting `fixed_cost = n` with
+`cost_per_byte = 1` preserves the former fixed-equivalent-byte weighting.
+Costs use one consistent unit. Coefficients and scores must be finite.
+Negative avoided costs are clamped per request before summing.
+
+`open_with_retention_scorer` shares one scorer between tiers.
+`open_with_retention_scorers` accepts separate memory and disk scorers, both using
+all caller demand rather than demand conditional on memory misses. The linear
+model does not inspect disk residency or model alignment and whole-entry reads.
+Sampling remains in `CacheConfig` through `SampledEvictionConfig`.
 
 Each started request records its requested range or whole-object demand once, before any lookup,
 in `feuer-historian`, shared by both tiers. Historian supplies request counts and recent events.
@@ -150,7 +154,8 @@ are still checked before publishing bytes copied outside the memory shard lock.
 
 Pass an `Arc<dyn RetentionScorer>` to
 `TieredMemoryDiskCache::open_with_retention_scorer(config, metrics, io_queues, scorer)`.
-Both tiers share it. The scorer can own computation costs keyed by
+Both tiers share it. Use `open_with_retention_scorers` for distinct tier scorers.
+A scorer can own computation costs keyed by
 `ObjectKeyHash::from(key.as_str())` and combine them with the supplied historian's demand.
 These costs live in application-owned metadata, not in cache entries. Feuer has no
 built-in per-object cost setter, and scorer arguments do not explicitly identify

@@ -60,9 +60,10 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
   (`FEUER_MAX_ACCESS_EVENTS_PER_KEY`), expiring after 262,144 requests across all keys
   (`FEUER_MAX_ACCESS_AGE_ACCESSES`). These limits do not truncate scoring counters. Wall-clock aging is not
   implemented.
-- Decayed counts weight the sum of fixed-cost-equivalent bytes (default zero,
-  configured on `RetrievalCostScorer`) and requested bytes. Only cached ranges
-  covering the exact request receive credit. Counter metadata is not capped per object.
+- The [retrieval-cost scorer](eviction.md#current-scoring) has configurable fixed and per-byte costs.
+  `open_with_retention_scorers` accepts separate memory and disk scorers using the same
+  caller-demand history. Only cached ranges covering the exact request receive credit.
+  Counter metadata is not capped per object.
 - A dense rotating candidate ring supplies a shared sample of at most 64 live entries per pressure decision.
   The victim has the lowest retrieval value per charged allocation byte, with object key and range breaking ties.
   Registration and removal are constant-work and leave no stale candidate backlog.

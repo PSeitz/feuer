@@ -61,9 +61,9 @@ target/release/replay \
 To test memory and disk together, use the same executable and trace with a positive
 `--disk-bytes`, for example `137438953472` (128 GiB), and fresh directories.
 Defaults: 16 GiB memory, disk disabled, and 256,000 fixed retrieval-equivalent bytes.
-Configure the latter with `--fixed-retrieval-equivalent-bytes`. Eviction sample size,
-buffer retention, and access-history settings use the current cache environment
-variables, just as in the application.
+`--fixed-retrieval-equivalent-bytes` sets `RetrievalCostScorer.fixed_cost`, with
+`cost_per_byte = 1`. Eviction sample size, buffer retention, and access-history
+settings use the current cache environment variables.
 
 Replay writes all registered cache/process metrics in `metrics.prom`, phase
 snapshots in `before.prom`, `requests-finished.prom`, and `settled.prom`, and

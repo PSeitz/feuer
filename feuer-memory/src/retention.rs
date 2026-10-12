@@ -8,7 +8,7 @@ use feuer_types::{ByteRange, ObjectKeyHash};
 /// Scores must be finite. The lowest-scoring eligible sampled entry is evicted.
 /// Normalization is up to the scorer. `entry_size_bytes` is the entry's size for this tier:
 /// memory allocation charge or disk payload length, possibly zero.
-/// Both tiers share the scorer. It may own application metadata keyed by [`ObjectKeyHash`].
+/// Each tier can use its own scorer or share one. It may own application metadata keyed by [`ObjectKeyHash`].
 /// Calls run concurrently under shard locks: avoid I/O, cache re-entry, and holding
 /// application locks across cache operations if scoring acquires those locks.
 /// The cache owns sampling, trimming, and removal. The application owns custom metadata.
@@ -23,27 +23,41 @@ pub trait RetentionScorer: Send + Sync {
     ) -> f64;
 }
 
-/// Scores cached ranges by decayed retrieval cost per byte of entry size.
-/// Empty entries use a one-byte denominator to keep scores finite.
+/// Scores cached ranges by decayed avoided retrieval cost per byte of entry size.
 ///
-/// For repeated requests for one exact range contained in the cached entry:
-/// `score = decayed_count * (fixed_retrieval_equivalent_bytes + requested_bytes) / max(entry_size_bytes, 1)`.
-/// With the default fixed cost of zero and a nonempty request whose size equals the entry size,
-/// the score equals the decayed count. Using the default half-life and current decay approximation:
+/// Each contained request contributes its decayed count times
+/// `max(fixed_cost + requested_bytes * cost_per_byte, 0)`.
+/// Whole-object demand uses the cached payload length. Empty entries use a one-byte denominator.
+/// Costs must use one consistent unit, such as equivalent bytes, I/O time, or CPU time.
+/// Coefficients must be finite and keep scores finite over the application's sizes and demand.
+///
+/// Defaults are zero fixed cost and one cost unit per byte, preserving byte-weighted demand.
+/// With a nonempty request whose size equals the entry size, the default score equals its
+/// decayed count. Using the default half-life and current decay approximation:
 ///
 /// | Matching request frequency | Score approached immediately after a matching request |
 /// | --- | ---: |
 /// | Every request | 524,288 |
 /// | Every second request | 262,144 |
 ///
-/// Larger byte charges reduce the score. A fixed retrieval cost increases it.
-/// Different ranges on the same object have separate counters. The score sums contributions
-/// only from requests contained in the cached entry.
-#[derive(Debug, Default)]
+/// Separate tier scorers can model memory's assumed fallback cost and disk's source-minus-disk
+/// cost. Negative savings are clamped per request before summing. Both use caller-demand history.
+/// This linear model does not inspect disk residency or model alignment and whole-entry reads.
+#[derive(Debug)]
 pub struct RetrievalCostScorer {
-    /// Fixed source-request cost in equivalent transferred bytes. Defaults to zero.
-    /// Zero scores only requested bytes.
-    pub fixed_retrieval_equivalent_bytes: u64,
+    /// Fixed avoided retrieval cost per request. Defaults to zero.
+    pub fixed_cost: f64,
+    /// Avoided retrieval cost per requested byte. Defaults to one.
+    pub cost_per_byte: f64,
+}
+
+impl Default for RetrievalCostScorer {
+    fn default() -> Self {
+        Self {
+            fixed_cost: 0.0,
+            cost_per_byte: 1.0,
+        }
+    }
 }
 
 impl RetentionScorer for RetrievalCostScorer {
@@ -54,7 +68,7 @@ impl RetentionScorer for RetrievalCostScorer {
         entry_size_bytes: u64,
         histories: &ObjectAccessHistories,
     ) -> f64 {
-        decayed_retrieval_cost(histories, key, cached_range, self.fixed_retrieval_equivalent_bytes)
+        decayed_retrieval_cost(histories, key, cached_range, self.fixed_cost, self.cost_per_byte)
             / entry_size_bytes.max(1) as f64
     }
 }
@@ -84,16 +98,17 @@ pub fn decayed_retrieval_cost(
     histories: &ObjectAccessHistories,
     key: &ObjectKeyHash,
     cached_range: ByteRange,
-    fixed_retrieval_equivalent_bytes: u64,
+    fixed_cost: f64,
+    cost_per_byte: f64,
 ) -> f64 {
     histories.read_request_counts(key, |request_counts, request_clock| {
-        let fixed_retrieval_cost = fixed_retrieval_equivalent_bytes as f64;
         request_counts
             .iter()
             .map(|(requested, request_count)| (requested.unwrap_or(cached_range), request_count))
             .filter(|(requested_range, _)| cached_range.contains(*requested_range))
             .map(|(requested_range, request_count)| {
-                request_count.decayed_count(request_clock) * (fixed_retrieval_cost + requested_range.len() as f64)
+                request_count.decayed_count(request_clock)
+                    * (fixed_cost + requested_range.len() as f64 * cost_per_byte).max(0.0)
             })
             .sum()
     })

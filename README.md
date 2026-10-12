@@ -153,8 +153,10 @@ requirement imposed by Feuer; the configured memory target is not an RSS limit.
 ## Eviction
 
 Both tiers sample eligible entries and evict the lowest retention score.
-The default scorer uses decayed request cost per charged byte. Applications can
-supply a custom scorer with per-object cost metadata.
+`RetrievalCostScorer` uses decayed avoided retrieval cost per charged byte, with
+configurable fixed and per-byte costs. Applications can share one scorer through
+`open_with_retention_scorer` or supply separate memory and disk scorers through
+`open_with_retention_scorers`.
 
 `CacheConfig` groups candidate sampling under `SampledEvictionConfig`, separate from
 capacities, disk location, and idle-buffer retention. Scoring parameters belong to the scorer.
@@ -164,8 +166,7 @@ let eviction = feuer::SampledEvictionConfig::new()?.with_sample_size(128)?;
 let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?.with_eviction(eviction);
 ```
 
-See [eviction policy and cost-model ideas](eviction.md) for current scoring,
-access history, and proposed tier-specific retrieval costs.
+See [eviction policy](eviction.md) for the formula, defaults, and scoring contract.
 
 ## Environment variables
 

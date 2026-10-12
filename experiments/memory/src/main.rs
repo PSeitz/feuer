@@ -168,7 +168,8 @@ impl FeuerReplayCache {
         Self {
             cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards).with_retention_scorer(Arc::new(
                 RetrievalCostScorer {
-                    fixed_retrieval_equivalent_bytes: *FIXED_RETRIEVAL_EQUIVALENT_BYTES,
+                    fixed_cost: *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64,
+                    ..Default::default()
                 },
             )),
         }
