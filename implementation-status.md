@@ -61,7 +61,7 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
   (`FEUER_MAX_ACCESS_AGE_ACCESSES`). These limits do not truncate scoring counters. Wall-clock aging is not
   implemented.
 - Decayed counts weight the sum of fixed-cost-equivalent bytes (default zero,
-  configurable per cache via `CacheConfig::with_fixed_retrieval_equivalent_bytes`) and requested bytes. Only cached ranges
+  configured on `RetrievalCostScorer`) and requested bytes. Only cached ranges
   covering the exact request receive credit. Counter metadata is not capped per object.
 - A dense rotating candidate ring supplies a shared sample of at most 64 live entries per pressure decision.
   The victim has the lowest retrieval value per charged allocation byte, with object key and range breaking ties.
@@ -76,7 +76,8 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
   a trimming snapshot. Replacement ranges already cached as exact entries are skipped.
   Admission falls back to eviction if the source was removed or replaced by a different range.
 
-There is no periodic compaction, separate prefetch-promotion state, or public policy configuration.
+`CacheConfig` exposes sampled eviction settings through `SampledEvictionConfig`, separate
+from resource settings. There is no periodic compaction or separate prefetch-promotion state.
 
 ### Raw direct I/O
 

@@ -110,7 +110,7 @@ that pipeline or increasing capacities.
 
 The current policy is an approximation of the objective, not a tier-specific
 cost model. Both tiers sample eligible entries and evict the lowest retention score.
-The default `RetrievalCostScorer` divides modeled retrieval cost by charged bytes:
+The default `RetrievalCostScorer` divides modeled retrieval cost by `entry_size_bytes`:
 allocation capacity in memory, payload length on disk (at least one byte for empty entries).
 For each request fully contained in a cached range, the retrieval cost adds:
 
@@ -118,10 +118,11 @@ For each request fully contained in a cached range, the retrieval cost adds:
 decayed access count × (fixed request cost + requested bytes)
 ```
 
-Fixed request cost defaults to `0`. Set it per cache with
-`CacheConfig::with_fixed_retrieval_equivalent_bytes(n)`. Both tiers use this setting
-unless a custom scorer is supplied. The default scorer does not model aligned
-disk reads or store per-object source costs.
+Fixed request cost defaults to `0`. Set `RetrievalCostScorer.fixed_retrieval_equivalent_bytes`
+and pass the scorer to `open_with_retention_scorer`. Scoring parameters belong to the scorer.
+`CacheConfig` keeps candidate sampling settings in `SampledEvictionConfig`, separate from
+resource settings. The default scorer does not model aligned disk reads or store
+per-object source costs.
 
 Each started request records its requested range or whole-object demand once, before any lookup,
 in `feuer-historian`, shared by both tiers. Historian supplies request counts and recent events.

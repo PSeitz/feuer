@@ -236,7 +236,7 @@ fn custom_scores_use_live_application_metadata_without_cache_byte_normalization(
             &self,
             key: &ObjectKeyHash,
             _cached_range: ByteRange,
-            _charged_bytes: u64,
+            _entry_size_bytes: u64,
             _histories: &ObjectAccessHistories,
         ) -> f64 {
             if *key == ObjectKeyHash(1) {

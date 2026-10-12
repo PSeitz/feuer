@@ -15,7 +15,7 @@ mod linux {
 
     use bytes::Bytes;
     use clap::Parser;
-    use feuer::{CacheConfig, TieredMemoryDiskCache};
+    use feuer::{CacheConfig, RetrievalCostScorer, TieredMemoryDiskCache};
     use feuer_replay::{Request, Result, load_requests};
     use feuer_types::Download;
     use mixtrics::{metrics::BoxedRegistry, registry::prometheus::PrometheusMetricsRegistry};
@@ -172,13 +172,11 @@ mod linux {
         registry.register(Box::new(phase.clone()))?;
         let metrics: BoxedRegistry = Box::new(PrometheusMetricsRegistry::new(registry.clone()));
         let opening = Instant::now();
-        let cache = TieredMemoryDiskCache::open(
-            CacheConfig::new(&args.cache_dir, args.disk_bytes, args.memory_bytes)?
-                .with_fixed_retrieval_equivalent_bytes(args.fixed_retrieval_equivalent_bytes),
-            Some(&metrics),
-            None,
-        )
-        .await?;
+        let config = CacheConfig::new(&args.cache_dir, args.disk_bytes, args.memory_bytes)?;
+        let scorer = Arc::new(RetrievalCostScorer {
+            fixed_retrieval_equivalent_bytes: args.fixed_retrieval_equivalent_bytes,
+        });
+        let cache = TieredMemoryDiskCache::open_with_retention_scorer(config, Some(&metrics), None, scorer).await?;
         writeln!(summary, "open_seconds,{}", opening.elapsed().as_secs_f64())?;
         snapshot(&registry, &mut File::create_new(args.output.join("before.prom"))?)?;
 

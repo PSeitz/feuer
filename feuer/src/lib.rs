@@ -15,7 +15,7 @@ mod metrics;
 mod test_metrics;
 
 pub use cache::{GetOrFetchError, TieredMemoryDiskCache};
-pub use config::{CacheConfig, CacheConfigError};
+pub use config::{CacheConfig, CacheConfigError, SampledEvictionConfig};
 pub use feuer_historian::ObjectAccessHistories;
 pub use feuer_memory::{
     AlignedBuffer,

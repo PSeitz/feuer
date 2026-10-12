@@ -6,29 +6,29 @@ use feuer_types::{ByteRange, ObjectKeyHash};
 /// Scores how valuable a cached byte range is to retain.
 ///
 /// Scores must be finite. The lowest-scoring eligible sampled entry is evicted.
-/// Normalization is up to the scorer. `charged_bytes` is memory allocation charge
-/// or disk payload length, possibly zero.
+/// Normalization is up to the scorer. `entry_size_bytes` is the entry's size for this tier:
+/// memory allocation charge or disk payload length, possibly zero.
 /// Both tiers share the scorer. It may own application metadata keyed by [`ObjectKeyHash`].
 /// Calls run concurrently under shard locks: avoid I/O, cache re-entry, and holding
 /// application locks across cache operations if scoring acquires those locks.
 /// The cache owns sampling, trimming, and removal. The application owns custom metadata.
 pub trait RetentionScorer: Send + Sync {
-    /// Returns the retention score for one object's cached range and tier-specific byte charge.
+    /// Returns the retention score for one object's cached range and tier-specific entry size.
     fn score(
         &self,
         key: &ObjectKeyHash,
         cached_range: ByteRange,
-        charged_bytes: u64,
+        entry_size_bytes: u64,
         histories: &ObjectAccessHistories,
     ) -> f64;
 }
 
-/// Scores cached ranges by decayed retrieval cost per charged byte.
+/// Scores cached ranges by decayed retrieval cost per byte of entry size.
 /// Empty entries use a one-byte denominator to keep scores finite.
 ///
 /// For repeated requests for one exact range contained in the cached entry:
-/// `score = decayed_count * (fixed_retrieval_equivalent_bytes + requested_bytes) / max(charged_bytes, 1)`.
-/// With the default fixed cost of zero and a nonempty request whose size equals the byte charge,
+/// `score = decayed_count * (fixed_retrieval_equivalent_bytes + requested_bytes) / max(entry_size_bytes, 1)`.
+/// With the default fixed cost of zero and a nonempty request whose size equals the entry size,
 /// the score equals the decayed count. Using the default half-life and current decay approximation:
 ///
 /// | Matching request frequency | Score approached immediately after a matching request |
@@ -51,11 +51,11 @@ impl RetentionScorer for RetrievalCostScorer {
         &self,
         key: &ObjectKeyHash,
         cached_range: ByteRange,
-        charged_bytes: u64,
+        entry_size_bytes: u64,
         histories: &ObjectAccessHistories,
     ) -> f64 {
         decayed_retrieval_cost(histories, key, cached_range, self.fixed_retrieval_equivalent_bytes)
-            / charged_bytes.max(1) as f64
+            / entry_size_bytes.max(1) as f64
     }
 }
 

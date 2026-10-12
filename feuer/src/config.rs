@@ -19,17 +19,14 @@ pub struct CacheConfig {
     file_name: String,
     disk_capacity: u64,
     memory_capacity: u64,
-    reclaim_sample_size: usize,
     idle_buffer_pool_percent: u64,
-    fixed_retrieval_equivalent_bytes: u64,
+    eviction: SampledEvictionConfig,
 }
 
 impl CacheConfig {
     /// Creates a cache configuration with no implicit capacity defaults.
     ///
-    /// Reads `FEUER_RECLAIM_SAMPLE_SIZE` for the eviction candidate limit, defaulting
-    /// to 64 when unset. Accepts size suffixes as multipliers (e.g. `1KiB` for 1024).
-    /// The result must be positive and fit `usize`.
+    /// Uses [`SampledEvictionConfig::new`] for eviction settings.
     /// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT` for the idle buffer ceiling, defaulting
     /// to 7 when unset. The percentage must be between 0 and 100.
     pub fn new(
@@ -44,11 +41,9 @@ impl CacheConfig {
         Ok(Self {
             directory: directory.into(),
             file_name: "data".to_owned(),
-            fixed_retrieval_equivalent_bytes: 0,
             disk_capacity,
             memory_capacity,
-            reclaim_sample_size: read_env_number("FEUER_RECLAIM_SAMPLE_SIZE", RECLAIM_SAMPLE_SIZE, 1)
-                .map_err(|_| CacheConfigError::InvalidReclaimSampleSize)?,
+            eviction: SampledEvictionConfig::new()?,
             idle_buffer_pool_percent: read_idle_buffer_pool_percent()
                 .map_err(|_| CacheConfigError::InvalidIdleBufferPoolPercent)?,
         })
@@ -69,14 +64,15 @@ impl CacheConfig {
         Ok(self)
     }
 
-    /// Sets the maximum candidates inspected per memory or disk eviction decision.
-    /// Overrides the value read from `FEUER_RECLAIM_SAMPLE_SIZE`.
-    pub fn with_reclaim_sample_size(mut self, sample_size: usize) -> Result<Self, CacheConfigError> {
-        if sample_size == 0 {
-            return Err(CacheConfigError::InvalidReclaimSampleSize);
-        }
-        self.reclaim_sample_size = sample_size;
-        Ok(self)
+    /// Sets the sampled eviction settings shared by memory and disk.
+    pub fn with_eviction(mut self, eviction: SampledEvictionConfig) -> Self {
+        self.eviction = eviction;
+        self
+    }
+
+    /// Returns the sampled eviction settings.
+    pub const fn eviction(&self) -> &SampledEvictionConfig {
+        &self.eviction
     }
 
     /// Sets the maximum idle buffers as a percentage of memory capacity (0–100).
@@ -89,27 +85,9 @@ impl CacheConfig {
         Ok(self)
     }
 
-    /// Sets the fixed source-request cost in equivalent transferred bytes. Defaults to zero.
-    /// Zero scores only requested bytes. For example, 125 ms at 80 MB/s is 10,000,000 bytes.
-    /// Applies to the default scorer in both tiers. Ignored when supplying a custom scorer.
-    pub fn with_fixed_retrieval_equivalent_bytes(mut self, bytes: u64) -> Self {
-        self.fixed_retrieval_equivalent_bytes = bytes;
-        self
-    }
-
-    /// Returns the fixed source-request cost in equivalent transferred bytes.
-    pub const fn fixed_retrieval_equivalent_bytes(&self) -> u64 {
-        self.fixed_retrieval_equivalent_bytes
-    }
-
     /// Returns the maximum idle buffers as a percentage of memory capacity.
     pub const fn idle_buffer_pool_percent(&self) -> u64 {
         self.idle_buffer_pool_percent
-    }
-
-    /// Returns the maximum candidates inspected per eviction decision.
-    pub const fn reclaim_sample_size(&self) -> usize {
-        self.reclaim_sample_size
     }
 
     /// Returns the directory containing the cache's exclusively locked backing file.
@@ -130,6 +108,40 @@ impl CacheConfig {
     /// Returns the soft memory payload target in bytes.
     pub const fn memory_capacity(&self) -> u64 {
         self.memory_capacity
+    }
+}
+
+/// Settings for evicting the lowest-scoring entry from a sample.
+/// Scoring parameters belong to the supplied [`crate::RetentionScorer`], not these settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SampledEvictionConfig {
+    sample_size: usize,
+}
+
+impl SampledEvictionConfig {
+    /// Reads `FEUER_RECLAIM_SAMPLE_SIZE`, defaulting to 64 when unset.
+    /// Accepts size suffixes as multipliers (e.g. `1KiB` for 1024).
+    /// The result must be positive and fit `usize`.
+    pub fn new() -> Result<Self, CacheConfigError> {
+        Ok(Self {
+            sample_size: read_env_number("FEUER_RECLAIM_SAMPLE_SIZE", RECLAIM_SAMPLE_SIZE, 1)
+                .map_err(|_| CacheConfigError::InvalidReclaimSampleSize)?,
+        })
+    }
+
+    /// Sets the maximum candidates inspected per decision.
+    /// Overrides the value read from `FEUER_RECLAIM_SAMPLE_SIZE`.
+    pub fn with_sample_size(mut self, sample_size: usize) -> Result<Self, CacheConfigError> {
+        if sample_size == 0 {
+            return Err(CacheConfigError::InvalidReclaimSampleSize);
+        }
+        self.sample_size = sample_size;
+        Ok(self)
+    }
+
+    /// Returns the maximum candidates inspected per eviction decision.
+    pub const fn sample_size(&self) -> usize {
+        self.sample_size
     }
 }
 
@@ -183,7 +195,7 @@ mod tests {
     #[test]
     fn reclaim_sample_size_environment_override() {
         if let Ok(expected) = std::env::var("FEUER_TEST_RECLAIM_SAMPLE_CHILD") {
-            let result = CacheConfig::new("cache", 1, 1).map(|config| config.reclaim_sample_size());
+            let result = CacheConfig::new("cache", 1, 1).map(|config| config.eviction().sample_size());
             let expected = expected
                 .parse::<usize>()
                 .map_err(|_| CacheConfigError::InvalidReclaimSampleSize);
@@ -203,12 +215,15 @@ mod tests {
 
     #[test]
     fn explicit_reclaim_sample_size_overrides_configuration() {
-        let config = CacheConfig::new("cache", 1, 1).unwrap();
+        let eviction = SampledEvictionConfig::new().unwrap();
         assert_eq!(
-            config.clone().with_reclaim_sample_size(0),
+            eviction.clone().with_sample_size(0),
             Err(CacheConfigError::InvalidReclaimSampleSize)
         );
-        assert_eq!(config.with_reclaim_sample_size(128).unwrap().reclaim_sample_size(), 128);
+        let eviction = eviction.with_sample_size(128).unwrap();
+        let config = CacheConfig::new("cache", 1, 1).unwrap().with_eviction(eviction.clone());
+        assert_eq!(config.eviction(), &eviction);
+        assert_eq!(config.eviction().sample_size(), 128);
     }
 
     #[test]
@@ -268,14 +283,6 @@ mod tests {
                 Err(CacheConfigError::InvalidIdleBufferPoolPercent)
             );
         }
-    }
-
-    #[test]
-    fn configures_fixed_retrieval_cost() {
-        let config = CacheConfig::new("cache", 1, 1).unwrap();
-        assert_eq!(config.fixed_retrieval_equivalent_bytes(), 0);
-        let config = config.with_fixed_retrieval_equivalent_bytes(10_000_000);
-        assert_eq!(config.fixed_retrieval_equivalent_bytes(), 10_000_000);
     }
 
     #[test]

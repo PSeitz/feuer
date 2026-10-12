@@ -66,9 +66,7 @@ impl TieredMemoryDiskCache {
         metrics_registry: Option<&BoxedRegistry>,
         io_queues: Option<IoQueues>,
     ) -> Result<Self, DiskCacheError> {
-        let scorer = Arc::new(RetrievalCostScorer {
-            fixed_retrieval_equivalent_bytes: config.fixed_retrieval_equivalent_bytes(),
-        });
+        let scorer = Arc::new(RetrievalCostScorer::default());
         Self::open_with_retention_scorer(config, metrics_registry, io_queues, scorer).await
     }
 
@@ -88,7 +86,7 @@ impl TieredMemoryDiskCache {
             MemoryMetrics::new(metrics_registry),
             config.idle_buffer_pool_percent(),
         )
-        .with_reclaim_sample_size(config.reclaim_sample_size())
+        .with_reclaim_sample_size(config.eviction().sample_size())
         .with_retention_scorer(retention_scorer.clone());
         let disk = if config.disk_capacity() == 0 {
             None
@@ -102,7 +100,7 @@ impl TieredMemoryDiskCache {
                         io_metrics: IoMetrics::new(metrics_registry),
                         metrics: feuer_storage::DiskMetrics::new(metrics_registry),
                         access_histories: memory.access_histories().clone(),
-                        reclaim_sample_size: config.reclaim_sample_size(),
+                        reclaim_sample_size: config.eviction().sample_size(),
                         buffer_pool: memory.buffer_pool(),
                         io_queues,
                         retention_scorer,
@@ -376,13 +374,13 @@ mod tests {
                 &self,
                 key: &ObjectKeyHash,
                 cached_range: ByteRange,
-                charged_bytes: u64,
+                entry_size_bytes: u64,
                 histories: &ObjectAccessHistories,
             ) -> f64 {
                 self.0.lock().unwrap().push((
                     *key,
                     cached_range,
-                    charged_bytes,
+                    entry_size_bytes,
                     histories as *const ObjectAccessHistories as usize,
                 ));
                 if cached_range.start() == 0 { 2.0 } else { 1.0 }

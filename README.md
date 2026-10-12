@@ -155,6 +155,14 @@ Both tiers sample eligible entries and evict the lowest retention score.
 The default scorer uses decayed request cost per charged byte. Applications can
 supply a custom scorer with per-object cost metadata.
 
+`CacheConfig` groups candidate sampling under `SampledEvictionConfig`, separate from
+capacities, disk location, and idle-buffer retention. Scoring parameters belong to the scorer.
+
+```rust
+let eviction = feuer::SampledEvictionConfig::new()?.with_sample_size(128)?;
+let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?.with_eviction(eviction);
+```
+
 See [eviction policy and cost-model ideas](eviction.md) for current scoring,
 access history, and proposed tier-specific retrieval costs.
 
@@ -174,8 +182,8 @@ Suffixes work for counts too: `FEUER_ACCESS_COUNT_HALF_LIFE=8KiB` means 8192 acc
 The first four settings require positive values. The idle buffer percentage allows zero.
 
 `CacheConfig::new` reads the sample size and idle buffer percentage, returning an error
-for invalid values. `.with_reclaim_sample_size(n)` and `.with_idle_buffer_pool_percent(n)`
-override them for that cache. The other settings are process-wide, read once on first use,
+for invalid values. `SampledEvictionConfig::with_sample_size(n)` and
+`CacheConfig::with_idle_buffer_pool_percent(n)` override them for that cache. The other settings are process-wide, read once on first use,
 and panic on invalid values.
 
 ### Read buffers
