@@ -23,9 +23,12 @@ and derived inputs, which are not the FETR format.
   do not launch full traces or additional repetitions without an explicit request.
 - Real `TieredMemoryDiskCache::get_or_fetch`: memory cache, SSD reads/writes,
   write-queue admission, packing, eviction, and the revision's metadata writer.
-- One paced sender; one competing consumer per CPU. Preserve original arrival
-  timing and exactly-once completion. Queue only descriptors before consumers
-  allocate payloads. Do not throttle arrivals, drop requests, or hide backlog.
+- Current FETR replay: one paced sender and one lookup task per arrival, with one
+  runtime thread per CPU. Do not cap outstanding lookups at the thread count or
+  reapply Pomsky's split warmup permits to already-recorded starts. Preserve original
+  arrival timing and exactly-once completion. Queue only descriptors before lookup
+  tasks allocate payloads. Do not throttle arrivals, drop requests, or hide backlog.
+  Historical pinned harnesses below used one serial consumer per CPU.
 - Each source miss independently allocates zero-filled bytes for the requested
   logical range: `Bytes::from(vec![0; length])`. No network delay, shared payloads,
   aligned-download replacement, or experimental download pool.
@@ -132,7 +135,8 @@ Present baseline/candidate side by side for **both** scenarios, not just runtime
 - Memory/disk/callback outcomes; public request-weighted and byte-weighted hit
   rates and returned bytes. Internal memory operations are not caller hit rates.
 - CPU seconds/average cores; sampled and OS maximum RSS; cache accounting,
-  per-bucket idle/used buffer bytes, pending payload, and caller backlog.
+  per-bucket idle/used buffer bytes, pending payload, and caller backlog. Current
+  FETR replay reports both arrivals whose task has not started and active lookups.
 - Write admission: queued, queue-full, published, stale, canceled, failed,
   no-capacity; memory/disk eviction-triggering insertions and batch packing.
 - DataFile read/write calls, bytes, durations and errors; process and device

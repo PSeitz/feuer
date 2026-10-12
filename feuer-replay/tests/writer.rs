@@ -90,10 +90,13 @@ async fn decodes_current_writer_and_preserves_hashes_in_tiered_replay() -> Resul
         assert!(replay.status.success(), "{replay:?}");
         let summary = std::fs::read_to_string(output.join("summary.csv"))?;
         assert!(summary.lines().any(|line| line == "requests,5"));
+        assert!(summary.lines().any(|line| line == "scheduling,task_per_arrival"));
         assert!(summary.lines().any(|line| line == "recorded_incomplete,1"));
         assert!(summary.lines().any(|line| line == format!("disk_bytes,{disk_bytes}")));
         let metrics = std::fs::read_to_string(output.join("settled.prom"))?;
         assert!(metrics.contains("replay_completed_total 5"));
+        assert!(metrics.contains("replay_queued_requests 0"));
+        assert!(metrics.contains("replay_active_requests 0"));
         assert!(metrics.contains("feuer_lookup_total{outcome=\"callback_error\"} 0"));
         assert!(metrics.contains("feuer_lookup_total{outcome=\"invalid_download\"} 0"));
         assert_eq!(cache_dir.join("data").exists(), disk_bytes != 0);

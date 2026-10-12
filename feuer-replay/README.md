@@ -38,11 +38,14 @@ concurrency, synthetic downloads, and metrics collection are identical in both c
 There is no separate memory-policy simulator or disk build feature. Opening the
 real cache currently requires Linux, even when disk is disabled.
 
-The timestamp-paced replay was migrated from the private workspace. One sender
-preserves original arrival timing, with one consumer per available CPU. Only request
-descriptors are queued. Every synthetic source miss independently allocates
-zero-filled payload bytes. Recorded hashes enter through the cache's
-`benchmark`-feature API, without a second hash.
+One sender preserves original arrival timing and starts one lookup task per arrival,
+without waiting for earlier lookups to finish. Tokio uses one runtime thread per
+available CPU, not one outstanding lookup per thread. There is no additional
+lookup-admission limit. Recorded starts already reflect application admission, and
+Pomsky's split warmup permits do not limit individual cache reads. Feuer's real I/O
+queues provide their normal backpressure. Descriptors and unstarted tasks hold no
+payload. Every synthetic source miss independently allocates zero-filled payload bytes.
+Recorded hashes enter through the cache's `benchmark`-feature API, without a second hash.
 
 ```sh
 cargo build --locked --release -p feuer-replay --bin replay
@@ -65,6 +68,12 @@ variables, just as in the application.
 Replay writes all registered cache/process metrics in `metrics.prom`, phase
 snapshots in `before.prom`, `requests-finished.prom`, and `settled.prom`, and
 exact sender/queue/service/completion latency distributions in `summary.csv`.
+The summary records `scheduling,task_per_arrival`, and `workers` counts runtime threads.
+Queue wait runs from sender emission to the lookup task starting, including descriptor
+and runtime scheduling wait. Service time includes waiting inside Feuer, but excludes
+that scheduling wait. `replay_queued_requests` counts arrivals whose task has not started,
+and `replay_active_requests` counts started lookups awaiting completion. Samples are
+not atomic across these gauges.
 It verifies exactly-once completion. The five-second observation tail is not a
 forced drain, flush, or durability guarantee.
 
@@ -82,7 +91,7 @@ cargo clippy --locked -p feuer-replay --all-targets -- -D warnings
 ```
 
 On Linux, these include round trips through the current writer, recorded-hash
-lookup checks, sender timing tests, and replaying the same input with disk disabled
-and enabled. Decoder tests cover malformed packages, all event kinds, chronological
-prefixes and full captures, cross-package outcome joins, incomplete requests,
+lookup checks, sender timing tests, concurrent scheduling on a single runtime thread,
+lookup-error propagation, and replaying the same input with disk disabled and enabled.
+Decoder tests cover malformed packages, all event kinds, chronological prefixes and full captures, cross-package outcome joins, incomplete requests,
 mixed sessions, and duplicate/inconsistent events.

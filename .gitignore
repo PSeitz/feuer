@@ -16,3 +16,5 @@ AGENTS.md
 /experiments/cache/*/workspace.sha256
 /experiments/cache/*/measurements.tar.zst
 /experiments/cache/*/measurements.sha256
+/experiments/cache/*/raw/
+/experiments/cache/*/work/
