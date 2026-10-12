@@ -22,10 +22,9 @@ and derived inputs, which are not the FETR format.
   unless the user explicitly requests different capacities.
 - Host: `ssh m8g-32cpu-local-ssd-2`, 32 CPUs, `/mnt/local-ssd`, device `nvme1n1`.
   Check for unrelated CPU/device activity; do not stop other users' jobs.
-- **Use the original-time 180-second trace prefix.** It contains 469,587 requests
-  in the existing input. The completed four-case matrix took about 16 minutes.
-  A full trace can take 38–50+ minutes per case because backlog must finish;
-  do not launch full traces or additional repetitions without an explicit request.
+- **Replay the first 10 minutes by default.** Do not launch additional repetitions
+  without an explicit request. The historical 180-second four-case matrix took
+  about 16 minutes. Full-trace duration depends on backlog.
 - Real `TieredMemoryDiskCache::get_or_fetch`: memory cache, SSD reads/writes,
   write-queue admission, packing, eviction, and the revision's metadata writer.
 - Current FETR replay: one paced sender and one lookup task per arrival, with one
@@ -37,11 +36,9 @@ and derived inputs, which are not the FETR format.
 - Each source miss independently allocates zero-filled bytes for the requested
   logical range: `Bytes::from(vec![0; length])`. No network delay, shared payloads,
   aligned-download replacement, or experimental download pool.
-- Same system **jemalloc** for both binaries, using
+- Match allocators between binaries. The historical comparison used system jemalloc:
   `env -u MALLOC_CONF LD_PRELOAD=/lib/aarch64-linux-gnu/libjemalloc.so.2`.
-  Record package version/library hash. The completed comparison used jemalloc
-  5.3.0 and Rust 1.98.0. No profiling preload, manual trim, or allocator tuning;
-  do not mix glibc, preload jemalloc, and direct-Rust-allocator results.
+  Record the library version and hash.
 
 Before launching any case, verify **memory = `100000000000` bytes and disk =
 `500000000000` bytes** in the actual command and settings. Matching capacities
@@ -96,7 +93,7 @@ FEUER_IDLE_BUFFER_POOL_PERCENT=7
 ```
 
 New revisions no longer read `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES`; the harness must
-pass `RetrievalCostScorer { fixed_retrieval_equivalent_bytes: 256000 }` to
+pass `RetrievalCostScorer { fixed_cost: 256000.0, cost_per_byte: 1.0 }` to
 `open_with_retention_scorer` to match the older revisions.
 
 Requires `libjemalloc2`, `iostat`, `pidstat`, `/usr/bin/time`, and Python 3.

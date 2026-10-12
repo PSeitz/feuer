@@ -2,167 +2,115 @@
 
 ## Retention objective
 
-The objective is to reduce retrieval cost, not maximize memory and disk hit
-percentages independently. Treat memory retrieval as approximately free relative
-to I/O. Moving a disk hit into memory lowers disk's hit percentage but avoids a
-paid read. Combined cache hit rates measure source avoidance, not total cost.
+Retain entries that avoid the most retrieval cost per byte of cache capacity.
+Memory avoids the disk or source work that would otherwise serve a request.
+Disk saves source retrieval cost minus the disk read cost. Moving a disk hit into
+memory lowers disk's hit percentage but avoids a read, so tier hit percentages
+alone do not measure policy quality.
 
-Model disk and source retrieval separately, with fixed costs per request and
-transfer costs per byte. Costs may vary per object, especially for computed
-results. Use a consistent cost unit rather than adding latency and monetary
-charges directly.
-
-SSD random access generally has a lower fixed latency than S3. When their
-throughputs are similar, byte-transfer costs can be similar, while S3 GET charges
-add a per-request cost. Calibrate the model for the actual source. The source may
-be S3, another cache, or computation. Its cost is the work needed to obtain a
-missing result, not necessarily its original precomputation cost.
-
-Retention should favor expected retrieval cost saved per charged byte. A memory
-entry avoids the disk or source work that would otherwise serve its requests.
-A disk entry saves source retrieval cost minus the disk read cost, for requests
-that reach disk. Evaluate these benefits alongside eviction CPU and latency.
-
-The completed [tier retrieval cost-model experiment](experiments/cache/tier-retrieval-cost-20261011/README.md)
-tests memory retention using usable disk or source fallback, including whole-entry
-alignment, I/O submissions, and checksum costs. Disk victim scoring and write
-admission were unchanged.
-
-## Idea to test: tier-specific retrieval costs
-
-Status: hypothesis only. No policy changes or replay comparisons yet.
-
-Model disk retrieval from the implementation's actual work, not just returned
-payload bytes. Whole-entry reads verify the payload checksum. Disk byte counts
-round up to 4-KiB alignment, with a 4-KiB minimum, and reads larger than 1 MiB
-require multiple I/O requests. Memory allocation charges can differ from both
-payload length and disk bytes.
-
-For a first model:
-
-```text
-disk_cost(object) = fixed_read_cost + aligned_disk_bytes(object) × disk_byte_cost
-memory_value = expected_memory_requests × expected_fallback_cost / memory_charge
-disk_value = expected_requests_reaching_disk × (source_cost(object) - disk_cost(object))
-             / disk_charge
-```
-
-The disk-cost model is an approximation to calibrate, including the effect of
-multiple I/O requests and checksum work. Memory fallback cost depends on whether
-the object would be served from disk or the source. Source cost can vary by
-object and need not be proportional to bytes.
-
-### Per-object, per-tier costs
-
-Estimate avoided retrieval cost for each object in each tier, rather than
-assuming cost is linear in payload length. Disk-read cost depends on aligned
-bytes, the number of I/O requests, fixed latency, and checksum work. Memory
-capacity cost depends on the actual allocation charge, including bucket rounding.
-Retention value combines expected demand with avoided cost per charged byte.
-
-The smallest pooled memory bucket is 32 KiB. For entries charged at their pooled
-backing capacity:
-
-| Payload | Disk bytes read | Memory allocation charge |
-| --- | ---: | ---: |
-| 10 bytes | 4 KiB | 32 KiB |
-| 4 KiB | 4 KiB | 32 KiB |
-| 32 KiB | 32 KiB | 32 KiB |
-| 40 KiB | 40 KiB | 256 KiB |
-
-Disk alignment and memory buckets make the model stepped, not simply
-proportional to payload bytes. A compact 10-byte memory entry can have high
-retention value because it avoids a full disk operation for little memory.
-A 10-byte entry with a 32-KiB pool charge instead has roughly the same memory
-charge and disk-read cost as a 4-KiB entry with that charge, at equal demand.
-
-Downloads created through `AlignedBuffer::into_download` and disk promotions
-charge backing capacity. `Download::new` defaults to payload-length charges
-unless the application supplies a capacity. Use the entry's actual charge, not
-an assumed bucket size.
-
-Per-object modeling does not necessarily require a stored cost field. Predicted
-disk costs can be derived from existing entry metadata and calibrated disk
-parameters. Source cost may also follow a size-based model. Application-owned
-per-object metadata is needed when source work cannot be inferred, such as
-equally sized results with different recomputation costs. Memory and disk still
-need distinct avoided-cost models because their fallback paths differ.
-
-### Placement hypotheses
-
-- **Objects around 4 KiB:** test keeping their disk copies while evicting them
-  from memory when the modeled fallback cost is low. Their payload fits the
-  minimum disk read. The 4-KiB minimum alone does not establish that this is the
-  best placement, because demand, fixed latency, and memory charge still matter.
-- **Very large objects:** test evicting them from disk when source retrieval
-  approaches disk-read cost. With similar transfer throughput, the savings per
-  retained disk byte can become small. Size alone is not an eviction rule.
-- **Expensive computed results:** use per-object source costs so a cheap object
-  and an expensive object of the same size need not receive equal retention
-  credit.
-
-For whole objects, disk writes are already queued after memory admission.
-Evicting from memory while retaining a disk copy is a placement decision, not a
-new write-on-eviction mechanism. Test the scoring hypothesis without changing
-that pipeline or increasing capacities.
+Costs can represent I/O time, CPU time, or another application cost. Use one
+consistent unit. Source cost is the work needed to obtain a missing result, not
+necessarily its original precomputation cost.
 
 ## Current scoring
 
 Both tiers sample eligible entries and evict the lowest retention score.
-`RetrievalCostScorer` divides modeled avoided retrieval cost by `entry_size_bytes`:
-allocation charge in memory, payload length on disk (at least one byte for empty entries).
-For each request fully contained in a cached range, the retrieval cost adds:
+`RetrievalCostScorer` computes:
 
 ```text
-decayed access count × max(fixed_cost + requested_bytes × cost_per_byte, 0)
+Σ decayed_count × max(fixed_cost + requested_bytes × cost_per_byte, 0)
+───────────────────────────────────────────────────────────────────
+                       max(entry_size_bytes, 1)
 ```
 
-Defaults are `fixed_cost = 0` and `cost_per_byte = 1`. Setting `fixed_cost = n` with
-`cost_per_byte = 1` preserves the former fixed-equivalent-byte weighting.
-Costs use one consistent unit. Coefficients and scores must be finite.
-Negative avoided costs are clamped per request before summing.
+Only requests fully contained in the cached range contribute. Whole-object demand
+uses the cached payload length. The denominator is the allocation charge in
+memory and payload length on disk, not aligned disk bytes or metadata overhead.
+Negative avoided costs are clamped per request before summing. Coefficients and
+resulting scores must be finite.
+
+Defaults are `fixed_cost = 0` and `cost_per_byte = 1`, preserving byte-weighted
+demand. To preserve the former fixed-equivalent-byte policy:
+
+```rust
+let scorer = std::sync::Arc::new(feuer::RetrievalCostScorer {
+    fixed_cost: 256_000.0,
+    cost_per_byte: 1.0,
+});
+// Pass scorer to TieredMemoryDiskCache::open_with_retention_scorer.
+```
 
 `open_with_retention_scorer` shares one scorer between tiers.
-`open_with_retention_scorers` accepts separate memory and disk scorers, both using
-all caller demand rather than demand conditional on memory misses. The linear
-model does not inspect disk residency or model alignment and whole-entry reads.
-Sampling remains in `CacheConfig` through `SampledEvictionConfig`.
+`open_with_retention_scorers` accepts separate memory and disk scorers. Both receive
+the same caller-demand history. `CacheConfig` keeps candidate sampling settings in
+`SampledEvictionConfig`, separate from resource settings and scoring parameters.
 
-Each started request records its requested range or whole-object demand once, before any lookup,
-in `feuer-historian`, shared by both tiers. Historian supplies request counts and recent events.
-Retrieval-cost scoring belongs to the shared retention policy in `feuer-memory`.
-Whole-object scores use the cached object's payload length.
-Whole-object entries are evicted rather than trimmed to partial ranges.
-Failed requests, invalid downloads, and requests canceled after starting all count as demand.
-History hashes object keys into 64 independently locked maps, separate from cache shards.
-One atomic request clock across all history shards preserves global request-age decay.
-Raw cache reads, insertions, and evictions do not record accesses or delete history.
+### Tier-specific costs and limitations
 
-History keeps every distinct `(object key, requested range)` counter for its lifetime,
-even after both tiers evict the object. Repeated exact requests update the same counter. This metadata
-has no capacity limit and is not persisted across restarts. Its memory grows with distinct keys and ranges.
-Scores still decay, measured in requests across all keys.
+Separate scorers can model memory's fallback cost and disk's source-minus-disk
+cost. The linear model does not inspect residency or account for aligned reads,
+whole-entry checksum work, multiple I/O submissions, or contention.
 
-Under memory pressure, after a grace of 64 requests across all keys, memory trims the selected
-entry to previously requested ranges when their separate copies reduce payload bytes.
-There is no minimum savings percentage. Otherwise it evicts the entry. Grace never prevents eviction.
-Trimming uses recent-access events with per-object count and age limits, not the full counter set.
-A trimming plan uses a history snapshot. Newer accesses do not invalidate it. Cached-range changes
-are still checked before publishing bytes copied outside the memory shard lock.
+Assuming every memory miss falls back to disk can undervalue memory: pending or
+skipped writes, disk eviction, and read failures may leave only source fallback.
+Both scorers use all caller demand, not demand conditional on memory misses, so
+disk can also overvalue copies of memory-hot objects.
+
+Disk alignment and memory allocation buckets make actual costs non-linear. For
+example, a 10-byte payload may require a 4-KiB disk read and occupy a 32-KiB pooled
+memory buffer. `Download::new` defaults to payload-length charges, while disk
+promotions and `AlignedBuffer::into_download` charge backing capacity. Use the
+actual entry charge rather than assuming every entry occupies a pool bucket.
+
+Applications can supply a custom scorer when linear size-based costs are
+insufficient. Size alone is not an eviction rule: demand and avoided fixed costs
+also matter. Whole objects are already queued for disk after memory admission.
+Separate tier scoring does not add a write-on-eviction mechanism.
+
+## Access history and trimming
+
+Each started request records its requested range or whole-object demand once,
+before lookup, in `feuer-historian`. Failed requests, invalid downloads, and
+requests canceled after starting count as demand. Raw cache reads, insertions,
+and evictions do not record accesses or delete history.
+
+History hashes keys into 64 independently locked maps, separate from cache
+shards. One atomic request clock supplies global request-age decay. Every distinct
+`(object key, requested range)` counter survives cache eviction for the history
+object's lifetime. Repeated exact requests update the same counter. Counter
+metadata has no capacity limit and is not persisted across restarts.
+
+Under memory pressure, after a grace of 64 requests across all keys, the selected
+victim is trimmed to its observed request ranges if their separate copies reduce
+payload bytes. There is no minimum savings percentage. Otherwise it is evicted.
+Grace never prevents eviction. Whole-object entries are evicted rather than
+trimmed to partial ranges.
+
+Trimming uses recent-access events with per-object count and age limits, not the
+full counter set. Each distinct range is copied separately, including overlapping
+ranges. Newer accesses do not invalidate the history snapshot. Cached-range
+changes are checked before publishing bytes copied outside the shard lock.
 
 ## Custom retention scores
 
-Pass an `Arc<dyn RetentionScorer>` to
-`TieredMemoryDiskCache::open_with_retention_scorer(config, metrics, io_queues, scorer)`.
-Both tiers share it. Use `open_with_retention_scorers` for distinct tier scorers.
-A scorer can own computation costs keyed by
-`ObjectKeyHash::from(key.as_str())` and combine them with the supplied historian's demand.
-These costs live in application-owned metadata, not in cache entries. Feuer has no
-built-in per-object cost setter, and scorer arguments do not explicitly identify
-which tier is making the decision.
+A `RetentionScorer` receives the key hash, cached range, tier-specific entry size,
+and caller-demand history. It can own per-object computation costs keyed by
+`ObjectKeyHash::from(key.as_str())`. Higher finite scores favor retention. Any
+byte normalization belongs to the scorer.
 
-Higher finite scores favor retention. Any byte normalization belongs to the scorer.
-Application metadata is neither persisted nor removed by the cache, including on eviction.
-Scoring runs under shard locks. Keep it short and do not re-enter the cache.
+Scoring runs concurrently under shard locks. Avoid I/O, cache re-entry, and lock
+ordering that could deadlock with cache operations. Application-owned metadata is
+neither persisted nor removed by the cache, including on eviction. Separate tier
+scorers identify the tier without adding a tier argument to the scoring contract.
 
-See the [README](README.md#environment-variables) for tuning settings.
+See [environment variables](README.md#environment-variables) for tuning settings.
+
+## Experiments
+
+- [Tier retrieval model](experiments/cache/tier-retrieval-cost-20261011/README.md):
+  residency-aware memory scoring, without changing disk victim scoring.
+- [Historical linear tier costs](experiments/cache/tier-linear-cost-20261012/README.md):
+  coefficient derivation and full-object comparisons. These are not defaults.
+- [Scorer consolidation](experiments/cache/cost-scorer-20261012/README.md) and
+  [corrected-scheduler retest](experiments/cache/cost-scorer-retest-20261012T1324/README.md):
+  matched coefficients, not a search for better weights.
