@@ -7,11 +7,9 @@ record. Keep raw data and execution workspaces local and ignored by Git, not in
 
 ## Results and procedures
 
-- [Cost modelling, 2026-10-11](cache/cost-model-10d51f2-20261011T2130/README.md):
-  usable-fallback memory scoring, whole-entry read costs, reuse-based write
-  admission, and decimal 32-MB/64-MB source-admission limits. The Git record contains
-  summaries, model descriptions, settings, and compressed source patches.
-  Raw measurements and execution workspaces are local-only and ignored by Git.
+- [Tier retrieval cost model, 2026-10-11](cache/tier-retrieval-cost-20261011/README.md):
+  memory retention based on usable disk or source fallback, with whole-entry
+  alignment, I/O submission, and checksum costs. Two matched replay pairs.
 - [Memory policy comparisons](memory/README.md) and [results](memory/results.md).
 - [SSD read/write measurements](ssd/ssd-concurrent-read-write.md).
 - [Storage I/O](storage/README.md), [read priority](storage/read-priority.md), and

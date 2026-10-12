@@ -253,7 +253,7 @@ cargo test -p feuer -p feuer-memory -p feuer-historian -p feuer-types
 - [Experiments](experiments/README.md): configurations, raw data, and summaries
 - [Memory benchmarks](experiments/memory/README.md) and [results](experiments/memory/results.md)
 - [SSD measurements](experiments/ssd/ssd-concurrent-read-write.md)
-- [Cost-model experiments](experiments/cache/cost-model-10d51f2-20261011T2130/README.md)
+- [Tier retrieval cost model](experiments/cache/tier-retrieval-cost-20261011/README.md)
 
 ## License
 
