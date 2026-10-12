@@ -55,14 +55,6 @@ Remove only the runner's own cache and monitor processes afterward.
 
 ## Historical pinned comparison: pin, build, and run
 
-The capacities below describe an old experiment, not settings for new comparisons.
-Do not rerun this historical capacity matrix without an explicit user request.
-
-| Historical scenario | Memory | Disk | Observed behavior required by that experiment |
-| --- | ---: | ---: | --- |
-| Pressure | 16 GiB | 128 GiB | Disk eviction occurs |
-| No pressure | 16 GiB | 768 GiB | Zero disk eviction and zero no-capacity outcomes |
-
 Pin explicit baseline/candidate commits; never silently benchmark whatever HEAD
 happens to contain. The completed metadata comparison was **`f875941` versus
 `23d241c`**, not subsequent revisions.
