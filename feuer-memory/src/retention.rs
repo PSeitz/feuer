@@ -23,10 +23,10 @@ pub trait RetentionScorer: Send + Sync {
     ) -> f64;
 }
 
-/// Scores cached ranges by decayed avoided retrieval cost per byte of entry size.
+/// Scores entries by retrieval cost avoided per byte of entry size, weighted by decayed request counts.
 ///
 /// Each contained request contributes its decayed count times
-/// `max(fixed_cost + requested_bytes * cost_per_byte, 0)`.
+/// `max(cost_per_request + requested_bytes * cost_per_requested_byte, 0)`.
 /// Whole-object demand uses the cached payload length. Empty entries use a one-byte denominator.
 /// Costs must use one consistent unit, such as equivalent bytes, I/O time, or CPU time.
 /// Coefficients must be finite and keep scores finite over the application's sizes and demand.
@@ -44,23 +44,23 @@ pub trait RetentionScorer: Send + Sync {
 /// cost. Negative savings are clamped per request before summing. Both use caller-demand history.
 /// This linear model does not inspect disk residency or model alignment and whole-entry reads.
 #[derive(Debug)]
-pub struct RetrievalCostScorer {
-    /// Fixed avoided retrieval cost per request. Defaults to zero.
-    pub fixed_cost: f64,
-    /// Avoided retrieval cost per requested byte. Defaults to one.
-    pub cost_per_byte: f64,
+pub struct AvoidedRetrievalCostScorer {
+    /// Cost avoided once per request, regardless of requested byte count. Defaults to zero.
+    pub cost_per_request: f64,
+    /// Cost avoided for each requested byte. Defaults to one.
+    pub cost_per_requested_byte: f64,
 }
 
-impl Default for RetrievalCostScorer {
+impl Default for AvoidedRetrievalCostScorer {
     fn default() -> Self {
         Self {
-            fixed_cost: 0.0,
-            cost_per_byte: 1.0,
+            cost_per_request: 0.0,
+            cost_per_requested_byte: 1.0,
         }
     }
 }
 
-impl RetentionScorer for RetrievalCostScorer {
+impl RetentionScorer for AvoidedRetrievalCostScorer {
     fn score(
         &self,
         key: &ObjectKeyHash,
@@ -68,8 +68,13 @@ impl RetentionScorer for RetrievalCostScorer {
         entry_size_bytes: u64,
         histories: &ObjectAccessHistories,
     ) -> f64 {
-        decayed_retrieval_cost(histories, key, cached_range, self.fixed_cost, self.cost_per_byte)
-            / entry_size_bytes.max(1) as f64
+        decayed_avoided_retrieval_cost(
+            histories,
+            key,
+            cached_range,
+            self.cost_per_request,
+            self.cost_per_requested_byte,
+        ) / entry_size_bytes.max(1) as f64
     }
 }
 
@@ -91,15 +96,15 @@ pub fn sample_candidates<'a, T>(
     from_start.iter().chain(before_start).take(sample_size)
 }
 
-/// Sums retrieval costs for contained requests, weighted by decayed request counts.
+/// Sums avoided retrieval costs for contained requests, weighted by decayed request counts.
 /// Whole-object requests use the cached payload length. Unknown keys have zero cost.
 /// Eviction divides this cost by the memory allocation charge or disk payload length.
-pub fn decayed_retrieval_cost(
+pub fn decayed_avoided_retrieval_cost(
     histories: &ObjectAccessHistories,
     key: &ObjectKeyHash,
     cached_range: ByteRange,
-    fixed_cost: f64,
-    cost_per_byte: f64,
+    cost_per_request: f64,
+    cost_per_requested_byte: f64,
 ) -> f64 {
     histories.read_request_counts(key, |request_counts, request_clock| {
         request_counts
@@ -108,7 +113,7 @@ pub fn decayed_retrieval_cost(
             .filter(|(requested_range, _)| cached_range.contains(*requested_range))
             .map(|(requested_range, request_count)| {
                 request_count.decayed_count(request_clock)
-                    * (fixed_cost + requested_range.len() as f64 * cost_per_byte).max(0.0)
+                    * (cost_per_request + requested_range.len() as f64 * cost_per_requested_byte).max(0.0)
             })
             .sum()
     })

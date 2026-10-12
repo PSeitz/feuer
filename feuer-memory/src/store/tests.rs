@@ -9,7 +9,7 @@ use super::{
     shard::{InsertOrReclaimResult, MIN_REQUESTS_BEFORE_RANGE_TRIM},
     shard_capacity_for,
 };
-use crate::{BufferPool, MemoryMetrics, retention::decayed_retrieval_cost};
+use crate::{BufferPool, MemoryMetrics, retention::decayed_avoided_retrieval_cost};
 
 #[test]
 fn idle_buffer_pool_percent_is_independent_per_cache() {
@@ -895,7 +895,7 @@ fn access_history_survives_removal_reinsertion_and_cache_drop() {
     assert!(cache.get(&key, range(0, 1)).is_some());
     assert_eq!(history.request_count(), 2, "raw lookups do not record requests");
     drop(cache);
-    assert!(decayed_retrieval_cost(&history, &key, range(0, 1), 0.0, 1.0) > 0.0);
+    assert!(decayed_avoided_retrieval_cost(&history, &key, range(0, 1), 0.0, 1.0) > 0.0);
 }
 
 #[test]

@@ -11,7 +11,7 @@ use std::{
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use feuer_historian::{ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY};
-use feuer_memory::{MemoryCache, retention::RetrievalCostScorer};
+use feuer_memory::{MemoryCache, retention::AvoidedRetrievalCostScorer};
 use feuer_types::{
     ByteRange, Download, ObjectKeyHash,
     config::{parse_config_number, read_env_number},
@@ -167,8 +167,8 @@ impl FeuerReplayCache {
     fn new(capacity: usize, num_shards: usize) -> Self {
         Self {
             cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards).with_retention_scorer(Arc::new(
-                RetrievalCostScorer {
-                    fixed_cost: *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64,
+                AvoidedRetrievalCostScorer {
+                    cost_per_request: *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64,
                     ..Default::default()
                 },
             )),

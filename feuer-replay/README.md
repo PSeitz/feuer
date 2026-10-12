@@ -84,9 +84,9 @@ Comparisons require **100 GB memory and 500 GB disk**, using the exact decimal b
 counts above. Do not vary these capacities without an explicit user request.
 The executable's defaults are 16 GiB memory, disk disabled, and 256,000 fixed
 retrieval-equivalent bytes, so comparisons must pass both capacity arguments.
-`--fixed-retrieval-equivalent-bytes` sets `RetrievalCostScorer.fixed_cost`, with
-`cost_per_byte = 1`. Eviction sample size, buffer retention, and access-history
-settings use the current cache environment variables.
+`--fixed-retrieval-equivalent-bytes` sets `AvoidedRetrievalCostScorer.cost_per_request`,
+with `cost_per_requested_byte = 1`. Eviction sample size, buffer retention, and
+access-history settings use the current cache environment variables.
 
 Replay writes all registered cache/process metrics in `metrics.prom`, phase
 snapshots in `before.prom`, `requests-finished.prom`, and `settled.prom`, and

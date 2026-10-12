@@ -5,7 +5,7 @@ use feuer_memory::MemoryCache;
 #[cfg(target_os = "linux")]
 use feuer_memory::{
     MemoryMetrics,
-    retention::{RetentionScorer, RetrievalCostScorer},
+    retention::{AvoidedRetrievalCostScorer, RetentionScorer},
 };
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskCache, DiskCacheError, DiskCacheOptions, IoMetrics, IoQueues};
@@ -66,7 +66,7 @@ impl TieredMemoryDiskCache {
         metrics_registry: Option<&BoxedRegistry>,
         io_queues: Option<IoQueues>,
     ) -> Result<Self, DiskCacheError> {
-        let scorer = Arc::new(RetrievalCostScorer::default());
+        let scorer = Arc::new(AvoidedRetrievalCostScorer::default());
         Self::open_with_retention_scorer(config, metrics_registry, io_queues, scorer).await
     }
 

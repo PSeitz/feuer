@@ -15,12 +15,12 @@ necessarily its original precomputation cost.
 ## Current scoring
 
 Both tiers sample eligible entries and evict the lowest retention score.
-`RetrievalCostScorer` computes:
+`AvoidedRetrievalCostScorer` computes:
 
 ```text
-Σ decayed_count × max(fixed_cost + requested_bytes × cost_per_byte, 0)
-───────────────────────────────────────────────────────────────────
-                       max(entry_size_bytes, 1)
+Σ decayed_count × max(cost_per_request + requested_bytes × cost_per_requested_byte, 0)
+───────────────────────────────────────────────────────────────────────────────────
+                              max(entry_size_bytes, 1)
 ```
 
 Only requests fully contained in the cached range contribute. Whole-object demand
@@ -29,13 +29,15 @@ memory and payload length on disk, not aligned disk bytes or metadata overhead.
 Negative avoided costs are clamped per request before summing. Coefficients and
 resulting scores must be finite.
 
-Defaults are `fixed_cost = 0` and `cost_per_byte = 1`, preserving byte-weighted
-demand. To preserve the former fixed-equivalent-byte policy:
+`cost_per_request` is the cost avoided once per request, regardless of requested
+byte count. `cost_per_requested_byte` is the cost avoided for each requested byte.
+Defaults are `cost_per_request = 0` and `cost_per_requested_byte = 1`, preserving
+byte-weighted demand. To preserve the former fixed-equivalent-byte policy:
 
 ```rust
-let scorer = std::sync::Arc::new(feuer::RetrievalCostScorer {
-    fixed_cost: 256_000.0,
-    cost_per_byte: 1.0,
+let scorer = std::sync::Arc::new(feuer::AvoidedRetrievalCostScorer {
+    cost_per_request: 256_000.0,
+    cost_per_requested_byte: 1.0,
 });
 // Pass scorer to TieredMemoryDiskCache::open_with_retention_scorer.
 ```

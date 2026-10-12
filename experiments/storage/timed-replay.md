@@ -93,7 +93,7 @@ FEUER_IDLE_BUFFER_POOL_PERCENT=7
 ```
 
 New revisions no longer read `FEUER_FIXED_RETRIEVAL_EQUIVALENT_BYTES`; the harness must
-pass `RetrievalCostScorer { fixed_cost: 256000.0, cost_per_byte: 1.0 }` to
+pass `AvoidedRetrievalCostScorer { cost_per_request: 256000.0, cost_per_requested_byte: 1.0 }` to
 `open_with_retention_scorer` to match the older revisions.
 
 Requires `libjemalloc2`, `iostat`, `pidstat`, `/usr/bin/time`, and Python 3.

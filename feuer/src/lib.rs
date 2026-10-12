@@ -19,7 +19,7 @@ pub use config::{CacheConfig, CacheConfigError, SampledEvictionConfig};
 pub use feuer_historian::ObjectAccessHistories;
 pub use feuer_memory::{
     AlignedBuffer,
-    retention::{RetentionScorer, RetrievalCostScorer},
+    retention::{AvoidedRetrievalCostScorer, RetentionScorer},
 };
 #[cfg(target_os = "linux")]
 pub use feuer_storage::{DiskCacheError, IoQueues};

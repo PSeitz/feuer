@@ -153,9 +153,9 @@ requirement imposed by Feuer; the configured memory target is not an RSS limit.
 ## Eviction
 
 Both tiers sample eligible entries and evict the lowest retention score.
-`RetrievalCostScorer` uses decayed avoided retrieval cost per charged byte, with
-configurable fixed and per-byte costs. Applications can share one scorer through
-`open_with_retention_scorer` or supply separate memory and disk scorers through
+`AvoidedRetrievalCostScorer` uses decayed avoided retrieval cost per charged byte,
+with configurable costs per request and per requested byte. Applications can share
+one scorer through `open_with_retention_scorer` or supply separate memory and disk scorers through
 `open_with_retention_scorers`.
 
 `CacheConfig` groups candidate sampling under `SampledEvictionConfig`, separate from

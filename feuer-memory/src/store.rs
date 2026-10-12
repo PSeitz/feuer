@@ -15,7 +15,7 @@ use self::shard::{InsertOrReclaimResult, MemoryCacheShard};
 use crate::{
     BufferPool, MemoryMetrics,
     buffer::DEFAULT_IDLE_BUFFER_POOL_PERCENT,
-    retention::{RECLAIM_SAMPLE_SIZE, RetentionScorer, RetrievalCostScorer},
+    retention::{AvoidedRetrievalCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer},
 };
 
 /// Caps lock partitioning to avoid excessive per-cache metadata.
@@ -106,7 +106,7 @@ impl MemoryCache {
         Self {
             shards,
             access_histories: Arc::new(ObjectAccessHistories::new()),
-            retention_scorer: Arc::new(RetrievalCostScorer::default()),
+            retention_scorer: Arc::new(AvoidedRetrievalCostScorer::default()),
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             buffer_pool,
             compaction_callback: None,
