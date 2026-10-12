@@ -27,7 +27,7 @@ after the sender closes. Every selected request must complete exactly once.
 - `summary.csv` identifies the scheduler as `task_per_arrival`. `workers` now counts
   only runtime threads. Gauge samples are not an atomic accounting snapshot.
 
-Scoring, capacities, trace selection, range/whole-slice choice, synthetic downloads,
+Scoring, capacities, trace selection, range/full-object choice, synthetic downloads,
 and the observation tail are unchanged. **No capture benchmark was launched.** The
 old pair's latency discrepancy remains unresolved. This fixes a confirmed scheduling
 mismatch, not a demonstrated cause of the original seconds-level disk tails.
@@ -85,7 +85,7 @@ was changed based on this profile.
 
 | Difference | Consequence / next decision |
 | --- | --- |
-| Exact ranges versus `--whole-slices` | Pomsky passes original object identity and range. Whole slices prevent covering/overlapping requests from sharing entries. Range replay is available already, but changing this in a comparison changes the workload. |
+| Exact ranges versus `--full-objects` | Pomsky passes original object identity and range. Full objects prevent covering/overlapping requests from sharing entries. Range replay is available already, but changing this in a comparison changes the workload. |
 | Miss coalescing | Pomsky batches for 1 ms, merges gaps up to 1 MiB into ranges up to 8 MiB, and shares covered in-flight downloads. Replay independently downloads exact requested bytes. Concurrent replay does not implement that source behavior. |
 | Source timing and buffer charges | Pomsky allocates one cache-managed buffer after finalizing a download range, holds it across the storage read, and returns the full download. Replay immediately allocates zero-filled `Bytes` independently. This changes transient memory and write traffic. |
 | Recorded callback download shape | The original prefix reports 116.299 GB requested and 135.208 GB downloaded across successful callback outcomes. These are per-caller trace sums, not unique source/network bytes, because coalesced downloads can be shared. Recorded shapes describe original misses, not counterfactual replay misses. |
@@ -101,7 +101,7 @@ with the default 600-second prefix only when a new replay is requested.
 
 ## Validation and artifacts
 
-The original source snapshot includes pre-existing uncommitted whole-slice and scorer
+The original source snapshot includes pre-existing uncommitted full-object and scorer
 changes. Those source changes are excluded from the scheduling commit. The working-tree
 and scheduling-only versions were validated separately.
 
@@ -118,14 +118,14 @@ tests. A focused single-thread test starts 65 blocked lookups in two batches bef
 releasing any, verifies that later arrivals start, checks active/queued accounting,
 and verifies exactly-once completion after sender closure. Another test checks lookup
 error propagation. Integration tests check scheduler identity and zero unfinished
-requests with disk disabled/enabled and ranges/whole slices. These are tiny generated
+requests with disk disabled/enabled and ranges/full objects. These are tiny generated
 test inputs, not benchmark captures. Strict Clippy and the normal Linux binary build
 passed, as did local formatting and `git diff --check`.
 
 Before committing, the staged scheduling-only tree was exported and tested in a second
 isolated Linux workspace. All **11 tests passed**, along with formatting and strict
 Clippy. That tree has five reader tests, four binary tests, and two writer/integration
-tests, without the uncommitted whole-slice feature. No capture benchmark was run.
+tests, without the uncommitted full-object feature. No capture benchmark was run.
 
 [`settings.json`](settings.json) records tested source/binary hashes and conditional
 chart findings. Local ignored `raw/` contains the source snapshot and validation

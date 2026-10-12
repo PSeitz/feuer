@@ -27,10 +27,10 @@
     "clippy": "cargo clippy --locked -p feuer-replay --all-targets -- -D warnings",
     "build": "cargo build --locked -p feuer-replay --bin replay",
     "target_directory": "Isolated from the prior scorer experiment",
-    "test_replays": "Four cases using one tiny generated input, covering disk disabled/enabled and ranges/whole slices"
+    "test_replays": "Four cases using one tiny generated input, covering disk disabled/enabled and ranges/full objects"
   },
   "commit_validation": {
-    "scope": "Staged scheduling-only tree, excluding pre-existing whole-slice and scorer source changes",
+    "scope": "Staged scheduling-only tree, excluding pre-existing full-object and scorer source changes",
     "passed": 11,
     "formatting_passed": true,
     "strict_clippy_passed": true,

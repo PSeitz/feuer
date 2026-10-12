@@ -69,7 +69,7 @@ m8gd.8xlarge, with fresh caches and the same instrumented binary:
 
 Both candidates used the published-disk-or-source model above. There were no
 repetitions. Each case replayed the first 600 seconds at original pacing with
-100 GB memory, 500 GB disk, 32 workers, 64 shards, exact immutable whole slices,
+100 GB memory, 500 GB disk, 32 workers, 64 shards, exact immutable full objects,
 and a five-second observation tail. Each completed 1,606,645 requests and returned
 2,800,015,397,526 bytes, with zero errors and no pending or queued writes at finish.
 

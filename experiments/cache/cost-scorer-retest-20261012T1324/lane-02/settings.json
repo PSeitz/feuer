@@ -1,0 +1,40 @@
+{
+  "lane": "02",
+  "status": "completed",
+  "measured_cases": 2,
+  "repetitions": 0,
+  "memory_bytes": 100000000000,
+  "disk_bytes": 500000000000,
+  "full_objects": false,
+  "case_order": [
+    "candidate",
+    "baseline"
+  ],
+  "trace_prefix_seconds": 600,
+  "observation_tail_seconds": 5,
+  "scheduler": "task_per_arrival",
+  "runtime_threads": 32,
+  "shards": 64,
+  "fixed_retrieval_equivalent_bytes": 256000,
+  "cost_per_byte": 1,
+  "same_host_pair": true,
+  "shared_linux_validation_exit_status": 0,
+  "requests_per_case": 1606645,
+  "returned_bytes_per_case": 2800015397526,
+  "pressure_observed_both": false,
+  "no_disk_pressure_observed_both": true,
+  "source_archives_sha256": {
+    "baseline": "8ea0656cfebd537c7bce95e21b2d82953f59432dd7256e7710a581583aed856e",
+    "candidate": "41f9dab8cd1886a16c2e38a1c551f9efc481eb056408d91857cebca46baedb98"
+  },
+  "binary_sha256": {
+    "baseline": "2ebb9c92baaf7d0d217a921254c18659758ad633dcaa60fde0c1302bcae734fb",
+    "candidate": "abdbf3fe176e40bc99712da4b6fa9e8bb95d7829e901f5556fff88747c47de1a"
+  },
+  "trace_sha256": "a13aeae5c77da3709814fef42708d6cb55a867a553ba01dfc8c7e8338e7807f7",
+  "artifacts_sha256": "ecbd9fbfa0adc039bf81ffb67496784e9a20478b3552ac5b16f0f59051c80b1a",
+  "raw_evidence": "../raw/agents/lane-02/coordinator-finish/",
+  "infrastructure_recovery": "original subnet insufficient capacity, deliberate alternate subnet same hardware",
+  "cleanup": "sole owned instance terminated, independent state empty",
+  "billable_lane_resource_remains": false
+}

@@ -1,0 +1,57 @@
+{
+  "original_archives": {
+    "baseline": "e332d024af1d6bcd9493b1b9b2964052ff3c6714e83245b2938cfd5a7475bac7",
+    "candidate": "97965d2066ab6ed75ec1045de7873e18b487633a5266bb3572c2261968939d52"
+  },
+  "assembled_archives": {
+    "baseline": "8ea0656cfebd537c7bce95e21b2d82953f59432dd7256e7710a581583aed856e",
+    "candidate": "41f9dab8cd1886a16c2e38a1c551f9efc481eb056408d91857cebca46baedb98"
+  },
+  "replay_files": {
+    "feuer-replay/src/bin/replay.rs": "e39d4340ace2b7d6e49dad764b84cb77d568bcf1c8db5005a4420611dd7bbd1f",
+    "feuer-replay/tests/writer.rs": "319051657cabb3af4a110915f0214cb187837d904e31804ce79e2b03900df9ed",
+    "feuer-replay/README.md": "136484bd26131ff4312a6e790611ecc7d8637ec22b9dbc3e3246125f810cd86f"
+  },
+  "policy_diff_files": [
+    "experiments/memory/src/main.rs",
+    "feuer/src/cache.rs",
+    "feuer/src/lib.rs",
+    "feuer-memory/src/retention/tests.rs",
+    "feuer-memory/src/retention.rs",
+    "feuer-memory/src/store/tests.rs",
+    "feuer-storage/src/disk_cache/tests.rs"
+  ],
+  "candidate_rust_changes_since_original": [],
+  "cargo_lock": "78c6cafb9d5e9497e3db138467be75144c82fb4d1604d0bf2652dcde0a32fed1",
+  "shared_validation": {
+    "exit_status": 0,
+    "host": "m8g-32cpu-local-ssd-2",
+    "binary_sha256": {
+      "baseline": "9468bd2bebfb9f670b2be31a562bb6051b823eb8b0077ba04bbc3c6904245ec8",
+      "candidate": "58403f3362eae60d97e0d61631be0c397659331f3d131bb8a9c765dda331e6f1"
+    },
+    "rustc": "1.99.0 (b940084d7 2026-09-28)",
+    "commands": [
+      "cargo test --locked -p feuer-storage --lib",
+      "cargo test --locked -p feuer -p feuer-memory -p feuer-historian -p feuer-types -p feuer-replay",
+      "cargo clippy --locked -p feuer -p feuer-memory -p feuer-storage -p feuer-replay -p feuer-memory-bench --all-targets -- -D warnings",
+      "cargo build --locked --release -p feuer-replay --bin replay"
+    ]
+  },
+  "result": {
+    "retained_lanes": ["01", "02"],
+    "retained_pairs": 2,
+    "retained_cases": 4,
+    "memory_bytes": 100000000000,
+    "disk_bytes": 500000000000,
+    "deleted_lanes": "03–10 used incorrect capacities and were deleted at the user's request",
+    "measurement_repetitions": 0,
+    "cleanup": "All lane resources terminated, all independent states empty",
+    "policy_coefficients": {
+      "fixed_equivalent_bytes": 256000,
+      "cost_per_byte": 1
+    },
+    "trace_prefix_seconds": 600,
+    "scheduler": "task_per_arrival"
+  }
+}

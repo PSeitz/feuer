@@ -30,7 +30,7 @@ remains unresolved. See [latency and interpretation](#latency-and-interpretation
 Exactly one baseline → candidate pair ran on `m8g-32cpu-local-ssd-2`, with no repetitions.
 Each replay used the first 600 seconds of the same capture, original pacing, a fresh
 cache, **100,000,000,000 memory bytes and 500,000,000,000 disk bytes**, 32 workers,
-64 shards, exact immutable whole slices, jemalloc, and a five-second observation tail.
+64 shards, exact immutable full objects, jemalloc, and a five-second observation tail.
 The 32 consumers each await one lookup before taking another, limiting concurrent cache
 lookups to 32 independently of Tokio's 32 worker threads.
 Every source miss independently allocated zero-filled `Bytes`, without network delay

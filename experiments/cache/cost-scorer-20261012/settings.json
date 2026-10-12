@@ -19,7 +19,7 @@
   "cases": 2,
   "repetitions": 0,
   "trace_prefix_seconds": 600,
-  "whole_slices": true,
+  "full_objects": true,
   "memory_bytes": 100000000000,
   "disk_bytes": 500000000000,
   "workers": 32,
