@@ -1,4 +1,4 @@
-//! Repeated-open recovery benchmark. See benchmarks/storage/recovery.md.
+//! Repeated-open recovery benchmark. See experiments/storage/recovery.md.
 
 use std::{any::Any, cell::RefCell, os::unix::fs::MetadataExt, rc::Rc};
 
@@ -68,7 +68,7 @@ impl EventListener for CheckRecovery {
 
 /// Samples recorded source-download frequencies, stopping before exceeding 100 GB.
 fn trace_download_sizes() -> Vec<usize> {
-    let mut sizes: Vec<usize> = include_str!("../../../../benchmarks/storage/recovery-sizes.csv")
+    let mut sizes: Vec<usize> = include_str!("../../../../experiments/storage/recovery-sizes.csv")
         .lines()
         .skip(1)
         .flat_map(|line| {
@@ -103,7 +103,7 @@ fn trace_size_sample_is_reproducible() {
 }
 
 #[test]
-#[ignore = "manual SSD recovery benchmark; see benchmarks/storage/recovery.md"]
+#[ignore = "manual SSD recovery benchmark; see experiments/storage/recovery.md"]
 fn benchmark_recovery() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)

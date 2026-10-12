@@ -40,7 +40,7 @@ pub(crate) const MAX_IO_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_IN_FLIGHT_READS: usize = 64;
 // Local-SSD benchmarks saturated 1-MiB writes at QD8. QD64 added no write-only
 // throughput, but raised write p99 from 4.6 to 47 ms and worsened small-read latency.
-// See benchmarks/ssd/uring-20260928/REPORT.md.
+// See experiments/ssd/uring-20260928/REPORT.md.
 const MAX_IN_FLIGHT_WRITES: usize = 8;
 
 #[cfg(test)]

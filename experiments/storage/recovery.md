@@ -46,9 +46,9 @@ Only the identifier-free histogram is checked in, not private identifiers, raw
 length sequences, or trace event order:
 
 ```sh
-python3 benchmarks/storage/recovery_sizes.py \
+python3 experiments/storage/recovery_sizes.py \
   ../replay-feuer/new-bench-searcher-0/buffer-sizes/source-sizes.bin \
-  > benchmarks/storage/recovery-sizes.csv
+  > experiments/storage/recovery-sizes.csv
 ```
 
 The script groups subchunk downloads by their 4-KiB-aligned size and larger

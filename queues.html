@@ -244,7 +244,7 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
                 <div class="node-body">
                   <p>The current code caps active writes at 8, with a separate 8-request waiting channel. Its comment cites local-SSD measurements: 1-MiB writes saturated at QD8; QD64 added no write-only throughput and increased write p99 from 4.6 to 47 ms, while worsening small-read latency.</p>
                   <p>This is hardware/workload-specific evidence, not a universal optimal depth or a measurement of the current metadata-write pipeline.</p>
-                  <a class="source-label" href="benchmarks/ssd/uring-20260928/REPORT.md">benchmarks/ssd/uring-20260928/REPORT.md</a>
+                  <a class="source-label" href="experiments/ssd/uring-20260928/REPORT.md">experiments/ssd/uring-20260928/REPORT.md</a>
                   <details class="source">
                     <summary>Code · current limits</summary>
                     <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · request-size and active-slot limits (excerpt)</a>

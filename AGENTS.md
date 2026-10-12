@@ -13,10 +13,15 @@ obscure it with additional checks, that contradict the contract.
 
 Do not use semicolons in comments. Keep comments clear, precise, and grammatically correct.
 
+# Experiments
+
+Store tested configurations, raw data, and summaries in this repository under `experiments/`, not in `../replay-feuer`.
+Commit only small summaries, settings, and source changes. Keep raw data and execution workspaces local and ignored by Git.
+
 # Linux SSD testing
 
 Machine: `ssh m8g-32cpu-local-ssd-2`. Use this host for SSD tests and benchmarks.
-Follow [the timed SSD replay instructions](benchmarks/storage/timed-replay.md).
+Follow [the timed SSD replay instructions](experiments/storage/timed-replay.md).
 Replay 10m capture by default. Do not launch extra repetitions
 without an explicit request. Present the captured metrics, not only runtime/write counts.
 From the project checkout on that host:

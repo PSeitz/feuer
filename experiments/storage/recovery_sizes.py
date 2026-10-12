@@ -1,6 +1,6 @@
 """Aggregate recorded source-download sizes without retaining identifiers or event order.
 
-Usage: python3 benchmarks/storage/recovery_sizes.py PATH/source-sizes.bin > benchmarks/storage/recovery-sizes.csv
+Usage: python3 experiments/storage/recovery_sizes.py PATH/source-sizes.bin > experiments/storage/recovery-sizes.csv
 Input: little-endian u64 payload lengths from replay-feuer's buffer-sizes/analyze.py.
 """
 

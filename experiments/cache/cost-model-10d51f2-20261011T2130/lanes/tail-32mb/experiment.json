@@ -1,0 +1,22 @@
+{
+  "lane": "tail-32mb",
+  "authorization": "PLAN.md: one matched pair only",
+  "baseline": {"maximum_source_payload_bytes": null},
+  "candidate": {"maximum_source_payload_bytes": 32000000},
+  "same_instrumented_binary": true,
+  "tier_aware": false,
+  "fixed_retrieval_equivalent_bytes_both_tiers": 256000,
+  "trace_seconds": 600,
+  "trace_sha256": "a13aeae5c77da3709814fef42708d6cb55a867a553ba01dfc8c7e8338e7807f7",
+  "whole_slices": true,
+  "workers": 32,
+  "shards": 64,
+  "memory_bytes": 100000000000,
+  "disk_bytes": 500000000000,
+  "observation_tail_seconds": 5,
+  "environment": {"FEUER_ACCESS_COUNT_HALF_LIFE": 262144, "FEUER_MAX_ACCESS_EVENTS_PER_KEY": 64, "FEUER_MAX_ACCESS_AGE_ACCESSES": 262144, "FEUER_RECLAIM_SAMPLE_SIZE": 256, "FEUER_IDLE_BUFFER_POOL_PERCENT": 7},
+  "case_order": ["baseline", "candidate"],
+  "repetitions": 0,
+  "instance_count": 1,
+  "instance_type": "m8gd.8xlarge"
+}

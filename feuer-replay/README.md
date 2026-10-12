@@ -69,7 +69,7 @@ It verifies exactly-once completion. The five-second observation tail is not a
 forced drain, flush, or durability guarantee.
 
 Use `ssh m8g-32cpu-local-ssd-2` for SSD tests and follow
-[the timed replay procedure](../benchmarks/storage/timed-replay.md) for allocator matching,
+[the timed replay procedure](../experiments/storage/timed-replay.md) for allocator matching,
 host checks, OS/device measurements, and reporting. Do not run a full capture or
 additional comparison repetitions without an explicit request. Historical pinned
 comparisons continue to use their historical harness and inputs.

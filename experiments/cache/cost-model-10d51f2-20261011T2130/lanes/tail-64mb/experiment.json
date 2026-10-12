@@ -1,0 +1,21 @@
+{
+  "lane": "tail-64mb",
+  "pairs": 1,
+  "cases": {"baseline": {"maximum_source_payload_bytes": null}, "candidate": {"maximum_source_payload_bytes": 64000000}},
+  "same_instrumented_binary": true,
+  "inclusive": true,
+  "tier_aware": false,
+  "fixed_retrieval_equivalent_bytes": 256000,
+  "trace_seconds": 600,
+  "workers": 32,
+  "shards": 64,
+  "memory_bytes": 100000000000,
+  "disk_bytes": 500000000000,
+  "whole_slices": true,
+  "observation_tail_seconds": 5,
+  "repetitions": 0,
+  "instance_type": "m8gd.8xlarge",
+  "root_volume_gb": 100,
+  "request_tail_exposure": {"slices_above_64000000": 32, "requests_above_64000000": 32, "exact_slice_reuse": 0},
+  "source_allocation": "independent Bytes::from(vec![0; length])"
+}

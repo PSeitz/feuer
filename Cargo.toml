@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-  "benchmarks/memory",
+  "experiments/memory",
   "feuer",
   "feuer-historian",
   "feuer-memory",

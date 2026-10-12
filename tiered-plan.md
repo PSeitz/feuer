@@ -120,7 +120,7 @@ Policy and implementation choices should reflect the target workload:
 - posting lists vary from about 4 bytes to 4 MiB, the size roughly following a Zipf distribution.
 
 The current 165,435-access sample in
-[`benchmarks/access_pattern.ndjson`](benchmarks/access_pattern.ndjson) has a 3.74-KiB median and
+[`experiments/access_pattern.ndjson`](experiments/access_pattern.ndjson) has a 3.74-KiB median and
 1.96-MiB mean requested range. 72.9% of requests are at most 4 KiB, and the maximum is about 67.2 MiB. Under an
 uncached exact-request application of the source model below, fixed request latency contributes about 83.0% of
 total source time.

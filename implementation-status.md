@@ -103,11 +103,11 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
 
 ## Validation and benchmarks
 
-- The [memory suite](benchmarks/memory/README.md) compares exact-range and expanded downloads
+- The [memory suite](experiments/memory/README.md) compares exact-range and expanded downloads
   against native Foyer S3FIFO and a local exact-key cost-aware Foyer policy. The expanded strategy looks 5 ms
   ahead, coalesces gaps below the 10,000,000-byte source-cost break-even distance, and defaults to whole splits
   below 8 MiB and exact ranges otherwise.
-- [Memory results](benchmarks/memory/results.md) cover configured targets from 256 MiB through 32 GiB and
+- [Memory results](experiments/memory/results.md) cover configured targets from 256 MiB through 32 GiB and
   report request/source-cost hit rates, actual cached payload bytes, throughput, and shard-count sensitivity.
   These results do not establish general or tiered superiority over Foyer.
 - The complete memory gate was rerun after sharing access evidence (eight capacities through 32 GiB, exact
@@ -120,8 +120,8 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
   `/mnt/local-ssd/feuer-pressure.RgwqyQ/memory-baseline.csv`.
 - Storage tests cover independent read/write queue capacity and progress, mixed concurrency,
   caller-serialized shared pages, bounds, short I/O, cancellation, and reopening.
-- The [direct-I/O smoke benchmark](benchmarks/storage/README.md) measures the driver on the local SSD, not
-  an end-to-end cache or matched backend comparison. Separate [SSD measurements](benchmarks/ssd/ssd-concurrent-read-write.md)
+- The [direct-I/O smoke benchmark](experiments/storage/README.md) measures the driver on the local SSD, not
+  an end-to-end cache or matched backend comparison. Separate [SSD measurements](experiments/ssd/ssd-concurrent-read-write.md)
   explore mixed reads and writes. Small-read-heavy workloads may still warrant write throttling.
 
 ## In progress: disk-cache prototype

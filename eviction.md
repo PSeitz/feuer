@@ -23,6 +23,11 @@ entry avoids the disk or source work that would otherwise serve its requests.
 A disk entry saves source retrieval cost minus the disk read cost, for requests
 that reach disk. Evaluate these benefits alongside eviction CPU and latency.
 
+The completed [cost-model experiments](experiments/cache/cost-model-10d51f2-20261011T2130/README.md)
+cover usable-fallback memory scoring, whole-entry read costs, reuse-based write
+admission, and 32-MB/64-MB source-admission limits. Tested configurations, source
+snapshots, raw data, and summaries are retained with the results.
+
 ## Idea to test: tier-specific retrieval costs
 
 Status: hypothesis only. No policy changes or replay comparisons yet.

@@ -250,8 +250,10 @@ cargo test -p feuer -p feuer-memory -p feuer-historian -p feuer-types
 
 - [Disk layout](feuer-storage/disk-prototype.md)
 - [Implementation status](implementation-status.md) and [design](tiered-plan.md)
-- [Memory benchmarks](benchmarks/memory/README.md) and [results](benchmarks/memory/results.md)
-- [SSD measurements](benchmarks/ssd/ssd-concurrent-read-write.md)
+- [Experiments](experiments/README.md): configurations, raw data, and summaries
+- [Memory benchmarks](experiments/memory/README.md) and [results](experiments/memory/results.md)
+- [SSD measurements](experiments/ssd/ssd-concurrent-read-write.md)
+- [Cost-model experiments](experiments/cache/cost-model-10d51f2-20261011T2130/README.md)
 
 ## License
 

@@ -1,10 +1,11 @@
 # Timestamp-paced two-tier SSD replay
 
 Use this procedure for matched cache-revision SSD comparisons, not isolated direct-I/O
-benchmarks. The historical private harness is in `../replay-feuer`;
-its `DISK_REPLAY.md` documents the driver. Keep private traces, object identifiers,
-and raw artifacts in that workspace or on the authorized host. Publish only
-identifier-free commands and results.
+benchmarks. Keep each experiment's tested configuration, source changes, raw data,
+and summary in this repository under `experiments/cache/`. Input captures and
+raw artifacts may contain object identifiers. Keep narrative summaries free of
+those identifiers. The historical harness remains in `../replay-feuer`, where
+`DISK_REPLAY.md` documents its driver.
 
 For current FETR captures, the maintained reader and replayer are now in
 [`feuer-replay`](../../feuer-replay/README.md). Replay reads single-session `.tar.zst`
