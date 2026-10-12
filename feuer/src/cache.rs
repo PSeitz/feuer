@@ -233,20 +233,20 @@ impl TieredMemoryDiskCache {
     }
 
     /// Replays a recorded object identity without hashing it a second time.
-    /// Otherwise identical to [`Self::get_or_fetch`].
+    /// `None` requests a whole object. Otherwise identical to [`Self::get_or_fetch`].
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
     pub async fn get_or_fetch_by_hash<F, Fut, E>(
         &self,
         object_key: ObjectKeyHash,
-        requested_range: ByteRange,
+        requested_range: impl Into<Option<ByteRange>>,
         callback: F,
     ) -> Result<Bytes, GetOrFetchError<E>>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Download, E>>,
     {
-        self.lookup_by_hash(object_key, Some(requested_range), callback).await
+        self.lookup_by_hash(object_key, requested_range.into(), callback).await
     }
 
     async fn lookup_by_hash<F, Fut, E>(

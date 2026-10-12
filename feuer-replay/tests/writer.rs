@@ -75,23 +75,33 @@ async fn decodes_current_writer_and_preserves_hashes_in_tiered_replay() -> Resul
     assert_eq!(trace.incomplete, 1);
     assert_eq!(trace.outcomes, [0, 1, 0, 1, 1, 1]);
     assert_eq!(trace.requests[0].object_key, key);
-    for disk_bytes in [0, 4 << 20] {
-        let cache_dir = dir.path().join(format!("cache-{disk_bytes}"));
-        let output = dir.path().join(format!("results-{disk_bytes}"));
-        let replay = std::process::Command::new(env!("CARGO_BIN_EXE_replay"))
+    for (disk_bytes, full_objects) in [(0, false), (4 << 20, false), (0, true), (4 << 20, true)] {
+        let case = format!("{disk_bytes}-{full_objects}");
+        let cache_dir = dir.path().join(format!("cache-{case}"));
+        let output = dir.path().join(format!("results-{case}"));
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_replay"));
+        command
             .arg("--input")
             .arg(&path)
             .arg("--cache-dir")
             .arg(&cache_dir)
             .arg("--output")
             .arg(&output)
-            .args(["--memory-bytes", "1024", "--disk-bytes", &disk_bytes.to_string()])
-            .output()?;
+            .args(["--memory-bytes", "1024", "--disk-bytes", &disk_bytes.to_string()]);
+        if full_objects {
+            command.arg("--full-objects");
+        }
+        let replay = command.output()?;
         assert!(replay.status.success(), "{replay:?}");
         let summary = std::fs::read_to_string(output.join("summary.csv"))?;
         assert!(summary.lines().any(|line| line == "requests,5"));
         assert!(summary.lines().any(|line| line == "scheduling,task_per_arrival"));
         assert!(summary.lines().any(|line| line == "recorded_incomplete,1"));
+        assert!(
+            summary
+                .lines()
+                .any(|line| line == format!("full_objects,{}", u8::from(full_objects)))
+        );
         assert!(summary.lines().any(|line| line == format!("disk_bytes,{disk_bytes}")));
         let metrics = std::fs::read_to_string(output.join("settled.prom"))?;
         assert!(metrics.contains("replay_completed_total 5"));
@@ -113,10 +123,18 @@ async fn decodes_empty_whole_object_from_current_writer() -> Result<()> {
     cache
         .get_or_fetch_object("empty".to_owned(), || async { Ok::<_, Infallible>(Bytes::new()) })
         .await?;
+    let hit = cache
+        .get_or_fetch_by_hash(ObjectKeyHash::from("empty"), None, || async {
+            Err::<Download, _>(std::io::Error::other("whole-object hash lookup must hit"))
+        })
+        .await?;
+    assert!(hit.is_empty());
     drop(cache);
     let package = receiver.recv().await.ok_or("missing tail")?;
     let events = decode_package(&package)?.collect::<Result<Vec<_>>>()?;
     assert_eq!(events[0].requested, ByteRange::new(0, u64::MAX)?);
     assert_eq!(events[1].downloaded, Some(ByteRange::new(0, 0)?));
+    assert_eq!(events[2].requested, ByteRange::new(0, u64::MAX)?);
+    assert_eq!(events[3].kind, 1);
     Ok(())
 }

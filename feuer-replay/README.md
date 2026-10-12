@@ -27,8 +27,28 @@ The decoder accepts whole-object events, including empty objects, but replay
 rejects the unknown-length `0..u64::MAX` sentinel rather than allocate it.
 Parseable packages do not establish trace completeness or detect missing packages.
 
-Keep private traces, object identities, and raw results **outside this repository**.
+Keep private traces, object identities, and raw results in ignored local experiment
+directories under `experiments/cache/`. Commit only small settings and summaries.
 Nothing from the historical experiment directories is needed to build this tool.
+
+## Full-object simulation
+
+`--full-objects` treats each `(recorded object hash, start, end)` as a separate
+immutable whole object with length `end - start`, stored at offset zero. Repeated
+identical ranges share one derived identity. Different objects or bounds do not.
+The transformation runs after recorded outcomes are joined and before replay.
+Arrival times, request counts, returned bytes and synthetic source allocation are
+preserved, while the cache receives whole-object demand and performs whole-object
+lookups. Covering or overlapping ranges no longer share entries or demand counters.
+
+This simulates full-object caching of each exact recorded range, not full-file
+retrieval or a native whole-object capture. Arrival timing still comes from the
+original deployment. Native unknown-length whole-object starts remain unsupported.
+
+`--full-objects` changes the workload, not the scorer. Both range and full-object
+replays use the current [retrieval-cost scorer](../eviction.md#current-scoring).
+Compare the same transformation with matched settings and fresh caches, not a
+range baseline against a full-object candidate.
 
 ## Replay cache configurations (Linux)
 
@@ -45,22 +65,25 @@ lookup-admission limit. Recorded starts already reflect application admission, a
 Pomsky's split warmup permits do not limit individual cache reads. Feuer's real I/O
 queues provide their normal backpressure. Descriptors and unstarted tasks hold no
 payload. Every synthetic source miss independently allocates zero-filled payload bytes.
-Recorded hashes enter through the cache's `benchmark`-feature API, without a second hash.
+Identities enter through the cache's `benchmark`-feature API without an additional
+cache-side hash. Full-object mode derives new identities
+from the recorded hash and exact bounds during input preparation.
 
 ```sh
 cargo build --locked --release -p feuer-replay --bin replay
-# Example 180-second prefix with fresh cache and output directories:
+# Replay the first 10 minutes with fresh cache and output directories:
 target/release/replay \
   --input /private/path/searcher-0.tar.zst \
   --cache-dir /mnt/local-ssd/fresh-replay-cache \
   --output /private/path/fresh-results \
-  --memory-bytes 17179869184 --disk-bytes 0 \
-  --trace-seconds 180
+  --memory-bytes 100000000000 --disk-bytes 500000000000 \
+  --trace-seconds 600
 ```
 
-To test memory and disk together, use the same executable and trace with a positive
-`--disk-bytes`, for example `137438953472` (128 GiB), and fresh directories.
-Defaults: 16 GiB memory, disk disabled, and 256,000 fixed retrieval-equivalent bytes.
+Comparisons require **100 GB memory and 500 GB disk**, using the exact decimal byte
+counts above. Do not vary these capacities without an explicit user request.
+The executable's defaults are 16 GiB memory, disk disabled, and 256,000 fixed
+retrieval-equivalent bytes, so comparisons must pass both capacity arguments.
 `--fixed-retrieval-equivalent-bytes` sets `RetrievalCostScorer.fixed_cost`, with
 `cost_per_byte = 1`. Eviction sample size, buffer retention, and access-history
 settings use the current cache environment variables.
@@ -73,15 +96,15 @@ Queue wait runs from sender emission to the lookup task starting, including desc
 and runtime scheduling wait. Service time includes waiting inside Feuer, but excludes
 that scheduling wait. `replay_queued_requests` counts arrivals whose task has not started,
 and `replay_active_requests` counts started lookups awaiting completion. Samples are
-not atomic across these gauges.
-It verifies exactly-once completion. The five-second observation tail is not a
-forced drain, flush, or durability guarantee.
+not atomic across these gauges. It verifies exactly-once completion. The five-second
+observation tail is not a forced drain, flush, or durability guarantee.
 
 Use `ssh m8g-32cpu-local-ssd-2` for SSD tests and follow
 [the timed replay procedure](../experiments/storage/timed-replay.md) for allocator matching,
-host checks, OS/device measurements, and reporting. Do not run a full capture or
-additional comparison repetitions without an explicit request. Historical pinned
-comparisons continue to use their historical harness and inputs.
+host checks, OS/device measurements, and reporting. Replay the first 10 minutes
+by default with `--trace-seconds 600`. Do not run additional comparison repetitions
+without an explicit request. Historical pinned comparisons continue to use their
+historical harness and inputs.
 
 ## Validation
 

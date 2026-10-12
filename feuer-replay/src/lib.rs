@@ -85,10 +85,27 @@ pub struct Request {
     pub request_id: u64,
     /// Nanoseconds relative to the earliest recorded request start.
     pub time_ns: u64,
-    /// Recorded identity, never converted back into a string or rehashed.
+    /// Recorded identity, or the derived identity when replaying full objects.
     pub object_key: ObjectKeyHash,
-    /// Exact requested byte range.
+    /// Exact requested byte range, rebased to zero when replaying full objects.
     pub range: ByteRange,
+}
+
+impl Request {
+    /// Treats this exact range as a separate immutable object, preserving arrival and payload length.
+    /// Different original objects or range bounds get different identities. Input must have a known length.
+    pub fn full_object(self) -> Self {
+        Self {
+            object_key: ObjectKeyHash::from(format!(
+                "slice-v1:{}:{}:{:032x}",
+                self.range.start(),
+                self.range.end(),
+                self.object_key.0,
+            )),
+            range: ByteRange::new(0, self.range.len()).unwrap(),
+            ..self
+        }
+    }
 }
 
 /// Selected request starts, with recorded outcomes reported separately from synthetic replay results.
@@ -382,6 +399,43 @@ mod tests {
         whole.requested = ByteRange::new(0, u64::MAX).unwrap();
         std::fs::write(&path, package(&[whole])).unwrap();
         assert!(load_requests(&path, Some(1)).is_err());
+    }
+
+    #[test]
+    fn full_objects_preserve_arrivals_and_lengths_but_separate_exact_ranges() {
+        let request = Request {
+            request_id: 7,
+            time_ns: 123,
+            object_key: ObjectKeyHash(1),
+            range: ByteRange::new(10, 20).unwrap(),
+        };
+        let object = request.full_object();
+        assert_eq!(object.request_id, request.request_id);
+        assert_eq!(object.time_ns, request.time_ns);
+        assert_eq!(object.range, ByteRange::new(0, 10).unwrap());
+        assert_eq!(object.object_key, request.full_object().object_key);
+        for other in [
+            Request {
+                object_key: ObjectKeyHash(2),
+                ..request
+            },
+            Request {
+                range: ByteRange::new(11, 21).unwrap(),
+                ..request
+            },
+            Request {
+                range: ByteRange::new(10, 21).unwrap(),
+                ..request
+            },
+        ] {
+            assert_ne!(object.object_key, other.full_object().object_key);
+        }
+        let empty = Request {
+            range: ByteRange::new(10, 10).unwrap(),
+            ..request
+        }
+        .full_object();
+        assert_eq!(empty.range, ByteRange::new(0, 0).unwrap());
     }
 
     #[test]

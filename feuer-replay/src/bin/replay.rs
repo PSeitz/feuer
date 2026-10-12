@@ -40,6 +40,9 @@ mod linux {
         trace_seconds: Option<u64>,
         #[arg(long, default_value_t = 256_000)]
         fixed_retrieval_equivalent_bytes: u64,
+        /// Replay each (recorded hash, start, end) as a separate immutable whole object.
+        #[arg(long)]
+        full_objects: bool,
     }
 
     struct Observation {
@@ -129,12 +132,18 @@ mod linux {
     }
 
     async fn replay(args: Args, workers: usize) -> Result<()> {
-        let trace = load_requests(&args.input, args.trace_seconds)?;
+        let mut trace = load_requests(&args.input, args.trace_seconds)?;
+        if args.full_objects {
+            for request in &mut trace.requests {
+                *request = request.full_object();
+            }
+        }
         eprintln!(
-            "Recorded starts={}, outcomes={:?}, incomplete={}. Replaying every start with successful exact-range synthetic downloads.",
+            "Recorded starts={}, outcomes={:?}, incomplete={}. Replaying every start with successful synthetic downloads. Full objects={}.",
             trace.requests.len(),
             trace.outcomes,
             trace.incomplete,
+            args.full_objects,
         );
         let requests = Arc::new(trace.requests);
         fs::create_dir(&args.cache_dir)?;
@@ -149,7 +158,12 @@ mod linux {
             requests.len(),
             requests.last().unwrap().time_ns as f64 / 1e9
         )?;
-        writeln!(summary, "scheduling,task_per_arrival")?;
+        writeln!(
+            summary,
+            "scheduling,task_per_arrival\nfull_objects,{}\nfixed_retrieval_equivalent_bytes,{}",
+            u8::from(args.full_objects),
+            args.fixed_retrieval_equivalent_bytes,
+        )?;
         writeln!(summary, "recorded_incomplete,{}", trace.incomplete)?;
         for (kind, count) in trace.outcomes.iter().enumerate().skip(1) {
             writeln!(summary, "recorded_outcome_{kind},{count}")?;
@@ -204,13 +218,14 @@ mod linux {
         let events = requests.clone();
         let sender_queued = queued.clone();
         let sender = thread::spawn(move || emit(&events, origin, sender, &sender_queued));
+        let full_objects = args.full_objects;
         let mut observations = run_lookups(receiver, queued, active, |index, sent| {
             let (requests, cache, completed) = (requests.clone(), cache.clone(), completed.clone());
             async move {
                 let request = &requests[index];
                 let started = Instant::now();
                 let bytes = cache
-                    .get_or_fetch_by_hash(request.object_key, request.range, || async {
+                    .get_or_fetch_by_hash(request.object_key, (!full_objects).then_some(request.range), || async {
                         Ok::<_, Infallible>(
                             Download::new(
                                 request.range.start(),
