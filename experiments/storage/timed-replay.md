@@ -15,6 +15,11 @@ and derived inputs, which are not the FETR format.
 
 ## Defaults and workload contract
 
+- **Memory capacity is fixed at 100 GB (`100000000000` bytes). Disk capacity is
+  fixed at 500 GB (`500000000000` bytes). These are constants, not tuning parameters.**
+  Use these exact decimal byte counts for every baseline and candidate case.
+  Do not substitute GiB, sweep capacities, or change capacities to induce pressure
+  unless the user explicitly requests different capacities.
 - Host: `ssh m8g-32cpu-local-ssd-2`, 32 CPUs, `/mnt/local-ssd`, device `nvme1n1`.
   Check for unrelated CPU/device activity; do not stop other users' jobs.
 - **Use the original-time 180-second trace prefix.** It contains 469,587 requests
@@ -38,19 +43,25 @@ and derived inputs, which are not the FETR format.
   5.3.0 and Rust 1.98.0. No profiling preload, manual trim, or allocator tuning;
   do not mix glibc, preload jemalloc, and direct-Rust-allocator results.
 
-| Scenario | Memory | Disk | Required observed behavior |
-| --- | ---: | ---: | --- |
-| Pressure | 16 GiB | 128 GiB | Disk eviction occurs |
-| No pressure | 16 GiB | 768 GiB | Zero disk eviction and zero no-capacity outcomes |
+Before launching any case, verify **memory = `100000000000` bytes and disk =
+`500000000000` bytes** in the actual command and settings. Matching capacities
+between revisions is not enough. Both must match these constants.
 
-Both sizes use 64 shards in the historical comparison. Validate each revision's
-actual scenario metrics; capacities alone do not prove pressure. Queue-full disk
-admission skips can occur in both scenarios and are not dropped fetch requests.
-Run one case at a time with a fresh cache. Keep input, sources, builds, and output
+Use 64 shards. Report observed eviction and no-capacity outcomes rather than
+changing capacities to create pressure. Queue-full disk admission skips are not
+dropped fetch requests. Run one case at a time with a fresh cache. Keep input, sources, builds, and output
 on EBS, not the measured SSD. Require disk capacity plus 32 GiB free headroom.
 Remove only the runner's own cache and monitor processes afterward.
 
-## Pin, build, and run
+## Historical pinned comparison: pin, build, and run
+
+The capacities below describe an old experiment, not settings for new comparisons.
+Do not rerun this historical capacity matrix without an explicit user request.
+
+| Historical scenario | Memory | Disk | Observed behavior required by that experiment |
+| --- | ---: | ---: | --- |
+| Pressure | 16 GiB | 128 GiB | Disk eviction occurs |
+| No pressure | 16 GiB | 768 GiB | Zero disk eviction and zero no-capacity outcomes |
 
 Pin explicit baseline/candidate commits; never silently benchmark whatever HEAD
 happens to contain. The completed metadata comparison was **`f875941` versus
@@ -129,7 +140,7 @@ environment, exit status, `pidstat.txt`, `iostat.txt`, `time.txt`, device counte
 and host-activity snapshots. The five-second observation tail is **not** a forced
 payload drain, metadata flush, shutdown flush, or durability guarantee.
 
-Present baseline/candidate side by side for **both** scenarios, not just runtime:
+Present baseline/candidate side by side for every requested case, not just runtime:
 
 - Sender lateness, caller-queue wait, service, and scheduled-to-completion:
   mean, p50, p95, p99, maximum; execution and backlog-drain time separately.
