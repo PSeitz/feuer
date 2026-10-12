@@ -1,7 +1,7 @@
 use std::{sync::Arc, thread};
 
 use bytes::Bytes;
-use feuer_historian::{ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_EVENTS_PER_KEY, ObjectAccessHistories};
+use feuer_historian::{MAX_ACCESS_EVENTS_PER_KEY, ObjectAccessHistories};
 use feuer_types::{ByteRange, Download, ObjectKeyHash};
 
 use super::{
@@ -630,7 +630,7 @@ fn stale_frequency_decays_below_recent_accesses() {
     for _ in 0..8 {
         cache.access_histories.record_access(&stale, range(0, 1));
     }
-    for _ in 0..*ACCESS_COUNT_HALF_LIFE * 4 {
+    for _ in 0..cache.access_histories.half_life() * 4 {
         cache.access_histories.record_access(&clock, range(0, 1));
     }
     cache.access_histories.record_access(&fresh, range(0, 1));

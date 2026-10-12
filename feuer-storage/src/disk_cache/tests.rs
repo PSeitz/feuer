@@ -641,7 +641,6 @@ async fn pressure_replacement_preserves_evidence_while_the_last_old_entry_is_rem
 
 #[tokio::test]
 async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
-    use feuer_historian::ACCESS_COUNT_HALF_LIFE;
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
     let key = ObjectKeyHash::from("object");
     cache.insert(key, download(0, 100)).await.unwrap();
@@ -659,7 +658,7 @@ async fn disk_access_evidence_ages_and_credits_only_covering_ranges() {
     // Successful lookups are recorded explicitly. Raw storage reads and writes do not double-count.
     assert!(cache.get(&key, range(0, 1)).await.is_some());
     assert_eq!(histories.request_count(), 3);
-    for _ in 0..*ACCESS_COUNT_HALF_LIFE {
+    for _ in 0..histories.half_life() {
         histories.record_access(&key, range(200, 201));
     }
     assert_eq!(

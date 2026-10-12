@@ -108,6 +108,9 @@ impl TieredMemoryDiskCache {
             MemoryMetrics::new(metrics_registry),
             config.idle_buffer_pool_percent(),
         )
+        .with_access_histories(Arc::new(feuer_historian::ObjectAccessHistories::with_half_life(
+            config.access_count_half_life(),
+        )))
         .with_reclaim_sample_size(config.eviction().sample_size())
         .with_retention_scorer(memory_scorer);
         let disk = if config.disk_capacity() == 0 {
@@ -676,6 +679,37 @@ mod tests {
         disk.flush().await.unwrap();
         assert_eq!(disk.get(&hash, range(13, 17)).await.unwrap(), result);
         assert_eq!(disk.get(&hash, range(18, 20)).await.unwrap(), Bytes::from_static(b"ij"));
+    }
+
+    #[tokio::test]
+    async fn cache_instances_decay_access_counts_independently() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut caches = Vec::new();
+        for (half_life, disk_bytes) in [(2, 0), (4, 4 << 20)] {
+            let config = CacheConfig::new(directory.path(), disk_bytes, 1 << 20)
+                .unwrap()
+                .with_access_count_half_life(half_life)
+                .unwrap();
+            caches.push(TieredMemoryDiskCache::open(config, None, None).await.unwrap());
+        }
+        let key = ObjectKeyHash::from("old");
+        let other = ObjectKeyHash::from("other");
+        let scorer = AvoidedRetrievalCostScorer::default();
+        for cache in &caches {
+            let history = cache.inner.memory.access_histories();
+            history.record_access(&key, range(0, 1));
+            for _ in 0..4 {
+                history.record_access(&other, range(0, 1));
+            }
+        }
+        for (cache, expected) in caches.iter().zip([0.25, 0.5]) {
+            let history = cache.inner.memory.access_histories();
+            assert_eq!(scorer.score(&key, range(0, 1), 1, history), expected);
+            if let Some(disk) = &cache.inner.disk {
+                assert!(Arc::ptr_eq(history, &disk.access_histories()));
+                assert_eq!(scorer.score(&key, range(0, 1), 1, &disk.access_histories()), expected);
+            }
+        }
     }
 
     #[tokio::test]

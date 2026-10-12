@@ -112,7 +112,7 @@ pub fn decayed_avoided_retrieval_cost(
             .map(|(requested, request_count)| (requested.unwrap_or(cached_range), request_count))
             .filter(|(requested_range, _)| cached_range.contains(*requested_range))
             .map(|(requested_range, request_count)| {
-                request_count.decayed_count(request_clock)
+                request_count.decayed_count(request_clock, histories.half_life())
                     * (cost_per_request + requested_range.len() as f64 * cost_per_requested_byte).max(0.0)
             })
             .sum()

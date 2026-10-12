@@ -26,14 +26,12 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 pub struct ObjectAccessHistories {
     shards: [Mutex<FxHashMap<ObjectKeyHash, RangeAccessHistory>>; ACCESS_HISTORY_SHARDS],
     request_count: AtomicU64,
+    half_life: u64,
 }
 
 impl Default for ObjectAccessHistories {
     fn default() -> Self {
-        Self {
-            shards: std::array::from_fn(|_| Mutex::default()),
-            request_count: AtomicU64::new(0),
-        }
+        Self::with_half_life(DEFAULT_ACCESS_COUNT_HALF_LIFE)
     }
 }
 
@@ -41,6 +39,22 @@ impl ObjectAccessHistories {
     /// Creates empty request history with one clock across all keys and cache tiers.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates empty history with a fixed decay half-life in requests across all keys.
+    /// Panics if the half-life is zero.
+    pub fn with_half_life(half_life: u64) -> Self {
+        assert!(half_life > 0, "access count half-life must be greater than zero");
+        Self {
+            shards: std::array::from_fn(|_| Mutex::default()),
+            request_count: AtomicU64::new(0),
+            half_life,
+        }
+    }
+
+    /// Returns the decay half-life used when recording and evaluating request counts.
+    pub fn half_life(&self) -> u64 {
+        self.half_life
     }
 
     /// Records one request when it starts, before any cache lookup or source fetch.
@@ -53,7 +67,10 @@ impl ObjectAccessHistories {
         // Assign the clock under the shard lock so this key's updates cannot arrive out of order.
         // The atomic only measures request age. The shard mutex protects the history itself.
         let request_clock = self.request_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-        histories.entry(*key).or_default().record(requested, request_clock);
+        histories
+            .entry(*key)
+            .or_default()
+            .record(requested, request_clock, self.half_life);
     }
 
     /// Number of requests recorded across all keys and cache tiers.
@@ -66,7 +83,7 @@ impl ObjectAccessHistories {
     /// Each pair contains a requested byte range and its counter. `None` means a whole-object request.
     ///
     /// The callback borrows the pairs without copying or allocation and receives the global request count.
-    /// Use that count as the clock for [`DecayedAccessCount::decayed_count`], after filtering requests if needed.
+    /// Evaluate counts with [`DecayedAccessCount::decayed_count`] using that clock and [`Self::half_life`].
     ///
     /// # Locking
     /// The history shard stays locked during the callback.
@@ -117,12 +134,8 @@ struct RangeAccess {
     observed_at_access: u64,
 }
 
-/// Half-life of access counts, in requests across all keys.
-/// Reads `FEUER_ACCESS_COUNT_HALF_LIFE` once on first use, defaulting to 262,144.
-/// Accepts size suffixes as multipliers. Panics unless the result is positive and fits `u64`.
-pub static ACCESS_COUNT_HALF_LIFE: LazyLock<u64> = LazyLock::new(|| {
-    read_env_number("FEUER_ACCESS_COUNT_HALF_LIFE", 262_144, 1).unwrap_or_else(|error| panic!("{error}"))
-});
+/// Default half-life of access counts, in requests across all keys.
+pub const DEFAULT_ACCESS_COUNT_HALF_LIFE: u64 = 262_144;
 
 /// A request count that decays as requests accumulate across all object keys.
 #[derive(Default)]
@@ -133,6 +146,7 @@ pub struct DecayedAccessCount {
 
 impl DecayedAccessCount {
     /// Evaluates the count at the supplied request clock, without modifying it.
+    /// `half_life` must be positive and match the half-life used to record this count.
     /// The result is between zero and the count stored at the last update, inclusive.
     /// It is not normalized to [0, 1]. Each matching request decays the stored count
     /// and adds one, so repeated requests can make it exceed one.
@@ -171,11 +185,11 @@ impl DecayedAccessCount {
     /// Between matching requests, a count near 4 decays toward 3 before the next update adds one.
     /// At 128,000 requests apart, the corresponding limits are 4.096 after adding one and 3.096 before.
     #[inline]
-    pub fn decayed_count(&self, request_clock: u64) -> f64 {
+    pub fn decayed_count(&self, request_clock: u64, half_life: u64) -> f64 {
         // Age is measured in requests across all keys, not wall-clock time.
         // An earlier clock leaves the count unchanged rather than increasing it.
         let requests_since_update = request_clock.saturating_sub(self.observed_at_access);
-        let half_lives_elapsed = requests_since_update as f64 / *ACCESS_COUNT_HALF_LIFE as f64;
+        let half_lives_elapsed = requests_since_update as f64 / half_life as f64;
 
         if half_lives_elapsed >= 126.0 {
             return 0.0; // Discard negligible counts rather than constructing subnormal floats.
@@ -203,7 +217,7 @@ struct RangeAccessHistory {
 }
 
 impl RangeAccessHistory {
-    fn record(&mut self, range: impl Into<Option<ByteRange>>, request_clock: u64) {
+    fn record(&mut self, range: impl Into<Option<ByteRange>>, request_clock: u64, half_life: u64) {
         let range = range.into();
         let count_index = *self.request_count_indices.entry(range).or_insert_with(|| {
             let count_index = self.request_counts.len();
@@ -211,7 +225,7 @@ impl RangeAccessHistory {
             count_index
         });
         let request_count = &mut self.request_counts[count_index].1;
-        request_count.count = request_count.decayed_count(request_clock) + 1.0;
+        request_count.count = request_count.decayed_count(request_clock, half_life) + 1.0;
         request_count.observed_at_access = request_clock;
         if self.events.len() == *MAX_ACCESS_EVENTS_PER_KEY {
             self.events.pop_front();

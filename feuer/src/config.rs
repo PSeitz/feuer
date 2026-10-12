@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use feuer_historian::DEFAULT_ACCESS_COUNT_HALF_LIFE;
 use feuer_memory::{read_idle_buffer_pool_percent, retention::RECLAIM_SAMPLE_SIZE};
 use feuer_types::config::read_env_number;
 use thiserror::Error;
@@ -20,6 +21,7 @@ pub struct CacheConfig {
     disk_capacity: u64,
     memory_capacity: u64,
     idle_buffer_pool_percent: u64,
+    access_count_half_life: u64,
     eviction: SampledEvictionConfig,
 }
 
@@ -27,6 +29,8 @@ impl CacheConfig {
     /// Creates a cache configuration with no implicit capacity defaults.
     ///
     /// Uses [`SampledEvictionConfig::new`] for eviction settings.
+    /// Reads `FEUER_ACCESS_COUNT_HALF_LIFE`, defaulting to 262,144 requests.
+    /// The half-life must be positive and applies to both tiers of this cache.
     /// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT` for the idle buffer ceiling, defaulting
     /// to 7 when unset. The percentage must be between 0 and 100.
     pub fn new(
@@ -44,6 +48,8 @@ impl CacheConfig {
             disk_capacity,
             memory_capacity,
             eviction: SampledEvictionConfig::new()?,
+            access_count_half_life: read_env_number("FEUER_ACCESS_COUNT_HALF_LIFE", DEFAULT_ACCESS_COUNT_HALF_LIFE, 1)
+                .map_err(|_| CacheConfigError::InvalidAccessCountHalfLife)?,
             idle_buffer_pool_percent: read_idle_buffer_pool_percent()
                 .map_err(|_| CacheConfigError::InvalidIdleBufferPoolPercent)?,
         })
@@ -73,6 +79,21 @@ impl CacheConfig {
     /// Returns the sampled eviction settings.
     pub const fn eviction(&self) -> &SampledEvictionConfig {
         &self.eviction
+    }
+
+    /// Sets the access count half-life in requests across all keys of this cache.
+    /// Applies to both tiers. Overrides `FEUER_ACCESS_COUNT_HALF_LIFE` for this cache.
+    pub fn with_access_count_half_life(mut self, half_life: u64) -> Result<Self, CacheConfigError> {
+        if half_life == 0 {
+            return Err(CacheConfigError::InvalidAccessCountHalfLife);
+        }
+        self.access_count_half_life = half_life;
+        Ok(self)
+    }
+
+    /// Returns the access count half-life in requests across all keys of this cache.
+    pub const fn access_count_half_life(&self) -> u64 {
+        self.access_count_half_life
     }
 
     /// Sets the maximum idle buffers as a percentage of memory capacity (0–100).
@@ -159,6 +180,11 @@ pub enum CacheConfigError {
         "reclaim sample size must be a positive number fitting usize; check FEUER_RECLAIM_SAMPLE_SIZE (e.g. 1KiB) or the explicit setting"
     )]
     InvalidReclaimSampleSize,
+    /// The access count half-life must be positive.
+    #[error(
+        "access count half-life must be greater than zero; check FEUER_ACCESS_COUNT_HALF_LIFE or the explicit setting"
+    )]
+    InvalidAccessCountHalfLife,
     /// The idle buffer ceiling must be a percentage between 0 and 100.
     #[error(
         "idle buffer pool percent must be between 0 and 100; check FEUER_IDLE_BUFFER_POOL_PERCENT or the explicit setting"
@@ -224,6 +250,55 @@ mod tests {
         let config = CacheConfig::new("cache", 1, 1).unwrap().with_eviction(eviction.clone());
         assert_eq!(config.eviction(), &eviction);
         assert_eq!(config.eviction().sample_size(), 128);
+    }
+
+    #[test]
+    fn access_count_half_life_environment_override() {
+        const NAME: &str = "FEUER_ACCESS_COUNT_HALF_LIFE";
+        const CHILD: &str = "FEUER_TEST_HALF_LIFE_CHILD";
+        if let Ok(expected) = std::env::var(CHILD) {
+            let config = CacheConfig::new("cache", 1, 1);
+            let expected = expected
+                .parse::<u64>()
+                .map_err(|_| CacheConfigError::InvalidAccessCountHalfLife);
+            assert_eq!(
+                config
+                    .as_ref()
+                    .map(|config| config.access_count_half_life())
+                    .map_err(|error| *error),
+                expected
+            );
+            if let Ok(config) = config {
+                assert_eq!(
+                    config.with_access_count_half_life(17).unwrap().access_count_half_life(),
+                    17
+                );
+            }
+            return;
+        }
+        for (setting, expected) in [
+            (None, "262144"),
+            (Some("1"), "1"),
+            (Some("64KiB"), "65536"),
+            (Some("18446744073709551615"), "18446744073709551615"),
+            (Some("0"), "error"),
+            (Some("bad"), "error"),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", "config::tests::access_count_half_life_environment_override"])
+                .env(CHILD, expected)
+                .env_remove(NAME);
+            if let Some(setting) = setting {
+                child.env(NAME, setting);
+            }
+            let output = child.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+        assert_eq!(
+            CacheConfig::new("cache", 1, 1).unwrap().with_access_count_half_life(0),
+            Err(CacheConfigError::InvalidAccessCountHalfLife)
+        );
     }
 
     #[test]

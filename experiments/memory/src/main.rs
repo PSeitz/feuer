@@ -10,7 +10,9 @@ use std::{
 
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
-use feuer_historian::{ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY};
+use feuer_historian::{
+    DEFAULT_ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY, ObjectAccessHistories,
+};
 use feuer_memory::{MemoryCache, retention::AvoidedRetrievalCostScorer};
 use feuer_types::{
     ByteRange, Download, ObjectKeyHash,
@@ -20,6 +22,10 @@ use foyer_memory::{Cache as FoyerCache, CacheBuilder, CostAwareConfig, S3FifoCon
 
 const PINNED_FOYER_REVISION: &str = "14c2d88b9d7dd2135bfc723d0967debb59532b4b";
 const SOURCE_FIXED_EQUIVALENT_BYTES: u64 = 10_000_000;
+static ACCESS_COUNT_HALF_LIFE: LazyLock<u64> = LazyLock::new(|| {
+    read_env_number("FEUER_ACCESS_COUNT_HALF_LIFE", DEFAULT_ACCESS_COUNT_HALF_LIFE, 1)
+        .unwrap_or_else(|error| panic!("{error}"))
+});
 // Keep the replay's source-cost assumption explicit rather than relying on the cache default.
 static FIXED_RETRIEVAL_EQUIVALENT_BYTES: LazyLock<u64> = LazyLock::new(|| {
     read_env_number(
@@ -166,12 +172,12 @@ struct FeuerReplayCache {
 impl FeuerReplayCache {
     fn new(capacity: usize, num_shards: usize) -> Self {
         Self {
-            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards).with_retention_scorer(Arc::new(
-                AvoidedRetrievalCostScorer {
+            cache: MemoryCache::with_shards_for_benchmark(capacity as u64, num_shards)
+                .with_access_histories(Arc::new(ObjectAccessHistories::with_half_life(*ACCESS_COUNT_HALF_LIFE)))
+                .with_retention_scorer(Arc::new(AvoidedRetrievalCostScorer {
                     cost_per_request: *FIXED_RETRIEVAL_EQUIVALENT_BYTES as f64,
                     ..Default::default()
-                },
-            )),
+                })),
         }
     }
 }

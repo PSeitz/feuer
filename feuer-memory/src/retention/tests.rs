@@ -95,7 +95,7 @@ fn exact_and_expanded_scores_match_btree_counts() {
                 let requested = requested.unwrap();
                 (
                     (requested.start(), requested.end()),
-                    request_count.decayed_count(request_clock),
+                    request_count.decayed_count(request_clock, histories.half_life()),
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>()

@@ -163,7 +163,9 @@ capacities, disk location, and idle-buffer retention. Scoring parameters belong 
 
 ```rust
 let eviction = feuer::SampledEvictionConfig::new()?.with_sample_size(128)?;
-let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?.with_eviction(eviction);
+let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?
+    .with_eviction(eviction)
+    .with_access_count_half_life(262_144)?;
 ```
 
 See [eviction policy](eviction.md) for the formula, defaults, and scoring contract.
@@ -173,7 +175,7 @@ See [eviction policy](eviction.md) for the formula, defaults, and scoring contra
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Candidates per eviction decision. |
-| `FEUER_ACCESS_COUNT_HALF_LIFE` | `262144` | Score decay half-life in requests across all keys. |
+| `FEUER_ACCESS_COUNT_HALF_LIFE` | `262144` | Default access count half-life for `CacheConfig`, in requests across all keys of that cache. |
 | `FEUER_MAX_ACCESS_AGE_ACCESSES` | `262144` | Trimming event age limit in requests across all keys. |
 | `FEUER_MAX_ACCESS_EVENTS_PER_KEY` | `64` | Maximum trimming events per key. |
 | `FEUER_IDLE_BUFFER_POOL_PERCENT` | `7` | Maximum idle buffers as a percentage of memory capacity, shared by all buckets. Range 0–100; `0` disables idle retention. |
@@ -183,10 +185,12 @@ Binary suffixes use powers of 1024 and decimal suffixes use powers of 1000.
 Suffixes work for counts too: `FEUER_ACCESS_COUNT_HALF_LIFE=8KiB` means 8192 accesses.
 The first four settings require positive values. The idle buffer percentage allows zero.
 
-`CacheConfig::new` reads the sample size and idle buffer percentage, returning an error
-for invalid values. `SampledEvictionConfig::with_sample_size(n)` and
-`CacheConfig::with_idle_buffer_pool_percent(n)` override them for that cache. The other settings are process-wide, read once on first use,
-and panic on invalid values.
+`CacheConfig::new` reads the sample size, access count half-life, and idle buffer percentage,
+returning an error for invalid values. `SampledEvictionConfig::with_sample_size(n)`,
+`CacheConfig::with_access_count_half_life(n)`, and `CacheConfig::with_idle_buffer_pool_percent(n)`
+override them for that cache. Both tiers share the cache's fixed half-life. Standalone memory
+and disk caches use the default half-life unless supplied with configured `ObjectAccessHistories`.
+The trimming settings are process-wide, read once on first use, and panic on invalid values.
 
 ### Read buffers
 
