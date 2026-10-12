@@ -728,6 +728,41 @@ fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
 }
 
 #[test]
+fn range_trim_publishes_one_entry_per_distinct_request() {
+    let cache = cache(12);
+    let key = ObjectKeyHash::from("download");
+    let original = Bytes::from_static(b"abcdefghijkl");
+    let requests = [range(1, 2), range(1, 4), range(2, 3), range(3, 5), range(5, 6)];
+    cache.insert(key, Download::new(0, original.clone()).unwrap());
+    for index in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM as usize {
+        cache
+            .access_histories
+            .record_access(&key, requests[index % requests.len()]);
+    }
+    cache.insert("incoming".into(), Download::new(0, Bytes::from_static(b"x")).unwrap());
+
+    assert_eq!(cache.entry_count(), requests.len() as u64 + 1);
+    assert_eq!(cache.used_bytes(), 9);
+    for requested in requests {
+        assert!(cache.contains_entry(&key, requested));
+        assert_eq!(
+            cache.get(&key, requested).unwrap(),
+            original.slice(requested.start() as usize..requested.end() as usize)
+        );
+    }
+    assert_ne!(
+        cache.get(&key, range(1, 2)).unwrap().as_ptr(),
+        cache.get(&key, range(1, 4)).unwrap().as_ptr()
+    );
+    // A contained entry must not hide another entry during lookup or replacement.
+    assert_eq!(cache.get(&key, range(2, 4)).unwrap(), Bytes::from_static(b"cd"));
+    assert!(cache.get(&key, range(1, 6)).is_none());
+    cache.insert(key, Download::new(0, Bytes::from_static(b"abc")).unwrap());
+    assert!(!cache.contains_entry(&key, range(2, 3)));
+    assert!(cache.contains_entry(&key, range(1, 4)));
+}
+
+#[test]
 fn candidate_state_tracks_entries_during_oversized_churn() {
     let cache = cache(1);
     for index in 0..300 {
@@ -747,7 +782,7 @@ fn range_trim_requires_only_the_exact_source_range() {
         (1, true, 2, 1, range(2, 4), Some(b"cd".as_slice())),
         (2, true, 3, 2, range(12, 13), Some(b"x".as_slice())),
         (3, false, 11, 1, range(0, 10), Some(b"abcdefghij".as_slice())),
-        (4, true, 9, 1, range(2, 11), Some(b"cdefghijk".as_slice())),
+        (4, true, 11, 2, range(2, 11), Some(b"cdefghijk".as_slice())),
         (5, true, 2, 1, range(2, 4), Some(b"cd".as_slice())),
     ] {
         let (registry, backend) = crate::test_metrics::registry();
@@ -802,9 +837,10 @@ fn range_trim_requires_only_the_exact_source_range() {
             published
         );
         if change == 4 {
-            assert!(
-                replacement.payloads.is_empty(),
-                "covered ranges are not published again"
+            assert_eq!(
+                replacement.payloads.len(),
+                1,
+                "covering ranges do not suppress exact entries"
             );
         }
         drop(shard);

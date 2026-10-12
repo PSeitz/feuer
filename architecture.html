@@ -220,7 +220,7 @@
           <details class="branch">
             <summary><code>MemoryCacheShard</code><small>Maps object keys to cached byte ranges</small></summary>
             <div class="content">
-              <p><code>MemoryCache</code> splits keys among shards so requests for different shards can run without sharing one lock. Each shard stores an object's cached ranges in a <code>BTreeMap</code>, sorted by starting byte offset.</p>
+              <p><code>MemoryCache</code> splits keys among shards so requests for different shards can run without sharing one lock. Each shard stores an object's cached ranges in a <code>BTreeMap</code>, sorted by exact byte range.</p>
               <p>A lookup needs <strong>one entry covering the entire request</strong>; it does not assemble several cached ranges.</p>
               <details class="deeper"><summary>Index structure and admission rules</summary><div>
                 <p><code>ObjectEntries</code> owns the ordered ranges. Each <code>MemoryEntry</code> holds its byte range, <code>Bytes</code>, allocation charge, candidate slot, and admission request clock. Entries are identified by key hash and exact range, not an entry ID or generation. Request history is stored separately and shared by both tiers.</p>
@@ -248,8 +248,8 @@
               <p>When memory is full, the cache chooses an entry to remove. If only parts of it have been requested, it can copy those parts into smaller buffers and discard the rest. Otherwise, it removes the whole entry. Whole-object entries are evicted rather than trimmed.</p>
               <dl><dt>Trimming grace</dt><dd>64 requests across all keys</dd><dt>Minimum payload saving</dt><dd>30%</dd></dl>
               <details class="deeper"><summary>Copy outside the lock, validate before publishing</summary><div>
-                <p>Overlapping or adjacent observed intervals are merged and copied into independent <code>Bytes</code>. Copying occurs outside the shard lock.</p>
-                <p>Publication requires the exact source key and range to remain cached. Reinsertion of that immutable range, changes to neighboring ranges, and new requests do not invalidate the copy. Replacement ranges already covered by another entry are skipped. If the source disappeared or was replaced by a different range, admission falls back to eviction.</p>
+                <p>Each distinct observed request range is copied into an independent, exact-size entry. Overlapping, adjacent, and contained ranges remain separate. Savings count every copy of overlapping bytes. Copying occurs outside the shard lock.</p>
+                <p>Publication requires the exact source key and range to remain cached. Reinsertion of that immutable range, changes to neighboring ranges, and new requests do not invalidate the copy. Replacement ranges already cached as exact entries are skipped. If the source disappeared or was replaced by a different range, admission falls back to eviction.</p>
                 <p>There is no periodic compaction. Caller-held slices remain valid.</p>
               </div></details>
               <a class="source" href="feuer-memory/src/store/range_trim.rs">feuer-memory/src/store/range_trim.rs · plan_range_trim</a>

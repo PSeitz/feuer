@@ -67,13 +67,13 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
   The victim has the lowest retrieval value per charged allocation byte, with object key and range breaking ties.
   Registration and removal are constant-work and leave no stale candidate backlog.
 - After a grace of 64 requests across all keys, the selected victim is trimmed to observed requests if
-  that releases at least one quarter of its payload. Otherwise it is evicted. Grace never prevents eviction.
-- Compaction merges only overlapping or adjacent observed intervals and copies them into independent `Bytes`.
-  It preserves exact coverage, updates accounting and metrics, creates no access, and leaves caller-held
-  slices valid.
+  separate copies release at least 30% of its payload. Otherwise it is evicted. Grace never prevents eviction.
+- Compaction copies each distinct observed request range into an independent, exact-size entry, without merging
+  overlapping, adjacent, or contained ranges. Savings count every copy of overlapping bytes. It updates
+  accounting and metrics, creates no access, and leaves caller-held slices valid.
 - Copying happens outside the shard lock. Publication requires the exact source range to still be cached.
   Reinsertion of that immutable range, changes to neighboring ranges, and new accesses do not invalidate
-  a trimming snapshot. Replacement ranges already covered by another entry are skipped.
+  a trimming snapshot. Replacement ranges already cached as exact entries are skipped.
   Admission falls back to eviction if the source was removed or replaced by a different range.
 
 There is no periodic compaction, separate prefetch-promotion state, or public policy configuration.

@@ -222,17 +222,18 @@ For range trimming only, history keeps at most 64 exact events per object by def
 (`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this). Events expire after 262,144 later
 requests across all keys by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this).
 Once its grace of 64 requests across all keys expires, that same
-victim is trimmed when its observed requests can release at least one quarter of its payload. Otherwise it is
-evicted.
-Compacted replacements use only observed requests, merge only overlapping or adjacent intervals, preserve gaps,
-create no access, and cannot affect lookup results or caller-held slices.
+victim is trimmed when separate copies of its observed request ranges can release at least 30% of its payload.
+Otherwise it is evicted.
+Compaction creates one exact-size entry per distinct observed request range, without merging overlapping,
+adjacent, or contained ranges. Savings count every copy of overlapping bytes. Compaction creates no access
+and leaves caller-held slices valid.
 
 Lookup and access recording must not scan every live shard entry. Victim selection samples at most the
 configured number of entries (64 by default). Scoring work depends on the distinct requested ranges each
 candidate covers.
 Copies made outside the metadata lock require the exact source range to still be cached at publication.
 Reinsertion of the same immutable range and changes to neighboring ranges do not invalidate a copy.
-Replacement ranges already covered by another entry are skipped.
+Replacement ranges already cached as exact entries are skipped.
 Access history is only policy input: newer accesses do not invalidate a trimming snapshot.
 
 ## 7. Best-effort disk writes

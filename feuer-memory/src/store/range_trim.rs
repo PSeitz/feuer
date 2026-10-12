@@ -4,26 +4,20 @@ use feuer_types::ByteRange;
 const MIN_RANGE_TRIM_SAVINGS_PERCENT: u128 = 30;
 
 /// Plans replacement ranges from requests fully contained in `source_range`.
-/// Filters and merges the owned request snapshot in place, without retaining gaps.
-/// Returns no plan if no requests remain or the saved bytes fall below the minimum.
+/// Deduplicates requests without merging overlapping, adjacent, or contained ranges.
+/// Returns no plan if no requests remain or savings from the separate copies fall below the minimum.
 pub(super) fn plan_range_trim(
     source_range: ByteRange,
     mut requested_ranges: Vec<ByteRange>,
 ) -> Option<Box<[ByteRange]>> {
     requested_ranges.retain(|requested| source_range.contains(*requested));
     requested_ranges.sort_unstable();
-    requested_ranges.dedup_by(|requested_range, previous_range| {
-        if requested_range.start() > previous_range.end() {
-            return false;
-        }
-        *previous_range = ByteRange::new(previous_range.start(), previous_range.end().max(requested_range.end()))
-            .expect("a union of ordered ranges must remain ordered");
-        true
-    });
+    requested_ranges.dedup();
 
-    let reclaimed_bytes = source_range.len() - requested_ranges.iter().map(|range| range.len()).sum::<u64>();
+    let replacement_bytes: u128 = requested_ranges.iter().map(|range| u128::from(range.len())).sum();
+    let reclaimed_bytes = u128::from(source_range.len()).checked_sub(replacement_bytes)?;
     (!requested_ranges.is_empty()
-        && u128::from(reclaimed_bytes) * 100 >= u128::from(source_range.len()) * MIN_RANGE_TRIM_SAVINGS_PERCENT)
+        && reclaimed_bytes * 100 >= u128::from(source_range.len()) * MIN_RANGE_TRIM_SAVINGS_PERCENT)
         .then(|| requested_ranges.into_boxed_slice())
 }
 
@@ -36,7 +30,7 @@ mod tests {
     }
 
     #[test]
-    fn merges_duplicate_overlapping_and_adjacent_requests_covered_by_the_source() {
+    fn preserves_distinct_request_ranges_covered_by_the_source() {
         let replacements = plan_range_trim(
             range(10, 30),
             vec![
@@ -51,7 +45,21 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(*replacements, [range(12, 16), range(18, 24)]);
+        assert_eq!(
+            *replacements,
+            [range(12, 14), range(14, 16), range(18, 22), range(21, 24)]
+        );
+    }
+
+    #[test]
+    fn savings_count_each_copy_of_overlapping_bytes() {
+        assert!(plan_range_trim(range(0, 10), vec![range(1, 5), range(2, 6)]).is_none());
+        assert!(plan_range_trim(range(0, 10), vec![range(0, 7), range(1, 8)]).is_none());
+        assert!(plan_range_trim(range(0, u64::MAX), vec![range(0, u64::MAX), range(1, u64::MAX)]).is_none());
+        assert_eq!(
+            *plan_range_trim(range(0, 10), vec![range(1, 5), range(2, 5)]).unwrap(),
+            [range(1, 5), range(2, 5)]
+        );
     }
 
     #[test]
