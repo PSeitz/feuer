@@ -64,11 +64,11 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
   `open_with_retention_scorers` accepts separate memory and disk scorers using the same
   caller-demand history. Only cached ranges covering the exact request receive credit.
   Counter metadata is not capped per object.
-- A dense rotating candidate ring supplies a shared sample of at most 64 live entries per pressure decision.
-  The victim has the lowest retrieval value per charged allocation byte, with object key and range breaking ties.
-  Registration and removal are constant-work and leave no stale candidate backlog.
-- After a grace of 64 requests across all keys, the selected victim is always trimmed to observed requests
-  when separate copies reduce payload bytes, without a minimum savings percentage. Otherwise it is evicted.
+- Pressure searches a rotating sample of live entries (64 by default) for a compactable entry first.
+  If none is found, it evicts the entry with the lowest retention score, breaking ties by object key and range.
+  Updating the sampling list takes constant work per entry and leaves no stale entries.
+- It trims the first sampled entry whose grace of 64 requests across all keys has elapsed and whose
+  observed requests reduce payload bytes when copied separately, without a minimum savings percentage.
   Grace never prevents eviction.
 - Compaction copies each distinct observed request range into an independent, exact-size entry, without merging
   overlapping, adjacent, or contained ranges. Savings count every copy of overlapping bytes. It updates

@@ -645,6 +645,43 @@ fn stale_frequency_decays_below_recent_accesses() {
 }
 
 #[test]
+fn compaction_precedes_eviction_within_sample() {
+    for (sample_size, compactable_first) in [(1, false), (2, false), (2, true)] {
+        let cache = cache(11).with_reclaim_sample_size(sample_size);
+        let unrequested_key = ObjectKeyHash::from("unrequested");
+        let compactable_key = ObjectKeyHash::from("compactable");
+        let mut downloads = [
+            (unrequested_key, Download::new(0, Bytes::from_static(b"x")).unwrap()),
+            (
+                compactable_key,
+                Download::new(0, Bytes::from_static(b"abcdefghij")).unwrap(),
+            ),
+        ];
+        if compactable_first {
+            downloads.reverse();
+        }
+        for (key, download) in downloads {
+            cache.insert(key, download);
+        }
+        // The compactable entry has a higher retention score than the unrequested entry.
+        for _ in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM {
+            cache.access_histories.record_access(&compactable_key, range(1, 2));
+        }
+        cache.insert("incoming".into(), Download::new(0, Bytes::from_static(b"y")).unwrap());
+
+        let expect_trim = sample_size == 2;
+        assert_eq!(cache.contains_entry(&unrequested_key, range(0, 1)), expect_trim);
+        assert_eq!(cache.contains_entry(&compactable_key, range(1, 2)), expect_trim);
+        assert_eq!(cache.contains_entry(&compactable_key, range(0, 10)), !expect_trim);
+        assert_eq!(
+            cache.get(&compactable_key, range(1, 2)).unwrap(),
+            Bytes::from_static(b"b")
+        );
+        assert!(cache.contains_entry(&"incoming".into(), range(0, 1)));
+    }
+}
+
+#[test]
 fn range_trim_waits_for_grace_and_pressure_and_reclaims_one_byte() {
     for requests in [1, MIN_REQUESTS_BEFORE_RANGE_TRIM - 1] {
         let early_pressure = cache(10);

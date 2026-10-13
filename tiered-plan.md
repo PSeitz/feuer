@@ -214,16 +214,17 @@ In-memory compaction remains an MVP feature. Feuer observes exact ranges from in
 can replace a cached larger download with smaller cached payloads biased toward observed requests, releasing
 unrequested cache memory.
 
-Compaction is pressure-driven. Policy samples at most 64 cached ranges and selects the one with the lowest recent
-retrieval value per charged allocation byte, using independent exact-range access counts with a half-life of
-262,144 requests across all keys. Standalone history owns every distinct counter for its full
-in-process lifetime, independently of cache shards and eviction. Counter metadata has no capacity limit.
+Compaction is pressure-driven. Policy searches a sample of cached ranges (64 by default) for a compactable entry first.
+If none is found, it evicts the entry with the lowest retention score. The default scorer uses recent retrieval
+value per charged allocation byte and independent exact-range access counts with a half-life of 262,144 requests
+across all keys. Standalone history owns every distinct counter for its full in-process lifetime, independently
+of cache shards and eviction. Counter metadata has no capacity limit.
 For range trimming only, history keeps at most 64 exact events per object by default
 (`FEUER_MAX_ACCESS_EVENTS_PER_KEY` overrides this). Events expire after 262,144 later
 requests across all keys by default (`FEUER_MAX_ACCESS_AGE_ACCESSES` overrides this).
-Once its grace of 64 requests across all keys expires, that same victim is always trimmed when separate copies
-of its observed request ranges reduce payload bytes, without a minimum savings percentage. If there are no
-contained requests or the copies do not reduce payload bytes, it is evicted. Grace never prevents eviction.
+Policy trims the first sampled entry whose grace of 64 requests across all keys has elapsed and whose
+observed request ranges reduce payload bytes when copied separately, without a minimum savings percentage.
+Entries with no contained requests or no payload-byte savings cannot be compacted. Grace never prevents eviction.
 Compaction creates one exact-size entry per distinct observed request range, without merging overlapping,
 adjacent, or contained ranges. Savings count every copy of overlapping bytes. Compaction creates no access
 and leaves caller-held slices valid.
@@ -374,8 +375,9 @@ The MVP is complete when tests demonstrate that:
   bound never-requested prefetch.
 - a broader memory admission cannot be compacted until 64 requests across all keys have elapsed, while
   pressure may still evict it.
-- after that grace, pressure trims the selected victim to its observed exact requests whenever their separate
-  copies reduce payload bytes, without a minimum savings percentage or separate promotion or prefetch-reuse state.
+- pressure searches its sample for a compactable entry before selecting an eviction victim. It trims the first
+  entry past its grace whose observed exact requests reduce payload bytes when copied separately, without a
+  minimum savings percentage or separate promotion or prefetch-reuse state.
 - returned `Bytes` may safely outlive cache eviction.
 - shard pressure evicts toward each shard's assigned target, while an oversized download empties its shard and remains cached even when aggregate cached payload bytes exceed the configured target.
 - pressure-driven in-memory compaction can release unrequested cached payload without changing results, and

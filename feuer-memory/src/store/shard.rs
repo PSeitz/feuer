@@ -169,18 +169,7 @@ impl MemoryCacheShard {
             return InsertOrReclaimResult::Complete(true);
         }
 
-        let Some((key, entry)) = self.select_reclaim_candidate(object_key, range, cache) else {
-            // The sample cursor advanced, but no eligible victim was found.
-            // Return to the caller so it can release the lock before sampling again.
-            return InsertOrReclaimResult::Retry { evicted: false };
-        };
-        if allow_range_trim && let Some(source) = Self::prepare_range_trim(key, entry, &cache.access_histories) {
-            return InsertOrReclaimResult::Trim(source);
-        }
-
-        let range = entry.range();
-        self.remove_entry(&key, range);
-        InsertOrReclaimResult::Retry { evicted: true }
+        self.prepare_trim_or_evict_entry(object_key, range, cache, allow_range_trim)
     }
 
     /// Inserts an entry not already covered, removes entries it contains, and returns whether any were replaced.
@@ -256,38 +245,52 @@ impl MemoryCacheShard {
         self.buffer_pool.metrics.entries.decrease(1);
     }
 
-    /// Samples eligible entries and selects the lowest retention score, breaking ties by key and range.
-    fn select_reclaim_candidate(
+    /// Prepares a trim for the first compactable sampled entry when trimming is allowed.
+    /// Otherwise evicts the lowest-scoring eligible entry, if any, breaking ties by object key and range.
+    fn prepare_trim_or_evict_entry(
         &mut self,
-        admitting_key: &ObjectKeyHash,
-        admitting_range: ByteRange,
+        incoming_key: &ObjectKeyHash,
+        incoming_range: ByteRange,
         cache: &MemoryCache,
-    ) -> Option<(ObjectKeyHash, &MemoryEntry)> {
-        sample_candidates(
+        allow_range_trim: bool,
+    ) -> InsertOrReclaimResult {
+        let mut entry_to_evict: Option<(f64, ObjectKeyHash, ByteRange)> = None;
+        for (key, range) in sample_candidates(
             &mut self.next_sample_start,
             &self.reclaim_candidates,
             cache.reclaim_sample_size,
-        )
-        .map(|(key, range)| (key, &self.entries_by_key[key].by_range[range]))
-        .filter(|(key, entry)| **key != *admitting_key || !admitting_range.contains(entry.range()))
-        .map(|(key, entry)| {
+        ) {
+            if key == incoming_key && incoming_range.contains(*range) {
+                continue;
+            }
+            let entry = &self.entries_by_key[key].by_range[range];
+            if allow_range_trim && let Some(source) = Self::prepare_range_trim(*key, entry, &cache.access_histories) {
+                return InsertOrReclaimResult::Trim(source);
+            }
             let score = cache.retention_scorer.score(
                 key,
-                entry.range(),
+                *range,
                 entry.download.allocation_charge() as u64,
                 &cache.access_histories,
             );
-            (key, entry, score)
-        })
-        .min_by(
-            |(left_key, left_entry, left_score), (right_key, right_entry, right_score)| {
-                left_score
-                    .total_cmp(right_score)
-                    .then_with(|| left_key.cmp(right_key))
-                    .then_with(|| left_entry.range().cmp(&right_entry.range()))
-            },
-        )
-        .map(|(object_key, entry, _)| (*object_key, entry))
+            if entry_to_evict
+                .as_ref()
+                .is_none_or(|(other_score, other_key, other_range)| {
+                    score
+                        .total_cmp(other_score)
+                        .then_with(|| (key, range).cmp(&(other_key, other_range)))
+                        .is_lt()
+                })
+            {
+                entry_to_evict = Some((score, *key, *range));
+            }
+        }
+        let Some((_, key, range)) = entry_to_evict else {
+            // The caller releases the shard lock before searching the next sample.
+            return InsertOrReclaimResult::Retry { evicted: false };
+        };
+        self.remove_entry(&key, range);
+        InsertOrReclaimResult::Retry { evicted: true }
     }
 
     /// Prepares a range trim by retaining its source bytes and plan after the grace period.

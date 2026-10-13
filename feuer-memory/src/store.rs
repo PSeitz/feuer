@@ -35,11 +35,10 @@ const MAX_SHARDS: usize = 64;
 /// Each shard evicts locally against its share before insertion. Admission also
 /// frees idle buffers when needed. An allocation larger than its shard's target
 /// is cached after that shard is emptied, so total usage can exceed capacity.
-/// Victims are selected shard-locally by retention score, defaulting to recent modeled
+/// A rotating sample first searches for an entry admitted at least 64 requests ago across all keys
+/// whose observed requests can be copied into fewer payload bytes. Feuer trims that entry outside
+/// the shard lock. Otherwise it evicts the lowest-scoring entry. Default scores model recent
 /// retrieval value per charged allocation byte.
-/// A rotating sample selects one victim.
-/// After a grace of 64 requests across all keys, Feuer trims that victim outside
-/// the shard lock whenever separate copies of its observed requests reduce payload bytes.
 pub struct MemoryCache {
     /// Independently locked partitions selected by complete object identity.
     shards: Box<[Mutex<MemoryCacheShard>]>,
