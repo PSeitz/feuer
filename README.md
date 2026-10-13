@@ -104,6 +104,11 @@ memory is charged its whole capacity. Whole-entry disk reads and checksum verifi
 Callback downloads default to payload-length charges because `Bytes` does not expose capacity.
 Downloads created with `AlignedBuffer::into_download` charge the buffer's whole capacity;
 other downloaders can supply a known capacity with `Download::with_allocation_charge`.
+Whole-object callbacks can return `(bytes, allocation_charge)` through
+`get_or_fetch_object_with_allocation_charge`. This preserves a shared slice's backing-capacity charge
+without copying. Ordinary `get_or_fetch_object` callbacks charge only payload length.
+Shared allocations are conservatively charged once per cached entry, not deduplicated across slices.
+Correcting the charge does not release unused bytes inside an allocation retained by a slice.
 Entry targets remain split across shards; an oversized entry empties its shard and remains cached.
 Active reads and caller-only results are outside the budget. Metadata and pending disk writes
 can also keep additional memory alive.

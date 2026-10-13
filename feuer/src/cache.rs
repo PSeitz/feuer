@@ -179,6 +179,8 @@ impl TieredMemoryDiskCache {
     /// Returns the complete object from memory, disk, or this call's callback.
     ///
     /// The callback returns the entire immutable object as [`Bytes`], including empty objects.
+    /// Callback results are charged the payload length. Use [`Self::get_or_fetch_object_with_allocation_charge`]
+    /// when the bytes retain a larger backing allocation of known capacity.
     /// Do not mix this API and [`Self::get_or_fetch`] for the same key,
     /// including after reopening the disk cache. The stored length is treated as the object length.
     pub async fn get_or_fetch_object<F, Fut, E>(
@@ -194,6 +196,35 @@ impl TieredMemoryDiskCache {
             callback()
                 .await
                 .map(|bytes| Download::new(0, bytes).expect("an object length fits in u64"))
+        })
+        .await
+    }
+
+    /// Returns a complete object and charges memory for the callback's backing allocation.
+    ///
+    /// Like [`Self::get_or_fetch_object`], but the callback returns `(bytes, allocation_charge)`.
+    /// Supply the known backing capacity, including bytes outside a shared slice.
+    /// Each entry charges the full capacity, even when entries share an allocation.
+    /// Callback bytes are not copied. The memory target remains soft.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the callback's allocation charge is smaller than the payload length.
+    pub async fn get_or_fetch_object_with_allocation_charge<F, Fut, E>(
+        &self,
+        object_key: crate::ObjectKey,
+        callback: F,
+    ) -> Result<Bytes, GetOrFetchError<E>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(Bytes, usize), E>>,
+    {
+        self.lookup_by_hash(ObjectKeyHash::from(object_key), None, || async {
+            callback().await.map(|(bytes, allocation_charge)| {
+                Download::new(0, bytes)
+                    .expect("an object length fits in u64")
+                    .with_allocation_charge(allocation_charge)
+            })
         })
         .await
     }
@@ -367,6 +398,9 @@ pub enum GetOrFetchError<E> {
 
 #[cfg(test)]
 mod download_buffer_tests;
+
+#[cfg(test)]
+mod object_allocation_charge_tests;
 
 #[cfg(all(test, not(target_os = "linux")))]
 mod request_history_tests;
