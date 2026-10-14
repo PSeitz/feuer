@@ -36,6 +36,7 @@ libc = "0.2"
 binggan = "0.17"
 blake3 = "1"
 mixtrics = { workspace = true, features = ["prometheus"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
 prometheus = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

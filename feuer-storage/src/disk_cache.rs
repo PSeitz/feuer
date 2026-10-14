@@ -1,5 +1,7 @@
 //! Cache object bytes on disk, looked up by object key and byte range.
 
+#[cfg(test)]
+mod adversarial_tests;
 mod metadata;
 mod small_entry_buffer;
 mod write_queue;

@@ -1,0 +1,4 @@
+# Saved proptest seeds, replayed before newly generated cases.
+cc f70a9177a589b8d4963082acb3af56b2e39c532d5f2207a7a167ab2f1124bfe3 # Metadata-shaped payload under key 5 becomes shard metadata when capacity grows from 256 to 258 chunks.
+cc 26f5429d0a825008c95d5bc2fd59e1a6e02eadebcc4e4a87b4d35d3f92cb5060 # Entry length u64::MAX overflows recovery arithmetic in a three-chunk image.
+cc d291b042a2516579051ea00ea145e7d0a29f83aa5cafab25428940bd5a5bc1b2 # A link to byte 1052672 is accepted despite being unaligned to a chunk boundary.

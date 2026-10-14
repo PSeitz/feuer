@@ -85,6 +85,21 @@ impl DiskChunkAllocator {
         free.free_chunk_count_by_start.values().sum::<u64>() * CHUNK_BYTES
     }
 
+    /// Chunk-number ranges with `None` for free chunks or `Some(payload_count)` for payload chunks.
+    #[cfg(test)]
+    pub(super) fn free_and_payload_chunks(&self) -> Vec<(Range<u64>, Option<usize>)> {
+        let payload_chunks = self.payload_chunks.lock().unwrap();
+        let free = self.free.lock().unwrap();
+        let free_runs = free
+            .free_chunk_count_by_start
+            .iter()
+            .map(|(&start, &count)| (start..start + count, None));
+        let payload_runs = payload_chunks
+            .values()
+            .map(|(reserved_chunks, count)| (reserved_chunks.chunk_numbers.clone(), Some(*count)));
+        free_runs.chain(payload_runs).collect()
+    }
+
     #[cfg(test)]
     pub(super) fn for_disk_range(disk_range: Range<u64>) -> Self {
         Self::with_metrics(disk_range, DiskMetrics::noop())
