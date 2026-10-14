@@ -33,9 +33,12 @@ and derived inputs, which are not the FETR format.
   arrival timing and exactly-once completion. Queue only descriptors before lookup
   tasks allocate payloads. Do not throttle arrivals, drop requests, or hide backlog.
   Historical pinned harnesses below used one serial consumer per CPU.
-- Each source miss independently allocates zero-filled bytes for the requested
-  logical range: `Bytes::from(vec![0; length])`. No network delay, shared payloads,
-  aligned-download replacement, or experimental download pool.
+- Each source miss independently acquires a buffer through the cache's existing
+  `allocate_buffer` pool, zero-fills the requested bytes, and preserves backing
+  capacity with `into_download`. There are no shared source downloads or expanded
+  ranges. Downloads are immediate unless the experiment explicitly selects
+  `--simulate-s3`. Historical pinned replays used exact-length `Vec` allocations
+  and must not be relabeled as using the buffer pool.
 - Match allocators between binaries. The historical comparison used system jemalloc:
   `env -u MALLOC_CONF LD_PRELOAD=/lib/aarch64-linux-gnu/libjemalloc.so.2`.
   Record the library version and hash.
