@@ -124,12 +124,12 @@ guarantee durability or persistence ordering after power loss; recovery is best-
 
 Open waits for recovery, which runs on Tokio's blocking pool. Recovery follows metadata links with one 1-MiB read per
 metadata chunk; it never scans payload chunks. Zero-filled chunks, read failures,
-links outside the current shard, cycles, or corrupt link pages terminate a chain.
+links outside the current shard, links not aligned to a chunk boundary, cycles, or corrupt link pages terminate a chain.
 Corrupt record pages are discarded independently.
 
 A page's checksum and type/version tag establish the writer's format contract.
 Readers use fixed-size pages and records and do not recheck reserved fields, slot
-counts, padding, range arithmetic, or address alignment. `Download` guarantees a
+counts, padding, range arithmetic, or payload address alignment. `Download` guarantees a
 representable object range; payload packing places its aligned storage inside
 reserved consecutive chunks, and metadata links use reserved chunk addresses.
 An unused record is all-zero.

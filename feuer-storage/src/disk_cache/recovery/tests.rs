@@ -242,10 +242,11 @@ async fn torn_entry_metadata_page_does_not_reject_other_pages() {
 }
 
 #[tokio::test]
-async fn corrupt_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
+async fn corrupt_unaligned_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
     for (next_chunk_address, corrupt_checksum) in [
         (0, true),
         (0, false),
+        (CHUNK_BYTES + METADATA_PAGE_BYTES as u64, false),
         (2 * CHUNK_BYTES, false),
         (4 * CHUNK_BYTES, false),
     ] {
@@ -258,7 +259,12 @@ async fn corrupt_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
         if corrupt_checksum {
             page[0] ^= 1;
         }
-        cache.disk.file.write_at(offset, &Bytes::from(page)).await.unwrap();
+        let page = Bytes::from(page);
+        if !next_chunk_address.is_multiple_of(CHUNK_BYTES) {
+            // Keep the target nonzero so recovery cannot dismiss it as an unwritten chunk.
+            cache.disk.file.write_at(next_chunk_address, &page).await.unwrap();
+        }
+        cache.disk.file.write_at(offset, &page).await.unwrap();
         let cache = reopen(directory.path(), cache).await;
         assert!(cache.get(&ObjectKeyHash(1), range(0, 1)).await.is_some());
         assert!(cache.insert(ObjectKeyHash(2), download(0, 1)).await.unwrap());

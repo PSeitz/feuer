@@ -61,8 +61,8 @@ impl DiskCacheShard {
     /// Reads the metadata chain and decodes its records before reserving payload chunks.
     async fn load_metadata_chain(&self, file: &DataFile, mut address: u64) {
         let mut metadata = metadata::MetadataPages::default();
-        while address != NO_CHUNK {
-            // The writer aligns links. Reservations enforce current shard bounds and stop cycles.
+        while address != NO_CHUNK && address.is_multiple_of(CHUNK_BYTES) {
+            // Reservations enforce current shard bounds and stop cycles.
             let Some(mut reserved_chunk) = self.allocator.reserve_chunks_at(address / CHUNK_BYTES, 1) else {
                 break;
             };
