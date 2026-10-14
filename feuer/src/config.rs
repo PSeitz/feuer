@@ -257,23 +257,12 @@ mod tests {
         const NAME: &str = "FEUER_ACCESS_COUNT_HALF_LIFE";
         const CHILD: &str = "FEUER_TEST_HALF_LIFE_CHILD";
         if let Ok(expected) = std::env::var(CHILD) {
-            let config = CacheConfig::new("cache", 1, 1);
-            let expected = expected
-                .parse::<u64>()
-                .map_err(|_| CacheConfigError::InvalidAccessCountHalfLife);
             assert_eq!(
-                config
-                    .as_ref()
-                    .map(|config| config.access_count_half_life())
-                    .map_err(|error| *error),
+                CacheConfig::new("cache", 1, 1).map(|config| config.access_count_half_life()),
                 expected
+                    .parse::<u64>()
+                    .map_err(|_| CacheConfigError::InvalidAccessCountHalfLife)
             );
-            if let Ok(config) = config {
-                assert_eq!(
-                    config.with_access_count_half_life(17).unwrap().access_count_half_life(),
-                    17
-                );
-            }
             return;
         }
         for (setting, expected) in [

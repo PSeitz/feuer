@@ -71,12 +71,6 @@ Separate tier scoring does not add a write-on-eviction mechanism.
 
 ## Access history and trimming
 
-`CacheConfig::with_access_count_half_life(n)` sets how quickly this cache forgets demand,
-measured in requests across its keys, not wall-clock time. Both tiers use the same half-life.
-It is fixed at cache creation and may differ between cache instances in the same process.
-`CacheConfig::new` reads `FEUER_ACCESS_COUNT_HALF_LIFE`, defaulting to 262,144 requests.
-The historian applies this setting when updating and evaluating counts.
-
 Each started request records its requested range or whole-object demand once,
 before lookup, in `feuer-historian`. Failed requests, invalid downloads, and
 requests canceled after starting count as demand. Raw cache reads, insertions,

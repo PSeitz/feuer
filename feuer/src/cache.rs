@@ -716,43 +716,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_instances_decay_access_counts_independently() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut caches = Vec::new();
-        for (half_life, disk_bytes) in [(2, 0), (4, 4 << 20)] {
-            let config = CacheConfig::new(directory.path(), disk_bytes, 1 << 20)
-                .unwrap()
-                .with_access_count_half_life(half_life)
-                .unwrap();
-            caches.push(TieredMemoryDiskCache::open(config, None, None).await.unwrap());
-        }
-        let key = ObjectKeyHash::from("old");
-        let other = ObjectKeyHash::from("other");
-        let scorer = AvoidedRetrievalCostScorer::default();
-        for cache in &caches {
-            let history = cache.inner.memory.access_histories();
-            history.record_access(&key, range(0, 1));
-            for _ in 0..4 {
-                history.record_access(&other, range(0, 1));
-            }
-        }
-        for (cache, expected) in caches.iter().zip([0.25, 0.5]) {
-            let history = cache.inner.memory.access_histories();
-            assert_eq!(scorer.score(&key, range(0, 1), 1, history), expected);
-            if let Some(disk) = &cache.inner.disk {
-                assert!(Arc::ptr_eq(history, &disk.access_histories()));
-                assert_eq!(scorer.score(&key, range(0, 1), 1, &disk.access_histories()), expected);
-            }
-        }
-    }
-
-    #[tokio::test]
     async fn shared_io_queues_preserve_independent_whole_object_caches_in_one_directory() {
         let directory = tempfile::tempdir().unwrap();
         let (metrics_registry, backend) = registry();
         let queues = IoQueues::new().unwrap();
         let first = TieredMemoryDiskCache::open(
-            CacheConfig::new(directory.path(), 4 << 20, 1 << 20).unwrap(),
+            CacheConfig::new(directory.path(), 4 << 20, 1 << 20)
+                .unwrap()
+                .with_access_count_half_life(2)
+                .unwrap(),
             Some(&backend),
             Some(queues.clone()),
         )
@@ -763,6 +735,8 @@ mod tests {
             CacheConfig::new(directory.path(), 4 << 20, 1 << 20)
                 .unwrap()
                 .with_file_name("objects")
+                .unwrap()
+                .with_access_count_half_life(4)
                 .unwrap(),
             None,
             Some(queues),
@@ -782,6 +756,13 @@ mod tests {
             first.inner.memory.access_histories(),
             second.inner.memory.access_histories()
         ));
+        for (cache, half_life) in [(&first, 2), (&second, 4)] {
+            assert_eq!(cache.inner.memory.access_histories().half_life(), half_life);
+            assert_eq!(
+                cache.inner.disk.as_ref().unwrap().access_histories().half_life(),
+                half_life
+            );
+        }
         let key = "object-v1";
         let hash = ObjectKeyHash::from(key);
         let first_bytes = Bytes::from_static(b"first object");

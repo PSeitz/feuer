@@ -53,36 +53,6 @@ fn access_event_limit_environment_override() {
 }
 
 #[test]
-fn histories_use_their_own_half_lives_for_updates_and_reads() {
-    let histories = [
-        ObjectAccessHistories::with_half_life(2),
-        ObjectAccessHistories::with_half_life(4),
-    ];
-    let key = ObjectKeyHash::from("object");
-    let other = ObjectKeyHash::from("other");
-    for history in &histories {
-        history.record_access(&key, None);
-        for _ in 0..3 {
-            history.record_access(&other, None);
-        }
-        history.record_access(&key, None);
-    }
-    for (history, expected) in histories.iter().zip([1.25, 1.5]) {
-        history.read_request_counts(&key, |counts, clock| {
-            assert_eq!(counts[0].1.decayed_count(clock, history.half_life()), expected);
-        });
-        for _ in 0..4 {
-            history.record_access(&other, None);
-        }
-    }
-    for (history, expected) in histories.iter().zip([0.3125, 0.75]) {
-        history.read_request_counts(&key, |counts, clock| {
-            assert_eq!(counts[0].1.decayed_count(clock, history.half_life()), expected);
-        });
-    }
-}
-
-#[test]
 fn access_age_environment_override() {
     if std::env::var_os("FEUER_TEST_ACCESS_AGE_CHILD").is_some() {
         assert_eq!(*MAX_ACCESS_AGE_ACCESSES, 65_536);
@@ -242,21 +212,22 @@ fn whole_object_requests_share_one_counter_and_have_no_byte_range_events() {
 
 #[test]
 fn counts_decay_and_new_accesses_add_one() {
-    let requested = range(2, 4);
-    let mut history = RangeAccessHistory::default();
-    history.record(requested, 0, DEFAULT_ACCESS_COUNT_HALF_LIFE);
-    assert_eq!(range_count(&history, requested, 0), 1.0);
-    assert_eq!(range_count(&history, requested, DEFAULT_ACCESS_COUNT_HALF_LIFE), 0.5);
-    history.record(
-        requested,
-        DEFAULT_ACCESS_COUNT_HALF_LIFE,
-        DEFAULT_ACCESS_COUNT_HALF_LIFE,
-    );
-    assert_eq!(range_count(&history, requested, DEFAULT_ACCESS_COUNT_HALF_LIFE), 1.5);
-    assert_eq!(
-        range_count(&history, requested, DEFAULT_ACCESS_COUNT_HALF_LIFE * 2),
-        0.75
-    );
+    let key = ObjectKeyHash::from("object");
+    for half_life in [2, 4, DEFAULT_ACCESS_COUNT_HALF_LIFE] {
+        let histories = ObjectAccessHistories::with_half_life(half_life);
+        histories.record_access(&key, range(2, 4));
+        for _ in 1..half_life {
+            histories.record_access(&ObjectKeyHash::from("other"), None);
+        }
+        histories.record_access(&key, range(2, 4));
+        histories.read_request_counts(&key, |counts, clock| {
+            assert_eq!(counts[0].1.decayed_count(clock, histories.half_life()), 1.5);
+            assert_eq!(
+                counts[0].1.decayed_count(clock + half_life, histories.half_life()),
+                0.75
+            );
+        });
+    }
 }
 
 #[test]
