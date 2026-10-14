@@ -1,0 +1,15 @@
+[package]
+name = "object-allocation-accounting"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+feuer = { path = "../../../../feuer" }
+mixtrics = { version = "0.2", features = ["prometheus"] }
+prometheus = { version = "0.14", default-features = false }
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[profile.dev]
+debug = false
