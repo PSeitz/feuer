@@ -6,7 +6,7 @@ use feuer_types::{ByteRange, Download, ObjectKeyHash};
 
 use super::{
     MemoryCache,
-    shard::{InsertOrReclaimResult, MIN_REQUESTS_BEFORE_RANGE_TRIM},
+    shard::{InsertResult, MIN_REQUESTS_BEFORE_RANGE_TRIM},
     shard_capacity_for,
 };
 use crate::{BufferPool, MemoryMetrics, retention::decayed_avoided_retrieval_cost};
@@ -141,9 +141,7 @@ fn trimming_replaces_allocation_capacity_with_copied_payload_capacity() {
             .unwrap()
             .with_allocation_charge(capacity),
     );
-    for _ in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM {
-        cache.access_histories.record_access(&key, range(10, 20));
-    }
+    repeat_request(&cache, key, range(10, 20), MIN_REQUESTS_BEFORE_RANGE_TRIM);
     cache.insert("incoming".into(), Download::new(0, Bytes::from_static(b"x")).unwrap());
     assert_eq!(cache.used_bytes(), 11);
     assert_eq!(cache.buffer_pool().idle_bytes(), 0);
@@ -189,6 +187,13 @@ fn cache(capacity: u64) -> MemoryCache {
 
 fn cache_with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>) -> MemoryCache {
     MemoryCache::with_shard_count(BufferPool::new(capacity, metrics), 1)
+}
+
+/// Adds requests to history without looking up cached bytes.
+fn repeat_request(cache: &MemoryCache, key: ObjectKeyHash, range: ByteRange, count: u64) {
+    for _ in 0..count {
+        cache.access_histories.record_access(&key, range);
+    }
 }
 
 fn accessed_ranges(cache: &MemoryCache, key: &ObjectKeyHash) -> Vec<ByteRange> {
@@ -288,31 +293,33 @@ fn equal_cost_eviction_uses_key_order_not_sample_order() {
 
 #[test]
 fn reclaim_sampling_advances_past_contained_ranges() {
-    let cache = cache(4).with_reclaim_sample_size(1);
+    let cache = cache(5).with_reclaim_sample_size(1);
     let key = ObjectKeyHash::from("object");
     for (start, bytes) in [
-        (0, Bytes::from_static(b"a")),
-        (1, Bytes::from_static(b"b")),
-        (2, Bytes::from_static(b"cd")),
+        (0, Bytes::from_static(b"ab")),
+        (2, Bytes::from_static(b"c")),
+        (3, Bytes::from_static(b"de")),
     ] {
         cache.insert(key, Download::new(start, bytes).unwrap());
     }
+    repeat_request(&cache, key, range(0, 1), MIN_REQUESTS_BEFORE_RANGE_TRIM);
     let mut shard = cache.shards[0].lock();
-    let replacement = Download::new(0, Bytes::from_static(b"abc")).unwrap();
+    assert_eq!(shard.compaction_candidate_count(), 3);
+    let replacement = Download::new(0, Bytes::from_static(b"abcd")).unwrap();
     for (expected_entries, evicted) in [(3, false), (3, false), (2, true)] {
         assert!(matches!(
-            shard.try_admit_or_reclaim(&key, &replacement, &cache, false),
-            InsertOrReclaimResult::Retry { evicted: removed } if removed == evicted
+            shard.try_insert(&key, &replacement, &cache, true),
+            InsertResult::Retry { evicted: removed } if removed == evicted
         ));
         assert_eq!(shard.entry_count(), expected_entries);
     }
-    // The partial overlap is eligible. The two ranges fully contained in the incoming download were skipped.
+    // Compaction and eviction skip the contained entries. The partial overlap is eligible.
     assert!(matches!(
-        shard.try_admit_or_reclaim(&key, &replacement, &cache, false),
-        InsertOrReclaimResult::Complete(true)
+        shard.try_insert(&key, &replacement, &cache, false),
+        InsertResult::Inserted
     ));
     assert_eq!(shard.entry_count(), 1);
-    assert_eq!(shard.used_bytes(), 3);
+    assert_eq!(shard.used_bytes(), 4);
 }
 
 #[test]
@@ -568,9 +575,7 @@ fn access_history_caps_event_count_and_preserves_repeated_requests() {
     let key = ObjectKeyHash::from("object");
     insert(&cache, key, download(range(0, 1), Bytes::from_static(b"a")));
 
-    for _ in 0..*MAX_ACCESS_EVENTS_PER_KEY + 17 {
-        cache.access_histories.record_access(&key, range(0, 1));
-    }
+    repeat_request(&cache, key, range(0, 1), *MAX_ACCESS_EVENTS_PER_KEY as u64 + 17);
 
     assert_eq!(access_history_len(&cache, &key), *MAX_ACCESS_EVENTS_PER_KEY);
     assert_eq!(
@@ -591,9 +596,7 @@ fn evicts_entry_with_lower_retrieval_value() {
         insert(&cache, cold, payload.clone());
 
         cache.access_histories.record_access(&cold, range(0, 1));
-        for _ in 0..hot_accesses {
-            cache.access_histories.record_access(&hot, range(0, hot_request_bytes));
-        }
+        repeat_request(&cache, hot, range(0, hot_request_bytes), hot_accesses);
         insert(&cache, incoming, payload);
 
         assert!(cache.get(&hot, range(0, hot_request_bytes)).is_some());
@@ -627,12 +630,8 @@ fn stale_frequency_decays_below_recent_accesses() {
     insert(&cache, fresh, download(range(0, 1), Bytes::from_static(b"f")));
     insert(&cache, clock, download(range(0, 1), Bytes::from_static(b"c")));
 
-    for _ in 0..8 {
-        cache.access_histories.record_access(&stale, range(0, 1));
-    }
-    for _ in 0..cache.access_histories.half_life() * 4 {
-        cache.access_histories.record_access(&clock, range(0, 1));
-    }
+    repeat_request(&cache, stale, range(0, 1), 8);
+    repeat_request(&cache, clock, range(0, 1), cache.access_histories.half_life() * 4);
     cache.access_histories.record_access(&fresh, range(0, 1));
     insert(
         &cache,
@@ -645,39 +644,52 @@ fn stale_frequency_decays_below_recent_accesses() {
 }
 
 #[test]
-fn compaction_precedes_eviction_within_sample() {
-    for (sample_size, compactable_first) in [(1, false), (2, false), (2, true)] {
-        let cache = cache(11).with_reclaim_sample_size(sample_size);
-        let unrequested_key = ObjectKeyHash::from("unrequested");
-        let compactable_key = ObjectKeyHash::from("compactable");
-        let mut downloads = [
-            (unrequested_key, Download::new(0, Bytes::from_static(b"x")).unwrap()),
-            (
-                compactable_key,
-                Download::new(0, Bytes::from_static(b"abcdefghij")).unwrap(),
-            ),
-        ];
-        if compactable_first {
-            downloads.reverse();
-        }
-        for (key, download) in downloads {
-            cache.insert(key, download);
-        }
-        // The compactable entry has a higher retention score than the unrequested entry.
-        for _ in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM {
-            cache.access_histories.record_access(&compactable_key, range(1, 2));
-        }
-        cache.insert("incoming".into(), Download::new(0, Bytes::from_static(b"y")).unwrap());
+fn pressure_compacts_all_mature_candidates_before_admission() {
+    let cache = cache(51).with_reclaim_sample_size(1);
+    // Eviction's first sample would select this entry, but compaction must run first.
+    cache.insert(
+        "unrequested".into(),
+        Download::new(0, Bytes::from_static(b"x")).unwrap(),
+    );
+    let keys = ["removed", "first", "second", "replaced", "moved"].map(ObjectKeyHash::from);
+    for key in keys {
+        cache.insert(key, Download::new(0, Bytes::from_static(b"abcdefghij")).unwrap());
+        cache.access_histories.record_access(&key, range(1, 2));
+    }
+    repeat_request(&cache, "clock".into(), range(0, 1), MIN_REQUESTS_BEFORE_RANGE_TRIM);
+    assert_eq!(cache.shards[0].lock().compaction_candidate_count(), 6);
+    let [removed, first, second, replaced, moved] = keys;
+    cache.remove(&removed, range(0, 10));
+    cache.insert(replaced, Download::new(0, Bytes::from_static(b"abcdefghijk")).unwrap());
+    // Removal must not move the young replacement ahead of mature candidates.
+    cache.remove(&moved, range(0, 10));
+    assert_eq!(cache.shards[0].lock().compaction_candidate_count(), 4);
 
-        let expect_trim = sample_size == 2;
-        assert_eq!(cache.contains_entry(&unrequested_key, range(0, 1)), expect_trim);
-        assert_eq!(cache.contains_entry(&compactable_key, range(1, 2)), expect_trim);
-        assert_eq!(cache.contains_entry(&compactable_key, range(0, 10)), !expect_trim);
-        assert_eq!(
-            cache.get(&compactable_key, range(1, 2)).unwrap(),
-            Bytes::from_static(b"b")
-        );
-        assert!(cache.contains_entry(&"incoming".into(), range(0, 1)));
+    // Either compaction frees enough space, but both must run before admission.
+    cache.insert("incoming".into(), Download::new(0, Bytes::from(vec![0; 20])).unwrap());
+    for key in [first, second] {
+        assert!(cache.contains_entry(&key, range(1, 2)));
+    }
+    assert_eq!(cache.shards[0].lock().compaction_candidate_count(), 4);
+    assert!(cache.contains_entry(&"unrequested".into(), range(0, 1)));
+    assert!(cache.contains_entry(&replaced, range(0, 11)));
+    assert_eq!(cache.used_bytes(), 34);
+}
+
+#[test]
+fn compaction_does_not_recheck_entries_after_requests_change() {
+    let cache = cache(20);
+    let key = ObjectKeyHash::from("source");
+    for key in [key, "evicted".into()] {
+        cache.insert(key, Download::new(0, Bytes::from_static(b"abcdefghij")).unwrap());
+    }
+    let requests = (*MAX_ACCESS_EVENTS_PER_KEY as u64).max(MIN_REQUESTS_BEFORE_RANGE_TRIM);
+    for (requested, incoming, bytes) in [(range(0, 10), "first", 1), (range(1, 2), "second", 10)] {
+        repeat_request(&cache, key, requested, requests);
+        cache.get(&key, requested).unwrap();
+        cache.insert(incoming.into(), Download::new(0, Bytes::from(vec![0; bytes])).unwrap());
+        assert!(cache.contains_entry(&key, range(0, 10)));
+        assert_eq!(cache.shards[0].lock().compaction_candidate_count(), 1);
     }
 }
 
@@ -687,9 +699,7 @@ fn range_trim_waits_for_grace_and_pressure_and_reclaims_one_byte() {
         let early_pressure = cache(10);
         let early_key = ObjectKeyHash::from("early-download");
         early_pressure.insert(early_key, download(range(0, 10), Bytes::from_static(b"abcdefghij")));
-        for _ in 0..requests {
-            early_pressure.access_histories.record_access(&early_key, range(1, 10));
-        }
+        repeat_request(&early_pressure, early_key, range(1, 10), requests);
         insert(
             &early_pressure,
             ObjectKeyHash::from("early-pressure"),
@@ -709,11 +719,7 @@ fn range_trim_waits_for_grace_and_pressure_and_reclaims_one_byte() {
     assert_eq!(returned, Bytes::from_static(b"bcdefghij"));
     assert_eq!(returned.as_ptr(), original.slice(1..).as_ptr());
     cache.access_histories.record_access(&key, range(1, 10));
-    for _ in 1..MIN_REQUESTS_BEFORE_RANGE_TRIM {
-        cache
-            .access_histories
-            .record_access(&ObjectKeyHash::from("clock"), range(0, 1));
-    }
+    repeat_request(&cache, "clock".into(), range(0, 1), MIN_REQUESTS_BEFORE_RANGE_TRIM - 1);
     assert_eq!(cache.used_bytes(), 10);
     assert!(cache.contains_entry(&key, range(0, 10)), "trimming requires pressure");
     insert(&cache, incoming, download(range(0, 1), Bytes::from_static(b"x")));
@@ -750,9 +756,7 @@ fn range_trim_preserves_disjoint_requested_coverage_without_filling_gaps() {
     insert(&cache, key, download(range(10, 20), Bytes::from_static(b"abcdefghij")));
     cache.access_histories.record_access(&key, range(11, 13));
     cache.access_histories.record_access(&key, range(17, 19));
-    for _ in 2..MIN_REQUESTS_BEFORE_RANGE_TRIM {
-        cache.access_histories.record_access(&key, range(11, 13));
-    }
+    repeat_request(&cache, key, range(11, 13), MIN_REQUESTS_BEFORE_RANGE_TRIM - 2);
     assert!(compacted.lock().is_empty());
 
     insert(
@@ -837,12 +841,10 @@ fn range_trim_requires_only_the_exact_source_range() {
         let key = ObjectKeyHash::from("source");
         let source = download(range(0, 10), Bytes::from_static(b"abcdefghij"));
         cache.insert(key, source.clone());
-        for _ in 0..MIN_REQUESTS_BEFORE_RANGE_TRIM {
-            cache.access_histories.record_access(&key, range(2, 4));
-        }
+        repeat_request(&cache, key, range(2, 4), MIN_REQUESTS_BEFORE_RANGE_TRIM);
         let trim_source = {
             let mut shard = cache.shards[0].lock();
-            let InsertOrReclaimResult::Trim(source) = shard.try_admit_or_reclaim(
+            let InsertResult::Trim(mut sources) = shard.try_insert(
                 &ObjectKeyHash::from("incoming"),
                 &Download::new(0, Bytes::from_static(b"01234567890")).unwrap(),
                 &cache,
@@ -850,7 +852,8 @@ fn range_trim_requires_only_the_exact_source_range() {
             ) else {
                 panic!("expected a trim");
             };
-            source
+            assert_eq!(sources.len(), 1);
+            sources.pop().unwrap()
         };
         let mut replacement = trim_source.copy_replacement_payloads();
         match change {
@@ -873,16 +876,21 @@ fn range_trim_requires_only_the_exact_source_range() {
                 // A partial overlap can cover the replacement range without replacing the source.
                 cache.insert(key, download(range(2, 11), Bytes::from_static(b"cdefghijk")));
             }
-            _ => {}
+            _ => {
+                // Lookups cannot enqueue the source again while copying is outside the shard lock.
+                cache.get(&key, range(2, 4)).unwrap();
+                assert_eq!(cache.shards[0].lock().compaction_candidate_count(), 0);
+            }
         }
         let mut shard = cache.shards[0].lock();
         // A request recorded after copying does not invalidate the plan or need the shard lock.
         cache.access_histories.record_access(&key, range(6, 8));
         let used_bytes_before_trim = shard.used_bytes();
         assert_eq!(
-            shard.publish_range_trim(&mut replacement, cache.access_histories.request_count()),
+            shard.publish_range_trim(&mut replacement, &cache.access_histories),
             published
         );
+        assert_eq!(shard.compaction_candidate_count(), expected_entries as usize);
         if change == 4 {
             assert_eq!(
                 replacement.payloads.len(),

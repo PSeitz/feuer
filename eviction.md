@@ -82,11 +82,13 @@ shards. One atomic request clock supplies global request-age decay. Every distin
 object's lifetime. Repeated exact requests update the same counter. Counter
 metadata has no capacity limit and is not persisted across restarts.
 
-Under memory pressure, after a grace of 64 requests across all keys, the selected
-victim is trimmed to its observed request ranges if their separate copies reduce
-payload bytes. There is no minimum savings percentage. Otherwise it is evicted.
-Grace never prevents eviction. Whole-object entries are evicted rather than
-trimmed to partial ranges.
+Insertion appends each entry to a compaction deque ordered by insertion request
+count. On its first pressure attempt, admission binary-searches and drains the
+prefix aged at least 64 requests across all keys. Each candidate is checked once,
+with no minimum savings percentage. All byte-saving plans run before sampled
+eviction, even if the first frees enough space. Entries covered by the incoming
+download are skipped. Removal filters candidates without changing their order.
+Grace never prevents eviction. Whole-object entries are evicted rather than trimmed.
 
 Trimming uses recent-access events with per-object count and age limits, not the
 full counter set. Each distinct range is copied separately, including overlapping

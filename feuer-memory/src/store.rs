@@ -11,7 +11,7 @@ use feuer_types::{ByteRange, Download, ObjectKeyHash};
 use parking_lot::Mutex;
 use rustc_hash::FxBuildHasher;
 
-use self::shard::{InsertOrReclaimResult, MemoryCacheShard};
+use self::shard::{InsertResult, MemoryCacheShard};
 use crate::{
     BufferPool, MemoryMetrics,
     buffer::DEFAULT_IDLE_BUFFER_POOL_PERCENT,
@@ -35,10 +35,10 @@ const MAX_SHARDS: usize = 64;
 /// Each shard evicts locally against its share before insertion. Admission also
 /// frees idle buffers when needed. An allocation larger than its shard's target
 /// is cached after that shard is emptied, so total usage can exceed capacity.
-/// A rotating sample first searches for an entry admitted at least 64 requests ago across all keys
-/// whose observed requests can be copied into fewer payload bytes. Feuer trims that entry outside
-/// the shard lock. Otherwise it evicts the lowest-scoring entry. Default scores model recent
-/// retrieval value per charged allocation byte.
+/// Under pressure, entries admitted at least 64 requests ago across all keys are checked once for compaction.
+/// Every byte-saving plan is processed, copying payloads outside the shard lock.
+/// If space is still needed, a rotating sample selects the lowest-scoring entry for eviction.
+/// Default scores model recent retrieval value per charged allocation byte.
 pub struct MemoryCache {
     /// Independently locked partitions selected by complete object identity.
     shards: Box<[Mutex<MemoryCacheShard>]>,
@@ -118,7 +118,7 @@ impl MemoryCache {
         self
     }
 
-    /// Sets the maximum candidates inspected per decision. Panics if zero.
+    /// Sets the maximum candidates inspected per eviction decision. Compaction does not sample. Panics if zero.
     pub fn with_reclaim_sample_size(mut self, sample_size: usize) -> Self {
         assert!(sample_size > 0, "reclaim sample size must be greater than zero");
         self.reclaim_sample_size = sample_size;
@@ -170,34 +170,34 @@ impl MemoryCache {
     /// partial overlaps coexist.
     /// Returns whether the download was inserted rather than already covered.
     pub fn insert(&self, object_key: ObjectKeyHash, download: Download) -> bool {
-        let shard_index = self.shard_index(&object_key);
-        let mut allow_range_trim = true;
+        let shard = &self.shards[self.shard_index(&object_key)];
+        let mut compact_before_eviction = true;
         let mut evicted_any_entry = false;
         loop {
-            let insert_or_reclaim_result =
-                self.shards[shard_index]
-                    .lock()
-                    .try_admit_or_reclaim(&object_key, &download, self, allow_range_trim);
-            match insert_or_reclaim_result {
-                InsertOrReclaimResult::Complete(inserted) => {
+            let insert_result = shard
+                .lock()
+                .try_insert(&object_key, &download, self, compact_before_eviction);
+            compact_before_eviction = false;
+            match insert_result {
+                InsertResult::Inserted | InsertResult::AlreadyCovered => {
                     if evicted_any_entry {
                         self.buffer_pool.metrics.eviction_triggering_insertions.increase(1);
                     }
-                    return inserted;
+                    return matches!(insert_result, InsertResult::Inserted);
                 }
-                InsertOrReclaimResult::Retry { evicted } => evicted_any_entry |= evicted,
-                InsertOrReclaimResult::Trim(source) => {
-                    // Payload copying is deliberately outside the shard lock.
-                    // Publication checks that the exact source range is still cached, not history.
-                    let mut replacement = source.copy_replacement_payloads();
-                    let request_count = self.access_histories.request_count();
-                    // If the source disappeared, fall back to eviction so admission cannot starve.
-                    allow_range_trim = self.shards[shard_index]
-                        .lock()
-                        .publish_range_trim(&mut replacement, request_count);
-                    if allow_range_trim && let Some(callback) = &self.compaction_callback {
-                        for download in replacement.payloads {
-                            callback(replacement.object_key, download);
+                InsertResult::Retry { evicted } => evicted_any_entry |= evicted,
+                InsertResult::Trim(sources) => {
+                    // Process every trim before retrying admission, even if earlier trims freed enough space.
+                    for source in sources {
+                        // Copy outside the shard lock. Publication checks only that the source range remains cached.
+                        let mut replacement = source.copy_replacement_payloads();
+                        let published = shard
+                            .lock()
+                            .publish_range_trim(&mut replacement, &self.access_histories);
+                        if published && let Some(callback) = &self.compaction_callback {
+                            for download in replacement.payloads {
+                                callback(replacement.object_key, download);
+                            }
                         }
                     }
                 }
