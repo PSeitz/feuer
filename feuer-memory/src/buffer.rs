@@ -40,10 +40,7 @@ pub(crate) const BUCKET_COUNT: usize = BUFFER_SIZES.len() + 1;
 
 /// Bucket of the smallest fixed size that fits `length`, or the bucket above the largest size.
 pub(crate) fn bucket_index(length: usize) -> usize {
-    BUFFER_SIZES
-        .iter()
-        .position(|&size| length <= size)
-        .unwrap_or(BUFFER_SIZES.len())
+    BUFFER_SIZES.partition_point(|&size| size < length)
 }
 
 /// Default maximum share of memory capacity occupied by idle buffers across all buckets.
@@ -100,7 +97,7 @@ impl BufferPool {
 
     /// Fresh backing capacity for a length. Reuse may retain less than 10% spare capacity.
     pub fn allocation_capacity(length: usize) -> usize {
-        BUFFER_SIZES.into_iter().find(|&size| length <= size).unwrap_or(length)
+        BUFFER_SIZES.get(bucket_index(length)).copied().unwrap_or(length)
     }
 
     /// Takes or allocates a buffer. Above 64 MiB, reuse grows to fit and shrinks only

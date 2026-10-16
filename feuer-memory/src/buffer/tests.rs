@@ -1,6 +1,14 @@
 use super::*;
 use crate::test_metrics::{registry, value};
 
+fn buffer_pool_bytes(registry: &prometheus::Registry, bucket: &str, status: &str) -> f64 {
+    value(
+        registry,
+        "feuer_io_buffer_pool_bytes",
+        &[("bucket", bucket), ("status", status)],
+    )
+}
+
 #[test]
 fn size_boundaries_round_up_without_exposing_spare_capacity() {
     let pool = BufferPool::new(100 * *BUFFER_SIZES.last().unwrap() as u64, MemoryMetrics::noop());
@@ -53,11 +61,7 @@ fn cache_pressure_frees_larger_idle_buffers_and_updates_bucket_gauges() {
     let pool = BufferPool::new(capacity, MemoryMetrics::new(&backend));
     let idle = |size: usize| {
         let bucket = format!("{:.0}", bytesize::ByteSize(size as u64));
-        value(
-            &registry,
-            "feuer_io_buffer_pool_bytes",
-            &[("bucket", &bucket), ("status", "idle")],
-        )
+        buffer_pool_bytes(&registry, &bucket, "idle")
     };
     for &size in &BUFFER_SIZES[..3] {
         drop(pool.allocate(size).unwrap());
@@ -110,13 +114,7 @@ fn large_buffers_are_resized_on_reuse() {
     assert_eq!(BufferPool::allocation_capacity(length), length);
     assert_eq!(BufferPool::allocation_capacity(usize::MAX), usize::MAX);
     let pool = BufferPool::new(100 * 2 * length as u64, MemoryMetrics::new(&backend));
-    let large = |status| {
-        value(
-            &registry,
-            "feuer_io_buffer_pool_bytes",
-            &[("bucket", ">64 MiB"), ("status", status)],
-        )
-    };
+    let large = |status| buffer_pool_bytes(&registry, ">64 MiB", status);
     let mut buffer = pool.allocate(length).unwrap();
     assert_eq!(buffer.capacity(), length);
     assert_eq!(large("used"), length as f64);
@@ -166,13 +164,7 @@ fn large_buffers_shrink_only_when_capacity_is_at_least_ten_percent_larger() {
     let mib = 1024 * 1024;
     let capacity = 77 * mib;
     let pool = BufferPool::new(100 * capacity as u64, MemoryMetrics::new(&backend));
-    let large = |status| {
-        value(
-            &registry,
-            "feuer_io_buffer_pool_bytes",
-            &[("bucket", ">64 MiB"), ("status", status)],
-        )
-    };
+    let large = |status| buffer_pool_bytes(&registry, ">64 MiB", status);
     let buffer = pool.allocate(capacity).unwrap();
     let address = buffer.as_ref().as_ptr();
     drop(buffer);
@@ -228,13 +220,7 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         let pool = BufferPool::new(capacity, metrics.clone());
         let gauge = |name| value(&registry, name, &[]);
         let bucket = format!("{:.0}", bytesize::ByteSize(size as u64));
-        let buffer_bytes = |status| {
-            value(
-                &registry,
-                "feuer_io_buffer_pool_bytes",
-                &[("bucket", &bucket), ("status", status)],
-            )
-        };
+        let buffer_bytes = |status| buffer_pool_bytes(&registry, &bucket, status);
         assert_eq!(buffer_bytes("idle"), 0.0);
         assert_eq!(buffer_bytes("used"), 0.0);
         assert_eq!(gauge("feuer_memory_capacity_bytes"), capacity as f64);

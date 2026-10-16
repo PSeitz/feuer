@@ -196,6 +196,18 @@ pub enum CacheConfigError {
 mod tests {
     use super::*;
 
+    fn check_environment_overrides(test: &str, name: &str, child: &str, cases: &[(Option<&str>, &str)]) {
+        for &(setting, expected) in cases {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", test]).env(child, expected).env_remove(name);
+            if let Some(setting) = setting {
+                command.env(name, setting);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
+
     #[test]
     fn configures_independent_files_in_one_directory() {
         let config = CacheConfig::new("cache", 1, 1).unwrap();
@@ -228,15 +240,12 @@ mod tests {
             assert_eq!(result, expected);
             return;
         }
-        for (value, expected) in [("1KiB", "1024"), ("0", "error"), ("bad", "error")] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "config::tests::reclaim_sample_size_environment_override"])
-                .env("FEUER_TEST_RECLAIM_SAMPLE_CHILD", expected)
-                .env("FEUER_RECLAIM_SAMPLE_SIZE", value)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{output:?}");
-        }
+        check_environment_overrides(
+            "config::tests::reclaim_sample_size_environment_override",
+            "FEUER_RECLAIM_SAMPLE_SIZE",
+            "FEUER_TEST_RECLAIM_SAMPLE_CHILD",
+            &[(Some("1KiB"), "1024"), (Some("0"), "error"), (Some("bad"), "error")],
+        );
     }
 
     #[test]
@@ -265,25 +274,19 @@ mod tests {
             );
             return;
         }
-        for (setting, expected) in [
-            (None, "262144"),
-            (Some("1"), "1"),
-            (Some("64KiB"), "65536"),
-            (Some("18446744073709551615"), "18446744073709551615"),
-            (Some("0"), "error"),
-            (Some("bad"), "error"),
-        ] {
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-            child
-                .args(["--exact", "config::tests::access_count_half_life_environment_override"])
-                .env(CHILD, expected)
-                .env_remove(NAME);
-            if let Some(setting) = setting {
-                child.env(NAME, setting);
-            }
-            let output = child.output().unwrap();
-            assert!(output.status.success(), "{output:?}");
-        }
+        check_environment_overrides(
+            "config::tests::access_count_half_life_environment_override",
+            NAME,
+            CHILD,
+            &[
+                (None, "262144"),
+                (Some("1"), "1"),
+                (Some("64KiB"), "65536"),
+                (Some("18446744073709551615"), "18446744073709551615"),
+                (Some("0"), "error"),
+                (Some("bad"), "error"),
+            ],
+        );
         assert_eq!(
             CacheConfig::new("cache", 1, 1).unwrap().with_access_count_half_life(0),
             Err(CacheConfigError::InvalidAccessCountHalfLife)
@@ -302,30 +305,21 @@ mod tests {
             assert_eq!(result, expected);
             return;
         }
-        for (setting, expected) in [
-            (None, "7"),
-            (Some("0"), "0"),
-            (Some("10"), "10"),
-            (Some("100"), "100"),
-            (Some("101"), "error"),
-            (Some("-1"), "error"),
-            (Some("1.5"), "error"),
-            (Some("bad"), "error"),
-        ] {
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-            child
-                .args([
-                    "--exact",
-                    "config::tests::idle_buffer_pool_percent_environment_override",
-                ])
-                .env(CHILD, expected)
-                .env_remove(NAME);
-            if let Some(setting) = setting {
-                child.env(NAME, setting);
-            }
-            let output = child.output().unwrap();
-            assert!(output.status.success(), "{output:?}");
-        }
+        check_environment_overrides(
+            "config::tests::idle_buffer_pool_percent_environment_override",
+            NAME,
+            CHILD,
+            &[
+                (None, "7"),
+                (Some("0"), "0"),
+                (Some("10"), "10"),
+                (Some("100"), "100"),
+                (Some("101"), "error"),
+                (Some("-1"), "error"),
+                (Some("1.5"), "error"),
+                (Some("bad"), "error"),
+            ],
+        );
     }
 
     #[test]

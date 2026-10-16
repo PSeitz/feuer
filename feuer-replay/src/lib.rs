@@ -47,12 +47,10 @@ pub fn decode_package(data: &[u8]) -> Result<impl Iterator<Item = Result<Event>>
         let requested = ByteRange::new(u64_at(33), u64_at(41))?;
         let downloaded = match kind {
             3 | 5 => Some(ByteRange::new(u64_at(49), u64_at(57))?),
-            _ => {
-                if u64_at(49) != 0 || u64_at(57) != 0 {
-                    return Err("unexpected downloaded range for FETR event kind".into());
-                }
-                None
+            _ if u64_at(49) != 0 || u64_at(57) != 0 => {
+                return Err("unexpected downloaded range for FETR event kind".into());
             }
+            _ => None,
         };
         if kind == 3 {
             let downloaded = downloaded.unwrap();
@@ -152,24 +150,22 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
     if requests.is_empty() {
         return Err("selected trace has no request starts".into());
     }
-    let mut indices = FxHashMap::default();
-    for (index, request) in requests.iter().enumerate() {
-        if indices.insert(request.request_id, index).is_some() {
+    let mut requests_by_id = FxHashMap::default();
+    for request in &requests {
+        if requests_by_id.insert(request.request_id, (request, false)).is_some() {
             return Err("duplicate request start ID".into());
         }
         if request.range == ByteRange::new(0, u64::MAX).unwrap() {
             return Err("whole-object replay requires a known object length".into());
         }
     }
-    let mut completed = vec![false; requests.len()];
     let mut outcomes = [0; 6];
     visit_events(path, |event| {
         if event.kind == 0 {
             return Ok(());
         }
-        if let Some(&index) = indices.get(&event.request_id) {
-            let request = &requests[index];
-            if completed[index] {
+        if let Some((request, completed)) = requests_by_id.get_mut(&event.request_id) {
+            if *completed {
                 return Err("duplicate request outcome ID".into());
             }
             if event.object_key != request.object_key
@@ -178,12 +174,12 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
             {
                 return Err("request outcome disagrees with its start".into());
             }
-            completed[index] = true;
+            *completed = true;
             outcomes[event.kind as usize] += 1;
         }
         Ok(())
     })?;
-    let incomplete = completed.iter().filter(|&&value| !value).count();
+    let incomplete = requests_by_id.values().filter(|(_, completed)| !completed).count();
     for request in &mut requests {
         request.time_ns -= first;
     }
@@ -199,10 +195,7 @@ fn visit_events(path: &Path, mut visit: impl FnMut(Event) -> Result<()>) -> Resu
     let mut read_package = |reader: &mut dyn Read| -> Result<()> {
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes)?;
-        for event in decode_package(&bytes)? {
-            visit(event?)?;
-        }
-        Ok(())
+        decode_package(&bytes)?.try_for_each(|event| visit(event?))
     };
     let mut file = BufReader::new(File::open(path)?);
     if path.extension().is_some_and(|extension| extension == "feuer") {

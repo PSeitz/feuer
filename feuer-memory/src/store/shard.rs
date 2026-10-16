@@ -22,12 +22,6 @@ struct MemoryEntry {
     eviction_index: usize,
 }
 
-impl MemoryEntry {
-    fn range(&self) -> ByteRange {
-        self.download.downloaded_range()
-    }
-}
-
 /// One object's entries, indexed by their exact byte ranges.
 ///
 /// Compaction can publish overlapping and contained request ranges independently.
@@ -44,7 +38,7 @@ impl ObjectEntries {
                 .range(..=ByteRange::new(range.start(), u64::MAX).unwrap())
                 .rev()
                 .map(|(_, entry)| entry)
-                .find(|entry| entry.range().contains(range))
+                .find(|entry| entry.download.downloaded_range().contains(range))
         })
     }
 
@@ -56,7 +50,7 @@ impl ObjectEntries {
                     ..=ByteRange::new(range.end(), range.end()).unwrap(),
             )
             .map(|(_, entry)| entry)
-            .filter(move |entry| range.contains(entry.range()))
+            .filter(move |entry| range.contains(entry.download.downloaded_range()))
     }
 }
 
@@ -139,10 +133,12 @@ impl MemoryCacheShard {
     }
 
     pub(super) fn get(&self, object_key: &ObjectKeyHash, requested: Option<ByteRange>) -> Option<Bytes> {
-        self.entries_by_key
+        let download = &self
+            .entries_by_key
             .get(object_key)?
-            .covering_entry(requested.unwrap_or_else(|| ByteRange::new(0, 0).unwrap()))
-            .map(|entry| entry.download.bytes_in_range(requested.unwrap_or(entry.range())))
+            .covering_entry(requested.unwrap_or_else(|| ByteRange::new(0, 0).unwrap()))?
+            .download;
+        Some(download.bytes_in_range(requested.unwrap_or(download.downloaded_range())))
     }
 
     /// Tries to insert the download, preparing compaction plans or sampling entries for eviction if space is needed.
@@ -233,11 +229,12 @@ impl MemoryCacheShard {
     fn insert_entry(&mut self, object_key: ObjectKeyHash, download: Download, request_count: u64) -> bool {
         let range = download.downloaded_range();
         let mut replaced = false;
-        while let Some(contained_range) = self
-            .entries_by_key
-            .get(&object_key)
-            .and_then(|entries| entries.contained_entries(range).next().map(|entry| entry.range()))
-        {
+        while let Some(contained_range) = self.entries_by_key.get(&object_key).and_then(|entries| {
+            entries
+                .contained_entries(range)
+                .next()
+                .map(|entry| entry.download.downloaded_range())
+        }) {
             self.remove_entry(&object_key, contained_range);
             replaced = true;
         }
