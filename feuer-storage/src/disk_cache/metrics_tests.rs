@@ -21,7 +21,7 @@ async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskCache, prometh
     let (registry, backend) = registry();
     let cache = DiskCache::open(
         directory.path(),
-        capacity,
+        capacity + CHUNK_BYTES,
         DiskCacheOptions {
             io_metrics: IoMetrics::new(&backend),
             metrics: DiskMetrics::new(&backend),
@@ -41,18 +41,26 @@ async fn periodic_writer_combines_updates_into_page_writes() {
     }
     let written_bytes = || value(&registry, "feuer_disk_io_bytes_total", &[("operation", "write")]);
     let payload_bytes = 2 * CHUNK_BYTES;
-    assert_eq!(written_bytes(), payload_bytes as f64);
+    let header_bytes = 4096;
+    assert_eq!(written_bytes(), (header_bytes + CHUNK_BYTES + payload_bytes) as f64);
+    assert_eq!(read_byte_count(&registry), (header_bytes + CHUNK_BYTES) as f64);
+    cache.write_dirty_metadata_pages().await;
+    assert_eq!(written_bytes(), (header_bytes + 2 * CHUNK_BYTES + payload_bytes) as f64);
+    for key in [ObjectKeyHash(1), ObjectKeyHash(2)] {
+        cache.disk.shards[0].remove_entry(&key, 0);
+    }
+    let before = written_bytes();
     let weak = Arc::downgrade(&cache.disk);
     tokio::spawn(DiskCacheInner::write_metadata_periodically(weak.clone()));
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        // Wait for both the shared record page and the link page, not a whole-chunk write.
-        while written_bytes() < (payload_bytes + 2 * METADATA_PAGE_BYTES as u64) as f64 {
+        // Both removals share one page in an initialized chunk.
+        while written_bytes() < before + METADATA_PAGE_BYTES as f64 {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
     .unwrap();
-    assert_eq!(written_bytes(), (payload_bytes + 2 * METADATA_PAGE_BYTES as u64) as f64);
+    assert_eq!(written_bytes(), before + METADATA_PAGE_BYTES as f64);
     drop(cache);
     assert!(
         weak.upgrade().is_none(),
@@ -99,11 +107,11 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
                 "feuer_disk_io_total",
                 &[("operation", "read"), ("outcome", "success")]
             ),
-            chunks as f64
+            (chunks + 1) as f64
         );
         assert_eq!(
             value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]),
-            (chunks * CHUNK_BYTES) as f64
+            (4096 + chunks * CHUNK_BYTES) as f64
         );
         assert!(
             cache
@@ -134,11 +142,11 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
             "feuer_disk_io_total",
             &[("operation", "write"), ("outcome", "success")]
         ),
-        2.0 // One shared payload run and one three-chunk payload run.
+        4.0 // Chain clearing, global header, one shared payload run, and one three-chunk payload run.
     );
     assert_eq!(
         value(&registry, "feuer_disk_io_bytes_total", &[("operation", "write")]),
-        (4 * CHUNK_BYTES) as f64
+        (4096 + 5 * CHUNK_BYTES) as f64
     );
     assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), 0.0);
     let written_chunks = value(&registry, "feuer_disk_chunks", &[("state", "allocated")]);
@@ -149,7 +157,7 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
 
     let cache = DiskCache::open(
         directory.path(),
-        capacity,
+        capacity + CHUNK_BYTES,
         DiskCacheOptions {
             metrics,
             ..Default::default()
@@ -183,7 +191,7 @@ async fn subrange_checksums_reduce_read_bytes_without_writes_and_reset_on_recove
         let (registry, backend) = registry();
         let cache = DiskCache::open(
             directory.path(),
-            4 * CHUNK_BYTES,
+            5 * CHUNK_BYTES,
             DiskCacheOptions {
                 io_metrics: IoMetrics::new(&backend),
                 metrics: DiskMetrics::new(&backend),
@@ -613,7 +621,7 @@ async fn pressure_eviction_and_write_failure_record_each_entry_outcome() {
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
     let shard = &disk.shards[0];
     shard.remove_entry(&ObjectKeyHash::from("second"), 0);
-    disk.shards[0].allocator = DiskChunkAllocator::with_metrics(CHUNK_BYTES..4 * CHUNK_BYTES, disk.metrics.clone());
+    disk.shards[0].allocator = DiskChunkAllocator::with_metrics(2 * CHUNK_BYTES..5 * CHUNK_BYTES, disk.metrics.clone());
     let cache = DiskCache {
         disk: Arc::new(disk),
         write_sender: cache.write_sender,

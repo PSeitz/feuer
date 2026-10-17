@@ -1,10 +1,11 @@
-# Disk cache format v13
+# Disk cache format v14
 
 Experimental, best-effort cache format; no durability or compatibility guarantee.
 
 ## Overview
 
-The backing file is divided into 1-MiB chunks of two kinds:
+The first 1-MiB chunk is reserved for a global header. The remaining file is divided into
+1-MiB chunks of two kinds:
 
 - **Metadata chunks** describe cached entries: their keys, object ranges, payload
   locations, and checksums. Each metadata chunk also links to the next metadata chunk.
@@ -58,7 +59,36 @@ Selection holds the shard's index lock.
 - The backing filename defaults to `data`, with exclusive lock file `.feuer.lock`.
   A configured filename uses `.feuer.<filename>.lock`; different files may share a directory.
 - Integers are unsigned little-endian; addresses are absolute byte offsets in the backing file.
-- No global header or persistent free-space map; ownership is reconstructed on open.
+- The first chunk stores global metadata, separate from shard metadata and payload chunks.
+- No persistent free-space map; ownership is reconstructed on open.
+
+## Global header
+
+The first 4 KiB of the file contain:
+
+| Offset | Bytes | Field |
+| --- | --- | --- |
+| 0 | 8 | Seed-zero XXHash64 of header bytes `[8, 4096)` |
+| 8 | 8 | ASCII disk-format tag: `FEUHDR14` |
+| 16 | 8 | Application payload version, default `0` |
+| 24 | 8 | File capacity in bytes, aligned to 1 MiB |
+| 32 | 4064 | Reserved for future global metadata; written as zero |
+
+The rest of the first chunk is reserved and unused. Shard chunks begin at 1 MiB.
+Configured capacity includes this header chunk and must be at least 2 MiB.
+
+`CacheConfig::with_payload_version` (or `DiskCacheOptions::payload_version`) sets the
+application's payload format version independently of Feuer's disk format. On open,
+an unequal payload version or file capacity, missing header, unsupported disk-format tag,
+or invalid header checksum causes the first metadata chunk of every shard to be zeroed before
+writing a new header and recovering shards. This breaks the old chains without truncating
+the file to zero. A version change with unchanged capacity leaves payload bytes untouched.
+Clearing writes 1 MiB per shard plus the 4-KiB header.
+Both upgrades and downgrades discard old entries. Existing headerless formats are discarded,
+not migrated. Header reads or initialization writes that fail abort opening.
+Matching headers are not rewritten. Capacity changes also clear the chains because shard
+starts move and could otherwise expose metadata from a previous payload version.
+The header checksum covers reserved bytes, but readers do not require them to be zero.
 
 ## Metadata chunks
 
@@ -80,7 +110,7 @@ Every page begins with this 32-byte header:
 | 0 | 8 | Seed-zero XXHash64 of page bytes `[8, 4096)` |
 | 8 | 8 | Reserved; zero |
 | 16 | 8 | Slot count: 84 for records, 1 for next-chunk address |
-| 24 | 8 | ASCII tag: `FEUDES13` for records, `FEUNXT13` for next-chunk address |
+| 24 | 8 | ASCII tag: `FEUDES14` for records, `FEUNXT14` for next-chunk address |
 
 A record page holds 84 consecutive 48-byte records after the header, then 32 zero
 bytes. An all-zero record is unused. The next-chunk page holds one `u64` address
@@ -118,11 +148,14 @@ The background writer flushes full/no-fit chunks immediately and partial chunks 
    for the whole flush; otherwise discard the written payload. Publication takes the earliest free
    position in recovery scan order, so live records claim reused payload chunks before remaining
    stale records. Metadata updates mark their pages dirty.
-2. One metadata writer runs every second after recovery. It copies dirty pages under the
-   metadata mutex, releases it, then checksums and writes complete 4-KiB pages sequentially.
+2. One metadata writer runs every second after recovery. It encodes dirty pages under the
+   metadata mutex, releases it, then writes sequentially. A new metadata chunk is written
+   in full before its predecessor's link, replacing any stale pages from previous use.
+   Only after that write succeeds can updates write individual 4-KiB pages.
    It waits for I/O queue capacity and completion without holding the mutex. Concurrent changes
-   remain dirty for the next round. Missed ticks are skipped; failed writes are not retried.
-   Only changed record pages and next-chunk links are written; unused disk pages are left alone.
+   remain dirty for the next round. Missed ticks are skipped; failed writes are not retried
+   automatically. A later metadata change includes all unfinished chunk initializations
+   before writing any links to them.
 3. The allocator releases payload chunks when their last entry is removed. Neither reads
    nor queued or buffered writes reserve disk space. Removal does not invalidate the old metadata record.
    Readers validate owned buffers against the expected checksum after I/O; late writes to reused
@@ -133,8 +166,8 @@ guarantee durability or persistence ordering after power loss; recovery is best-
 
 ## Recovery
 
-Open waits for recovery, which runs on Tokio's blocking pool. Recovery follows metadata links with one 1-MiB read per
-metadata chunk; it never scans payload chunks. Zero-filled chunks, read failures,
+Open clears incompatible metadata chains before recovery, which runs on Tokio's blocking pool.
+Recovery follows metadata links with one 1-MiB read per metadata chunk; it never scans payload chunks. Zero-filled chunks, read failures,
 links outside the current shard, links not aligned to a chunk boundary, cycles, or corrupt link pages terminate a chain.
 Corrupt record pages are discarded independently.
 

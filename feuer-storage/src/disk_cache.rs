@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 mod adversarial_tests;
+mod header;
 mod metadata;
 mod small_entry_buffer;
 mod write_queue;
@@ -60,7 +61,8 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 /// The key hash selects an independently allocated shard. Admission may fail despite space elsewhere.
 ///
 /// Pressure eviction uses sampled retention scores, defaulting to retrieval value per payload byte.
-/// Opening waits for all shards to recover before making the cache available.
+/// The first chunk holds a global header with the application's payload version and reserved space.
+/// Opening clears incompatible files, then waits for all shards to recover before making the cache available.
 /// The experimental format is neither a persistence guarantee nor a stable on-disk interface.
 #[derive(Clone)]
 pub struct DiskCache {
@@ -126,7 +128,7 @@ struct PayloadRead {
 #[derive(Debug, thiserror::Error)]
 pub enum DiskCacheError {
     /// The requested disk capacity is unsupported.
-    #[error("disk cache capacity must be at least 1 MiB and at most i64::MAX")]
+    #[error("disk cache capacity must be at least 2 MiB and at most i64::MAX")]
     InvalidCapacity,
     /// Raw storage failed.
     #[error(transparent)]
@@ -151,6 +153,9 @@ pub struct DiskCacheOptions {
     /// Backing filename within the cache directory. Defaults to `data`.
     /// Must be a single filename, without NUL bytes or the reserved `.feuer.` prefix.
     pub file_name: String,
+    /// Application payload format version, independent of Feuer's disk format. Defaults to zero.
+    /// Any mismatch on open clears previous disk entries, including when changing to a lower version.
+    pub payload_version: u64,
     /// Raw file I/O metrics.
     pub io_metrics: Arc<IoMetrics>,
     /// Disk-cache lookup, write, and capacity metrics.
@@ -173,6 +178,7 @@ impl Default for DiskCacheOptions {
     fn default() -> Self {
         Self {
             file_name: "data".to_owned(),
+            payload_version: 0,
             io_metrics: IoMetrics::noop(),
             metrics: DiskMetrics::noop(),
             access_histories: Arc::new(ObjectAccessHistories::new()),
@@ -193,6 +199,7 @@ impl DiskCache {
     ) -> Result<Self, DiskCacheError> {
         let DiskCacheOptions {
             file_name,
+            payload_version,
             io_metrics,
             metrics,
             access_histories,
@@ -202,13 +209,14 @@ impl DiskCache {
             retention_scorer,
         } = options;
         assert!(reclaim_sample_size > 0, "reclaim sample size must be greater than zero");
-        if capacity < CHUNK_BYTES || capacity > i64::MAX as u64 {
+        if capacity < 2 * CHUNK_BYTES || capacity > i64::MAX as u64 {
             return Err(DiskCacheError::InvalidCapacity);
         }
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
         let file =
             DataFile::open_with_io_queues(directory, &file_name, capacity, io_metrics, buffer_pool, io_queues).await?;
-        let num_shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
+        let num_shards = ((capacity - CHUNK_BYTES) / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
+        header::clear_incompatible_metadata(&file, payload_version, num_shards).await?;
         let shards = (0..num_shards)
             .map(|shard_index| {
                 let range = recovery::shard_disk_range(capacity, num_shards, shard_index);

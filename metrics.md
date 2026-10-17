@@ -35,7 +35,7 @@ operations. Use the public lookup counters to measure caller-visible behavior.
 |---|---|---|
 | `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `checksum_failed` |
 | `feuer_disk_lookup_duration_seconds` | Histogram | No labels. Successful hits only: buffered copying, or reading a covering checksummed range, verification and copying |
-| `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`. Each chunk is 1 MiB |
+| `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`. Each chunk is 1 MiB. Excludes the reserved global-header chunk |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
 | `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`. Payload and payload-chunk bytes of successfully written payload regions, before publication. Metadata writes are included in the raw I/O counters, not this packing counter |

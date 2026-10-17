@@ -128,7 +128,7 @@ fn benchmark_recovery() {
         let payload_bytes: usize = entry_sizes.iter().sum();
         let source = Bytes::from(vec![0x5a; entry_sizes.iter().copied().max().unwrap_or(0)]);
         let directory = tempfile::tempdir().unwrap();
-        let capacity = capacity_chunks * CHUNK_BYTES;
+        let capacity = (capacity_chunks + 1) * CHUNK_BYTES;
         let (shards, metadata_chunks) = runtime.block_on(async {
             let cache = with_manual_metadata_writes(
                 DiskCache::open(directory.path(), capacity, DiskCacheOptions::default())

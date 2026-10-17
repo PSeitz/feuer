@@ -7,7 +7,7 @@ async fn measured_disk() -> (tempfile::TempDir, DiskCache, prometheus::Registry)
     let (registry, backend) = registry();
     let disk = DiskCache::open(
         directory.path(),
-        4 * CHUNK_BYTES,
+        5 * CHUNK_BYTES,
         DiskCacheOptions {
             metrics: DiskMetrics::new(&backend),
             ..Default::default()

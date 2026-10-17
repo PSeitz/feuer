@@ -214,7 +214,7 @@ async fn torn_entry_metadata_page_does_not_reject_other_pages() {
         entries
     );
     cache.write_dirty_metadata_pages().await;
-    let address = 0;
+    let address = CHUNK_BYTES;
     let mut bytes = cache
         .disk
         .file
@@ -244,16 +244,16 @@ async fn torn_entry_metadata_page_does_not_reject_other_pages() {
 #[tokio::test]
 async fn corrupt_unaligned_or_cyclic_link_terminates_recovery_and_can_be_repaired() {
     for (next_chunk_address, corrupt_checksum) in [
-        (0, true),
-        (0, false),
-        (CHUNK_BYTES + METADATA_PAGE_BYTES as u64, false),
-        (2 * CHUNK_BYTES, false),
-        (4 * CHUNK_BYTES, false),
+        (CHUNK_BYTES, true),
+        (CHUNK_BYTES, false),
+        (2 * CHUNK_BYTES + METADATA_PAGE_BYTES as u64, false),
+        (3 * CHUNK_BYTES, false),
+        (5 * CHUNK_BYTES, false),
     ] {
         let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
         assert!(cache.insert(ObjectKeyHash(1), download(0, 1)).await.unwrap());
         cache.write_dirty_metadata_pages().await;
-        let offset = (ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES) as u64;
+        let offset = CHUNK_BYTES + (ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES) as u64;
         let mut page = vec![0; METADATA_PAGE_BYTES];
         encode_page(&mut page, NEXT_CHUNK_PAGE_TAG, 1, &next_chunk_address.to_le_bytes());
         if corrupt_checksum {
@@ -311,9 +311,13 @@ async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
     );
     let shard = &cache.disk.shards[0];
     let directory = tempfile::tempdir().unwrap();
-    let short_file = DataFile::open(directory.path(), METADATA_PAGE_BYTES as u64, IoMetrics::noop())
-        .await
-        .unwrap();
+    let short_file = DataFile::open(
+        directory.path(),
+        CHUNK_BYTES + METADATA_PAGE_BYTES as u64,
+        IoMetrics::noop(),
+    )
+    .await
+    .unwrap();
     assert!(shard.write_dirty_metadata_pages(&short_file).await.is_err());
     assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
     shard.write_dirty_metadata_pages(&short_file).await.unwrap();
@@ -327,6 +331,18 @@ async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
     // Freed slots mark their pages for rewriting without the removed records.
     assert_eq!(shard.metadata_pages.lock().unwrap().dirty_pages.len(), 2);
     assert!(shard.allocator.reserve_chunks(1).is_some());
+    // A failed initialization still requires a full-chunk write, including the unchanged link page.
+    shard.write_dirty_metadata_pages(&cache.disk.file).await.unwrap();
+    let link_page = cache
+        .disk
+        .file
+        .read_at(2 * CHUNK_BYTES - METADATA_PAGE_BYTES as u64, METADATA_PAGE_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(
+        validate_page(&link_page, NEXT_CHUNK_PAGE_TAG).map(|bytes| read_u64(bytes, 0)),
+        Some(NO_CHUNK)
+    );
 }
 
 #[tokio::test]
@@ -358,7 +374,7 @@ async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
         2
     );
     cache.write_dirty_metadata_pages().await;
-    let address = 0;
+    let address = CHUNK_BYTES;
     let mut bytes = cache
         .disk
         .file
@@ -393,12 +409,18 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
         let position = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(2)][&0]
             .metadata
             .entry_index as usize;
-        let mut page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap().to_vec();
+        let mut page = cache
+            .disk
+            .file
+            .read_at(CHUNK_BYTES, METADATA_PAGE_BYTES)
+            .await
+            .unwrap()
+            .to_vec();
         let offset = PAGE_HEADER_BYTES + position * ENTRY_METADATA_BYTES;
         page[offset..offset + 16].copy_from_slice(&key.0.to_le_bytes());
         let checksum = XxHash64::oneshot(0, &page[8..]);
         page[..8].copy_from_slice(&checksum.to_le_bytes());
-        cache.disk.file.write_at(0, &Bytes::from(page)).await.unwrap();
+        cache.disk.file.write_at(CHUNK_BYTES, &Bytes::from(page)).await.unwrap();
         let capacity = cache.disk.file.capacity();
         drop(cache);
         let (registry, backend) = crate::test_metrics::registry();

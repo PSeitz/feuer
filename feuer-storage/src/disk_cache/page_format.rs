@@ -1,4 +1,4 @@
-//! Experimental v13 metadata-only chunks. Each chunk contains 255 independently checksummed
+//! Experimental v14 metadata-only chunks. Each chunk contains 255 independently checksummed
 //! entry-metadata pages and one checksummed next-chunk page. All-zero entry metadata is unused.
 //! Payloads live in separate chunks. An entry's metadata never crosses a page boundary.
 
@@ -16,8 +16,8 @@ pub(super) const ENTRY_METADATA_BYTES: usize = 48;
 pub(super) type RawMetadataBytes = [u8; ENTRY_METADATA_BYTES];
 pub(super) const PAGE_CONTENT_BYTES: usize =
     (METADATA_PAGE_BYTES - PAGE_HEADER_BYTES) / ENTRY_METADATA_BYTES * ENTRY_METADATA_BYTES;
-pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES13";
-pub(super) const NEXT_CHUNK_PAGE_TAG: &[u8; 8] = b"FEUNXT13";
+pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES14";
+pub(super) const NEXT_CHUNK_PAGE_TAG: &[u8; 8] = b"FEUNXT14";
 /// Number of entries whose metadata fits in one page.
 pub(super) const ENTRIES_PER_METADATA_PAGE: usize = PAGE_CONTENT_BYTES / ENTRY_METADATA_BYTES;
 /// Number of entry-metadata pages in one chunk.

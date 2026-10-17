@@ -42,8 +42,8 @@ Larger entries write independently without flushing pending small entries. Closi
 `insert_batch` shares those chunks and flushes them before returning; its publication count can include other callers' entries.
 
 After a region's payload writes finish, accepted entries update metadata in memory and publish into the index.
-One periodic writer persists dirty metadata pages every second, best-effort; see the
-[write contract](../format.md#write-ordering-and-reuse). Sleeping does not keep the cache open.
+One periodic writer initializes new metadata chunks in full and persists dirty pages every
+second, best-effort; see the [write contract](../format.md#write-ordering-and-reuse). Sleeping does not keep the cache open.
 
 Publication rechecks disk containment: broader entries replace contained entries, while partial overlaps coexist.
 Contained entries and entries that cannot fit are skipped.
@@ -93,9 +93,13 @@ Closing the in-memory index does not invalidate live entries needed by the next 
 
 ## Format and recovery
 
-[format.md](../format.md) documents experimental **v13**: shard boundaries, fixed chain starts,
-page headers, entry records, checksums, and write ordering. Each metadata chain starts at the first
-chunk of its shard. There is no `recovery-heads` file or periodic address checkpoint.
+[format.md](../format.md) documents experimental **v14**: the global header, shard boundaries,
+fixed chain starts, page headers, entry records, checksums, and write ordering. The first chunk
+is reserved for the global header, including the application payload version and file capacity.
+A mismatched version or capacity, or an invalid header, clears each shard's first metadata chunk.
+A version change with unchanged capacity leaves payload bytes untouched.
+Each metadata chain starts at the first chunk of its shard.
+There is no `recovery-heads` file or periodic address checkpoint.
 
 Recovery follows links using **one 1-MiB read per metadata chunk**. It never scans payload chunks to
 find metadata. The read channel holds at most 64 waiting requests and processes them in arrival order.
@@ -125,4 +129,4 @@ size, metadata updates, independently reclaimable payloads, reuse without waitin
 or metadata writes, duplicate-start recovery, stale-record checksum misses, malformed/cyclic links, corrupt record pages,
 metadata/payload ownership conflicts, fixed chain starts, replacement after reopening, and payload checksum
 failures. Existing tests cover packing, fragmentation, cancellation, eviction, and contiguous payloads
-up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v13.
+up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v14.

@@ -122,6 +122,7 @@ impl TieredMemoryDiskCache {
                     config.disk_capacity(),
                     DiskCacheOptions {
                         file_name: config.file_name().to_owned(),
+                        payload_version: config.payload_version(),
                         io_metrics: IoMetrics::new(metrics_registry),
                         metrics: feuer_storage::DiskMetrics::new(metrics_registry),
                         access_histories: memory.access_histories().clone(),
@@ -450,7 +451,7 @@ mod tests {
         let scorer = Arc::new(ScoredEntries::default());
         let disk_scorer = Arc::new(ScoredEntries::default());
         let cache = TieredMemoryDiskCache::open_with_retention_scorers(
-            CacheConfig::new(directory.path(), 3 << 20, 1).unwrap(),
+            CacheConfig::new(directory.path(), 4 << 20, 1).unwrap(),
             None,
             None,
             scorer.clone(),
@@ -559,7 +560,7 @@ mod tests {
                 &registry,
                 "feuer_disk_io_total",
                 &[("operation", "write"), ("outcome", "success")],
-            ) < 3.0
+            ) < 4.0
             {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -572,7 +573,7 @@ mod tests {
                 "feuer_disk_io_total",
                 &[("operation", "write"), ("outcome", "success")]
             ),
-            3.0 // One payload chunk, one metadata record page, and one next-chunk link.
+            4.0 // Global header, one payload chunk, one metadata record page, and one next-chunk link.
         );
         assert_eq!(
             value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),

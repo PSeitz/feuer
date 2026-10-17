@@ -10,14 +10,17 @@ use thiserror::Error;
 
 /// Explicit capacities and location for one Feuer cache.
 ///
-/// `disk_capacity` includes metadata and alignment overhead. Zero disables the disk tier.
-/// When disk is disabled, `directory` and `file_name` are unused.
+/// `disk_capacity` includes the 1-MiB header chunk, shard metadata, and alignment overhead.
+/// Nonzero capacity must be at least 2 MiB. Changing the file capacity invalidates disk entries.
+/// Zero disables the disk tier.
+/// When disk is disabled, `directory`, `file_name`, and `payload_version` are unused.
 /// `memory_capacity` is a soft eviction target divided among the in-memory shards. Oversized entries
 /// can make entry allocation charges exceed it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheConfig {
     directory: PathBuf,
     file_name: String,
+    payload_version: u64,
     disk_capacity: u64,
     memory_capacity: u64,
     idle_buffer_pool_percent: u64,
@@ -45,6 +48,7 @@ impl CacheConfig {
         Ok(Self {
             directory: directory.into(),
             file_name: "data".to_owned(),
+            payload_version: 0,
             disk_capacity,
             memory_capacity,
             eviction: SampledEvictionConfig::new()?,
@@ -68,6 +72,19 @@ impl CacheConfig {
         }
         self.file_name = file_name;
         Ok(self)
+    }
+
+    /// Sets the application's payload format version. Defaults to zero.
+    /// Opening with a different version clears all previous disk entries, including on downgrade.
+    /// This is independent of Feuer's disk format version and unused when disk is disabled.
+    pub fn with_payload_version(mut self, payload_version: u64) -> Self {
+        self.payload_version = payload_version;
+        self
+    }
+
+    /// Returns the application's payload format version.
+    pub const fn payload_version(&self) -> u64 {
+        self.payload_version
     }
 
     /// Sets the sampled eviction settings shared by memory and disk.

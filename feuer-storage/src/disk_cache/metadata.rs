@@ -1,5 +1,6 @@
 //! Inserts and removals update entry metadata slots under the metadata mutex. One periodic writer
-//! encodes dirty pages, releases the mutex, then writes them sequentially. Changes during I/O remain dirty.
+//! encodes dirty pages or whole new chunks, releases the mutex, then writes them sequentially.
+//! Changes during I/O remain dirty.
 //! Failed writes are not retried. There is no stable-storage sync or shutdown flush. Recovery is best-effort.
 
 use std::{collections::BTreeSet, time::Duration};
@@ -48,20 +49,16 @@ pub(super) struct MetadataChunk {
     pub(super) slots: Box<[Option<EntryMetadata>]>,
     /// The next metadata chunk's disk address, or `NO_CHUNK` at the end of the chain.
     pub(super) next_chunk_address: u64,
+    /// New chunks must be written in full before individual pages can be updated.
+    pub(super) needs_full_write: bool,
 }
 
 impl MetadataChunk {
     /// Encodes one checksummed page: an entry metadata page, or the final next-chunk page.
-    fn encode_page(&self, page_index: usize) -> Box<[u8]> {
-        let mut page = vec![0; METADATA_PAGE_BYTES].into_boxed_slice();
+    fn encode_page(&self, page_index: usize, page: &mut [u8]) {
         if page_index == ENTRY_METADATA_PAGES_PER_CHUNK {
-            encode_page(
-                &mut page,
-                NEXT_CHUNK_PAGE_TAG,
-                1,
-                &self.next_chunk_address.to_le_bytes(),
-            );
-            return page;
+            encode_page(page, NEXT_CHUNK_PAGE_TAG, 1, &self.next_chunk_address.to_le_bytes());
+            return;
         }
         let mut contents = [0; PAGE_CONTENT_BYTES];
         let slots = &self.slots[page_index * ENTRIES_PER_METADATA_PAGE..][..ENTRIES_PER_METADATA_PAGE];
@@ -71,12 +68,11 @@ impl MetadataChunk {
             }
         }
         encode_page(
-            &mut page,
+            page,
             ENTRY_METADATA_PAGE_TAG,
             ENTRIES_PER_METADATA_PAGE as u64,
             &contents,
         );
-        page
     }
 }
 
@@ -129,6 +125,7 @@ impl MetadataPages {
                 reserved_chunk,
                 slots: vec![None; ENTRIES_PER_METADATA_CHUNK].into(),
                 next_chunk_address: NO_CHUNK,
+                needs_full_write: true,
             });
             self.mark_link_page_dirty(self.chunks.len() - 1);
             self.free_slot_count += ENTRIES_PER_METADATA_CHUNK;
@@ -192,24 +189,50 @@ impl DiskCacheInner {
 }
 
 impl DiskCacheShard {
-    /// Writes dirty metadata pages without syncing them to stable storage.
+    /// Initializes new metadata chunks and writes dirty pages without syncing to stable storage.
     /// Called only by the periodic writer. Never holds the metadata mutex while waiting for I/O.
     pub(super) async fn write_dirty_metadata_pages(&self, file: &DataFile) -> DataFileResult<()> {
-        let writes: Box<[(u64, Box<[u8]>)]> = {
+        let writes: Vec<_> = {
             let mut pages = self.metadata_pages.lock().unwrap();
+            if !pages.dirty_pages.is_empty() {
+                // Include failed initializations before a predecessor can write its link.
+                for chunk_index in 0..pages.chunks.len() {
+                    if pages.chunks[chunk_index].needs_full_write {
+                        pages.mark_link_page_dirty(chunk_index);
+                    }
+                }
+            }
+            let mut previous_chunk_index = None;
             std::mem::take(&mut pages.dirty_pages)
                 .into_iter()
                 .rev() // Write later chunks before the links pointing to them.
-                .map(|location| {
+                .filter_map(|location| {
                     let chunk = &pages.chunks[location.chunk_index as usize];
-                    let offset = location.page_index as usize * METADATA_PAGE_BYTES;
-                    let start = chunk.reserved_chunk.disk_byte_range().start + offset as u64;
-                    (start, chunk.encode_page(location.page_index as usize))
+                    if chunk.needs_full_write && previous_chunk_index == Some(location.chunk_index) {
+                        return None;
+                    }
+                    previous_chunk_index = Some(location.chunk_index);
+                    let (first_page, page_count) = if chunk.needs_full_write {
+                        (0, ENTRY_METADATA_PAGES_PER_CHUNK + 1)
+                    } else {
+                        (location.page_index as usize, 1)
+                    };
+                    let mut bytes = vec![0; page_count * METADATA_PAGE_BYTES].into_boxed_slice();
+                    for (page_index, page) in (first_page..).zip(bytes.as_chunks_mut::<METADATA_PAGE_BYTES>().0) {
+                        chunk.encode_page(page_index, page);
+                    }
+                    let start =
+                        chunk.reserved_chunk.disk_byte_range().start + (first_page * METADATA_PAGE_BYTES) as u64;
+                    Some((location.chunk_index, start, bytes))
                 })
                 .collect()
         };
-        for (address, bytes) in writes {
+        for (chunk_index, address, bytes) in writes {
+            let full_chunk = bytes.len() == CHUNK_BYTES as usize;
             file.write_at(address, &Bytes::from(bytes)).await?;
+            if full_chunk {
+                self.metadata_pages.lock().unwrap().chunks[chunk_index as usize].needs_full_write = false;
+            }
         }
         Ok(())
     }

@@ -35,11 +35,11 @@ pub(super) fn download(start: u64, length: usize) -> Download {
 
 pub(super) async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskCache) {
     let directory = tempfile::tempdir().unwrap();
-    // Keep the requested payload capacity, plus one metadata chunk per shard.
+    // Keep the requested payload capacity, plus one metadata chunk per shard and the global header.
     let shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
     let cache = DiskCache::open(
         directory.path(),
-        capacity + shards * CHUNK_BYTES,
+        capacity + (shards + 1) * CHUNK_BYTES,
         DiskCacheOptions::default(),
     )
     .await
@@ -96,7 +96,7 @@ async fn whole_object_reads_survive_recovery() {
     cache.insert_batch(downloads).await.unwrap();
     cache.write_dirty_metadata_pages().await;
     drop(cache);
-    let cache = DiskCache::open(directory.path(), 9 * CHUNK_BYTES, DiskCacheOptions::default())
+    let cache = DiskCache::open(directory.path(), 10 * CHUNK_BYTES, DiskCacheOptions::default())
         .await
         .unwrap();
     for length in lengths {
@@ -110,7 +110,7 @@ async fn whole_object_reads_survive_recovery() {
 #[tokio::test]
 async fn rejects_invalid_capacity() {
     let directory = tempfile::tempdir().unwrap();
-    for capacity in [0, 1, CHUNK_BYTES - 1, 1 << 63, u64::MAX] {
+    for capacity in [0, 2 * CHUNK_BYTES - 1, 1 << 63, u64::MAX] {
         let result = DiskCache::open(directory.path(), capacity, DiskCacheOptions::default()).await;
         assert!(matches!(result, Err(DiskCacheError::InvalidCapacity)));
     }
@@ -197,14 +197,14 @@ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers()
             .unwrap(),
         lengths.len()
     );
-    let mut previous_end = CHUNK_BYTES;
+    let mut previous_end = 2 * CHUNK_BYTES;
     for length in [1, 1024, 4016, 4096, 4097, 3 * 4096 + 9] {
         let key = ObjectKeyHash::from(format!("entry-{length}"));
         let source = download(17, length);
         let (allocated, entry_metadata) = entry_disk_ranges(&cache, &key).await;
         assert_eq!(allocated.start, previous_end);
         assert!(allocated.start.is_multiple_of(BUFFER_ALIGNMENT as u64));
-        assert!(allocated.end <= 2 * CHUNK_BYTES);
+        assert!(allocated.end <= 3 * CHUNK_BYTES);
         assert_eq!(
             allocated.end - allocated.start,
             (length as u64).next_multiple_of(BUFFER_ALIGNMENT as u64)
@@ -221,7 +221,7 @@ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers()
             cache.get(&key, source.downloaded_range()).await.unwrap(),
             source.bytes()
         );
-        assert_eq!(entry_metadata, 0..METADATA_PAGE_BYTES as u64);
+        assert_eq!(entry_metadata, CHUNK_BYTES..CHUNK_BYTES + METADATA_PAGE_BYTES as u64);
         previous_end = allocated.end;
     }
 }
@@ -234,7 +234,7 @@ async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
     inputs.extend((0..130).map(|i| (ObjectKeyHash::from(format!("small-{i}")), download(i, 1024))));
     assert_eq!(cache.insert_batch(inputs).await.unwrap(), 131);
     let large_start = entry_disk_ranges(&cache, &ObjectKeyHash::from("large")).await.0.start;
-    let metadata_end = METADATA_PAGE_BYTES as u64;
+    let entry_metadata_pages_end = CHUNK_BYTES + 2 * METADATA_PAGE_BYTES as u64;
     for i in 0..130 {
         let key = ObjectKeyHash::from(format!("small-{i}"));
         assert_eq!(
@@ -242,10 +242,10 @@ async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
             download(i, 1024).bytes()
         );
         let (payload, metadata) = entry_disk_ranges(&cache, &key).await;
-        assert!((2 * CHUNK_BYTES..3 * CHUNK_BYTES).contains(&payload.start));
-        assert!(metadata.end <= 2 * metadata_end);
+        assert!((3 * CHUNK_BYTES..4 * CHUNK_BYTES).contains(&payload.start));
+        assert!(metadata.end <= entry_metadata_pages_end);
     }
-    assert_eq!(large_start, CHUNK_BYTES);
+    assert_eq!(large_start, 2 * CHUNK_BYTES);
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
     assert_eq!(
         cache
@@ -319,7 +319,7 @@ async fn full_and_no_fit_chunks_flush_across_metadata_pages() {
         for i in 0..count {
             let key = ObjectKeyHash(i as u128);
             let (payload, _) = entry_disk_ranges(&cache, &key).await;
-            assert_eq!(payload.start, CHUNK_BYTES + (i * length) as u64);
+            assert_eq!(payload.start, 2 * CHUNK_BYTES + (i * length) as u64);
             assert_eq!(
                 cache.get(&key, source.downloaded_range()).await.unwrap(),
                 source.bytes()
@@ -372,11 +372,11 @@ async fn failed_large_reservation_leaves_buffered_entries_and_metadata_slots_unt
     assert_eq!(cache.flush().await.unwrap(), 2);
     assert_eq!(
         entry_disk_ranges(&cache, &ObjectKeyHash(1)).await.0,
-        CHUNK_BYTES..CHUNK_BYTES + 8192
+        2 * CHUNK_BYTES..2 * CHUNK_BYTES + 8192
     );
     assert_eq!(
         entry_disk_ranges(&cache, &ObjectKeyHash(3)).await.0.start,
-        CHUNK_BYTES + 8192
+        2 * CHUNK_BYTES + 8192
     );
     assert_eq!(cache.get(&ObjectKeyHash(1), range(0, 4097)).await.unwrap(), bytes);
 }
@@ -573,7 +573,7 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
     cache
         .disk
         .file
-        .write_at(0, &Bytes::from(vec![0; METADATA_PAGE_BYTES]))
+        .write_at(CHUNK_BYTES, &Bytes::from(vec![0; METADATA_PAGE_BYTES]))
         .await
         .unwrap();
     let shard = &cache.disk.shards[0];
@@ -691,7 +691,7 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     let directory = tempfile::tempdir().unwrap();
     let cache = DiskCache::open(
         directory.path(),
-        3 * CHUNK_BYTES,
+        4 * CHUNK_BYTES,
         DiskCacheOptions {
             access_histories: history.clone(),
             ..Default::default()
@@ -851,7 +851,7 @@ async fn removing_one_shared_payload_does_not_free_its_neighbors_chunks() {
     let original = cache
         .disk
         .file
-        .read_at(CHUNK_BYTES, CHUNK_BYTES as usize)
+        .read_at(2 * CHUNK_BYTES, CHUNK_BYTES as usize)
         .await
         .unwrap();
     let shard = &cache.disk.shards[0];
@@ -867,7 +867,7 @@ async fn removing_one_shared_payload_does_not_free_its_neighbors_chunks() {
         cache
             .disk
             .file
-            .read_at(CHUNK_BYTES, CHUNK_BYTES as usize)
+            .read_at(2 * CHUNK_BYTES, CHUNK_BYTES as usize)
             .await
             .unwrap(),
         original
@@ -969,10 +969,10 @@ async fn writes_key_hash_range_and_payload_address_in_fixed_size_metadata() {
     let source = download(17, (CHUNK_BYTES + 7) as usize);
     assert!(cache.insert(key, source.clone()).await.unwrap());
     let (payload, entry_metadata) = entry_disk_ranges(&cache, &key).await;
-    assert_eq!(entry_metadata, 0..METADATA_PAGE_BYTES as u64);
-    assert_eq!(payload.start, CHUNK_BYTES);
+    assert_eq!(entry_metadata, CHUNK_BYTES..CHUNK_BYTES + METADATA_PAGE_BYTES as u64);
+    assert_eq!(payload.start, 2 * CHUNK_BYTES);
     cache.write_dirty_metadata_pages().await;
-    let page = cache.disk.file.read_at(0, METADATA_PAGE_BYTES).await.unwrap();
+    let page = cache.disk.file.read_at(CHUNK_BYTES, METADATA_PAGE_BYTES).await.unwrap();
     let entry_metadata_bytes = page_format::validate_page(&page, page_format::ENTRY_METADATA_PAGE_TAG).unwrap();
     let read_u64 = |offset| u64::from_le_bytes(entry_metadata_bytes[offset..offset + 8].try_into().unwrap());
     assert_eq!(&entry_metadata_bytes[..16], &key.0.to_le_bytes());
@@ -1171,7 +1171,7 @@ async fn read_addresses_and_results_do_not_delay_replaced_payload_reuse() {
     let bytes = cache.disk.file.read_at(address, BUFFER_ALIGNMENT).await.unwrap();
     assert_eq!(XxHash64::oneshot(0, &bytes[..100]), payload_checksum);
     let reused = cache.disk.shards[0].allocator.reserve_chunks(1).unwrap();
-    assert_eq!(reused.disk_byte_range(), CHUNK_BYTES..2 * CHUNK_BYTES);
+    assert_eq!(reused.disk_byte_range(), 2 * CHUNK_BYTES..3 * CHUNK_BYTES);
     assert_eq!(result, download(6, 1).bytes());
 }
 
@@ -1229,7 +1229,7 @@ async fn a_short_read_is_a_miss_not_unverified_bytes() {
         .write(true)
         .open(directory.path().join("data"))
         .unwrap()
-        .set_len(METADATA_PAGE_BYTES as u64 + 100)
+        .set_len(CHUNK_BYTES + METADATA_PAGE_BYTES as u64 + 100)
         .unwrap();
     assert!(cache.get(&key, range(0, 1)).await.is_none());
 }
@@ -1239,7 +1239,7 @@ async fn failed_multi_chunk_write_keeps_earlier_entries_and_releases_its_storage
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
     // The first exclusive entry succeeds. The large entry's reserved range exceeds the file.
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
-    disk.shards[0].allocator = DiskChunkAllocator::for_disk_range(0..4 * CHUNK_BYTES);
+    disk.shards[0].allocator = DiskChunkAllocator::for_disk_range(CHUNK_BYTES..5 * CHUNK_BYTES);
     let cache = DiskCache {
         disk: Arc::new(disk),
         write_sender: cache.write_sender,
@@ -1348,8 +1348,8 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
     assert_eq!(cache.insert_batch(vec![(keys[0], download(0, 100))]).await.unwrap(), 2);
     let first = entry_disk_ranges(&cache, &keys[0]).await.0;
     let second = entry_disk_ranges(&cache, &keys[1]).await.0;
-    assert!(first.end <= 128 * CHUNK_BYTES);
-    assert!(second.start >= 128 * CHUNK_BYTES);
+    assert!(first.end <= 130 * CHUNK_BYTES);
+    assert!(second.start >= 130 * CHUNK_BYTES);
     let returned = cache.get(&keys[0], range(0, 100)).await.unwrap();
     cache.write_dirty_metadata_pages().await;
     let capacity = cache.disk.file.capacity();
@@ -1375,7 +1375,7 @@ async fn insertion_releases_contained_entries_and_preserves_covering_entries() {
     let directory = tempfile::tempdir().unwrap();
     let cache = DiskCache::open(
         directory.path(),
-        3 * CHUNK_BYTES,
+        4 * CHUNK_BYTES,
         DiskCacheOptions {
             metrics: DiskMetrics::new(&backend),
             ..Default::default()

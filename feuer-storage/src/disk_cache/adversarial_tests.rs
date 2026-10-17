@@ -102,20 +102,21 @@ enum CacheChange {
     },
 }
 
-/// Chunk numbers near the file start, the two-shard boundary at chunk 128, and the end of a 256-chunk file.
+/// Chunk numbers near the first shard, the two-shard boundary at chunk 129, and the end of a 257-chunk file.
 fn chunk_number() -> impl Strategy<Value = u64> {
-    prop_oneof![0..10u64, 126..131u64, 254..258u64]
+    prop_oneof![1..11u64, 127..132u64, 255..259u64]
 }
 
-/// One shard of 3 or 8 chunks, or two shards. Between 256 and 258 chunks, shard 1's head moves from chunk 128 to 129.
+/// Header plus one shard of 3 or 8 chunks, or two shards. Shard 1's head moves from chunk 129 to 130.
 fn capacity_chunks() -> impl Strategy<Value = u64> {
-    prop_oneof![Just(3u64), Just(8), Just(256), Just(258)]
+    prop_oneof![Just(4u64), Just(9), Just(257), Just(259)]
 }
 
 /// Disk byte addresses within the selected chunks, optionally including addresses throughout `u64`.
 fn disk_address(allow_overflow: bool) -> BoxedStrategy<u64> {
     let page = prop_oneof![Just(0u64), Just(1), Just(255), 0..256u64];
     let chunk_relative = prop_oneof![
+        Just(0),
         (chunk_number(), page).prop_map(|(chunk, page)| chunk * CHUNK_BYTES + page * PAGE_BYTES),
         (chunk_number(), 0..CHUNK_BYTES).prop_map(|(chunk, offset)| chunk * CHUNK_BYTES + offset),
     ];
@@ -207,7 +208,7 @@ fn disk_image(allow_overflow: bool) -> impl Strategy<Value = DiskImage> {
         1 => Just(LinkTarget::NoChunk),
     ];
     let chunk = (
-        prop_oneof![chunk_number(), Just(128)],
+        prop_oneof![chunk_number(), Just(129)],
         prop::collection::vec(page, 0..4),
         prop::option::weighted(0.9, (link_target, page_change())),
     )
@@ -218,7 +219,7 @@ fn disk_image(allow_overflow: bool) -> impl Strategy<Value = DiskImage> {
         });
     (capacity_chunks(), prop::collection::vec(chunk, 1..5)).prop_map(|(capacity_chunks, mut metadata_chunks)| {
         // Start shard 0's metadata chain at the chunk recovery reads first.
-        metadata_chunks[0].chunk_number = 0;
+        metadata_chunks[0].chunk_number = 1;
         DiskImage {
             capacity_chunks,
             metadata_chunks,
@@ -437,7 +438,7 @@ fn encode_changed_page(tag: &[u8; 8], entry_count: u64, contents: &[u8], change:
 }
 
 /// One chunk of payload bytes containing valid metadata pages. The forged entries claim every chunk
-/// of a 256-chunk file, with keys for both shards. The link page points to `next_chunk_number`.
+/// after the header of a 257-chunk file, with keys for both shards. The link page points to `next_chunk_number`.
 fn payload_with_metadata(next_chunk_number: u64) -> Bytes {
     let mut bytes = vec![0; CHUNK_BYTES as usize];
     for (page_index, page) in bytes.chunks_mut(METADATA_PAGE_BYTES).enumerate() {
@@ -461,7 +462,7 @@ fn payload_with_metadata(next_chunk_number: u64) -> Bytes {
             let entry = EntryMetadata {
                 key: ObjectKeyHash(FORGED_KEY_PREFIX << 64 | entry_number as u128),
                 object_range: ByteRange::new(0, PAGE_BYTES).unwrap(),
-                payload_address: entry_number % 256 * CHUNK_BYTES + entry_number / 256 % 4 * PAGE_BYTES,
+                payload_address: (1 + entry_number % 256) * CHUNK_BYTES + entry_number / 256 % 4 * PAGE_BYTES,
                 payload_checksum: 0,
             };
             encode_entry_metadata(raw, &entry);

@@ -11,11 +11,11 @@ use super::{
 /// Records of a page that failed validation: all unused.
 const UNUSED_RECORDS: &[RawMetadataBytes] = &[[0; ENTRY_METADATA_BYTES]; ENTRIES_PER_METADATA_PAGE];
 
-/// The disk byte range assigned to one shard.
+/// The disk byte range assigned to one shard, excluding the file's header chunk.
 pub(super) fn shard_disk_range(capacity: u64, num_shards: usize, shard_index: usize) -> Range<u64> {
-    let chunks = capacity / CHUNK_BYTES;
-    chunks * shard_index as u64 / num_shards as u64 * CHUNK_BYTES
-        ..chunks * (shard_index + 1) as u64 / num_shards as u64 * CHUNK_BYTES
+    let chunks_after_header = capacity / CHUNK_BYTES - 1;
+    (1 + chunks_after_header * shard_index as u64 / num_shards as u64) * CHUNK_BYTES
+        ..(1 + chunks_after_header * (shard_index + 1) as u64 / num_shards as u64) * CHUNK_BYTES
 }
 
 impl DiskCacheInner {
@@ -94,6 +94,7 @@ impl DiskCacheShard {
                 reserved_chunk,
                 slots,
                 next_chunk_address: next_chunk_address.unwrap_or(NO_CHUNK),
+                needs_full_write: false,
             });
             match next_chunk_address {
                 Some(next_chunk_address) => address = next_chunk_address,

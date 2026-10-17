@@ -56,8 +56,13 @@ Feuer leaves request coalescing, scheduling, and retries to your downloader.
 At the public lookup boundary, Feuer hashes the key's UTF-8 bytes once with XXH3-128
 (seed zero). Both tiers, access history, and disk recovery use only this 128-bit identity;
 full keys are not stored or checked for collisions. Keys must not be adversarial.
-[Disk format v13](format.md) stores the hash in little-endian form in fixed
+[Disk format v14](format.md) stores the hash in little-endian form in fixed
 48-byte entry metadata. Older disk formats are not migrated.
+
+When changing your payload encoding, set `config.with_payload_version(1)` before opening
+(the default is `0`). Any version change invalidates the previous disk entries, including on
+downgrade. The version is stored once in the global file header, not per entry, and is
+independent of Feuer's disk-format version.
 
 ## Independent caches on one SSD
 
@@ -113,7 +118,8 @@ Entry targets remain split across shards; an oversized entry empties its shard a
 Active reads and caller-only results are outside the budget. Metadata and pending disk writes
 can also keep additional memory alive.
 
-Disk capacity includes metadata and alignment overhead.
+Disk capacity includes a reserved 1-MiB header chunk, shard metadata, and alignment overhead.
+Nonzero capacity must be at least 2 MiB. Changing the file capacity invalidates disk entries.
 The backing file is exclusively locked while open. Lookups first check the shard's buffered entries,
 then verify disk bytes against a covering checksum. [Subrange checksums](format.md#overview)
 prepared from recent requests during writing or learned during reading let partial reads skip the rest of an entry.
