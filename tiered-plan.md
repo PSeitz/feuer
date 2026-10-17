@@ -97,9 +97,10 @@ A returned `Bytes` may share a larger heap allocation. Feuer does not require a 
 subrange result. Caller-held results are outside cache-capacity accounting and may keep shared backing memory
 alive after cache eviction.
 
-A hit on an entry already written to disk reads and verifies the whole covering entry, then returns only the
-requested bytes. A subrange lookup may therefore read a complete larger download. Packing independent entries
-in one allocation chunk does not require reading the neighboring entries. Returned disk results do not retain
+A hit on an entry already written to disk reads and verifies a covering checksummed range, then returns only the
+requested bytes. The first partial read verifies the covering entry and remembers the requested range's checksum
+in memory. Subsequent reads can use that checksum without reading the complete larger download. Packing independent entries
+in one payload chunk does not require reading the neighboring entries. Returned disk results do not retain
 disk storage, allocation guards, or file mappings.
 
 Every started request records its exact range once, before checking either cache tier. Failed requests,
@@ -183,8 +184,8 @@ cost-weighted, request, and byte hit rates together with useful-payload utilizat
 footprint, read and write amplification, cleaning or relocation traffic, throughput, and tail latency.
 
 The performance hypotheses are that integrated containment can reuse a larger downloaded range and exact
-range attribution improves frequency-aware retention. The current disk design uses whole-entry checksum
-validation and 4-KiB-aligned entry allocations. It does not claim smaller reads or sub-alignment packing than
+range attribution improves frequency-aware retention. The current disk design uses whole-entry checksums,
+learned partial-read checksums, and 4-KiB-aligned entry storage. It does not claim smaller reads or sub-alignment packing than
 Foyer. These are hypotheses to isolate, not evidence of superiority. Feuer must not claim to beat Foyer until
 the comparison demonstrates the claim without violating correctness or the stated resource guardrails.
 
@@ -306,7 +307,8 @@ results. Direct mode does not imply synchronization or durability.
 
 ## 9. Integrity
 
-Feuer verifies the whole covering payload against its expected checksum before returning disk-backed bytes.
+Feuer verifies a covering byte range against its expected checksum before returning disk-backed bytes.
+Partial-read checksums are learned only from verified bytes and discarded with their owning entry or on restart.
 Read failures and checksum mismatches become misses. Recovery validates each metadata page's checksum and
 format tag, then relies on the writer's range and alignment contract; it still enforces current shard routing,
 bounds, and metadata/payload ownership. Hash collisions and checksum collisions are not detected separately.
@@ -395,7 +397,7 @@ The MVP is complete when tests demonstrate that:
 - buffered and direct modes return identical requested bytes, and requested direct mode never silently falls back.
 - Linux supports direct mode on a capable filesystem, with simultaneous reads and writes through io_uring queues
   that enforce waiting-request and active-request limits.
-- disk hits verify the whole covering entry, return only requested bytes, and do not read neighboring entries.
+- disk hits verify a covering checksummed range, return only requested bytes, and do not read neighboring entries.
 - corrupted or uncertain disk bytes always miss and are never returned.
 - restart may recover any subset, including none; corrupt recovered payloads become misses.
 - unsupported metadata page tags are discarded without requiring migration or a global cache reset.

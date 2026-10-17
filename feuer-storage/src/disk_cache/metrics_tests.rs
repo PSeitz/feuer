@@ -1,5 +1,16 @@
+use std::{future::Future, pin::Pin, task::Poll};
+
 use super::*;
 use crate::test_metrics::{registry, value};
+
+fn read_byte_count(registry: &prometheus::Registry) -> f64 {
+    value(registry, "feuer_disk_io_bytes_total", &[("operation", "read")])
+}
+
+async fn assert_pending(mut future: Pin<&mut impl Future>) {
+    let result = std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await;
+    assert!(result.is_pending());
+}
 
 fn download(length: usize) -> Download {
     Download::new(0, Bytes::from(vec![7; length])).unwrap()
@@ -159,72 +170,202 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
 }
 
 #[tokio::test]
-async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation() {
-    use std::{future::Future, task::Poll};
-
-    let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
-    let key = ObjectKeyHash::from("object");
-    let source = Download::new(10, Bytes::from_static(b"abcdefgh")).unwrap();
-    cache.insert_batch(vec![(key, source)]).await.unwrap();
-
-    // Hold initialization pending so both lookups deterministically join the same read.
-    let read = cache.disk.shards[0]
-        .entry_index
-        .lock()
-        .unwrap()
-        .covering_entry(&key, ByteRange::new(10, 18).unwrap())
-        .unwrap()
-        .share_payload_read();
-    let mut initializer = Box::pin(read.result.get_or_init(std::future::pending));
-    assert!(
-        std::future::poll_fn(|cx| Poll::Ready(initializer.as_mut().poll(cx)))
-            .await
-            .is_pending()
-    );
-    let mut first = Box::pin(cache.get(&key, ByteRange::new(11, 14).unwrap()));
-    let mut second = Box::pin(cache.get(&key, ByteRange::new(15, 18).unwrap()));
-    assert!(
-        std::future::poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
-            .await
-            .is_pending()
-    );
-    assert!(
-        std::future::poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx)))
-            .await
-            .is_pending()
-    );
-    let mut canceled = Box::pin(cache.get(&key, ByteRange::new(10, 11).unwrap()));
-    assert!(
-        std::future::poll_fn(|cx| Poll::Ready(canceled.as_mut().poll(cx)))
-            .await
-            .is_pending()
-    );
-    drop(canceled); // Canceling a waiter must leave the other readers' initialization intact.
-    assert_eq!(Arc::strong_count(&read), 3);
-    let weak = Arc::downgrade(&read);
-    drop(initializer);
-    drop(read);
-
-    let (first, second) = tokio::join!(first, second);
-    assert_eq!(first.unwrap(), Bytes::from_static(b"bcd"));
-    assert_eq!(second.unwrap(), Bytes::from_static(b"fgh"));
-    assert!(weak.upgrade().is_none(), "completed reads must not retain the payload");
-    let reads = || {
-        value(
-            &registry,
-            "feuer_disk_io_total",
-            &[("operation", "read"), ("outcome", "success")],
+async fn subrange_checksums_reduce_read_bytes_without_writes_and_reset_on_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let key = ObjectKeyHash::from("partial");
+    let source = tests::download(u64::MAX - 3 * CHUNK_BYTES, 2 * CHUNK_BYTES as usize + 17);
+    let start = source.downloaded_range().start();
+    let request = tests::range(start + 4093, start + 4093 + 65_543);
+    let nested_request = tests::range(request.start() + 7, request.start() + 40_007);
+    // Alignment padding pushes this read into the 64-KiB buffer bucket before copying shrinks it.
+    let unaligned_32_kib_request = tests::range(start + 1, start + 1 + 32 * 1024);
+    for recovered in [false, true] {
+        let (registry, backend) = registry();
+        let cache = DiskCache::open(
+            directory.path(),
+            4 * CHUNK_BYTES,
+            DiskCacheOptions {
+                io_metrics: IoMetrics::new(&backend),
+                metrics: DiskMetrics::new(&backend),
+                ..Default::default()
+            },
         )
-    };
-    assert_eq!(reads(), 2.0); // One startup metadata read and one shared payload read.
-    assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", "hit")]), 2.0);
+        .await
+        .unwrap();
+        let cache = tests::with_manual_metadata_writes(cache);
+        if !recovered {
+            cache.insert(key, source.clone()).await.unwrap();
+        }
+        let written_bytes = value(&registry, "feuer_disk_io_bytes_total", &[("operation", "write")]);
+        for (range, expected_read_bytes) in [
+            (request, source.downloaded_range().len()),
+            (request, request.len()),
+            (nested_request, request.len()),
+            (nested_request, nested_request.len()),
+            (unaligned_32_kib_request, source.downloaded_range().len()),
+            (unaligned_32_kib_request, unaligned_32_kib_request.len()),
+            (source.downloaded_range(), source.downloaded_range().len()),
+        ] {
+            let before = read_byte_count(&registry);
+            let (bytes, capacity) = cache.fetch_from_disk(&key, range).await.unwrap();
+            assert_eq!(bytes, source.bytes_in_range(range));
+            assert_eq!(capacity, BufferPool::allocation_capacity(bytes.len()));
+            assert_eq!(read_byte_count(&registry) - before, expected_read_bytes as f64);
+        }
+        assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
+        assert_eq!(
+            value(&registry, "feuer_disk_payload_bytes", &[]),
+            source.bytes().len() as f64
+        );
+        assert_eq!(
+            value(&registry, "feuer_disk_io_bytes_total", &[("operation", "write")]),
+            written_bytes
+        );
+        cache.write_dirty_metadata_pages().await;
+    }
+}
 
-    // A later lookup must issue another read rather than use a hidden memory cache.
-    assert_eq!(
-        cache.get(&key, ByteRange::new(10, 11).unwrap()).await.unwrap(),
-        b"a"[..]
-    );
-    assert_eq!(reads(), 3.0);
+#[tokio::test]
+async fn partial_reads_detect_corruption_before_and_after_learning_checksums() {
+    for checksum_learned in [false, true] {
+        let (_directory, cache, registry) = measured_cache(3 * CHUNK_BYTES).await;
+        let key = ObjectKeyHash::from("corrupt partial");
+        let source = tests::download(17, CHUNK_BYTES as usize);
+        let request = tests::range(17 + 4093, 17 + 8197);
+        cache.insert(key, source.clone()).await.unwrap();
+        if checksum_learned {
+            assert_eq!(cache.get(&key, request).await.unwrap(), source.bytes_in_range(request));
+        }
+        let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&17].payload_address;
+        // Before learning, corruption outside the request must still fail full-payload verification.
+        let corrupt_offset = if checksum_learned { 4096 } else { 12_288 };
+        cache
+            .disk
+            .file
+            .write_at(address + corrupt_offset, &Bytes::from(vec![0; 4096]))
+            .await
+            .unwrap();
+        let before = read_byte_count(&registry);
+        assert!(cache.get(&key, request).await.is_none());
+        assert_eq!(
+            read_byte_count(&registry) - before,
+            if checksum_learned { request.len() } else { CHUNK_BYTES } as f64,
+        );
+        assert_eq!(
+            value(&registry, "feuer_disk_lookup_total", &[("outcome", "checksum_failed")]),
+            1.0
+        );
+        assert!(!cache.covers_range(&key, source.downloaded_range()));
+        assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
+        assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
+        assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 1.0);
+        assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 2.0);
+    }
+}
+
+#[tokio::test]
+async fn shared_reads_survive_cancellation_and_learn_each_subrange_once() {
+    for read_subrange in [false, true] {
+        let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
+        let key = ObjectKeyHash::from("concurrent reads");
+        let source = tests::download(17, CHUNK_BYTES as usize);
+        let learned_range = tests::range(4110, 69_653);
+        let request = tests::range(4111, 69_652);
+        let suffix_request = tests::range(69_636, 69_652);
+        cache.insert(key, source.clone()).await.unwrap();
+        assert!(cache.get(&key, learned_range).await.is_some());
+        // Hold initialization pending so all lookups join the same read.
+        // A whole-entry read takes priority even when a smaller checksum is available.
+        let read = cache.disk.shards[0]
+            .entry_index
+            .lock()
+            .unwrap()
+            .covering_entry(&key, request)
+            .unwrap()
+            .share_covering_read(read_subrange.then_some(learned_range));
+        let expected_read_bytes = if read_subrange {
+            learned_range.len()
+        } else {
+            CHUNK_BYTES
+        };
+        let mut initializer = Box::pin(read.result.get_or_init(std::future::pending));
+        assert_pending(initializer.as_mut()).await;
+        let mut first = Box::pin(cache.get(&key, request));
+        let mut second = Box::pin(cache.get(&key, request));
+        let mut suffix = Box::pin(cache.get(&key, suffix_request));
+        let mut canceled = Box::pin(cache.get(&key, learned_range));
+        for waiter in [&mut first, &mut second, &mut suffix, &mut canceled] {
+            assert_pending(waiter.as_mut()).await;
+        }
+        drop(canceled);
+        let weak = Arc::downgrade(&read);
+        drop(initializer);
+        drop(read);
+        let before = read_byte_count(&registry);
+        let (first, second, suffix) = tokio::join!(first, second, suffix);
+        assert_eq!(first.unwrap(), source.bytes_in_range(request));
+        assert_eq!(second.unwrap(), source.bytes_in_range(request));
+        assert_eq!(suffix.unwrap(), source.bytes_in_range(suffix_request));
+        assert!(weak.upgrade().is_none(), "completed reads must not retain the payload");
+        assert_eq!(read_byte_count(&registry) - before, expected_read_bytes as f64);
+        assert_eq!(
+            cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&17]
+                .subrange_checksums
+                .len(),
+            3
+        );
+        // Later lookups must read each learned range from disk rather than retain payload buffers.
+        for request in [request, suffix_request] {
+            let before = read_byte_count(&registry);
+            assert_eq!(cache.get(&key, request).await.unwrap(), source.bytes_in_range(request));
+            assert_eq!(read_byte_count(&registry) - before, request.len() as f64);
+        }
+    }
+}
+
+#[tokio::test]
+async fn late_partial_reads_do_not_modify_replacement_entries() {
+    for replacement_bytes_differ in [false, true] {
+        let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
+        let key = ObjectKeyHash::from("replacement");
+        let source = tests::download(17, CHUNK_BYTES as usize);
+        let request = tests::range(4110, 69_653);
+        let nested_request = tests::range(4111, 4112);
+        cache.insert(key, source.clone()).await.unwrap();
+        assert!(cache.get(&key, request).await.is_some());
+        let shard = &cache.disk.shards[0];
+        let read = shard
+            .entry_index
+            .lock()
+            .unwrap()
+            .covering_entry(&key, request)
+            .unwrap()
+            .share_covering_read(Some(request));
+        let mut initializer = Box::pin(read.result.get_or_init(std::future::pending));
+        assert_pending(initializer.as_mut()).await;
+        let mut waiter = Box::pin(cache.get(&key, nested_request));
+        assert_pending(waiter.as_mut()).await;
+        shard.remove_entry(&key, 17);
+        let replacement = if replacement_bytes_differ {
+            Download::new(17, Bytes::from(vec![0; CHUNK_BYTES as usize])).unwrap()
+        } else {
+            source.clone()
+        };
+        cache.insert(key, replacement.clone()).await.unwrap();
+        let address = shard.entry_index.lock().unwrap().entries_by_key[&key][&17].payload_address;
+        assert_eq!(read.payload_address, address + request.start() - 17);
+        drop(initializer);
+        assert_eq!(
+            waiter.await,
+            (!replacement_bytes_differ).then(|| source.bytes_in_range(nested_request))
+        );
+        let before = read_byte_count(&registry);
+        assert_eq!(
+            cache.get(&key, nested_request).await.unwrap(),
+            replacement.bytes_in_range(nested_request)
+        );
+        assert_eq!(read_byte_count(&registry) - before, CHUNK_BYTES as f64);
+    }
 }
 
 #[tokio::test]
@@ -308,27 +449,10 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
 }
 
 #[tokio::test]
-async fn checksum_failures_remove_entries_but_io_errors_preserve_them() {
+async fn io_errors_preserve_entries() {
     let (directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
     let request = ByteRange::new(0, 1).unwrap();
-    let key = ObjectKeyHash::from("corrupt");
-    cache.insert_batch(vec![(key, download(4))]).await.unwrap();
-    let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&0].payload_address;
-    cache
-        .disk
-        .file
-        .write_at(address, &Bytes::from(vec![0; 4096]))
-        .await
-        .unwrap();
-    assert!(cache.get(&key, request).await.is_none());
-    assert_eq!(
-        value(&registry, "feuer_disk_lookup_total", &[("outcome", "checksum_failed")]),
-        1.0
-    );
-    assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
-    assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
-    // Only metadata remains reserved. Payload reuse does not wait for invalidation writes.
-    assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "free")]), 1.0);
+    let key = ObjectKeyHash::from("unreadable");
     cache.insert_batch(vec![(key, download(4))]).await.unwrap();
     std::fs::OpenOptions::new()
         .write(true)

@@ -42,6 +42,14 @@ record's address and length. Only three entry records are shown.
 On open, the cache follows metadata links to rebuild its in-memory index without
 reading payloads. Payload checksums are verified when entries are read.
 
+Partial reads verify the whole entry until a learned checksum covers the request.
+Verified bytes supply checksums for requested subranges. Later reads choose the shortest
+covering range, unless another caller still holds a whole-entry read.
+These checksums are memory-only and disappear on entry removal or restart. They neither copy
+payloads on disk nor change disk ownership. Direct I/O rounds reads to 4-KiB alignment.
+Checksum storage and selection scans grow with distinct requested ranges until removal.
+Selection holds the shard's index lock.
+
 ## Files and encoding
 
 - The backing filename defaults to `data`, with exclusive lock file `.feuer.lock`.

@@ -18,7 +18,7 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
 | `feuer-types` | XXH3-128 object identity, exact non-empty `ByteRange`, keyless `Download` with a derived range | None for the current public type boundary |
 | `feuer-historian` | Standalone request history, decayed access counts, and recent request events | History is volatile; distinct counters have no capacity limit |
 | `feuer-memory` | Sharded covering-range index, exact access counts shared with disk, per-object trimming-event limits, sampled retention policy, pressure-driven compaction, payload accounting, metrics | Wall-clock evidence aging, disk-state inputs, further trace-independent evaluation |
-| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskCache` with small entries packed into immutable 1-MiB chunks, whole-entry checksums, whole-chunk reuse and per-admission eviction limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
+| `feuer-storage` | Fixed-capacity Linux O_DIRECT file, io_uring driver with up to 64 active reads and 8 active writes, experimental sharded `DiskCache` with small entries packed into immutable 1-MiB chunks, whole-entry and learned subrange checksums, whole-chunk reuse and per-admission eviction limits | Recovery crash testing, buffered mode, retention-policy evaluation, comparative allocator measurements |
 | Runtime and tooling | Feuer-only workspace/CI, memory comparison gate, raw storage benchmarks | End-to-end acceptance and crash tests, examples, tiered and concurrent cache benchmarks |
 
 ## Implemented behavior
@@ -37,9 +37,9 @@ The recovery additions cross-compile for Linux; real io_uring execution and devi
   history. Failures, invalid downloads, and cancellation after starting still count as demand.
   Raw memory/disk lookups and insertions do not record accesses; history takes no cache shard lock.
 - Cached allocations and idle buffers share the configured memory capacity. Disk promotions copy the
-  requested slice into the pool if its allocation capacity is smaller than the original backing
-  capacity; allocation failure retains the original slice. Admission charges the chosen allocation's
-  whole capacity. Whole-entry reads and checksums are unchanged. Callback downloads use payload
+  requested slice into the pool if copying saves at least 25% of the original backing
+  capacity. Allocation failure retains the original slice. Admission charges the chosen allocation's
+  whole capacity. Callback downloads use payload
   length when allocation capacity is unknown. Entry targets remain divided among shards, preserving the
   existing oversized-entry exception. Caller-only results survive eviction outside cache accounting.
 - `feuer-memory` owns one aligned buffer pool per cache instance: 32 KiB, 256 KiB, 512 KiB, 1 MiB,
@@ -135,7 +135,8 @@ Each shard owns an initialized 1-MiB buffer shared by all insertion paths; the b
 Buffering reserves no disk space. A flush reserves payload chunks; metadata positions remain free until publication.
 Payload completion precedes publication; a separate writer persists metadata every second.
 Reads first copy requested bytes from buffered entries; busy/flushing chunks may miss until publication.
-Disk reads verify the whole covering entry's XXHash64 checksum, without reading neighbors or metadata.
+Disk reads verify a covering XXHash64 checksum, without reading neighbors or metadata. Partial reads learn
+requested-range checksums from verified bytes and keep them in memory on the owning entry until removal or restart.
 
 Independent shards have their own allocator and range-index lock. The allocator tracks coalesced free
 whole-chunk runs; the metadata component reserves entry positions and grows metadata capacity internally.
@@ -151,7 +152,7 @@ reserved, but removed entries' metadata positions are reused across batches. An 
 metadata chunk in addition to its payload chunks. One periodic writer persists dirty 4-KiB pages every second;
 see the [write contract](format.md#write-ordering-and-reuse). Payload chunks remain independently reclaimable.
 Each page and payload has its own XXHash64 checksum. Older formats are not migrated.
-Read invalidation compares expected payload checksums. Discarding a newer identical copy is an allowed miss.
+Read invalidation checks read identity so a late checksum failure cannot remove a replacement entry.
 Pressure eviction samples up to 64 live entries and selects the lowest recent retrieval value per payload
 byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.
 Alignment, metadata and chunk overhead do not enter the score. Only selected entries are removed. Neighbors
@@ -170,8 +171,8 @@ cancellation, corruption/reused payload, partial batch failure, metadata-only ch
 mixed-size packing, exclusive multi-chunk ownership, finalized entry metadata, whole-chunk ownership/reuse,
 per-admission eviction limits, shared evidence across tiers, payload-only scoring, mixed-size churn,
 concurrent eviction/reads,
-rejection of scattered free chunks, contiguous payloads across chunk boundaries, and whole-entry
-validation of 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable.
+rejection of scattered free chunks, contiguous payloads across chunk boundaries, and learned partial-read
+checksums for 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable.
 Unrelated entries and metadata are not loaded. Before background recovery was added, on `m8g-32cpu-local-ssd`,
 all 71 storage tests and all 135 workspace tests passed with real direct I/O
 and io_uring on the local ext4 SSD. Workspace Clippy passed with warnings denied. Formatting and whitespace

@@ -169,6 +169,18 @@ async fn exact_unaligned_reads_containment_and_key_hash_identity() {
 }
 
 #[tokio::test]
+async fn empty_partial_reads_at_end_of_file_do_not_learn_checksums() {
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let key = ObjectKeyHash::from("empty suffix");
+    let source = download(17, CHUNK_BYTES as usize);
+    cache.insert(key, source.clone()).await.unwrap();
+    let end = source.downloaded_range().end();
+    for _ in 0..2 {
+        assert!(cache.get(&key, range(end, end)).await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
     // Deliberately unordered input: small entries should be packed ahead of larger ones.
@@ -481,7 +493,7 @@ async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
         .unwrap()
         .covering_entry(&key, source.downloaded_range())
         .unwrap()
-        .share_payload_read();
+        .share_covering_read(None);
     assert!(
         cache
             .insert(ObjectKeyHash::from("new"), download(0, CHUNK_BYTES as usize))
@@ -1271,7 +1283,7 @@ async fn reads_30_mib_contiguous_payloads_and_trims_final_padding() {
 }
 
 #[tokio::test]
-async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
+async fn large_subrange_reads_shrink_buffers_and_detect_corruption_within_the_read() {
     let (_directory, cache) = open_test_cache(104 * CHUNK_BYTES).await;
     let key = ObjectKeyHash::from("large object");
     let source = download(3, 100 * CHUNK_BYTES as usize + 17);
@@ -1283,6 +1295,8 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
             range(3, 3 + 80 * CHUNK_BYTES),
             100 * CHUNK_BYTES as usize + BUFFER_ALIGNMENT,
         ),
+        // Copying 75 MiB from the verified 80-MiB range would save less than 25%, so keep its buffer.
+        (range(3, 3 + 75 * CHUNK_BYTES), 80 * CHUNK_BYTES as usize),
         (range(3, 3 + 75 * CHUNK_BYTES), 75 * CHUNK_BYTES as usize),
         (range(7, 33), 32 * 1024),
         (range(boundary - 3, boundary + 13), 32 * 1024),
@@ -1304,7 +1318,20 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
         .write_at(last_aligned_offset, &Bytes::from(vec![0; BUFFER_ALIGNMENT]))
         .await
         .unwrap();
-    // Even a request at the beginning must detect corruption at the end of this entry.
+    // The prefix checksum excludes the corruption. Reading the corrupted suffix removes the entry.
+    assert_eq!(
+        cache.get(&key, range(3, 13)).await.unwrap(),
+        source.bytes_in_range(range(3, 13))
+    );
+    assert!(
+        cache
+            .get(
+                &key,
+                range(source.downloaded_range().end() - 17, source.downloaded_range().end())
+            )
+            .await
+            .is_none()
+    );
     assert!(cache.get(&key, range(3, 13)).await.is_none());
 }
 

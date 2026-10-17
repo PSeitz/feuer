@@ -66,12 +66,14 @@ throughput has not yet been compared against v10.
 
 `get` first copies the requested bytes from a covering buffered entry, without disk I/O. Busy buffers and
 chunks detached for flushing may miss until disk publication; no in-flight lookup state is retained.
-Otherwise it reads and hashes the complete covering disk entry against its XXHash64 checksum, excluding alignment
-padding, then returns exactly the requested bytes. It reads neither metadata nor neighboring entries.
+Otherwise it reads and verifies the shortest covering range with an XXHash64 checksum, or shares a whole-entry
+read still held by another caller, then returns the requested bytes without alignment padding.
+Partial reads [learn subrange checksums](../format.md#overview) in memory until entry removal or restart.
+Reads load neither metadata nor neighboring entries.
 A read copies the address and expected checksum under the range-index lock, then reads into an
 owned memory buffer. Concurrent disk overwrite is allowed: checksum validation happens after I/O
-and before using the bytes, subject to the usual checksum-collision limitation. A checksum mismatch removes the entry only if its expected
-checksum still matches the failed read; discarding a newer identical copy remains an allowed miss.
+and before using the bytes, subject to the usual checksum-collision limitation. A checksum mismatch
+removes the entry only if the read still belongs to it, leaving replacement entries untouched.
 
 Disk and memory consult standalone access history through `feuer-historian`, using the shared
 retrieval-cost policy in `feuer-memory::retention`. Public requests

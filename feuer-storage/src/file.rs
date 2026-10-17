@@ -158,8 +158,8 @@ impl DataFile {
         .await
     }
 
-    /// Reads one contiguous payload, omitting final alignment padding, and returns its backing capacity.
-    /// The caller supplies the aligned payload address. Even empty payloads occupy one alignment page.
+    /// Reads payload bytes at a possibly unaligned address and returns their backing buffer capacity.
+    /// Omits alignment padding from the returned bytes. Empty reads still read 4 KiB.
     pub(crate) async fn read_payload(&self, address: u64, length: usize) -> DataFileResult<(Bytes, usize)> {
         self.measure_io(IoOperation::Read, address, length, self.read_slice(address, length))
             .await
