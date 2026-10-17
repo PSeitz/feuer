@@ -183,11 +183,16 @@ impl MemoryCacheShard {
                 .drain(..ready_count)
                 .filter(|(_, key, candidate_range)| key != object_key || !range.contains(*candidate_range))
                 .filter_map(|(_, key, range)| {
+                    let download = &self.entries_by_key[&key].by_range[&range].download;
                     let replacement_ranges =
-                        plan_range_trim(range, cache.access_histories.recent_requested_ranges(&key))?;
+                        plan_range_trim(range, cache.access_histories.recent_requested_ranges(&key)).or_else(|| {
+                            let payload = u128::from(range.len());
+                            let charge = download.allocation_charge() as u128;
+                            (charge > payload && payload * 4 <= charge * 3).then(|| vec![range].into_boxed_slice())
+                        })?;
                     Some(RangeTrimSource {
                         object_key: key,
-                        download: self.entries_by_key[&key].by_range[&range].download.clone(),
+                        download: download.clone(),
                         replacement_ranges,
                     })
                 })

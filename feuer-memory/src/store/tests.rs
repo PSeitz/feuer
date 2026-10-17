@@ -149,6 +149,122 @@ fn trimming_replaces_allocation_capacity_with_copied_payload_capacity() {
 }
 
 #[test]
+fn same_range_compaction_reclaims_charged_capacity_without_eviction_or_recopying() {
+    use crate::test_metrics::{registry, value};
+
+    let (registry, backend) = registry();
+    let compacted = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let received = compacted.clone();
+    let charge = 32 * 1024;
+    let payload = charge * 3 / 4;
+    let cache = cache_with_metrics(charge as u64, MemoryMetrics::new(&backend))
+        .with_compaction_callback(move |key, download| received.lock().push((key, download)));
+    let key = ObjectKeyHash::from("source");
+    let source_range = range(10, 10 + payload as u64);
+    let expected: Vec<_> = (0..payload).map(|index| (index % 251) as u8).collect();
+    let mut buffer = cache.buffer_pool().allocate(payload).unwrap();
+    assert_eq!(buffer.capacity(), charge);
+    buffer.as_mut_slice().copy_from_slice(&expected);
+    cache.insert(key, buffer.into_download(source_range.start()).unwrap());
+    let held = cache.get(&key, source_range).unwrap();
+    repeat_request(&cache, key, source_range, MIN_REQUESTS_BEFORE_RANGE_TRIM);
+    assert_eq!(cache.used_bytes(), charge as u64);
+
+    let incoming = ObjectKeyHash::from("incoming");
+    cache.insert(
+        incoming,
+        Download::new(0, Bytes::from(vec![0; charge - payload])).unwrap(),
+    );
+
+    assert_eq!(cache.used_bytes(), charge as u64);
+    assert_eq!(cache.entry_count(), 2);
+    assert!(cache.contains_entry(&incoming, range(0, (charge - payload) as u64)));
+    let copied = cache.get(&key, source_range).unwrap();
+    assert_eq!(copied.as_ref(), expected.as_slice());
+    assert_eq!(held.as_ref(), expected.as_slice());
+    assert_ne!(copied.as_ptr(), held.as_ptr());
+    assert_eq!(
+        value(&registry, "feuer_memory_eviction_triggering_insertions_total", &[]),
+        0.0
+    );
+    assert_eq!(
+        value(&registry, "feuer_memory_compacted_payload_bytes_total", &[]),
+        (charge - payload) as f64
+    );
+    {
+        let callbacks = compacted.lock();
+        assert_eq!(callbacks.len(), 1);
+        assert_eq!(callbacks[0].0, key);
+        assert_eq!(callbacks[0].1.downloaded_range(), source_range);
+        assert_eq!(callbacks[0].1.allocation_charge(), payload);
+        assert_eq!(callbacks[0].1.bytes().as_ref(), expected.as_slice());
+    }
+    drop(held);
+    assert_eq!(cache.buffer_pool().idle_bytes(), 0);
+    assert_eq!(cache.used_bytes(), charge as u64);
+
+    // Another mature pressure check must not copy the exact-size replacement again.
+    repeat_request(&cache, key, source_range, MIN_REQUESTS_BEFORE_RANGE_TRIM);
+    cache.insert("next".into(), Download::new(0, Bytes::from_static(b"x")).unwrap());
+    assert_eq!(cache.get(&key, source_range).unwrap().as_ptr(), copied.as_ptr());
+    assert_eq!(compacted.lock().len(), 1);
+    assert_eq!(cache.used_bytes(), payload as u64 + 1);
+    assert_eq!(
+        value(&registry, "feuer_memory_eviction_triggering_insertions_total", &[]),
+        1.0
+    );
+}
+
+#[test]
+fn same_range_compaction_requires_savings_pressure_and_maturity() {
+    use crate::test_metrics::{registry, value};
+
+    let charge = 32 * 1024;
+    for (payload, capacity, requests, evicted) in [
+        (charge * 3 / 4 + 1, charge, MIN_REQUESTS_BEFORE_RANGE_TRIM, true),
+        (charge * 3 / 4, charge + 1, MIN_REQUESTS_BEFORE_RANGE_TRIM, false),
+        (charge * 3 / 4, charge, MIN_REQUESTS_BEFORE_RANGE_TRIM - 1, true),
+    ] {
+        let (registry, backend) = registry();
+        let cache = cache_with_metrics(capacity as u64, MemoryMetrics::new(&backend))
+            .with_compaction_callback(|_, _| panic!("unexpected compaction"));
+        let key = ObjectKeyHash::from("source");
+        let buffer = cache.buffer_pool().allocate(payload).unwrap();
+        assert_eq!(buffer.capacity(), charge);
+        cache.insert(key, buffer.into_download(0).unwrap());
+        let held = cache.get(&key, range(0, payload as u64)).unwrap();
+        repeat_request(&cache, key, range(0, payload as u64), requests);
+        cache.insert("incoming".into(), Download::new(0, Bytes::from_static(b"x")).unwrap());
+        assert_eq!(value(&registry, "feuer_memory_compacted_payload_bytes_total", &[]), 0.0);
+        assert_eq!(cache.used_bytes(), if evicted { 1 } else { charge as u64 + 1 });
+        if evicted {
+            assert!(!cache.contains_entry(&key, range(0, payload as u64)));
+        } else {
+            assert_eq!(
+                cache.get(&key, range(0, payload as u64)).unwrap().as_ptr(),
+                held.as_ptr()
+            );
+        }
+    }
+}
+
+#[test]
+fn same_range_compaction_handles_maximum_charge_without_requests_for_the_source() {
+    let cache = cache(usize::MAX as u64);
+    let key = ObjectKeyHash::from("source");
+    cache.insert(
+        key,
+        Download::new(0, Bytes::from_static(b"a"))
+            .unwrap()
+            .with_allocation_charge(usize::MAX),
+    );
+    repeat_request(&cache, "clock".into(), range(0, 1), MIN_REQUESTS_BEFORE_RANGE_TRIM);
+    cache.insert("incoming".into(), Download::new(0, Bytes::from_static(b"x")).unwrap());
+    assert_eq!(cache.used_bytes(), 2);
+    assert_eq!(cache.get(&key, range(0, 1)).unwrap(), Bytes::from_static(b"a"));
+}
+
+#[test]
 fn entry_presence_check_accepts_reinsertion_but_rejects_removal_and_replacement() {
     let cache = cache(1024);
     let key = ObjectKeyHash::from("disk-source");
