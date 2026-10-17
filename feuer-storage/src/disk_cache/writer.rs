@@ -50,16 +50,41 @@ impl DiskCacheShard {
             disk.metrics
                 .packed_chunk_bytes
                 .increase(chunks.chunk_count() * CHUNK_BYTES);
+            // Hash trusted write bytes before taking the index and metadata locks.
+            let checksums_by_entry: Vec<Vec<_>> = entries
+                .iter()
+                .map(|entry| {
+                    let mut requested_ranges = disk.access_histories.recent_requested_ranges(&entry.key);
+                    requested_ranges.retain(|range| {
+                        !range.is_empty() && *range != entry.object_range && entry.object_range.contains(*range)
+                    });
+                    requested_ranges.sort_unstable();
+                    requested_ranges.dedup();
+                    requested_ranges
+                        .into_iter()
+                        .map(|object_range| {
+                            let buffer_offset =
+                                entry.offset + (object_range.start() - entry.object_range.start()) as usize;
+                            let requested_bytes = &bytes[buffer_offset..buffer_offset + object_range.len() as usize];
+                            SubrangeChecksum {
+                                object_range,
+                                checksum: XxHash64::oneshot(0, requested_bytes),
+                                shared_read: Weak::new(),
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
             let mut disk_index = self.entry_index.lock().unwrap();
             let mut pages = self.metadata_pages.lock().unwrap();
-            // Other writers may have consumed free slots during I/O. Publish all or discard this run.
+            // Other writers may consume metadata space during I/O. Ensure room for every entry before publishing any.
             if pages.ensure_free_slots(entries.len(), &self.allocator).is_none() {
                 return Ok(0);
             }
             self.allocator
                 .hold_chunks_until_payloads_released(chunks, entries.len());
             let mut published = 0;
-            for mut buffered in entries.drain(..).rev() {
+            for (mut buffered, subrange_checksums) in entries.drain(..).zip(checksums_by_entry).rev() {
                 if disk_index
                     .covering_entry(&buffered.key, buffered.object_range)
                     .is_some()
@@ -74,7 +99,8 @@ impl DiskCacheShard {
                     payload_address: range.start + buffered.offset as u64,
                     payload_checksum: buffered.payload_checksum,
                 };
-                let entry = DiskEntry::new(&entry_metadata, pages.store_entry_metadata(entry_metadata));
+                let mut entry = DiskEntry::new(&entry_metadata, pages.store_entry_metadata(entry_metadata));
+                entry.subrange_checksums = subrange_checksums;
                 self.insert_entry(&mut disk_index, &mut pages, buffered.key, entry);
                 published += 1;
                 buffered.attempt.outcome = DiskWriteOutcome::Published;

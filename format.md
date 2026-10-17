@@ -42,9 +42,12 @@ record's address and length. Only three entry records are shown.
 On open, the cache follows metadata links to rebuild its in-memory index without
 reading payloads. Payload checksums are verified when entries are read.
 
-Partial reads verify the whole entry until a learned checksum covers the request.
-Verified bytes supply checksums for requested subranges. Later reads choose the shortest
-covering range, unless another caller still holds a whole-entry read.
+Before publishing an entry, writers hash distinct, nonempty, recently requested subranges
+fully contained in the payload, using the trusted write buffer outside the index and metadata locks.
+History uses the existing per-key event and global request-age limits. Reads also learn
+requested-range checksums from verified bytes. Reads reuse a whole-entry read while another
+caller still holds it. Otherwise they verify the smallest checksummed range containing the request,
+using the whole entry if no subrange checksum covers it.
 These checksums are memory-only and disappear on entry removal or restart. They neither copy
 payloads on disk nor change disk ownership. Direct I/O rounds reads to 4-KiB alignment.
 Checksum storage and selection scans grow with distinct requested ranges until removal.

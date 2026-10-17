@@ -136,7 +136,8 @@ Buffering reserves no disk space. A flush reserves payload chunks; metadata posi
 Payload completion precedes publication; a separate writer persists metadata every second.
 Reads first copy requested bytes from buffered entries; busy/flushing chunks may miss until publication.
 Disk reads verify a covering XXHash64 checksum, without reading neighbors or metadata. Partial reads learn
-requested-range checksums from verified bytes and keep them in memory on the owning entry until removal or restart.
+requested-range checksums from verified bytes. Writers also hash recently requested subranges from their trusted
+payload buffers before publication. Both keep checksums in memory on the owning entry until removal or restart.
 
 Independent shards have their own allocator and range-index lock. The allocator tracks coalesced free
 whole-chunk runs; the metadata component reserves entry positions and grows metadata capacity internally.

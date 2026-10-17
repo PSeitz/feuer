@@ -68,7 +68,9 @@ throughput has not yet been compared against v10.
 chunks detached for flushing may miss until disk publication; no in-flight lookup state is retained.
 Otherwise it reads and verifies the shortest covering range with an XXHash64 checksum, or shares a whole-entry
 read still held by another caller, then returns the requested bytes without alignment padding.
-Partial reads [learn subrange checksums](../format.md#overview) in memory until entry removal or restart.
+Writers prepare [subrange checksums](../format.md#overview) for recent requested ranges from their trusted payload
+buffers before publication. Reads learn further checksums from verified bytes. Both keep them in memory until
+entry removal or restart.
 Reads load neither metadata nor neighboring entries.
 A read copies the address and expected checksum under the range-index lock, then reads into an
 owned memory buffer. Concurrent disk overwrite is allowed: checksum validation happens after I/O

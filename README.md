@@ -115,8 +115,9 @@ can also keep additional memory alive.
 
 Disk capacity includes metadata and alignment overhead.
 The backing file is exclusively locked while open. Lookups first check the shard's buffered entries,
-then verify disk bytes against a covering checksum. [Learned subrange checksums](format.md#overview)
-let repeated partial reads skip the rest of an entry. Both paths promote requested bytes to memory.
+then verify disk bytes against a covering checksum. [Subrange checksums](format.md#overview)
+prepared from recent requests during writing or learned during reading let partial reads skip the rest of an entry.
+Both paths promote requested bytes to memory.
 Busy/flushing chunks may miss until publication; corrupt or uncertain disk reads are misses.
 
 Exact-range downloads and whole objects are queued for disk immediately after memory admission.

@@ -54,7 +54,8 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 /// Small entries share immutable 1-MiB payload chunks. Separate mutable metadata chunks
 /// hold entry records and links between metadata chunks. Each shard's chain starts at its first chunk.
 /// Entries have plain payload bytes, 4-KiB-aligned storage, and a checksum in their entry metadata.
-/// Reads verify a covering checksum, learning subrange checksums in memory from verified bytes.
+/// Writers hash recently requested subranges from their payload buffers. Reads learn from verified bytes.
+/// Subrange checksums stay in memory on the owning entry.
 /// Payload reuse requires a wholly free chunk.
 /// The key hash selects an independently allocated shard. Admission may fail despite space elsewhere.
 ///
@@ -154,7 +155,8 @@ pub struct DiskCacheOptions {
     pub io_metrics: Arc<IoMetrics>,
     /// Disk-cache lookup, write, and capacity metrics.
     pub metrics: Arc<DiskMetrics>,
-    /// Request history consulted for retention decisions. Insertion and `get` do not record accesses.
+    /// Request history consulted for retention and write-time subrange checksums.
+    /// Insertion and `get` do not record accesses.
     /// Public request handling records once before lookup.
     pub access_histories: Arc<ObjectAccessHistories>,
     /// Maximum candidates inspected per eviction decision. Must be positive.
@@ -292,7 +294,8 @@ impl DiskCache {
     }
 
     /// Copies buffered bytes, or reads disk using a covering checksum.
-    /// The first partial read verifies the entry, then remembers the requested range's checksum.
+    /// Uses a checksum prepared by the writer or learned from an earlier verified read.
+    /// Without a covering subrange checksum, verifies the entry and remembers the requested range's checksum.
     /// Subrange checksums are discarded with the entry and are not persisted.
     /// Copies a disk-read slice only if it saves at least 25% of backing capacity.
     /// Allocation failure keeps the original slice.

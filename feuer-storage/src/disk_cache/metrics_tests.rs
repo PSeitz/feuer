@@ -226,19 +226,131 @@ async fn subrange_checksums_reduce_read_bytes_without_writes_and_reset_on_recove
 }
 
 #[tokio::test]
-async fn partial_reads_detect_corruption_before_and_after_learning_checksums() {
-    for checksum_learned in [false, true] {
+async fn writer_subrange_checksums_cover_recent_requests_until_restart() {
+    // Exercise a packed payload and a request crossing a payload chunk boundary.
+    for (payload_len, request_offset, payload_chunks) in [
+        (96 * 1024 + 17, 4093, 1),
+        (2 * CHUNK_BYTES as usize + 17, CHUNK_BYTES - 4093, 4),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let key = ObjectKeyHash::from("writer checksums");
+        let neighbor = ObjectKeyHash::from("packed neighbor");
+        let source = tests::download(u64::MAX - 4 * CHUNK_BYTES, payload_len);
+        let start = source.downloaded_range().start();
+        let end = source.downloaded_range().end();
+        let request = tests::range(start + request_offset, start + request_offset + 65_543);
+        let nested_request = tests::range(request.start() + 7, request.start() + 7 + 3006);
+        // Newer requests remove this range from the key's history. Another key still has it.
+        let range_removed_from_history = tests::range(start + 101, start + 103);
+        let access_histories = Arc::new(ObjectAccessHistories::new());
+        access_histories.record_access(&key, range_removed_from_history);
+        for _ in 0..*feuer_historian::MAX_ACCESS_EVENTS_PER_KEY {
+            access_histories.record_access(&key, source.downloaded_range());
+        }
+        access_histories.record_access(&neighbor, range_removed_from_history);
+        for range in [
+            request,
+            nested_request,
+            request,
+            tests::range(end, end),
+            tests::range(start - 1, start + 7),
+            tests::range(end - 7, end + 1),
+        ] {
+            access_histories.record_access(&key, range);
+        }
+        for recovered in [false, true] {
+            let (registry, backend) = registry();
+            let cache = DiskCache::open(
+                directory.path(),
+                6 * CHUNK_BYTES,
+                DiskCacheOptions {
+                    access_histories: access_histories.clone(),
+                    io_metrics: IoMetrics::new(&backend),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let cache = tests::with_manual_metadata_writes(cache);
+            if !recovered {
+                let read_bytes_before = read_byte_count(&registry);
+                let written_bytes_before = value(&registry, "feuer_disk_io_bytes_total", &[("operation", "write")]);
+                assert_eq!(
+                    cache
+                        .insert_batch(vec![(key, source.clone()), (neighbor, tests::download(23, 8192))])
+                        .await
+                        .unwrap(),
+                    2
+                );
+                assert_eq!(read_byte_count(&registry), read_bytes_before);
+                assert_eq!(
+                    value(&registry, "feuer_disk_io_bytes_total", &[("operation", "write")]) - written_bytes_before,
+                    (payload_chunks * CHUNK_BYTES) as f64
+                );
+            }
+            {
+                let index = cache.disk.shards[0].entry_index.lock().unwrap();
+                let checksums = &index.entries_by_key[&key][&start].subrange_checksums;
+                assert_eq!(checksums.len(), if recovered { 0 } else { 2 });
+            }
+            for range in [nested_request, request, range_removed_from_history] {
+                let expected_read_bytes = if recovered || range == range_removed_from_history {
+                    payload_len as u64
+                } else {
+                    range.len()
+                };
+                let read_bytes_before = read_byte_count(&registry);
+                assert_eq!(cache.get(&key, range).await.unwrap(), source.bytes_in_range(range));
+                let read_bytes = read_byte_count(&registry) - read_bytes_before;
+                assert_eq!(read_bytes, expected_read_bytes as f64);
+            }
+            cache.write_dirty_metadata_pages().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn discarded_writes_leave_covering_entry_checksums_unchanged() {
+    let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
+    let key = ObjectKeyHash::from("discarded writer checksums");
+    let request_before_publication = tests::range(117, 217);
+    let request_after_publication = tests::range(317, 417);
+    cache.access_histories().record_access(&key, request_before_publication);
+    assert_eq!(cache.write(key, tests::download(17, 8192), ()).await.unwrap(), 0);
+    let source = tests::download(17, CHUNK_BYTES as usize);
+    assert_eq!(cache.write(key, source.clone(), ()).await.unwrap(), 1);
+    // The pending small entry loses publication to the larger entry. Its newer checksums must be discarded.
+    cache.access_histories().record_access(&key, request_after_publication);
+    assert_eq!(cache.flush().await.unwrap(), 0);
+    for (range, expected_read_bytes) in [
+        (request_before_publication, request_before_publication.len()),
+        (request_after_publication, CHUNK_BYTES),
+    ] {
+        let read_bytes_before = read_byte_count(&registry);
+        assert_eq!(cache.get(&key, range).await.unwrap(), source.bytes_in_range(range));
+        let read_bytes = read_byte_count(&registry) - read_bytes_before;
+        assert_eq!(read_bytes, expected_read_bytes as f64);
+    }
+}
+
+#[tokio::test]
+async fn partial_reads_reject_corruption_with_whole_entry_or_subrange_checksums() {
+    for subrange_checksum_source in ["none", "read", "write"] {
+        let has_subrange_checksum = subrange_checksum_source != "none";
         let (_directory, cache, registry) = measured_cache(3 * CHUNK_BYTES).await;
         let key = ObjectKeyHash::from("corrupt partial");
         let source = tests::download(17, CHUNK_BYTES as usize);
         let request = tests::range(17 + 4093, 17 + 8197);
+        if subrange_checksum_source == "write" {
+            cache.access_histories().record_access(&key, request);
+        }
         cache.insert(key, source.clone()).await.unwrap();
-        if checksum_learned {
+        if subrange_checksum_source == "read" {
             assert_eq!(cache.get(&key, request).await.unwrap(), source.bytes_in_range(request));
         }
         let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&17].payload_address;
-        // Before learning, corruption outside the request must still fail full-payload verification.
-        let corrupt_offset = if checksum_learned { 4096 } else { 12_288 };
+        // Without a subrange checksum, corruption outside the request still fails whole-entry verification.
+        let corrupt_offset = if has_subrange_checksum { 4096 } else { 12_288 };
         cache
             .disk
             .file
@@ -247,10 +359,12 @@ async fn partial_reads_detect_corruption_before_and_after_learning_checksums() {
             .unwrap();
         let before = read_byte_count(&registry);
         assert!(cache.get(&key, request).await.is_none());
-        assert_eq!(
-            read_byte_count(&registry) - before,
-            if checksum_learned { request.len() } else { CHUNK_BYTES } as f64,
-        );
+        let expected_read_bytes = if has_subrange_checksum {
+            request.len()
+        } else {
+            CHUNK_BYTES
+        };
+        assert_eq!(read_byte_count(&registry) - before, expected_read_bytes as f64);
         assert_eq!(
             value(&registry, "feuer_disk_lookup_total", &[("outcome", "checksum_failed")]),
             1.0
@@ -325,14 +439,20 @@ async fn shared_reads_survive_cancellation_and_learn_each_subrange_once() {
 
 #[tokio::test]
 async fn late_partial_reads_do_not_modify_replacement_entries() {
-    for replacement_bytes_differ in [false, true] {
+    for (checksum_from_write, replacement_bytes_differ) in [(false, false), (false, true), (true, false), (true, true)]
+    {
         let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
         let key = ObjectKeyHash::from("replacement");
         let source = tests::download(17, CHUNK_BYTES as usize);
         let request = tests::range(4110, 69_653);
         let nested_request = tests::range(4111, 4112);
+        if checksum_from_write {
+            cache.access_histories().record_access(&key, request);
+        }
         cache.insert(key, source.clone()).await.unwrap();
-        assert!(cache.get(&key, request).await.is_some());
+        if !checksum_from_write {
+            assert!(cache.get(&key, request).await.is_some());
+        }
         let shard = &cache.disk.shards[0];
         let read = shard
             .entry_index
@@ -364,7 +484,14 @@ async fn late_partial_reads_do_not_modify_replacement_entries() {
             cache.get(&key, nested_request).await.unwrap(),
             replacement.bytes_in_range(nested_request)
         );
-        assert_eq!(read_byte_count(&registry) - before, CHUNK_BYTES as f64);
+        assert_eq!(
+            read_byte_count(&registry) - before,
+            if checksum_from_write {
+                request.len()
+            } else {
+                CHUNK_BYTES
+            } as f64
+        );
     }
 }
 

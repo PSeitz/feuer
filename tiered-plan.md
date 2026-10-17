@@ -98,8 +98,9 @@ subrange result. Caller-held results are outside cache-capacity accounting and m
 alive after cache eviction.
 
 A hit on an entry already written to disk reads and verifies a covering checksummed range, then returns only the
-requested bytes. The first partial read verifies the covering entry and remembers the requested range's checksum
-in memory. Subsequent reads can use that checksum without reading the complete larger download. Packing independent entries
+requested bytes. Writers prepare checksums for recently requested subranges from their trusted payload buffers.
+Reads without a covering subrange checksum verify the entry and remember the requested range's checksum
+in memory. Later reads can use that checksum without reading the complete larger download. Packing independent entries
 in one payload chunk does not require reading the neighboring entries. Returned disk results do not retain
 disk storage, allocation guards, or file mappings.
 
@@ -308,7 +309,8 @@ results. Direct mode does not imply synchronization or durability.
 ## 9. Integrity
 
 Feuer verifies a covering byte range against its expected checksum before returning disk-backed bytes.
-Partial-read checksums are learned only from verified bytes and discarded with their owning entry or on restart.
+Partial-read checksums come only from trusted write buffers or verified disk bytes and are discarded with their
+owning entry or on restart.
 Read failures and checksum mismatches become misses. Recovery validates each metadata page's checksum and
 format tag, then relies on the writer's range and alignment contract; it still enforces current shard routing,
 bounds, and metadata/payload ownership. Hash collisions and checksum collisions are not detected separately.
