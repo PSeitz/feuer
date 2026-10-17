@@ -1,9 +1,22 @@
 # Experiments
 
-Keep each experiment's tested configurations and source changes, raw data, and
-summary in this repository under `experiments/`. Commit only the small experiment
-record. Keep raw data and execution workspaces local and ignored by Git, not in
-`../replay-feuer`.
+This directory is for high-quality, evidence-backed reports that shape the project's
+direction. It is not a development log or an archive of completed tasks.
+
+A report should include:
+
+- A concrete design or performance question and the alternatives being evaluated.
+- Reproducible methods: tested revisions, configurations, workloads, and commands.
+- Relevant measurements, comparisons, and enough context to interpret them.
+- Conclusions that inform a project decision, with tradeoffs and limitations stated.
+
+Do not add feature implementation summaries, routine test or Clippy results, LOC
+counts, or task status reports. Feature behavior belongs in the code, tests, and
+project documentation. Passing tests alone does not make an experiment.
+
+Keep each experiment's configurations, source changes, raw data, and report under
+`experiments/`. Commit only small reports, settings, and source changes.
+Keep raw data and execution workspaces local and ignored by Git.
 
 ## Results and procedures
 
