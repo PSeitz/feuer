@@ -340,11 +340,11 @@ fn open_file_state(
     });
     let (read_queue, write_queue) = match io_queues {
         Some(queues) => (
-            queues.read_queue(files.clone(), buffer_pool),
+            queues.read_queue(files.clone(), buffer_pool, metrics.clone()),
             queues.write_queue(files.clone()),
         ),
         None => (
-            uring::ReadQueue::new(files.clone(), buffer_pool)
+            uring::ReadQueue::new(files.clone(), buffer_pool, metrics.clone())
                 .map_err(|source| error(IoOperation::OpenDataFile, source))?,
             uring::WriteQueue::new(files.clone()).map_err(|source| error(IoOperation::OpenDataFile, source))?,
         ),

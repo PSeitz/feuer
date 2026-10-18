@@ -17,11 +17,14 @@
 
 use std::{
     fs::File,
+    future::poll_fn,
     io,
     ops::Range,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    pin::pin,
     sync::Arc,
     thread::{self, JoinHandle},
+    time::Instant,
 };
 
 use bytes::Bytes;
@@ -29,7 +32,7 @@ use feuer_memory::{AlignedBuffer, BufferPool};
 use io_uring::{IoUring, opcode, squeue, types};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::IoOperation;
+use crate::{IoMetrics, IoOperation};
 
 // Buffer addresses, physical offsets, and I/O lengths use this alignment.
 // Opening verifies that the filesystem's direct-I/O requirements divide it.
@@ -73,11 +76,17 @@ impl IoQueues {
         })
     }
 
-    pub(crate) fn read_queue(&self, files: Arc<DataFileAndDirectoryLock>, buffer_pool: Arc<BufferPool>) -> ReadQueue {
+    pub(crate) fn read_queue(
+        &self,
+        files: Arc<DataFileAndDirectoryLock>,
+        buffer_pool: Arc<BufferPool>,
+        metrics: Arc<IoMetrics>,
+    ) -> ReadQueue {
         ReadQueue {
             handle: self.read.clone(),
             files,
             buffer_pool,
+            metrics,
         }
     }
 
@@ -173,15 +182,53 @@ pub(crate) struct ReadQueue {
     handle: Arc<IoQueueHandle>,
     files: Arc<DataFileAndDirectoryLock>,
     buffer_pool: Arc<BufferPool>,
+    metrics: Arc<IoMetrics>,
+}
+
+/// Tracks one read-piece request waiting for channel capacity, including cancellation.
+struct ReadQueueWait<'a> {
+    metrics: &'a IoMetrics,
+    started: Instant,
+}
+
+impl Drop for ReadQueueWait<'_> {
+    fn drop(&mut self) {
+        self.metrics.read_queue_waiters.decrease(1);
+        self.metrics
+            .read_queue_wait_duration
+            .record(self.started.elapsed().as_secs_f64());
+    }
 }
 
 impl ReadQueue {
-    pub(crate) fn new(files: Arc<DataFileAndDirectoryLock>, buffer_pool: Arc<BufferPool>) -> io::Result<Self> {
+    pub(crate) fn new(
+        files: Arc<DataFileAndDirectoryLock>,
+        buffer_pool: Arc<BufferPool>,
+        metrics: Arc<IoMetrics>,
+    ) -> io::Result<Self> {
         Ok(Self {
             handle: Arc::new(IoQueueHandle::new(IoOperation::Read)?),
             files,
             buffer_pool,
+            metrics,
         })
+    }
+
+    async fn reserve_request(&self) -> io::Result<mpsc::Permit<'_, IoRequest>> {
+        let mut wait = None;
+        let mut reserve = pin!(self.handle.reserve_request());
+        poll_fn(|cx| {
+            let result = reserve.as_mut().poll(cx);
+            if result.is_pending() && wait.is_none() {
+                self.metrics.read_queue_waiters.increase(1);
+                wait = Some(ReadQueueWait {
+                    metrics: &self.metrics,
+                    started: Instant::now(),
+                });
+            }
+            result
+        })
+        .await
     }
 
     pub(crate) fn allocate_buffer(&self, length: usize) -> io::Result<AlignedBuffer> {
@@ -190,13 +237,13 @@ impl ReadQueue {
 
     /// Queues disjoint 1-MiB pieces into one allocation before waiting for their completions.
     pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<(Bytes, usize)> {
-        let mut permit = Some(self.handle.reserve_request().await?);
+        let mut permit = Some(self.reserve_request().await?);
         let buffer = ReadBuffer::new(self.allocate_buffer(length)?);
         let mut replies = Vec::with_capacity(length.div_ceil(MAX_IO_REQUEST_BYTES));
         for start in (0..length).step_by(MAX_IO_REQUEST_BYTES) {
             let permit = match permit.take() {
                 Some(permit) => permit,
-                None => self.handle.reserve_request().await?,
+                None => self.reserve_request().await?,
             };
             let end = (start + MAX_IO_REQUEST_BYTES).min(length);
             replies.push(self.handle.submit_request(

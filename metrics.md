@@ -223,6 +223,26 @@ until each entry completes or is discarded, including its time in a partial chun
 releases small incoming buffers after copying. Each shard always holds a 1-MiB buffer, even when empty;
 flushing retains the detached buffer through I/O as well. This gauge measures logical payload, not backing capacity.
 
+## Read I/O queue waits
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `feuer_disk_read_queue_waiters` | Gauge | Read-piece requests with a pending reservation for I/O channel capacity |
+| `feuer_disk_read_queue_wait_duration_seconds` | Histogram | Time from the first pending reservation poll until admission, cancellation, or queue closure |
+
+These measure waits **before entering** the read channel, not requests already in
+its 64 slots or the 64 active io_uring slots. They exclude buffer allocation and
+I/O completion waits. Durations include task rescheduling and Tokio cooperative
+yields. Immediately ready reservations produce no histogram observation.
+Cancellation removes the waiter and records its elapsed wait.
+
+Each piece is at most 1 MiB. A larger data-file read can wait separately for each
+piece, so histogram counts are not payload-read or cache-lookup counts. Metadata
+reads and the opening probe are included. Metrics use the requesting data file's
+registry, including when multiple files share an I/O queue. Sum cache labels to
+see their combined waits on a shared queue. Periodic gauge samples can miss short
+spikes. These metrics do not measure the proposed payload-read admission queue.
+
 ## Existing metrics
 
 - `feuer_memory_operations_total{operation}`: `insert`, `replace`, `redundant`,

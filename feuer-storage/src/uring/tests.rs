@@ -242,14 +242,83 @@ async fn active_request_limit_keeps_channel_full_until_completion() {
 }
 
 #[tokio::test]
+async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
+    use crate::test_metrics::value;
+
+    let (registry, backend) = crate::test_metrics::registry();
+    let queues = IoQueues::new().unwrap();
+    let first = queues.read_queue(data_file(), buffer_pool(), IoMetrics::new(&backend));
+    let second = queues.read_queue(data_file(), buffer_pool(), IoMetrics::new(&backend));
+    let assert_metrics = |waiters, waits| {
+        assert_eq!(value(&registry, "feuer_disk_read_queue_waiters", &[]), waiters);
+        assert_eq!(
+            value(&registry, "feuer_disk_read_queue_wait_duration_seconds", &[]),
+            waits
+        );
+    };
+    drop(first.reserve_request().await.unwrap());
+    assert_metrics(0.0, 0.0);
+    let reservations = first
+        .handle
+        .sender
+        .as_ref()
+        .unwrap()
+        .reserve_many(MAX_IN_FLIGHT_READS)
+        .await
+        .unwrap();
+    let mut admitted = Box::pin(first.reserve_request());
+    let mut canceled = Box::pin(second.reserve_request());
+    let mut context = Context::from_waker(std::task::Waker::noop());
+    for _ in 0..2 {
+        assert!(admitted.as_mut().poll(&mut context).is_pending());
+        assert!(canceled.as_mut().poll(&mut context).is_pending());
+        assert_metrics(2.0, 0.0);
+    }
+    drop(canceled);
+    assert_metrics(1.0, 1.0);
+    drop(reservations);
+    drop(admitted.await.unwrap());
+    assert_metrics(0.0, 2.0);
+
+    let (queue, sender, files) = queue();
+    let read = ReadQueue {
+        handle: Arc::new(IoQueueHandle {
+            sender: Some(sender),
+            wake_fd: queue.wake_fd.clone(),
+            thread: None,
+        }),
+        files,
+        buffer_pool: buffer_pool(),
+        metrics: IoMetrics::new(&backend),
+    };
+    let reservations = read
+        .handle
+        .sender
+        .as_ref()
+        .unwrap()
+        .reserve_many(MAX_IN_FLIGHT_READS)
+        .await
+        .unwrap();
+    let mut closed = Box::pin(read.reserve_request());
+    assert!(closed.as_mut().poll(&mut context).is_pending());
+    assert_metrics(1.0, 2.0);
+    drop(queue);
+    assert_eq!(closed.await.err().unwrap().kind(), io::ErrorKind::BrokenPipe);
+    assert_metrics(0.0, 3.0);
+    drop(reservations);
+    drop(read.reserve_request().await.err().unwrap());
+    assert_metrics(0.0, 3.0);
+}
+
+#[tokio::test]
 async fn shared_queues_use_one_admission_limit_and_independent_buffer_pools() {
     let queues = IoQueues::new().unwrap();
     let first_files = data_file();
     let second_files = data_file();
     let first_pool = buffer_pool();
     let second_pool = buffer_pool();
-    let first_read = queues.read_queue(first_files.clone(), first_pool);
-    let second_read = queues.read_queue(second_files.clone(), second_pool.clone());
+    let first_read = queues.read_queue(first_files.clone(), first_pool, IoMetrics::noop());
+    let second_read = queues.read_queue(second_files.clone(), second_pool.clone(), IoMetrics::noop());
     let first_write = queues.write_queue(first_files);
     let second_write = queues.write_queue(second_files);
     assert!(Arc::ptr_eq(&first_read.handle, &second_read.handle));
@@ -327,7 +396,7 @@ fn completed_requests_release_files_while_the_queue_remains_alive() {
 async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
     let (_, _, files) = queue();
     let pool = buffer_pool();
-    let read_queue = ReadQueue::new(files.clone(), pool).unwrap();
+    let read_queue = ReadQueue::new(files.clone(), pool, IoMetrics::noop()).unwrap();
     let write_queue = WriteQueue::new(files.clone()).unwrap();
     write_queue
         .write_padded(
@@ -503,7 +572,7 @@ fn requests_are_submitted_in_channel_order_and_drained_on_shutdown() {
 async fn reads_wait_for_channel_capacity_without_taking_idle_buffers() {
     let (_, _, files) = queue();
     let pool = buffer_pool();
-    let handle = ReadQueue::new(files, pool.clone()).unwrap();
+    let handle = ReadQueue::new(files, pool.clone(), IoMetrics::noop()).unwrap();
     let reservations = handle
         .handle
         .sender
@@ -550,6 +619,7 @@ async fn queue_exit_releases_admission_waiters_and_queued_requests() {
         }),
         files: files.clone(),
         buffer_pool: buffer_pool(),
+        metrics: IoMetrics::noop(),
     };
     let mut replies = Vec::new();
     for _ in 0..MAX_IN_FLIGHT_READS {
@@ -673,6 +743,7 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
         }),
         files: files.clone(),
         buffer_pool: pool.clone(),
+        metrics: IoMetrics::noop(),
     };
     let write = WriteQueue::new(files).unwrap();
     let length = MAX_IO_REQUEST_BYTES;
@@ -732,6 +803,7 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
             }),
             files,
             buffer_pool: pool.clone(),
+            metrics: IoMetrics::noop(),
         };
         let mut future = Box::pin(read.read(0, length));
         let mut context = Context::from_waker(std::task::Waker::noop());

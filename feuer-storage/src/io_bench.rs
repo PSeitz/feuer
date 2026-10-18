@@ -28,7 +28,7 @@ impl ReadQueue {
             file,
             _directory_lock: None,
         });
-        uring::ReadQueue::new(files, feuer_memory::BufferPool::unpooled()).map(Self)
+        uring::ReadQueue::new(files, feuer_memory::BufferPool::unpooled(), crate::IoMetrics::noop()).map(Self)
     }
 
     /// Reads through the production admission, allocation, notification, and completion path.

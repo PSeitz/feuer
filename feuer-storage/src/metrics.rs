@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use mixtrics::metrics::{BoxedCounter, BoxedHistogram, BoxedRegistry, Buckets};
+use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedHistogram, BoxedRegistry, Buckets};
 
 use crate::IoOperation;
 
@@ -22,6 +22,8 @@ pub struct IoMetrics {
     read: IoOperationMetrics,
     write: IoOperationMetrics,
     read_size: BoxedHistogram,
+    pub(crate) read_queue_waiters: BoxedGauge,
+    pub(crate) read_queue_wait_duration: BoxedHistogram,
 }
 
 impl IoMetrics {
@@ -51,6 +53,18 @@ impl IoMetrics {
             Buckets::exponential(1024.0, 2.0, 21),
         );
 
+        let read_queue_waiters = registry.register_gauge_vec(
+            "feuer_disk_read_queue_waiters".into(),
+            "Read-piece requests waiting for I/O channel capacity, excluding admitted and active requests".into(),
+            &[],
+        );
+        let read_queue_wait_duration = registry.register_histogram_vec_with_buckets(
+            "feuer_disk_read_queue_wait_duration_seconds".into(),
+            "Read-piece channel-capacity waits ending in admission, cancellation or queue closure".into(),
+            &[],
+            Buckets::exponential(0.000_001, 2.0, 25),
+        );
+
         let operation_metrics = |label: &'static str| IoOperationMetrics {
             success: operations.counter(&[label.into(), "success".into()]),
             error: operations.counter(&[label.into(), "error".into()]),
@@ -62,6 +76,8 @@ impl IoMetrics {
             read: operation_metrics(IoOperation::Read.as_str()),
             write: operation_metrics(IoOperation::Write.as_str()),
             read_size: read_size.histogram(&[]),
+            read_queue_waiters: read_queue_waiters.gauge(&[]),
+            read_queue_wait_duration: read_queue_wait_duration.histogram(&[]),
         })
     }
 
