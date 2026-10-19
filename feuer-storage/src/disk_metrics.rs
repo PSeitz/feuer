@@ -8,6 +8,7 @@ pub(crate) enum DiskLookupOutcome {
     Absent,
     IoError,
     ChecksumFailed,
+    Fallthrough,
 }
 
 #[derive(Clone, Copy)]
@@ -31,7 +32,7 @@ pub(crate) enum DiskWriteQueueOutcome {
 /// All labels have fixed values. Gauges aggregate caches sharing a registry.
 #[derive(Debug)]
 pub struct DiskMetrics {
-    lookup_count: [BoxedCounter; 4],
+    lookup_count: [BoxedCounter; 5],
     hit_duration: BoxedHistogram,
     write_entries: [BoxedCounter; 5],
     queue_outcomes: [BoxedCounter; 4],
@@ -121,7 +122,7 @@ impl DiskMetrics {
             "Payload and payload-chunk bytes in successfully written regions before publication".into(),
             &["kind"],
         );
-        let outcomes = ["hit", "absent", "io_error", "checksum_failed"];
+        let outcomes = ["hit", "absent", "io_error", "checksum_failed", "fallthrough"];
         Arc::new(Self {
             lookup_count: outcomes.map(|label| lookups.counter(&[label.into()])),
             hit_duration: duration.histogram(&[]),
@@ -202,6 +203,7 @@ mod tests {
             (DiskLookupOutcome::Absent, "absent"),
             (DiskLookupOutcome::IoError, "io_error"),
             (DiskLookupOutcome::ChecksumFailed, "checksum_failed"),
+            (DiskLookupOutcome::Fallthrough, "fallthrough"),
         ] {
             metrics.record_lookup(outcome, Duration::from_micros(10));
             assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", label)]), 1.0);

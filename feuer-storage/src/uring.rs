@@ -30,7 +30,10 @@ use std::{
 use bytes::Bytes;
 use feuer_memory::{AlignedBuffer, BufferPool};
 use io_uring::{IoUring, opcode, squeue, types};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{SemaphorePermit, mpsc, oneshot};
+
+mod read_admission;
+use read_admission::PayloadReadQueue;
 
 use crate::{IoMetrics, IoOperation};
 
@@ -59,12 +62,15 @@ pub(crate) struct DataFileAndDirectoryLock {
 ///
 /// All attached files share 64 active reads and 8 active writes, plus waiting channels
 /// for another 64 reads and 8 writes. Requests run in arrival order. There is no per-cache fairness.
+/// Cached payload reads also share 64 permits. At 64 waiting reads,
+/// all unchecked waiters are scheduled to consider source fallthrough before any payload I/O.
 /// File ownership and read-buffer pools remain independent. Idle queues retain no files.
 /// Dropping the last queue owner drains submitted I/O and joins both threads, which can block.
 #[derive(Clone)]
 pub struct IoQueues {
     read: Arc<IoQueueHandle>,
     write: Arc<IoQueueHandle>,
+    payload_reads: Arc<PayloadReadQueue>,
 }
 
 impl IoQueues {
@@ -73,6 +79,7 @@ impl IoQueues {
         Ok(Self {
             read: Arc::new(IoQueueHandle::new(IoOperation::Read)?),
             write: Arc::new(IoQueueHandle::new(IoOperation::Write)?),
+            payload_reads: Arc::new(PayloadReadQueue::new()),
         })
     }
 
@@ -84,10 +91,21 @@ impl IoQueues {
     ) -> ReadQueue {
         ReadQueue {
             handle: self.read.clone(),
+            payload_reads: self.payload_reads.clone(),
             files,
             buffer_pool,
             metrics,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_all_read_permits(&self) -> SemaphorePermit<'_> {
+        self.payload_reads.hold_all_read_permits()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_queued_reads(&self) -> impl Sized + '_ {
+        self.payload_reads.hold_queued_reads()
     }
 
     pub(crate) fn write_queue(&self, files: Arc<DataFileAndDirectoryLock>) -> WriteQueue {
@@ -180,6 +198,7 @@ impl Drop for IoQueueHandle {
 /// Submits reads and allocates their buffers.
 pub(crate) struct ReadQueue {
     handle: Arc<IoQueueHandle>,
+    payload_reads: Arc<PayloadReadQueue>,
     files: Arc<DataFileAndDirectoryLock>,
     buffer_pool: Arc<BufferPool>,
     metrics: Arc<IoMetrics>,
@@ -208,6 +227,7 @@ impl ReadQueue {
     ) -> io::Result<Self> {
         Ok(Self {
             handle: Arc::new(IoQueueHandle::new(IoOperation::Read)?),
+            payload_reads: Arc::new(PayloadReadQueue::new()),
             files,
             buffer_pool,
             metrics,
@@ -229,6 +249,13 @@ impl ReadQueue {
             result
         })
         .await
+    }
+
+    pub(crate) async fn acquire_payload_read_permit(
+        &self,
+        should_fall_through: impl FnOnce() -> bool,
+    ) -> Option<SemaphorePermit<'_>> {
+        self.payload_reads.acquire_permit(should_fall_through).await
     }
 
     pub(crate) fn allocate_buffer(&self, length: usize) -> io::Result<AlignedBuffer> {

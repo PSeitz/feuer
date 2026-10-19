@@ -37,7 +37,7 @@ operations. Use the public lookup counters to measure caller-visible behavior.
 
 | Metric | Type | Labels / meaning |
 |---|---|---|
-| `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `checksum_failed` |
+| `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `checksum_failed`, `fallthrough` |
 | `feuer_disk_lookup_duration_seconds` | Histogram | No labels. Successful hits only: buffered copying, or reading a covering checksummed range, verification and copying |
 | `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`. Each chunk is 1 MiB. Excludes the reserved global-header chunk |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
@@ -45,7 +45,13 @@ operations. Use the public lookup counters to measure caller-visible behavior.
 | `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`. Payload and payload-chunk bytes of successfully written payload regions, before publication. Metadata writes are counted separately in the raw I/O counters |
 
 Disk-tier hits include copies from the shard's buffer; those perform no disk I/O, reserve no disk capacity, and are not yet indexed.
-Read errors and checksum failures are distinct misses. `covers_range()` includes buffered entries but does not count as a lookup.
+Read errors and checksum failures are distinct misses. `fallthrough` counts application-approved
+source fallthrough scheduled when at least 64 payload reads are waiting, with no disk read started
+by that lookup. The callback may execute after other fallthroughs have relieved the pressure.
+The public lookup outcome records the source callback's success or failure as usual.
+Disk-hit lookup durations include the wait for a payload read permit. Raw data-file I/O durations
+start after admission and exclude that wait.
+`covers_range()` includes buffered entries but does not count as a lookup.
 
 Chunk states are disjoint. Payload reservations are released after their last indexed
 entry is removed, without waiting for readers. Metadata chunks remain reserved while

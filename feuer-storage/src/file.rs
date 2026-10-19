@@ -158,6 +158,16 @@ impl DataFile {
         .await
     }
 
+    pub(crate) async fn acquire_payload_read_permit(
+        &self,
+        should_fall_through: impl FnOnce() -> bool,
+    ) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        self.state
+            .read_queue
+            .acquire_payload_read_permit(should_fall_through)
+            .await
+    }
+
     /// Reads payload bytes at a possibly unaligned address and returns their backing buffer capacity.
     /// Omits alignment padding from the returned bytes. Empty reads still read 4 KiB.
     pub(crate) async fn read_payload(&self, address: u64, length: usize) -> DataFileResult<(Bytes, usize)> {

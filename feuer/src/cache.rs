@@ -199,7 +199,7 @@ impl TieredMemoryDiskCache {
             None => None,
         };
         let started = Instant::now();
-        let (outcome, bytes) = self.lookup_cached(object_key, None).await;
+        let (outcome, bytes) = self.lookup_cached(object_key, None, || false).await;
         self.inner.metrics.record(
             outcome,
             started.elapsed(),
@@ -230,7 +230,24 @@ impl TieredMemoryDiskCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Bytes, E>>,
     {
-        self.lookup_by_hash(ObjectKeyHash::from(object_key), None, || async {
+        self.get_or_fetch_object_with_disk_fallthrough(object_key, || false, callback)
+            .await
+    }
+
+    /// Like [`Self::get_or_fetch_object`], with the per-request disk fallthrough decision described in
+    /// [`Self::get_or_fetch_with_disk_fallthrough`].
+    pub async fn get_or_fetch_object_with_disk_fallthrough<F, Fut, E>(
+        &self,
+        object_key: crate::ObjectKey,
+        should_fall_through: impl FnOnce() -> bool,
+        callback: F,
+    ) -> Result<Bytes, GetOrFetchError<E>>
+    where
+        E: Clone + Send + Sync + 'static,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Bytes, E>>,
+    {
+        self.lookup_by_hash(ObjectKeyHash::from(object_key), None, should_fall_through, || async {
             callback()
                 .await
                 .map(|bytes| Download::new(0, bytes).expect("an object length fits in u64"))
@@ -258,13 +275,18 @@ impl TieredMemoryDiskCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(Bytes, usize), E>>,
     {
-        self.lookup_by_hash(ObjectKeyHash::from(object_key), None, || async {
-            callback().await.map(|(bytes, allocation_charge)| {
-                Download::new(0, bytes)
-                    .expect("an object length fits in u64")
-                    .with_allocation_charge(allocation_charge)
-            })
-        })
+        self.lookup_by_hash(
+            ObjectKeyHash::from(object_key),
+            None,
+            || false,
+            || async {
+                callback().await.map(|(bytes, allocation_charge)| {
+                    Download::new(0, bytes)
+                        .expect("an object length fits in u64")
+                        .with_allocation_charge(allocation_charge)
+                })
+            },
+        )
         .await
     }
 
@@ -304,8 +326,45 @@ impl TieredMemoryDiskCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Download, E>>,
     {
-        self.lookup_by_hash(ObjectKeyHash::from(object_key), Some(requested_range), callback)
+        self.get_or_fetch_with_disk_fallthrough(object_key, requested_range, || false, callback)
             .await
+    }
+
+    /// Like [`Self::get_or_fetch`], but may fetch from the source instead of a busy disk.
+    ///
+    /// Caches sharing `IoQueues` share 64 payload read permits. At 64 waiting reads,
+    /// every unchecked waiter is scheduled to call `should_fall_through` before I/O,
+    /// even if earlier fallthroughs have since reduced the number of waiting reads.
+    /// Each request is checked at most once. True invokes `callback`, false waits for disk.
+    /// The synchronous decision runs in the caller's task, should be cheap, and can capture
+    /// request details and current source load.
+    /// Memory hits, buffered disk hits, disk misses, admitted reads, and shared-read waiters
+    /// do not call the decision callback. Callers sharing a fetch follow its executing caller's
+    /// disk-versus-source decision. After cancellation, a waiter taking over uses its own decision.
+    ///
+    /// Fallthrough leaves the disk entry intact. Successful source downloads are admitted to
+    /// memory. Downloads already fully covered by disk are not queued for another write.
+    /// Source failures are returned without retrying disk. Downloads must cover the request,
+    /// and each request updates access history before checking either cache tier.
+    pub async fn get_or_fetch_with_disk_fallthrough<F, Fut, E>(
+        &self,
+        object_key: crate::ObjectKey,
+        requested_range: ByteRange,
+        should_fall_through: impl FnOnce() -> bool,
+        callback: F,
+    ) -> Result<Bytes, GetOrFetchError<E>>
+    where
+        E: Clone + Send + Sync + 'static,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Download, E>>,
+    {
+        self.lookup_by_hash(
+            ObjectKeyHash::from(object_key),
+            Some(requested_range),
+            should_fall_through,
+            callback,
+        )
+        .await
     }
 
     /// Replays a recorded object identity without hashing it a second time.
@@ -323,13 +382,15 @@ impl TieredMemoryDiskCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Download, E>>,
     {
-        self.lookup_by_hash(object_key, requested_range.into(), callback).await
+        self.lookup_by_hash(object_key, requested_range.into(), || false, callback)
+            .await
     }
 
     async fn lookup_by_hash<F, Fut, E>(
         &self,
         object_key: ObjectKeyHash,
         requested: Option<ByteRange>,
+        should_fall_through: impl FnOnce() -> bool,
         callback: F,
     ) -> Result<Bytes, GetOrFetchError<E>>
     where
@@ -355,7 +416,7 @@ impl TieredMemoryDiskCache {
             let fetch = PendingFetch::<E>::join(&self.inner.pending_fetches, object_key, requested);
             let result = fetch
                 .result
-                .get_or_init(|| self.fetch(object_key, requested, callback))
+                .get_or_init(|| self.fetch(object_key, requested, should_fall_through, callback))
                 .await
                 .clone();
             fetch.remove();
@@ -373,13 +434,18 @@ impl TieredMemoryDiskCache {
         &self,
         object_key: ObjectKeyHash,
         requested: Option<ByteRange>,
+        should_fall_through: impl FnOnce() -> bool,
     ) -> (LookupOutcome, Option<Bytes>) {
         if let Some(bytes) = self.inner.memory.get(&object_key, requested) {
             return (LookupOutcome::MemoryHit, Some(bytes));
         }
+        #[cfg(not(target_os = "linux"))]
+        let _ = should_fall_through;
         #[cfg(target_os = "linux")]
         if let Some(disk) = &self.inner.disk
-            && let Some((bytes, buffer_capacity)) = disk.fetch_from_disk(&object_key, requested).await
+            && let Some((bytes, buffer_capacity)) = disk
+                .fetch_from_disk_with_fallthrough(&object_key, requested, should_fall_through)
+                .await
         {
             let download = Download::new(requested.map_or(0, ByteRange::start), bytes.clone())
                 .expect("disk result covers the request");
@@ -396,13 +462,20 @@ impl TieredMemoryDiskCache {
         &self,
         object_key: ObjectKeyHash,
         requested: Option<ByteRange>,
+        should_fall_through: impl FnOnce() -> bool,
         callback: F,
     ) -> FetchResult<E>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Download, E>>,
     {
-        let (outcome, bytes) = self.lookup_cached(object_key, requested).await;
+        let mut fell_through = false;
+        let (outcome, bytes) = self
+            .lookup_cached(object_key, requested, || {
+                fell_through = should_fall_through();
+                fell_through
+            })
+            .await;
         if let Some(bytes) = bytes {
             return (outcome, None, Ok(bytes));
         }
@@ -433,6 +506,9 @@ impl TieredMemoryDiskCache {
             let metrics = &self.inner.metrics;
             if disk.covers_range(&object_key, downloaded_range) {
                 metrics.disk_write_already_covered.increase(1);
+                if fell_through {
+                    self.inner.memory.insert(object_key, download);
+                }
             } else if self.inner.memory.insert(object_key, download.clone()) {
                 if downloaded_range == requested_range {
                     disk.enqueue_if_space_available(object_key, download);
@@ -462,6 +538,9 @@ pub enum GetOrFetchError<E> {
         downloaded_range: ByteRange,
     },
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod disk_fallthrough_tests;
 
 #[cfg(test)]
 mod sharing_tests;

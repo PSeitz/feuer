@@ -74,6 +74,40 @@ When changing your payload encoding, set `config.with_payload_version(1)` before
 downgrade. The version is stored once in the global file header and is
 independent of Feuer's disk-format version.
 
+## Falling through from a busy disk
+
+Use `get_or_fetch_with_disk_fallthrough(key, range, should_fall_through, callback)` to let
+individual requests fall through to the source when at least 64 payload reads are waiting:
+
+```rust,ignore
+let bytes = cache.get_or_fetch_with_disk_fallthrough(
+    key,
+    range,
+    || range.len() >= 8 * 1024 * 1024 && s3.has_spare_capacity(),
+    || s3.fetch(range),
+).await?;
+```
+
+The decision is a synchronous `FnOnce() -> bool` with no arguments. Capture request
+information and current source load in the closure. Keep it cheap. `true` invokes
+the usual fetch callback, while `false` waits for disk. Existing APIs never fall through due to disk pressure.
+`get_or_fetch_object_with_disk_fallthrough(key, should_fall_through, callback)` provides
+the same option for whole objects.
+
+Caches using the same `IoQueues` share 64 payload read permits. When 64 reads are
+waiting for a permit, Feuer schedules a fallthrough check for every unchecked waiting read.
+Each callback runs at most once, in its caller's task, even if other fallthroughs have
+since reduced the number of waiting reads. New arrivals also get checked while at
+least 64 reads are waiting. Waiting for a permit does not allocate payload buffers.
+
+Memory hits, buffered disk hits, absent disk entries, admitted reads, and shared-read
+waiters skip the decision. Callers sharing a disk-or-callback operation follow its executing
+caller's decision, including a fallthrough and its source result. After cancellation, a waiter
+taking over uses its own decision while waiting for a permit.
+Fallthrough does not cancel submitted I/O or remove the disk entry. Successful source
+downloads enter memory. Downloads already fully covered by disk are not queued for
+another write. Source errors are returned without retrying disk.
+
 ## Independent caches on one SSD
 
 Create one `IoQueues::new()?` and pass its clones to
@@ -90,8 +124,10 @@ let documents = CacheConfig::new("/ssd/cache", 2 << 30, 32 << 20)?.with_file_nam
 The filename defaults to `data`, with lock file `.feuer.lock`. Other filenames use
 `.feuer.<filename>.lock`. Filenames must be single names, without NUL bytes or the
 reserved `.feuer.` prefix. Opening the same file twice concurrently fails.
-The caches share only low-level read/write queues and worker threads: 64 active reads and 8 active writes,
-with waiting channels for another 64 reads and 8 writes, across all attached caches.
+The caches share read admission plus low-level read/write queues and worker threads.
+Read admission permits 64 payload reads at a time. The I/O queues allow
+64 active read pieces and 8 active writes, with waiting channels for another 64 read
+pieces and 8 writes, across all attached caches. Each I/O piece is at most 1 MiB.
 Scheduling follows arrival order, without per-cache fairness.
 
 Contents, capacities, eviction, access histories, buffer pools, file locks,

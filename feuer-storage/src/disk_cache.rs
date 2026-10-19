@@ -2,6 +2,8 @@
 
 #[cfg(test)]
 mod adversarial_tests;
+#[cfg(test)]
+mod fallthrough_tests;
 mod header;
 mod metadata;
 mod small_entry_buffer;
@@ -316,6 +318,23 @@ impl DiskCache {
         key: &ObjectKeyHash,
         requested: impl Into<Option<ByteRange>>,
     ) -> Option<(Bytes, usize)> {
+        self.fetch_from_disk_with_fallthrough(key, requested, || false).await
+    }
+
+    /// Like [`Self::fetch_from_disk`], but allows reads waiting for admission to fall through.
+    /// At 64 payload reads waiting for a permit, every unchecked waiter is scheduled to call its own
+    /// `should_fall_through`, even if other fallthroughs subsequently relieve the pressure.
+    /// Each callback runs at most once, in its caller's task and without holding a cache lock.
+    /// Buffered hits, absent entries, admitted reads, and shared-read waiters skip the check.
+    /// A waiter taking over after cancellation or fallthrough may be checked while waiting for a permit.
+    /// Returning true produces `None` without reading or removing the entry. The decision is
+    /// local to this lookup and is not shared with other callers waiting for the same read.
+    pub async fn fetch_from_disk_with_fallthrough(
+        &self,
+        key: &ObjectKeyHash,
+        requested: impl Into<Option<ByteRange>>,
+        should_fall_through: impl FnOnce() -> bool,
+    ) -> Option<(Bytes, usize)> {
         let requested = requested.into();
         let started = Instant::now();
         let metrics = &self.disk.metrics;
@@ -339,10 +358,13 @@ impl DiskCache {
             };
             (entry.share_covering_read(requested), entry.object_range.start())
         };
-        // If the initializing caller is canceled, OnceCell lets a waiter take over.
-        let result = read
+        // Cancellation or fallthrough leaves the shared result unset so another caller can read.
+        let Ok(result) = read
             .result
-            .get_or_init(|| async {
+            .get_or_try_init(|| async {
+                let Some(_read_permit) = self.disk.file.acquire_payload_read_permit(should_fall_through).await else {
+                    return Err(());
+                };
                 let result = read.read_and_verify_payload(&self.disk.file).await;
                 if matches!(result, Err(DiskLookupOutcome::ChecksumFailed)) {
                     let mut disk_index = shard.entry_index.lock().unwrap();
@@ -355,9 +377,13 @@ impl DiskCache {
                         shard.remove_entry_from_index(&mut disk_index, key, entry_range_start);
                     }
                 }
-                result
+                Ok(result)
             })
-            .await;
+            .await
+        else {
+            metrics.record_lookup(DiskLookupOutcome::Fallthrough, started.elapsed());
+            return None;
+        };
         match result {
             Ok((bytes, capacity)) => {
                 let requested = requested.unwrap_or(read.object_range);
