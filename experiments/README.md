@@ -20,6 +20,8 @@ Keep raw data and execution workspaces local and ignored by Git.
 
 ## Results and procedures
 
+- [Reclaiming buffer capacity, 2026-10-17](cache/same-range-compaction-20261017/README.md):
+  capacity-based memory compaction reduced SSD reads by 28% at 11% more CPU in one matched replay pair.
 - [Tier retrieval cost model, 2026-10-11](cache/tier-retrieval-cost-20261011/README.md):
   memory retention based on usable disk or source fallback, with whole-entry
   alignment, I/O submission, and checksum costs. Two matched replay pairs.
