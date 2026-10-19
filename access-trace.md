@@ -15,8 +15,10 @@ Read and replay FETR packages with [the replay tools](feuer-replay/README.md).
   for persistence before runtime shutdown; abrupt shutdown can lose the tail.
   There is no durable spool.
 - Each lookup emits a start and one completed outcome; cancellation can leave an
-  unmatched start. Callbacks may hide backend retries/coalescing; these aren't
-  independently traced. Object keys are hashed, not anonymized; payloads aren't traced.
+  unmatched start. Shared disk and callback results emit an outcome per completed
+  caller, not per execution. Callbacks may also hide backend retries/coalescing,
+  which aren't independently traced. Object keys are hashed, not anonymized;
+  payloads aren't traced.
 
 ## FETR v1
 
@@ -25,7 +27,7 @@ events**. Integers are little-endian, without padding. Persist one package per f
 
 | Event offset | Type | Field |
 | --- | --- | --- |
-| 0 | `u8` | Kind: 0 start, 1 memory hit, 2 disk/buffered hit, 3 callback success, 4 callback error, 5 noncovering download |
+| 0 | `u8` | Kind: 0 start, 1 memory hit, 2 disk/buffered hit, 3 callback success, 4 callback error, 5 noncovering download, 6 lookup-only miss |
 | 1 | `u64` | Request ID, starts at 1; local to this trace |
 | 9 | `u64` | Elapsed nanoseconds since trace creation |
 | 17 | `u128` | Object key hash, seed-zero XXH3-128 |
@@ -34,6 +36,8 @@ events**. Integers are little-endian, without padding. Persist one package per f
 
 Whole-object requests encode the unknown requested length as `0..u64::MAX`.
 Their callback-success events record the actual object range in the downloaded fields.
+A lookup-only `get_object` returning `None` emits kind 6 with zero downloaded fields,
+not a callback error. Existing kinds 0 through 5 retain their meanings.
 
 Ranges are half-open. Timestamps are captured before enqueue; queue order can differ
 from timestamp order. Join start/outcome by request ID. Python layout: `<B8Q`, with

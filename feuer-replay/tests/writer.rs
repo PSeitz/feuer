@@ -22,7 +22,9 @@ async fn decodes_current_writer_and_preserves_hashes_in_tiered_replay() -> Resul
         .await?;
     let hit = cache
         .get_or_fetch_by_hash(key, range, || async {
-            Err::<Download, _>(std::io::Error::other("recorded hash must hit the string-key entry"))
+            Err::<Download, _>(std::sync::Arc::new(std::io::Error::other(
+                "recorded hash must hit the string-key entry",
+            )))
         })
         .await?;
     assert_eq!(hit.as_ref(), b"bc");
@@ -73,7 +75,7 @@ async fn decodes_current_writer_and_preserves_hashes_in_tiered_replay() -> Resul
     let trace = load_requests(&path, None)?;
     assert_eq!(trace.requests.len(), 5);
     assert_eq!(trace.incomplete, 1);
-    assert_eq!(trace.outcomes, [0, 1, 0, 1, 1, 1]);
+    assert_eq!(trace.outcomes, [0, 1, 0, 1, 1, 1, 0]);
     assert_eq!(trace.requests[0].object_key, key);
     for (disk_bytes, full_objects) in [(0, false), (4 << 20, false), (0, true), (4 << 20, true)] {
         let case = format!("{disk_bytes}-{full_objects}");
@@ -120,21 +122,25 @@ async fn decodes_empty_whole_object_from_current_writer() -> Result<()> {
     let cache = TieredMemoryDiskCache::open(CacheConfig::new("unused", 0, 1 << 20)?, None, None)
         .await?
         .with_trace(move |package| std::future::ready(sender.send(package).map_err(std::io::Error::other)));
+    assert!(cache.get_object("empty".to_owned()).await.is_none());
     cache
         .get_or_fetch_object("empty".to_owned(), || async { Ok::<_, Infallible>(Bytes::new()) })
         .await?;
-    let hit = cache
-        .get_or_fetch_by_hash(ObjectKeyHash::from("empty"), None, || async {
-            Err::<Download, _>(std::io::Error::other("whole-object hash lookup must hit"))
-        })
-        .await?;
+    let hit = cache.get_object("empty".to_owned()).await.unwrap();
     assert!(hit.is_empty());
     drop(cache);
     let package = receiver.recv().await.ok_or("missing tail")?;
     let events = decode_package(&package)?.collect::<Result<Vec<_>>>()?;
-    assert_eq!(events[0].requested, ByteRange::new(0, u64::MAX)?);
-    assert_eq!(events[1].downloaded, Some(ByteRange::new(0, 0)?));
-    assert_eq!(events[2].requested, ByteRange::new(0, u64::MAX)?);
-    assert_eq!(events[3].kind, 1);
+    assert_eq!(
+        events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+        [0, 6, 0, 3, 0, 1]
+    );
+    assert_eq!(events[0].request_id, events[1].request_id);
+    assert_eq!(events[1].downloaded, None);
+    assert_eq!(events[3].downloaded, Some(ByteRange::new(0, 0)?));
+    for event in events {
+        assert_eq!(event.object_key, ObjectKeyHash::from("empty"));
+        assert_eq!(event.requested, ByteRange::new(0, u64::MAX)?);
+    }
     Ok(())
 }

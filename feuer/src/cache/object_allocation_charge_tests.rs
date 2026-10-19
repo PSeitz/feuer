@@ -11,6 +11,7 @@ fn memory_cache(memory_capacity: u64, metrics_registry: &mixtrics::metrics::Boxe
                 .unwrap(),
             memory: MemoryCache::with_metrics(memory_capacity, feuer_memory::MemoryMetrics::new(metrics_registry), 0),
             metrics: LookupMetrics::new(metrics_registry),
+            pending_fetches: PendingFetches::default(),
             #[cfg(target_os = "linux")]
             disk: None,
         }),

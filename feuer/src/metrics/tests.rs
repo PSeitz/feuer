@@ -30,6 +30,7 @@ fn lookup_bytes_record_all_successes_but_latency_excludes_memory_hits() {
         (LookupOutcome::Callback, "callback"),
         (LookupOutcome::CallbackError, "callback_error"),
         (LookupOutcome::InvalidDownload, "invalid_download"),
+        (LookupOutcome::Miss, "miss"),
     ] {
         metrics.record(outcome, Duration::from_micros(10), 7);
         assert_eq!(value(&registry, "feuer_lookup_total", &[("outcome", label)]), 1.0);
@@ -50,6 +51,11 @@ fn lookup_bytes_record_all_successes_but_latency_excludes_memory_hits() {
         assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", "disk")]), 7.0);
     }
     let families = registry.gather();
+    let bytes = families
+        .iter()
+        .find(|family| family.name() == "feuer_lookup_bytes_total")
+        .unwrap();
+    assert_eq!(bytes.get_metric().len(), 3);
     let durations = families
         .iter()
         .find(|family| family.name() == "feuer_lookup_duration_seconds")

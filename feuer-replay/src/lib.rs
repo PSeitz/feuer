@@ -15,7 +15,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 /// One recorded request start or lookup outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Event {
-    /// 0 start, 1 memory hit, 2 disk hit, 3 callback success, 4 callback error, 5 noncovering download.
+    /// 0 start, 1 memory hit, 2 disk hit, 3 callback success, 4 callback error, 5 noncovering download, 6 miss.
     pub kind: u8,
     /// Identity joining this request's start and outcome within one trace session.
     pub request_id: u64,
@@ -41,7 +41,7 @@ pub fn decode_package(data: &[u8]) -> Result<impl Iterator<Item = Result<Event>>
     Ok(data[8..].as_chunks::<65>().0.iter().map(|record| {
         let u64_at = |offset| u64::from_le_bytes(record[offset..offset + 8].try_into().unwrap());
         let kind = record[0];
-        if kind > 5 {
+        if kind > 6 {
             return Err("unknown FETR event kind".into());
         }
         let requested = ByteRange::new(u64_at(33), u64_at(41))?;
@@ -111,7 +111,7 @@ pub struct TraceRequests {
     /// Requests in timestamp order, with request ID as the tie breaker.
     pub requests: Vec<Request>,
     /// Counts of recorded outcomes for selected starts, indexed by FETR kind.
-    pub outcomes: [usize; 6],
+    pub outcomes: [usize; 7],
     /// Selected starts without a recorded outcome. These are not established cache misses.
     pub incomplete: usize,
 }
@@ -159,7 +159,7 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
             return Err("whole-object replay requires a known object length".into());
         }
     }
-    let mut outcomes = [0; 6];
+    let mut outcomes = [0; 7];
     visit_events(path, |event| {
         if event.kind == 0 {
             return Ok(());
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn decodes_all_kinds_hashes_and_ranges() {
-        let events: Vec<_> = (0..=5).map(|kind| event(kind, 42, 100)).collect();
+        let events: Vec<_> = (0..=6).map(|kind| event(kind, 42, 100)).collect();
         let bytes = package(&events);
         let decoded: Vec<_> = decode_package(&bytes).unwrap().collect::<Result<_>>().unwrap();
         assert_eq!(decoded, events);
@@ -296,7 +296,7 @@ mod tests {
         assert!(decode_package(&[]).is_err());
         assert!(decode_package(&valid[..8]).is_err());
         assert!(decode_package(&valid[..valid.len() - 1]).is_err());
-        for (offset, value) in [(0, b'Q'), (4, 2), (8, 6), (8 + 49, 1), (8 + 33, 21)] {
+        for (offset, value) in [(0, b'Q'), (4, 2), (8, 7), (8 + 49, 1), (8 + 33, 21)] {
             let mut bad = valid.clone();
             bad[offset] = value;
             assert!(
@@ -347,7 +347,7 @@ mod tests {
             [(1, 0), (3, 0), (2, 500)]
         );
         assert_eq!(trace.requests[0].object_key, event(0, 1, 0).object_key);
-        assert_eq!(trace.outcomes, [0, 1, 0, 1, 0, 0]);
+        assert_eq!(trace.outcomes, [0, 1, 0, 1, 0, 0, 0]);
         assert_eq!(trace.incomplete, 1);
 
         let trace = load_requests(&path, None).unwrap();
@@ -359,7 +359,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(1, 0), (3, 0), (2, 500), (4, 1_000_000_000), (5, 181_000_000_000)]
         );
-        assert_eq!(trace.outcomes, [0, 2, 0, 1, 1, 0]);
+        assert_eq!(trace.outcomes, [0, 2, 0, 1, 1, 0, 0]);
         assert_eq!(trace.incomplete, 1);
     }
 
@@ -432,20 +432,22 @@ mod tests {
     }
 
     #[test]
-    fn preserves_empty_ranges_and_reports_failed_outcomes() {
+    fn preserves_empty_ranges_and_reports_errors_and_misses() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.feuer");
         let mut start = event(0, 1, 0);
         start.requested = ByteRange::new(10, 10).unwrap();
-        let outcome = Event {
-            kind: 4,
-            time_ns: 1,
-            ..start
-        };
-        std::fs::write(&path, package(&[start, outcome])).unwrap();
-        let trace = load_requests(&path, None).unwrap();
-        assert!(trace.requests[0].range.is_empty());
-        assert_eq!(trace.outcomes[4], 1);
-        assert_eq!(trace.incomplete, 0);
+        for kind in [4, 6] {
+            let outcome = Event {
+                kind,
+                time_ns: 1,
+                ..start
+            };
+            std::fs::write(&path, package(&[start, outcome])).unwrap();
+            let trace = load_requests(&path, None).unwrap();
+            assert!(trace.requests[0].range.is_empty());
+            assert_eq!(trace.outcomes[kind as usize], 1);
+            assert_eq!(trace.incomplete, 0);
+        }
     }
 }

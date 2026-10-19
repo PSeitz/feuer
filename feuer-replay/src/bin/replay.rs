@@ -111,7 +111,11 @@ mod linux {
             Ok(source)
         }
 
-        async fn download(&self, cache: &TieredMemoryDiskCache, request: &Request) -> std::io::Result<Download> {
+        async fn download(
+            &self,
+            cache: &TieredMemoryDiskCache,
+            request: &Request,
+        ) -> std::result::Result<Download, Arc<std::io::Error>> {
             self.gets.inc();
             self.waiting.inc();
             let queued = Instant::now();
@@ -140,7 +144,7 @@ mod linux {
             }
             self.service.observe(started.elapsed().as_secs_f64());
             self.active.dec();
-            download
+            download.map_err(Arc::new)
         }
     }
 

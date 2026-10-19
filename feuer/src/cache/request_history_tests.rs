@@ -11,6 +11,7 @@ async fn records_each_started_request_before_any_result() {
             config: CacheConfig::new("cache", 4 << 20, 1024).unwrap(),
             memory: MemoryCache::with_metrics(1024, feuer_memory::MemoryMetrics::new(&registry), 7),
             metrics: LookupMetrics::new(&registry),
+            pending_fetches: PendingFetches::default(),
         }),
         trace: None,
     };

@@ -42,11 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     assert_eq!(document.as_ref(), b"document bytes");
 
-    let image = images
-        .get_or_fetch_object("object-v1".to_owned(), || async {
-            Err::<Bytes, _>(std::io::Error::other("cached object must not be downloaded again"))
-        })
-        .await?;
+    let image = images.get_object("object-v1".to_owned()).await.unwrap();
     assert_eq!(image.as_ref(), b"image bytes");
     // Do not mix get_or_fetch_object and get_or_fetch for the same key within a cache.
     Ok(())

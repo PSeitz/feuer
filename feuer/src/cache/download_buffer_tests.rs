@@ -9,6 +9,7 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
             config: CacheConfig::new("cache", 0, 8 << 20).unwrap(),
             memory: MemoryCache::with_metrics(8 << 20, feuer_memory::MemoryMetrics::new(&backend), 7),
             metrics: LookupMetrics::new(&backend),
+            pending_fetches: PendingFetches::default(),
             #[cfg(target_os = "linux")]
             disk: None,
         }),

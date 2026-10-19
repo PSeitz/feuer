@@ -15,11 +15,12 @@ pub(crate) enum LookupOutcome {
     Callback = 2,
     CallbackError,
     InvalidDownload,
+    Miss,
 }
 
 /// Completed public lookups, never keyed by object identity.
 pub(crate) struct LookupMetrics {
-    outcome_counts: [BoxedCounter; 5],
+    outcome_counts: [BoxedCounter; 6],
     success_durations: [BoxedHistogram; 2],
     served_bytes: [BoxedCounter; 3],
     #[cfg(target_os = "linux")]
@@ -64,6 +65,7 @@ impl LookupMetrics {
                 "callback",
                 "callback_error",
                 "invalid_download",
+                "miss",
             ]
             .map(|label| count.counter(&[label.into()])),
             success_durations: ["disk_hit", "callback"].map(|label| duration.histogram(&[label.into()])),

@@ -47,11 +47,21 @@ the callback returns `Bytes`. Do not mix whole-object and range lookups for the 
 including after reopening the disk cache. Whole-object lookups treat the stored entry's
 length as the object length. Empty objects are supported.
 
+`get_object(key)` checks memory and disk without invoking or waiting for a source callback.
+It returns `None` on a miss and promotes disk hits to memory. Use it to plan work across
+multiple objects, then pass the actual work to `get_or_fetch_object` for the misses.
+
 Keys must identify immutable content. Requested ranges for a key may overlap;
 exact repeats update the same access counter. Cached ranges receive retrieval credit
 only for recorded request ranges they fully contain.
 Downloads may cover multiple requests.
-Feuer leaves request coalescing, scheduling, and retries to your downloader.
+Concurrent memory misses with the same key, requested range (or whole object), and exact
+callback error type share one disk-or-callback operation. They receive the same success or
+failure. Matching callbacks must be interchangeable. Errors must implement
+`Clone + Send + Sync + 'static`, but callbacks and their futures may borrow caller state.
+Different error types do not share the operation. Cancellation of its executing caller lets a
+waiter take over using its own callback. Completed failures are not cached for later requests.
+Feuer leaves merging different ranges, scheduling, and source retries to your downloader.
 
 At the public lookup boundary, Feuer hashes the key's UTF-8 bytes once with XXH3-128
 (seed zero). Both tiers, access history, and disk recovery use only this 128-bit identity;

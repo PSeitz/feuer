@@ -15,15 +15,19 @@ counters and gauges. Use separate registries if they must be distinguished.
 
 | Metric | Type | Labels / meaning |
 |---|---|---|
-| `feuer_lookup_total` | Counter | `outcome`: `memory_hit`, `disk_hit`, `callback`, `callback_error`, `invalid_download` |
+| `feuer_lookup_total` | Counter | `outcome`: `memory_hit`, `disk_hit`, `callback`, `callback_error`, `invalid_download`, `miss` |
 | `feuer_lookup_duration_seconds` | Histogram | `outcome`: `disk_hit`, `callback`. Successful lookup after a memory miss, including callback work and synchronous disk-write scheduling |
 | `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`. Exact requested bytes successfully returned |
 
 Lookup outcomes count only completed operations. Duration
-histograms record successful disk hits and callbacks only, starting after the
-memory lookup. Memory hits do not read the clock or record a duration; their
-outcome and served-byte counters still increase. A non-covering callback result
+histograms record successful disk hits and callbacks only, including time spent
+waiting for a shared fetch. Timing starts after trace-start delivery and before
+checking memory. Memory hits record no duration, but their outcome and served-byte
+counters still increase. A non-covering callback result
 is an `invalid_download` lookup and does not record a duration.
+A lookup-only `get_object` returning `None` records `miss`, without served bytes
+or duration. Shared disk and callback results count once per completed caller,
+not once per execution. Callback outcomes do not measure source invocation counts.
 
 Use lookup counters for request-weighted hit ratios and lookup byte counters for
 byte-weighted hit ratios. Memory-tier counters also include internal memory
