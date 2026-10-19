@@ -175,24 +175,6 @@ impl DataFile {
             .await
     }
 
-    /// Copies a payload read result only if it saves at least 25% of backing capacity.
-    /// Allocation failure leaves the result unchanged.
-    pub(crate) fn shrink_read_buffer(&self, bytes: Bytes, capacity: usize) -> (Bytes, usize) {
-        let saved_bytes = capacity - BufferPool::allocation_capacity(bytes.len());
-        if saved_bytes < capacity.div_ceil(4) {
-            return (bytes, capacity);
-        }
-        let Ok(mut buffer) = self.state.read_queue.allocate_buffer(bytes.len()) else {
-            return (bytes, capacity);
-        };
-        let copied_capacity = buffer.capacity();
-        if capacity - copied_capacity < capacity.div_ceil(4) {
-            return (bytes, capacity);
-        }
-        buffer.as_mut_slice().copy_from_slice(&bytes);
-        (buffer.into_bytes(), copied_capacity)
-    }
-
     /// Writes bytes at a 4096-byte-aligned offset. The byte count must also be a multiple of 4096.
     ///
     /// Retains aligned byte slices directly and copies unaligned inputs into aligned
@@ -474,31 +456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_buffer_copy_requires_minimum_savings() {
-        let temp = tempdir().unwrap();
-        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
-        file.write_at(0, &Bytes::from(vec![0x55; CAPACITY as usize]))
-            .await
-            .unwrap();
-        let mib = CHUNK_BYTES as usize;
-        for (payload_length, slice_length, expected_capacity, copied) in [
-            (3 * mib, 2 * mib, 2 * mib, true),
-            (4 * mib, 2 * mib, 2 * mib, true),
-            (4 * mib, 2 * mib + 1, 3 * mib, true),
-            (4 * mib, 4 * mib - 1, 4 * mib, false),
-            (3 * mib, mib, mib, true),
-        ] {
-            let (source, capacity) = file.read_payload(0, payload_length).await.unwrap();
-            let slice = source.slice(..slice_length);
-            let (bytes, capacity) = file.shrink_read_buffer(slice.clone(), capacity);
-            assert_eq!(bytes, slice);
-            assert_eq!(capacity, expected_capacity);
-            assert_eq!(bytes.as_ptr() != source.as_ptr(), copied);
-        }
-    }
-
-    #[tokio::test]
-    async fn large_reads_and_copies_use_retained_buffer_capacity() {
+    async fn large_reads_use_retained_buffer_capacity() {
         let temp = tempdir().unwrap();
         let mib = CHUNK_BYTES as usize;
         let pool = feuer_memory::MemoryCache::new(100 * 96 * CHUNK_BYTES).buffer_pool();
@@ -516,24 +474,6 @@ mod tests {
         let (bytes, capacity) = file.read_payload(0, 70 * mib).await.unwrap();
         assert_eq!(bytes.len(), 70 * mib);
         assert_eq!(capacity, 76 * mib);
-        let address = bytes.as_ptr();
-        let (bytes, capacity) = file.shrink_read_buffer(bytes, capacity);
-        assert_eq!(bytes.as_ptr(), address);
-        assert_eq!(capacity, 76 * mib);
-        drop(bytes);
-
-        let (source, capacity) = file.read_payload(0, 96 * mib).await.unwrap();
-        assert_eq!(capacity, 96 * mib);
-        drop(pool.allocate(76 * mib).unwrap());
-        // Fresh capacity would save 25%, but the reused destination does not.
-        let (bytes, capacity) = file.shrink_read_buffer(source.slice(..70 * mib), capacity);
-        assert_eq!(bytes.as_ptr(), source.as_ptr());
-        assert_eq!(capacity, 96 * mib);
-        // A smaller request shrinks the idle destination and meets the copy threshold.
-        let (bytes, capacity) = file.shrink_read_buffer(source.slice(..68 * mib), capacity);
-        assert_ne!(bytes.as_ptr(), source.as_ptr());
-        assert_eq!(capacity, 68 * mib);
-        assert_eq!(bytes, source.slice(..68 * mib));
     }
 
     #[tokio::test]

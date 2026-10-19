@@ -25,22 +25,20 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
     let mut buffer = cache.allocate_buffer(4).unwrap();
     assert_eq!(buffer.as_ref().as_ptr(), address);
     buffer.as_mut_slice().copy_from_slice(b"abcd");
-    let download = buffer.into_download(10).unwrap();
+    let download = buffer.into_download();
     let result = cache
-        .get_or_fetch("object".to_owned(), ByteRange::new(11, 13).unwrap(), || async {
-            Ok::<_, &str>(download)
-        })
+        .get_or_fetch("object".to_owned(), || async { Ok::<_, &str>(download) })
         .await
         .unwrap();
-    assert_eq!(result.as_ref(), b"bc");
-    assert_eq!(result.as_ptr(), address.wrapping_add(1));
+    assert_eq!(result.as_ref(), b"abcd");
+    assert_eq!(result.as_ptr(), address);
     assert_eq!(pool.used_bytes(), capacity as u64);
     assert_eq!(
         crate::test_metrics::value(&registry, "feuer_memory_used_bytes", &[]),
         capacity as f64
     );
     let hit = cache
-        .get_or_fetch("object".to_owned(), ByteRange::new(10, 14).unwrap(), || async {
+        .get_or_fetch("object".to_owned(), || async {
             Err::<Download, _>("memory hit must not download")
         })
         .await
@@ -60,21 +58,20 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
             .unwrap();
         assert_eq!(hit, payload);
         assert_eq!(hit.as_ptr(), payload.as_ptr());
-        assert!(cache.inner.memory.contains_entry(
-            &ObjectKeyHash::from(key),
-            ByteRange::new(0, payload.len() as u64).unwrap(),
-        ));
+        assert!(cache.inner.memory.contains_entry(&ObjectKeyHash::from(key)));
     }
     drop(cache);
     let bytes = receiver.recv().await.unwrap();
-    assert_eq!(&bytes[..8], b"FETR\x01\0\0\0");
-    assert_eq!(bytes.len(), 8 + 12 * 65);
-    let (events, _) = bytes[8..].as_chunks::<65>();
+    assert_eq!(&bytes[..8], b"FETR\x02\0\0\0");
+    assert_eq!(bytes.len(), 8 + 12 * 41);
+    let (events, _) = bytes[8..].as_chunks::<41>();
     assert_eq!(
         events.iter().map(|event| event[0]).collect::<Vec<_>>(),
         [0, 3, 0, 1].repeat(3)
     );
-    for event in &events[4..] {
-        assert_eq!(u64::from_le_bytes(event[41..49].try_into().unwrap()), u64::MAX);
+    for (object_events, payload_len) in events.as_chunks::<4>().0.iter().zip([4, 0, 6]) {
+        for (event, expected_length) in object_events.iter().zip([0, payload_len, 0, payload_len]) {
+            assert_eq!(u64::from_le_bytes(event[33..41].try_into().unwrap()), expected_length);
+        }
     }
 }

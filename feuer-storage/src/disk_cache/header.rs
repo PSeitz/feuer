@@ -7,7 +7,7 @@ use super::recovery::shard_disk_range;
 use crate::{DataFile, DataFileResult, allocation::CHUNK_BYTES};
 
 const HEADER_BYTES: usize = 4096;
-const FORMAT_TAG: &[u8; 8] = b"FEUHDR14";
+const FORMAT_TAG: &[u8; 8] = b"FEUHDR15";
 
 /// Clears incompatible metadata chains before writing the requested payload version.
 /// A matching format, payload version, capacity, and header checksum leave the file unchanged.
@@ -45,7 +45,7 @@ mod tests {
         DiskCache, DiskCacheOptions,
         disk_cache::{
             page_format::{ENTRIES_PER_METADATA_CHUNK, ENTRIES_PER_METADATA_PAGE},
-            tests::{download, entry_disk_ranges, range, with_manual_metadata_writes},
+            tests::{download, entry_disk_ranges, with_manual_metadata_writes},
         },
     };
     use feuer_types::ObjectKeyHash;
@@ -81,32 +81,32 @@ mod tests {
         let cache = open_cache(directory.path(), 384, 0).await;
         assert_eq!(cache.disk.shards.len(), 2);
         // Each shard needs two pages of entry metadata, so clearing only the first page is insufficient.
-        insert_entries(&cache, 0..200, 1).await;
+        insert_entries(&cache, 0..204, 1).await;
         cache.write_dirty_metadata_pages().await;
         drop(cache);
 
         let cache = open_cache(directory.path(), 384, 0).await;
-        for key in 0..200 {
-            assert!(cache.get(&ObjectKeyHash(key), range(0, 1)).await.is_some());
+        for key in 0..204 {
+            assert!(cache.get(&ObjectKeyHash(key)).await.is_some());
         }
         drop(cache);
 
         for payload_version in [u64::MAX, 0] {
             let cache = open_cache(directory.path(), 384, payload_version).await;
-            for key in 0..202 {
-                assert!(cache.get(&ObjectKeyHash(key), range(0, 1)).await.is_none());
+            for key in 0..206 {
+                assert!(cache.get(&ObjectKeyHash(key)).await.is_none());
             }
-            for key in 200..202 {
+            for key in 204..206 {
                 assert!(cache.insert(ObjectKeyHash(key), download(0, 1)).await.unwrap());
             }
             cache.write_dirty_metadata_pages().await;
             drop(cache);
             let cache = open_cache(directory.path(), 384, payload_version).await;
-            for key in 0..200 {
-                assert!(cache.get(&ObjectKeyHash(key), range(0, 1)).await.is_none());
+            for key in 0..204 {
+                assert!(cache.get(&ObjectKeyHash(key)).await.is_none());
             }
-            for key in 200..202 {
-                assert!(cache.get(&ObjectKeyHash(key), range(0, 1)).await.is_some());
+            for key in 204..206 {
+                assert!(cache.get(&ObjectKeyHash(key)).await.is_some());
             }
             drop(cache);
         }
@@ -115,7 +115,7 @@ mod tests {
     #[tokio::test]
     async fn version_change_preserves_payload_bytes_and_initializes_reused_metadata_chunks() {
         let directory = tempfile::tempdir().unwrap();
-        let cache = open_cache(directory.path(), 384, 0).await;
+        let cache = open_cache(directory.path(), 255, 0).await;
         // Fill two metadata chunks and two pages in a third chunk of shard zero.
         let entries = 2 * ENTRIES_PER_METADATA_CHUNK + ENTRIES_PER_METADATA_PAGE + 1;
         insert_entries(&cache, (0..2 * entries).step_by(2), 2).await;
@@ -130,7 +130,7 @@ mod tests {
         let (payload, _) = entry_disk_ranges(&cache, &ObjectKeyHash(0)).await;
         drop(cache);
 
-        let cache = open_cache(directory.path(), 384, 1).await;
+        let cache = open_cache(directory.path(), 255, 1).await;
         let file = &cache.disk.file;
         assert_eq!(file.read_at(payload.start, 2).await.unwrap(), download(0, 2).bytes());
         assert_eq!(
@@ -139,7 +139,8 @@ mod tests {
         );
         // Reuse the second chunk with one entry, replacing its stale pages and link to the third chunk.
         let new_entries = ENTRIES_PER_METADATA_CHUNK + 1;
-        insert_entries(&cache, (100_000..100_000 + 2 * new_entries).step_by(2), 2).await;
+        let first_new_key = 2 * entries;
+        insert_entries(&cache, (first_new_key..first_new_key + 2 * new_entries).step_by(2), 2).await;
         let shard = &cache.disk.shards[0];
         let reused_chunk_address = shard.metadata_pages.lock().unwrap().chunks[1]
             .reserved_chunk
@@ -152,19 +153,19 @@ mod tests {
             .unwrap();
         assert!(shard.write_dirty_metadata_pages(&short_file).await.is_err());
         // Only the first chunk changes after the second chunk's initialization failed.
-        shard.remove_entry(&ObjectKeyHash(100_000), 0);
+        shard.remove_entry(&ObjectKeyHash(first_new_key as u128));
         let first_dirty_page = *shard.metadata_pages.lock().unwrap().dirty_pages.first().unwrap();
         assert_eq!(first_dirty_page.chunk_index, 0);
         cache.write_dirty_metadata_pages().await;
         drop(cache);
 
-        let cache = open_cache(directory.path(), 384, 1).await;
+        let cache = open_cache(directory.path(), 255, 1).await;
         for key in 0..entries {
-            assert!(!cache.covers_range(&ObjectKeyHash(2 * key as u128), range(0, 2)));
+            assert!(!cache.contains(&ObjectKeyHash(2 * key as u128)));
         }
-        assert!(!cache.covers_range(&ObjectKeyHash(100_000), range(0, 2)));
+        assert!(!cache.contains(&ObjectKeyHash(first_new_key as u128)));
         for key in 1..new_entries {
-            assert!(cache.covers_range(&ObjectKeyHash(100_000 + 2 * key as u128), range(0, 2)));
+            assert!(cache.contains(&ObjectKeyHash((first_new_key + 2 * key) as u128)));
         }
     }
 
@@ -174,7 +175,7 @@ mod tests {
         // The second shard starts at chunk 129 or 130. Resizing back must not follow the old chain.
         for (capacity_chunks, payload_version) in [(258, 0), (260, 1), (258, 1)] {
             let cache = open_cache(directory.path(), capacity_chunks, payload_version).await;
-            assert!(cache.get(&ObjectKeyHash(3), range(0, 2)).await.is_none());
+            assert!(cache.get(&ObjectKeyHash(3)).await.is_none());
             if payload_version == 0 {
                 // The second payload stays beyond either shard start.
                 for key in [1, 3] {
@@ -201,7 +202,7 @@ mod tests {
             assert!(cache.insert(ObjectKeyHash(1), download(0, 1)).await.unwrap());
             cache.write_dirty_metadata_pages().await;
             let header = cache.disk.file.read_at(0, HEADER_BYTES).await.unwrap();
-            assert_eq!(&header[8..16], b"FEUHDR14");
+            assert_eq!(&header[8..16], b"FEUHDR15");
             assert_eq!(header[16..24], 7u64.to_le_bytes());
             assert_eq!(header[24..32], (384 * CHUNK_BYTES).to_le_bytes());
             assert!(header[32..].iter().all(|&byte| byte == 0));
@@ -219,7 +220,7 @@ mod tests {
             cache.disk.file.write_at(0, &Bytes::from(corrupt_header)).await.unwrap();
             drop(cache);
             let cache = open_cache(directory.path(), 384, 7).await;
-            assert!(cache.get(&ObjectKeyHash(1), range(0, 1)).await.is_none());
+            assert!(cache.get(&ObjectKeyHash(1)).await.is_none());
             assert_eq!(cache.disk.file.read_at(0, HEADER_BYTES).await.unwrap(), header);
         }
     }

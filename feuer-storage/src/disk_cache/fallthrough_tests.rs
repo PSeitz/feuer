@@ -48,7 +48,7 @@ async fn reaching_fallthrough_threshold_checks_earlier_reads_without_issuing_io(
     let mut reads: Vec<_> = keys
         .iter()
         .map(|key| {
-            Box::pin(cache.fetch_from_disk_with_fallthrough(key, None, || {
+            Box::pin(cache.get_with_fallthrough(key, || {
                 calls.set(calls.get() + 1);
                 true
             }))
@@ -73,7 +73,7 @@ async fn reaching_fallthrough_threshold_checks_earlier_reads_without_issuing_io(
         before
     );
     for key in keys {
-        assert!(cache.covers_range(&key, source.downloaded_range()));
+        assert!(cache.contains(&key));
     }
     drop(read_permits);
 }
@@ -86,7 +86,7 @@ async fn declining_fallthrough_reads_disk() {
     cache.insert(key, source.clone()).await.unwrap();
     let held_reads = queues.hold_queued_reads();
     let (bytes, _) = cache
-        .fetch_from_disk_with_fallthrough(&key, None, || {
+        .get_with_fallthrough(&key, || {
             drop(held_reads);
             false
         })
@@ -102,7 +102,7 @@ async fn absent_buffered_and_uncongested_reads_do_not_consult_fallthrough() {
     let source = tests::download(0, 8192);
     cache.insert(key, source.clone()).await.unwrap();
     let (bytes, _) = cache
-        .fetch_from_disk_with_fallthrough(&key, None, || panic!("queue has room"))
+        .get_with_fallthrough(&key, || panic!("queue has room"))
         .await
         .unwrap();
     assert_eq!(bytes, *source.bytes());
@@ -111,21 +111,21 @@ async fn absent_buffered_and_uncongested_reads_do_not_consult_fallthrough() {
     let missing = ObjectKeyHash::from("missing");
     assert!(
         cache
-            .fetch_from_disk_with_fallthrough(&missing, None, || panic!("no disk entry"))
+            .get_with_fallthrough(&missing, || panic!("no disk entry"))
             .await
             .is_none()
     );
     let buffered = ObjectKeyHash::from("buffered");
     cache.enqueue_if_space_available(buffered, source.clone());
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !cache.covers_range(&buffered, source.downloaded_range()) {
+        while !cache.contains(&buffered) {
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
     let (bytes, _) = cache
-        .fetch_from_disk_with_fallthrough(&buffered, None, || panic!("buffered hit"))
+        .get_with_fallthrough(&buffered, || panic!("buffered hit"))
         .await
         .unwrap();
     assert_eq!(bytes, *source.bytes());
@@ -139,9 +139,9 @@ async fn shared_read_waiter_does_not_consult_fallthrough() {
     let source = tests::download(0, 8192);
     cache.insert(key, source.clone()).await.unwrap();
     let held_reads = queues.hold_queued_reads();
-    let mut initializer = Box::pin(cache.fetch_from_disk(&key, None));
+    let mut initializer = Box::pin(cache.get_with_fallthrough(&key, || false));
     assert_pending(initializer.as_mut()).await;
-    let mut waiter = Box::pin(cache.fetch_from_disk_with_fallthrough(&key, None, || panic!("shared read")));
+    let mut waiter = Box::pin(cache.get_with_fallthrough(&key, || panic!("shared read")));
     assert_pending(waiter.as_mut()).await;
     drop(held_reads);
     let (first, second) = tokio::join!(initializer, waiter);
@@ -156,10 +156,10 @@ async fn canceled_initializer_allows_independent_waiter_decisions() {
     let source = tests::download(0, 8192);
     cache.insert(key, source.clone()).await.unwrap();
     let held_reads = queues.hold_queued_reads();
-    let mut initializer = Box::pin(cache.fetch_from_disk(&key, None));
+    let mut initializer = Box::pin(cache.get_with_fallthrough(&key, || false));
     assert_pending(initializer.as_mut()).await;
-    let mut fallthrough = Box::pin(cache.fetch_from_disk_with_fallthrough(&key, None, || true));
-    let mut reader = Box::pin(cache.fetch_from_disk_with_fallthrough(&key, None, || {
+    let mut fallthrough = Box::pin(cache.get_with_fallthrough(&key, || true));
+    let mut reader = Box::pin(cache.get_with_fallthrough(&key, || {
         drop(held_reads);
         false
     }));

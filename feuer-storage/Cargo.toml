@@ -1,6 +1,6 @@
 [package]
 name = "feuer-storage"
-description = "Internal range-storage primitives for Feuer"
+description = "Internal object-storage primitives for Feuer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

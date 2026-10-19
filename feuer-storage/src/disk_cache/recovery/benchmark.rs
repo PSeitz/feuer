@@ -40,20 +40,11 @@ impl EventListener for CheckRecovery {
                     .disk
                     .shards
                     .iter()
-                    .map(|shard| {
-                        shard
-                            .entry_index
-                            .lock()
-                            .unwrap()
-                            .entries_by_key
-                            .values()
-                            .map(BTreeMap::len)
-                            .sum::<usize>()
-                    })
+                    .map(|shard| shard.entry_index.lock().unwrap().entries_by_key.len())
                     .sum();
                 assert_eq!(entries, self.entry_sizes.len());
-                for (i, &size) in self.entry_sizes.iter().enumerate() {
-                    assert!(cache.covers_range(&ObjectKeyHash(i as u128), ByteRange::new(0, size as u64).unwrap()));
+                for i in 0..self.entry_sizes.len() {
+                    assert!(cache.contains(&ObjectKeyHash(i as u128)));
                 }
                 drop(cache);
             }
@@ -138,12 +129,7 @@ fn benchmark_recovery() {
             for start in (0..entries).step_by(4096) {
                 let end = (start + 4096).min(entries);
                 let batch: Vec<_> = (start..end)
-                    .map(|i| {
-                        (
-                            ObjectKeyHash(i as u128),
-                            Download::new(0, source.slice(..entry_sizes[i])).unwrap(),
-                        )
-                    })
+                    .map(|i| (ObjectKeyHash(i as u128), Download::new(source.slice(..entry_sizes[i]))))
                     .collect();
                 assert_eq!(cache.insert_batch(batch).await.unwrap(), end - start);
             }

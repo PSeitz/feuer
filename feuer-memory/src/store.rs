@@ -1,4 +1,3 @@
-mod range_trim;
 mod shard;
 #[cfg(test)]
 mod tests;
@@ -7,7 +6,7 @@ use std::{fmt, hash::BuildHasher, sync::Arc};
 
 use bytes::Bytes;
 use feuer_historian::ObjectAccessHistories;
-use feuer_types::{ByteRange, Download, ObjectKeyHash};
+use feuer_types::{Download, ObjectKeyHash};
 use parking_lot::Mutex;
 use rustc_hash::FxBuildHasher;
 
@@ -21,23 +20,18 @@ use crate::{
 /// Caps lock partitioning to avoid excessive per-cache metadata.
 const MAX_SHARDS: usize = 64;
 
-/// A sharded cache of downloaded object ranges with Foyer-style soft capacity.
+/// A sharded cache of complete objects with Foyer-style soft capacity.
 ///
-/// All ranges for one [`ObjectKeyHash`] share a shard and are kept
-/// in an ordered index. Partial overlaps coexist and are treated no differently
-/// from disjoint ranges. A lookup succeeds only when one entry covers
-/// the exact request and returns a [`Bytes`] slice containing only those
-/// requested bytes. The result can share the entry's allocation and never
-/// holds an entry guard. Request history is supplied separately: cache operations
-/// consult it for retention decisions but never record accesses or remove history.
+/// Each [`ObjectKeyHash`] identifies one immutable object. Lookups return its
+/// complete payload, sharing the entry's allocation without holding an entry guard.
+/// Request history is supplied separately. Cache operations consult it for
+/// retention decisions but never record accesses or remove history.
 ///
 /// Cached allocations and idle read buffers share the configured capacity.
 /// Each shard evicts locally against its share before insertion. Admission also
 /// frees idle buffers when needed. An allocation larger than its shard's target
 /// is cached after that shard is emptied, so total usage can exceed capacity.
-/// Under pressure, entries admitted at least 64 requests ago across all keys are checked once for compaction.
-/// Every byte-saving plan is processed, copying payloads outside the shard lock.
-/// If space is still needed, a rotating sample selects the lowest-scoring entry for eviction.
+/// Under pressure, a rotating sample selects the lowest-scoring entry for eviction.
 /// Default scores model recent retrieval value per charged allocation byte.
 pub struct MemoryCache {
     /// Independently locked partitions selected by complete object identity.
@@ -46,7 +40,6 @@ pub struct MemoryCache {
     retention_scorer: Arc<dyn RetentionScorer>,
     reclaim_sample_size: usize,
     buffer_pool: Arc<BufferPool>,
-    compaction_callback: Option<Box<dyn Fn(ObjectKeyHash, Download) + Send + Sync>>,
 }
 
 impl fmt::Debug for MemoryCache {
@@ -108,7 +101,6 @@ impl MemoryCache {
             retention_scorer: Arc::new(AvoidedRetrievalCostScorer::default()),
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             buffer_pool,
-            compaction_callback: None,
         }
     }
 
@@ -118,19 +110,10 @@ impl MemoryCache {
         self
     }
 
-    /// Sets the maximum candidates inspected per eviction decision. Compaction does not sample. Panics if zero.
+    /// Sets the maximum candidates inspected per eviction decision. Panics if zero.
     pub fn with_reclaim_sample_size(mut self, sample_size: usize) -> Self {
         assert!(sample_size > 0, "reclaim sample size must be greater than zero");
         self.reclaim_sample_size = sample_size;
-        self
-    }
-
-    /// Receives each range published by compaction, outside the memory shard lock.
-    pub fn with_compaction_callback(
-        mut self,
-        callback: impl Fn(ObjectKeyHash, Download) + Send + Sync + 'static,
-    ) -> Self {
-        self.compaction_callback = Some(Box::new(callback));
         self
     }
 
@@ -155,67 +138,43 @@ impl MemoryCache {
         self.buffer_pool.clone()
     }
 
-    /// Looks up one covering entry without recording an access.
-    /// `None` requests the whole object. Do not mix whole-object and range requests for a key.
-    /// Whole-object keys must contain only complete objects starting at zero.
-    pub fn get(&self, object_key: &ObjectKeyHash, requested: impl Into<Option<ByteRange>>) -> Option<Bytes> {
+    /// Looks up a complete object without recording an access.
+    pub fn get(&self, object_key: &ObjectKeyHash) -> Option<Bytes> {
         let shard_index = self.shard_index(object_key);
-        self.shards[shard_index].lock().get(object_key, requested.into())
+        self.shards[shard_index].lock().get(object_key)
     }
 
-    /// Caches one downloaded range without creating an access, using its allocation charge.
-    ///
-    /// If an existing entry contains the download, the supplied payload is
-    /// discarded. A larger download replaces entries it fully contains, while
-    /// partial overlaps coexist.
+    /// Caches a complete object without creating an access, using its allocation charge.
+    /// An existing entry for the key is retained and the supplied download is discarded.
     /// Returns whether the download was inserted.
     pub fn insert(&self, object_key: ObjectKeyHash, download: Download) -> bool {
         let shard = &self.shards[self.shard_index(&object_key)];
-        let mut compact_before_eviction = true;
         let mut evicted_any_entry = false;
         loop {
-            let insert_result = shard
-                .lock()
-                .try_insert(&object_key, &download, self, compact_before_eviction);
-            compact_before_eviction = false;
+            let insert_result = shard.lock().try_insert(&object_key, &download, self);
             match insert_result {
-                InsertResult::Inserted | InsertResult::AlreadyCovered => {
+                InsertResult::Inserted | InsertResult::AlreadyPresent => {
                     if evicted_any_entry {
                         self.buffer_pool.metrics.eviction_triggering_insertions.increase(1);
                     }
                     return matches!(insert_result, InsertResult::Inserted);
                 }
-                InsertResult::Retry { evicted } => evicted_any_entry |= evicted,
-                InsertResult::Trim(sources) => {
-                    // Process every trim before retrying admission, even if earlier trims freed enough space.
-                    for source in sources {
-                        // Copy outside the shard lock. Publication checks only that the source range remains cached.
-                        let mut replacement = source.copy_replacement_payloads();
-                        let published = shard
-                            .lock()
-                            .publish_range_trim(&mut replacement, &self.access_histories);
-                        if published && let Some(callback) = &self.compaction_callback {
-                            for download in replacement.payloads {
-                                callback(replacement.object_key, download);
-                            }
-                        }
-                    }
-                }
+                InsertResult::Evicted => evicted_any_entry = true,
             }
         }
     }
 
-    /// Checks whether the exact key and range are cached, without retaining bytes or recording an access.
-    pub fn contains_entry(&self, object_key: &ObjectKeyHash, range: ByteRange) -> bool {
+    /// Checks whether an object is cached without retaining bytes or recording an access.
+    pub fn contains_entry(&self, object_key: &ObjectKeyHash) -> bool {
         self.shards[self.shard_index(object_key)]
             .lock()
-            .contains_entry(object_key, range)
+            .contains_entry(object_key)
     }
 
-    /// Removes one entry with exactly the supplied key and range.
-    pub fn remove(&self, object_key: &ObjectKeyHash, range: ByteRange) -> bool {
+    /// Removes the entry for the supplied object key.
+    pub fn remove(&self, object_key: &ObjectKeyHash) -> bool {
         let shard_index = self.shard_index(object_key);
-        self.shards[shard_index].lock().remove(object_key, range)
+        self.shards[shard_index].lock().remove(object_key)
     }
 
     /// Selects this process's in-memory shard for an object.

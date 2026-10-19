@@ -5,19 +5,16 @@ use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedRegistry};
 
 use crate::buffer::{BUCKET_COUNT, BUFFER_SIZES};
 
-/// Internal metric handles for Feuer's in-memory range tier.
+/// Internal metric handles for Feuer's in-memory object tier.
 ///
 /// Operations use a fixed set of labels. Object identities and caller-defined
 /// cache names are never metric labels.
 #[derive(Debug)]
 pub struct MemoryMetrics {
     insert: BoxedCounter,
-    replace: BoxedCounter,
     redundant: BoxedCounter,
     remove: BoxedCounter,
     pub(crate) eviction_triggering_insertions: BoxedCounter,
-    trim: BoxedCounter,
-    trimmed_payload_bytes: BoxedCounter,
     pub(crate) used_bytes: BoxedGauge,
     pub(crate) capacity_bytes: BoxedGauge,
     pub(crate) idle_buffer_bytes: [BoxedGauge; BUCKET_COUNT],
@@ -30,17 +27,12 @@ impl MemoryMetrics {
     pub fn new(registry: &BoxedRegistry) -> Arc<Self> {
         let operations = registry.register_counter_vec(
             "feuer_memory_operations_total".into(),
-            "Operations completed by Feuer's in-memory range tier".into(),
+            "Operations completed by Feuer's in-memory object tier".into(),
             &["operation"],
         );
         let eviction_triggering_insertions = registry.register_counter_vec(
             "feuer_memory_eviction_triggering_insertions_total".into(),
             "Completed insertion attempts that evicted at least one entry under capacity pressure".into(),
-            &[],
-        );
-        let trimmed_payload_bytes = registry.register_counter_vec(
-            "feuer_memory_compacted_payload_bytes_total".into(),
-            "Cached allocation bytes released by in-memory compaction".into(),
             &[],
         );
         let used_bytes = registry.register_gauge_vec(
@@ -60,7 +52,7 @@ impl MemoryMetrics {
         );
         let entries = registry.register_gauge_vec(
             "feuer_memory_entries".into(),
-            "Object-range entries in Feuer's memory tier".into(),
+            "Object entries in Feuer's memory tier".into(),
             &[],
         );
         let operation_counter = |label: &'static str| operations.counter(&[label.into()]);
@@ -76,12 +68,9 @@ impl MemoryMetrics {
 
         Arc::new(Self {
             insert: operation_counter("insert"),
-            replace: operation_counter("replace"),
             redundant: operation_counter("redundant"),
             remove: operation_counter("remove"),
             eviction_triggering_insertions: eviction_triggering_insertions.counter(&[]),
-            trim: operation_counter("compact"),
-            trimmed_payload_bytes: trimmed_payload_bytes.counter(&[]),
             used_bytes: used_bytes.gauge(&[]),
             capacity_bytes: capacity_bytes.gauge(&[]),
             idle_buffer_bytes: buffer_gauges("idle"),
@@ -90,9 +79,8 @@ impl MemoryMetrics {
         })
     }
 
-    pub(crate) fn record_insert(&self, replaced: bool) {
-        let counter = if replaced { &self.replace } else { &self.insert };
-        counter.increase(1);
+    pub(crate) fn record_insert(&self) {
+        self.insert.increase(1);
     }
 
     pub(crate) fn record_redundant(&self) {
@@ -101,11 +89,6 @@ impl MemoryMetrics {
 
     pub(crate) fn record_remove(&self) {
         self.remove.increase(1);
-    }
-
-    pub(crate) fn record_range_trim(&self, reclaimed_bytes: u64) {
-        self.trim.increase(1);
-        self.trimmed_payload_bytes.increase(reclaimed_bytes);
     }
 
     pub(crate) fn noop() -> Arc<Self> {

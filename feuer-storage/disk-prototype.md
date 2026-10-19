@@ -16,7 +16,7 @@ metadata chunk: [255 checksummed 4-KiB record pages][4-KiB next-chunk page]
 payload chunks: [contiguous, aligned payload bytes, with no metadata gaps]
 ```
 
-Each metadata page holds 84 fixed 48-byte records. A metadata chunk therefore holds up to **21,420
+Each metadata page holds 101 fixed 40-byte records. A metadata chunk therefore holds up to **25,755
 records**, shared across payload chunks and write batches. Its last page contains the next metadata
 chunk address, or `u64::MAX` for the end of the chain. Metadata chunks stay reserved for the cache's
 lifetime. Each active shard needs at least one metadata chunk, charged against its capacity. A one-chunk cache consequently has no room for payloads.
@@ -30,7 +30,7 @@ The metadata component owns entry-position allocation, reserving whole chunks fr
 Publication takes the earliest free position in recovery scan order; returning a position does not dirty metadata.
 
 Each shard's metadata lock protects entry positions, page bytes, and dirty-page tracking;
-it and the range-index lock never span I/O. Page bytes consume 1 MiB per metadata chunk.
+it and the object-index lock never span I/O. Page bytes consume 1 MiB per metadata chunk.
 
 ## Writes
 
@@ -45,8 +45,7 @@ After a region's payload writes finish, accepted entries update metadata in memo
 One periodic writer initializes new metadata chunks in full and persists dirty pages every
 second, best-effort; see the [write contract](../format.md#write-ordering-and-reuse). Sleeping does not keep the cache open.
 
-Publication rechecks disk containment: broader entries replace contained entries, while partial overlaps coexist.
-Contained entries and entries that cannot fit are skipped.
+Publication rechecks object presence. Objects already indexed and entries that cannot fit are skipped.
 Later writes may replace or evict entries published earlier in the same batch. A write failure releases
 that region without undoing earlier publication. Publication does not check memory residency: the writer
 owns prepared small-entry buffers or immutable larger downloads. Superseded entries release their payload occupancy without invalidation writes.
@@ -64,15 +63,12 @@ throughput has not yet been compared against v10.
 
 ## Reads and eviction
 
-`get` first copies the requested bytes from a covering buffered entry, without disk I/O. Busy buffers and
-chunks detached for flushing may miss until disk publication; no in-flight lookup state is retained.
-Otherwise it reads and verifies the shortest covering range with an XXHash64 checksum, or shares a whole-entry
-read still held by another caller, then returns the requested bytes without alignment padding.
-Writers prepare [subrange checksums](../format.md#overview) for recent requested ranges from their trusted payload
-buffers before publication. Reads learn further checksums from verified bytes. Both keep them in memory until
-entry removal or restart.
+`get` first copies the complete object from a buffered entry, without disk I/O. Busy buffers and
+chunks detached for flushing may miss until disk publication. Otherwise it reads and verifies the
+complete object's XXHash64 checksum, or shares a read still held by another caller. Results omit
+alignment padding.
 Reads load neither metadata nor neighboring entries.
-A read copies the address and expected checksum under the range-index lock, then reads into an
+A read copies the address and expected checksum under the object-index lock, then reads into an
 owned memory buffer. Concurrent disk overwrite is allowed: checksum validation happens after I/O
 and before using the bytes, subject to the usual checksum-collision limitation. A checksum mismatch
 removes the entry only if the read still belongs to it, leaving replacement entries untouched.
@@ -93,7 +89,7 @@ Closing the in-memory index does not invalidate live entries needed by the next 
 
 ## Format and recovery
 
-[format.md](../format.md) documents experimental **v14**: the global header, shard boundaries,
+[format.md](../format.md) documents experimental **v15**: the global header, shard boundaries,
 fixed chain starts, page headers, entry records, checksums, and write ordering. The first chunk
 is reserved for the global header, including the application payload version and file capacity.
 A mismatched version or capacity, or an invalid header, clears each shard's first metadata chunk.
@@ -107,7 +103,7 @@ All metadata chunks in a shard are reserved before records can claim payload add
 decoding relies on the checksummed page's writer contract for range arithmetic and alignment, while
 checking current shard identity. The allocator reserves payload
 chunks and counts records sharing them; overlapping stale records are allowed and validated on read.
-Entries are indexed during opening, with duplicate starts and contained ranges removed before publication.
+Entries are indexed by object key during opening, with duplicate keys replaced in recovery order.
 Each shard's recovery runs on Tokio's blocking pool, using io_uring for reads. Opening returns only
 after every shard has been scanned.
 
@@ -126,7 +122,7 @@ TMPDIR=/mnt/local-ssd cargo test --locked -p feuer-storage --lib
 
 Tests cover links between full metadata chunks, one full-chunk recovery read independent of payload
 size, metadata updates, independently reclaimable payloads, reuse without waiting for readers
-or metadata writes, duplicate-start recovery, stale-record checksum misses, malformed/cyclic links, corrupt record pages,
+or metadata writes, duplicate-key recovery, stale-record checksum misses, malformed/cyclic links, corrupt record pages,
 metadata/payload ownership conflicts, fixed chain starts, replacement after reopening, and payload checksum
 failures. Existing tests cover packing, fragmentation, cancellation, eviction, and contiguous payloads
-up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v14.
+up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v15.

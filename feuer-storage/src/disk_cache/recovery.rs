@@ -34,11 +34,9 @@ impl DiskCacheInner {
                     continue;
                 };
                 let payload = entry_metadata.payload_address
-                    ..entry_metadata.payload_address + payload_disk_bytes(entry_metadata.object_range.len());
+                    ..entry_metadata.payload_address + payload_disk_bytes(entry_metadata.payload_len);
                 if self.shard_index_for_key(&entry_metadata.key) != shard_index
-                    || disk_index
-                        .covering_entry(&entry_metadata.key, entry_metadata.object_range)
-                        .is_some()
+                    || disk_index.entries_by_key.contains_key(&entry_metadata.key)
                     || shard.allocator.hold_chunks_for_recovered_payload(&payload).is_none()
                 {
                     // Rejected records stay on disk until a later change rewrites their page.
@@ -113,17 +111,16 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 }
 
 /// Decodes one record from a validated page. The writer guarantees
-/// representable ranges and aligned payloads. All-zero records are unused.
+/// representable lengths and aligned payloads. All-zero records are unused.
 fn decode_entry_metadata(bytes: &RawMetadataBytes) -> Option<EntryMetadata> {
     if bytes == &[0; ENTRY_METADATA_BYTES] {
         return None;
     }
-    let start = read_u64(bytes, 16);
     Some(EntryMetadata {
         key: ObjectKeyHash(u128::from_le_bytes(bytes[..16].try_into().unwrap())),
-        object_range: ByteRange::new(start, start + read_u64(bytes, 24)).ok()?,
-        payload_address: read_u64(bytes, 32),
-        payload_checksum: read_u64(bytes, 40),
+        payload_len: read_u64(bytes, 16),
+        payload_address: read_u64(bytes, 24),
+        payload_checksum: read_u64(bytes, 32),
     })
 }
 

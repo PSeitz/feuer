@@ -291,9 +291,9 @@ impl AlignedBuffer {
     }
 
     /// Transfers this allocation into a download without copying, preserving its capacity charge.
-    pub fn into_download(self, start: u64) -> Result<feuer_types::Download, feuer_types::DownloadError> {
+    pub fn into_download(self) -> feuer_types::Download {
         let capacity = self.capacity();
-        Ok(feuer_types::Download::new(start, self.into_bytes())?.with_allocation_charge(capacity))
+        feuer_types::Download::new(self.into_bytes()).with_allocation_charge(capacity)
     }
 
     /// Exclusively accesses the requested bytes, never spare capacity.

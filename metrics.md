@@ -15,16 +15,15 @@ counters and gauges. Use separate registries if they must be distinguished.
 
 | Metric | Type | Labels / meaning |
 |---|---|---|
-| `feuer_lookup_total` | Counter | `outcome`: `memory_hit`, `disk_hit`, `callback`, `callback_error`, `invalid_download`, `miss` |
+| `feuer_lookup_total` | Counter | `outcome`: `memory_hit`, `disk_hit`, `callback`, `callback_error`, `miss` |
 | `feuer_lookup_duration_seconds` | Histogram | `outcome`: `disk_hit`, `callback`. Successful lookup after a memory miss, including callback work and synchronous disk-write scheduling |
-| `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`. Exact requested bytes successfully returned |
+| `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`. Complete object payload bytes successfully returned |
 
 Lookup outcomes count only completed operations. Duration
 histograms record successful disk hits and callbacks only, including time spent
 waiting for a shared fetch. Timing starts after trace-start delivery and before
 checking memory. Memory hits record no duration, but their outcome and served-byte
-counters still increase. A non-covering callback result
-is an `invalid_download` lookup and does not record a duration.
+counters still increase.
 A lookup-only `get_object` returning `None` records `miss`, without served bytes
 or duration. Shared disk and callback results count once per completed caller,
 not once per execution. Callback outcomes do not measure source invocation counts.
@@ -38,7 +37,7 @@ operations. Use the public lookup counters to measure caller-visible behavior.
 | Metric | Type | Labels / meaning |
 |---|---|---|
 | `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `checksum_failed`, `fallthrough` |
-| `feuer_disk_lookup_duration_seconds` | Histogram | No labels. Successful hits only: buffered copying, or reading a covering checksummed range, verification and copying |
+| `feuer_disk_lookup_duration_seconds` | Histogram | No labels. Successful hits only: buffered copying, or reading and verifying the complete object |
 | `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`. Each chunk is 1 MiB. Excludes the reserved global-header chunk |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
@@ -51,7 +50,7 @@ by that lookup. The callback may execute after other fallthroughs have relieved 
 The public lookup outcome records the source callback's success or failure as usual.
 Disk-hit lookup durations include the wait for a payload read permit. Raw data-file I/O durations
 start after admission and exclude that wait.
-`covers_range()` includes buffered entries but does not count as a lookup.
+Object-presence checks include buffered entries but do not count as lookups.
 
 Chunk states are disjoint. Payload reservations are released after their last indexed
 entry is removed, without waiting for readers. Metadata chunks remain reserved while
@@ -62,8 +61,7 @@ Detached writes can outlive the last public cache handle.
 
 `allocated * 1 MiB - indexed payload bytes` measures capacity unavailable for
 indexed payload, including metadata, padding, partially dead chunks, and active
-writes. Indexed payload bytes sum individual entry lengths, counting overlapping
-object ranges once per entry.
+writes. Indexed payload bytes sum complete object lengths.
 
 For byte-weighted packing efficiency, divide the rate of batch `payload` bytes
 by the rate of batch `chunk` bytes. Both exclude failed payload regions and include
@@ -106,8 +104,7 @@ Invalid or unsupported pages are discarded without a global reset or generation 
 | `feuer_disk_eviction_triggering_insertions_total` | Counter | Terminal disk insertion attempts that evicted at least one entry under capacity pressure |
 
 Each incoming entry counts at most once, even if it evicts several entries.
-Replacement, invalidation, memory compaction and eviction searches that remove
-nothing do not count. Disk admission runs once per flush or independent large write;
+Invalidation and eviction searches that remove nothing do not count. Disk admission runs once per flush or independent large write;
 a shared flush attributes its evictions only to its first buffered entry.
 An attempt still counts if it evicts entries but is later skipped, fails or is canceled.
 
@@ -115,7 +112,7 @@ Percentage of memory insertion attempts that trigger eviction:
 
 ```promql
 100 * sum(rate(feuer_memory_eviction_triggering_insertions_total[5m]))
-  / sum(rate(feuer_memory_operations_total{operation=~"insert|replace|redundant"}[5m]))
+  / sum(rate(feuer_memory_operations_total{operation=~"insert|redundant"}[5m]))
 ```
 
 Percentage of disk insertion attempts that trigger eviction:
@@ -171,10 +168,8 @@ Gauge values remain in bytes. Update filters using the former numeric bucket lab
 
 `feuer_memory_used_bytes` replaces `feuer_memory_payload_bytes`; the separate
 `feuer_io_buffer_pool_capacity_bytes` gauge has been removed. Update dashboards.
-Disk promotions charge the retained allocation's whole capacity, including padding and unused
-bytes. If copying the slice into an aligned buffer saves at least 25% of backing capacity,
-the charge is the destination buffer's capacity. Otherwise, or if allocation fails,
-the original buffer and its charge are retained.
+Disk promotions charge the retained allocation's whole capacity, including padding
+and unused bytes.
 Callback downloads without capacity metadata use their payload length.
 Shared allocations are conservatively charged per cached entry. The existing oversized-entry
 exception can still make cached charges exceed the target.
@@ -216,8 +211,8 @@ retains no idle buffers.
 
 Queue and storage counters describe different stages: do not sum all their
 values as a total number of disk-write attempts. `queued` counts admissions.
-The tiered layer records `already_covered` when disk covers the callback download,
-and `redundant` when memory declined a contained download.
+The tiered layer records `already_covered` when disk already stores the object,
+and `redundant` when memory already stores it.
 Queued and active writes proceed independently of memory retention.
 
 A storage `failed` outcome means the entry's payload write failed. `no_capacity` can also mean
@@ -226,7 +221,7 @@ Prepared entries discarded
 before completion count as `canceled`; downloads not yet handled have no storage attempt.
 Canceling an `insert_batch` caller does not cancel its detached writer.
 
-Successful writes may be discarded by disk containment checks. Pending-byte accounting lasts
+Successful writes may be discarded when the object is already indexed. Pending-byte accounting lasts
 until each entry completes or is discarded, including its time in a partial chunk. The writer
 releases small incoming buffers after copying. Each shard always holds a 1-MiB buffer, even when empty;
 flushing retains the detached buffer through I/O as well. This gauge measures logical payload bytes.
@@ -253,12 +248,9 @@ spikes. These metrics do not measure the proposed payload-read admission queue.
 
 ## Existing metrics
 
-- `feuer_memory_operations_total{operation}`: `insert`, `replace`, `redundant`,
-  `remove`, `compact`. Internal access/hit/miss counters are not emitted.
-  Use public lookup counters for hit ratios.
-- `feuer_memory_entries`: cache entries.
-- `feuer_memory_compacted_payload_bytes_total`: cached allocation charges released
-  by compaction; does not guarantee the allocation was freed if callers still hold it.
+- `feuer_memory_operations_total{operation}`: `insert`, `redundant`, `remove`.
+  Internal access/hit/miss counters are not emitted. Use public lookup counters for hit ratios.
+- `feuer_memory_entries`: cached objects.
 - `feuer_disk_io_total{operation,outcome}`: logical data-file operations `read` and `write`,
   outcomes `success` and `error`. A multi-chunk payload run counts as one write.
 - `feuer_disk_io_duration_seconds{operation,outcome}`: operations `read` and

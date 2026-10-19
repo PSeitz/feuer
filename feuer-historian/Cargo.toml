@@ -1,6 +1,6 @@
 [package]
 name = "feuer-historian"
-description = "Request history and decayed access counts for immutable objects and byte ranges"
+description = "Request history and decayed access counts for immutable objects"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

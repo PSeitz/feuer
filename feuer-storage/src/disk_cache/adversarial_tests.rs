@@ -42,7 +42,6 @@ enum LinkTarget {
 struct EntryFields {
     index_in_page: usize,
     key: u128,
-    start: u64,
     length: u64,
     payload_address: u64,
     /// When absent, hash the existing payload bytes if readable and at most four chunks, otherwise use zero.
@@ -77,7 +76,6 @@ struct DiskImage {
 enum CacheChange {
     Insert {
         key: u128,
-        start: u64,
         length: usize,
     },
     /// Inserts a 1-MiB object whose bytes are valid metadata pages with forged entries.
@@ -135,9 +133,8 @@ fn disk_address(allow_overflow: bool) -> BoxedStrategy<u64> {
     .boxed()
 }
 
-/// An object's byte range start and length. Unless overflow is allowed, their sum fits in `u64`.
-fn object_start_and_length(allow_overflow: bool) -> BoxedStrategy<(u64, u64)> {
-    let start = prop_oneof![0..9000u64, Just(u64::MAX), u64::MAX - 9000..=u64::MAX, any::<u64>()];
+/// A payload length, optionally including values that overflow alignment arithmetic.
+fn payload_length(allow_overflow: bool) -> BoxedStrategy<u64> {
     let length = prop_oneof![
         0..9000u64,
         CHUNK_BYTES - PAGE_BYTES..=CHUNK_BYTES + PAGE_BYTES,
@@ -145,30 +142,27 @@ fn object_start_and_length(allow_overflow: bool) -> BoxedStrategy<(u64, u64)> {
         Just(1 << 40),
     ];
     if !allow_overflow {
-        return (start, length)
-            .prop_map(|(start, length)| (start.min(u64::MAX - length), length))
-            .boxed();
+        return length.boxed();
     }
     let length = prop_oneof![
         1 => length,
         1 => prop_oneof![Just(u64::MAX), Just(u64::MAX - (PAGE_BYTES - 1)), Just(u64::MAX - PAGE_BYTES)],
     ];
-    (start, length).boxed()
+    length.boxed()
 }
 
 fn entry_fields(allow_overflow: bool) -> impl Strategy<Value = EntryFields> {
     (
         0..ENTRIES_PER_METADATA_PAGE,
         prop_oneof![0..6u128, any::<u128>()],
-        object_start_and_length(allow_overflow),
+        payload_length(allow_overflow),
         disk_address(allow_overflow),
         prop::option::weighted(0.3, any::<u64>()),
     )
         .prop_map(
-            |(index_in_page, key, (start, length), payload_address, payload_checksum)| EntryFields {
+            |(index_in_page, key, length, payload_address, payload_checksum)| EntryFields {
                 index_in_page,
                 key,
-                start,
                 length,
                 payload_address,
                 payload_checksum,
@@ -229,12 +223,7 @@ fn disk_image(allow_overflow: bool) -> impl Strategy<Value = DiskImage> {
 
 fn cache_changes(include_metadata_payloads: bool) -> impl Strategy<Value = Vec<CacheChange>> {
     let length = prop_oneof![0..9000usize, 512 * 1024..=CHUNK_BYTES as usize + 9000];
-    let insert = (
-        0..6u128,
-        prop_oneof![Just(0u64), Just(50), Just(100), Just(5000)],
-        length,
-    )
-        .prop_map(|(key, start, length)| CacheChange::Insert { key, start, length });
+    let insert = (0..6u128, length).prop_map(|(key, length)| CacheChange::Insert { key, length });
     let metadata_payload = (0..6u128, chunk_number())
         .prop_map(|(key, next_chunk_number)| CacheChange::InsertPayloadWithMetadata { key, next_chunk_number });
     let metadata_payload_weight = if include_metadata_payloads { 3 } else { 0 };
@@ -299,18 +288,18 @@ async fn check_cache_changes(image: DiskImage, capacity_chunks: u64, changes: Ve
     check_cache(&cache).await;
     for change in changes {
         match change {
-            CacheChange::Insert { key, start, length } => {
-                insert_and_check_bytes(&cache, ObjectKeyHash(key), download(start, length)).await;
+            CacheChange::Insert { key, length } => {
+                insert_and_check_bytes(&cache, ObjectKeyHash(key), download(key as u64, length)).await;
             }
             CacheChange::InsertPayloadWithMetadata { key, next_chunk_number } => {
                 let bytes = payload_with_metadata(next_chunk_number);
-                insert_and_check_bytes(&cache, ObjectKeyHash(key), Download::new(0, bytes).unwrap()).await;
+                insert_and_check_bytes(&cache, ObjectKeyHash(key), Download::new(bytes)).await;
             }
             CacheChange::Remove { entry_index } => {
-                let mut entries = entry_ranges(&cache);
-                entries.sort_by_key(|(key, range)| (*key, range.start()));
-                if let Some((key, range)) = entries.get(entry_index % entries.len().max(1)) {
-                    cache.disk.shards[cache.disk.shard_index_for_key(key)].remove_entry(key, range.start());
+                let mut entries = entry_lengths(&cache);
+                entries.sort_by_key(|(key, _)| *key);
+                if let Some((key, _)) = entries.get(entry_index % entries.len().max(1)) {
+                    cache.disk.shards[cache.disk.shard_index_for_key(key)].remove_entry(key);
                 }
             }
             CacheChange::ReserveMetadataChunk { shard_index } => {
@@ -350,11 +339,10 @@ async fn open_with_manual_metadata_writes(directory: &Path, capacity_chunks: u64
 }
 
 async fn insert_and_check_bytes(cache: &DiskCache, key: ObjectKeyHash, download: Download) {
-    let range = download.downloaded_range();
     let bytes = download.bytes().clone();
     if cache.insert(key, download).await.unwrap() {
         assert_eq!(
-            cache.get(&key, range).await,
+            cache.get(&key).await.map(Download::into_bytes),
             Some(bytes),
             "published entry did not read back"
         );
@@ -391,10 +379,9 @@ async fn write_image(directory: &Path, image: &DiskImage) {
                 };
                 let raw = &mut contents[entry.index_in_page * ENTRY_METADATA_BYTES..][..ENTRY_METADATA_BYTES];
                 raw[..16].copy_from_slice(&entry.key.to_le_bytes());
-                raw[16..24].copy_from_slice(&entry.start.to_le_bytes());
-                raw[24..32].copy_from_slice(&entry.length.to_le_bytes());
-                raw[32..40].copy_from_slice(&entry.payload_address.to_le_bytes());
-                raw[40..48].copy_from_slice(&checksum.to_le_bytes());
+                raw[16..24].copy_from_slice(&entry.length.to_le_bytes());
+                raw[24..32].copy_from_slice(&entry.payload_address.to_le_bytes());
+                raw[32..40].copy_from_slice(&checksum.to_le_bytes());
             }
             let bytes = encode_changed_page(
                 ENTRY_METADATA_PAGE_TAG,
@@ -461,7 +448,7 @@ fn payload_with_metadata(next_chunk_number: u64) -> Bytes {
             let entry_number = (page_index * ENTRIES_PER_METADATA_PAGE + entry_index) as u64;
             let entry = EntryMetadata {
                 key: ObjectKeyHash(FORGED_KEY_PREFIX << 64 | entry_number as u128),
-                object_range: ByteRange::new(0, PAGE_BYTES).unwrap(),
+                payload_len: PAGE_BYTES,
                 payload_address: (1 + entry_number % 256) * CHUNK_BYTES + entry_number / 256 % 4 * PAGE_BYTES,
                 payload_checksum: 0,
             };
@@ -477,27 +464,27 @@ fn payload_with_metadata(next_chunk_number: u64) -> Bytes {
     Bytes::from(bytes)
 }
 
-/// Every indexed entry's key and object byte range.
-fn entry_ranges(cache: &DiskCache) -> Vec<(ObjectKeyHash, ByteRange)> {
-    let mut ranges = Vec::new();
+/// Every indexed entry's key and payload length.
+fn entry_lengths(cache: &DiskCache) -> Vec<(ObjectKeyHash, u64)> {
+    let mut lengths = Vec::new();
     for shard in &cache.disk.shards {
         let disk_index = shard.entry_index.lock().unwrap();
-        ranges.extend(
+        lengths.extend(
             disk_index
                 .entries_by_key
                 .iter()
-                .flat_map(|(key, entries)| entries.values().map(|entry| (*key, entry.object_range))),
+                .map(|(key, entry)| (*key, entry.payload_len)),
         );
     }
-    ranges
+    lengths
 }
 
 async fn check_cache(cache: &DiskCache) {
     check_entries_and_chunks(cache);
     // Checksum misses remove entries, so check ownership both before and after reading.
-    for (key, range) in entry_ranges(cache) {
-        if let Some(bytes) = cache.get(&key, range).await {
-            assert_eq!(bytes.len() as u64, range.len());
+    for (key, length) in entry_lengths(cache) {
+        if let Some(bytes) = cache.get(&key).await.map(Download::into_bytes) {
+            assert_eq!(bytes.len() as u64, length);
         }
     }
     check_entries_and_chunks(cache);
@@ -563,53 +550,43 @@ fn check_entries_and_chunks(cache: &DiskCache) {
 
         let mut payload_counts = BTreeMap::<u64, usize>::new();
         let mut entry_count = 0;
-        for (key, entries) in &disk_index.entries_by_key {
+        for (key, entry) in &disk_index.entries_by_key {
             assert_ne!(
                 key.0 >> 64,
                 FORGED_KEY_PREFIX,
                 "payload bytes were recovered as metadata"
             );
             assert_eq!(disk.shard_index_for_key(key), shard_index);
-            let mut previous_end = None;
-            for entry in entries.values() {
-                entry_count += 1;
-                let range = entry.object_range;
-                assert!(
-                    previous_end.is_none_or(|end| end < range.end()),
-                    "object ranges contain one another"
-                );
-                previous_end = Some(range.end());
-                let first_chunk = entry.payload_address / CHUNK_BYTES;
-                let storage_end = range
-                    .len()
-                    .max(1)
-                    .checked_next_multiple_of(PAGE_BYTES)
-                    .and_then(|length| entry.payload_address.checked_add(length));
-                let reservation = payload_reservations.get(&first_chunk);
-                assert!(
-                    reservation
-                        .is_some_and(|(chunks, _)| storage_end.is_some_and(|end| end <= chunks.end * CHUNK_BYTES)),
-                    "payload {:#x}+{} lies outside its reservation {:?}",
-                    entry.payload_address,
-                    range.len(),
-                    reservation
-                );
-                *payload_counts.entry(first_chunk).or_default() += 1;
-                let location = entry.metadata;
-                let entry_metadata = metadata
-                    .chunks
-                    .get(location.chunk_index as usize)
-                    .and_then(|chunk| chunk.slots.get(location.entry_index as usize))
-                    .copied()
-                    .flatten();
-                let expected = EntryMetadata {
-                    key: *key,
-                    object_range: range,
-                    payload_address: entry.payload_address,
-                    payload_checksum: entry.payload_checksum,
-                };
-                assert_eq!(entry_metadata, Some(expected));
-            }
+            entry_count += 1;
+            let first_chunk = entry.payload_address / CHUNK_BYTES;
+            let storage_end = entry
+                .payload_len
+                .max(1)
+                .checked_next_multiple_of(PAGE_BYTES)
+                .and_then(|length| entry.payload_address.checked_add(length));
+            let reservation = payload_reservations.get(&first_chunk);
+            assert!(
+                reservation.is_some_and(|(chunks, _)| storage_end.is_some_and(|end| end <= chunks.end * CHUNK_BYTES)),
+                "payload {:#x}+{} lies outside its reservation {:?}",
+                entry.payload_address,
+                entry.payload_len,
+                reservation
+            );
+            *payload_counts.entry(first_chunk).or_default() += 1;
+            let location = entry.metadata;
+            let entry_metadata = metadata
+                .chunks
+                .get(location.chunk_index as usize)
+                .and_then(|chunk| chunk.slots.get(location.entry_index as usize))
+                .copied()
+                .flatten();
+            let expected = EntryMetadata {
+                key: *key,
+                payload_len: entry.payload_len,
+                payload_address: entry.payload_address,
+                payload_checksum: entry.payload_checksum,
+            };
+            assert_eq!(entry_metadata, Some(expected));
         }
         let reservation_counts: BTreeMap<u64, usize> = payload_reservations
             .iter()

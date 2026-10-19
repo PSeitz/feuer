@@ -1,6 +1,6 @@
 [package]
 name = "feuer-types"
-description = "Shared immutable-object range contract types for Feuer"
+description = "Shared immutable-object contract types for Feuer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,7 +15,6 @@ exclude.workspace = true
 [dependencies]
 bytes = { workspace = true }
 bytesize = "2.7"
-thiserror = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [lints]

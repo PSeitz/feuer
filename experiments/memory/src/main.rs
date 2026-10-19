@@ -1,7 +1,6 @@
 //! Controlled memory-tier replay against Feuer and a pinned Foyer fork.
 
 use std::{
-    collections::HashMap,
     fs,
     path::Path,
     sync::{Arc, LazyLock},
@@ -9,13 +8,11 @@ use std::{
 };
 
 use bytes::Bytes;
-use clap::{Parser, ValueEnum};
-use feuer_historian::{
-    DEFAULT_ACCESS_COUNT_HALF_LIFE, MAX_ACCESS_AGE_ACCESSES, MAX_ACCESS_EVENTS_PER_KEY, ObjectAccessHistories,
-};
+use clap::Parser;
+use feuer_historian::{DEFAULT_ACCESS_COUNT_HALF_LIFE, ObjectAccessHistories};
 use feuer_memory::{MemoryCache, retention::AvoidedRetrievalCostScorer};
 use feuer_types::{
-    ByteRange, Download, ObjectKeyHash,
+    Download, ObjectKeyHash,
     config::{parse_config_number, read_env_number},
 };
 use foyer_memory::{Cache as FoyerCache, CacheBuilder, CostAwareConfig, S3FifoConfig};
@@ -38,15 +35,10 @@ static FIXED_RETRIEVAL_EQUIVALENT_BYTES: LazyLock<u64> = LazyLock::new(|| {
 /// Per-eviction comparison budget, matched to Feuer's candidate sample.
 const FOYER_COST_SAMPLE_SIZE: usize = 64;
 const TRACE_FILE: &str = "access_pattern.ndjson";
-const COALESCING_DISTANCE_ENV: &str = "COALESCING_DISTANCE_BYTES";
-const WHOLE_SPLIT_THRESHOLD_ENV: &str = "WHOLE_SPLIT_THRESHOLD_BYTES";
-const DEFAULT_COALESCING_DISTANCE_BYTES: u64 = SOURCE_FIXED_EQUIVALENT_BYTES;
-const DEFAULT_WHOLE_SPLIT_THRESHOLD_BYTES: u64 = 8 << 20;
-const COALESCING_WINDOW_MILLIS: u64 = 5;
-const CSV_HEADER: &str = "workload,downloader,shards,capacity_bytes,engine,requests,requested_bytes,cache_hits,hit_bytes,cache_hit_pct,byte_hit_pct,source_cost_hit_pct,source_gets,source_bytes,used_payload_bytes,used_vs_target_pct,elapsed_ms,operations_per_second";
+const CSV_HEADER: &str = "workload,shards,capacity_bytes,engine,requests,requested_bytes,cache_hits,hit_bytes,cache_hit_pct,byte_hit_pct,source_cost_hit_pct,source_gets,source_bytes,used_payload_bytes,used_vs_target_pct,elapsed_ms,operations_per_second";
 
 #[derive(Debug, Parser)]
-#[command(about = "Replay the captured trace against Feuer and a pinned Foyer fork")]
+#[command(about = "Replay full objects against Feuer and a pinned Foyer fork")]
 struct ReplayArgs {
     /// Soft payload capacities. Repeat the flag or separate values with commas.
     #[arg(
@@ -61,15 +53,6 @@ struct ReplayArgs {
     #[arg(long, default_value = "16", value_delimiter = ',')]
     shards: Vec<usize>,
 
-    /// Downloader policies. Repeat the flag or separate values with commas.
-    #[arg(
-        long = "downloader",
-        value_enum,
-        default_value = "expanded,exact",
-        value_delimiter = ','
-    )]
-    downloaders: Vec<DownloadRangePolicy>,
-
     /// Untimed passes executed against each cache before the measured pass.
     #[arg(long, default_value_t = 0)]
     warmup_iterations: usize,
@@ -83,83 +66,27 @@ struct ReplayArgs {
     csv: bool,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum DownloadRangePolicy {
-    Expanded,
-    Exact,
-}
-
-impl DownloadRangePolicy {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Expanded => "expanded",
-            Self::Exact => "exact",
-        }
-    }
-
-    fn ranges(self, workload: &ReplayWorkload) -> impl Iterator<Item = ByteRange> + '_ {
-        let requests = workload.requests.iter().enumerate();
-        requests.map(move |(index, request)| match self {
-            Self::Expanded => workload.expanded_downloads[index],
-            Self::Exact => request.requested_range,
-        })
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct DownloadExpansionConfig {
-    coalescing_distance_bytes: u64,
-    whole_split_threshold_bytes: u64,
-}
-
-impl DownloadExpansionConfig {
-    fn from_env() -> Result<Self, String> {
-        Ok(Self {
-            coalescing_distance_bytes: read_env_number(COALESCING_DISTANCE_ENV, DEFAULT_COALESCING_DISTANCE_BYTES, 0)?,
-            whole_split_threshold_bytes: read_env_number(
-                WHOLE_SPLIT_THRESHOLD_ENV,
-                DEFAULT_WHOLE_SPLIT_THRESHOLD_BYTES,
-                0,
-            )?,
-        })
-    }
-}
-
 #[derive(Clone)]
 struct TraceRequest {
     object_key: ObjectKeyHash,
-    object_size: u64,
-    requested_range: ByteRange,
+    payload_len: u64,
     timestamp_millis: u64,
-}
-
-impl TraceRequest {
-    fn expanded_download_range(&self, config: DownloadExpansionConfig) -> ByteRange {
-        if self.object_size < config.whole_split_threshold_bytes {
-            ByteRange::new(0, self.object_size)
-                .expect("an object containing a valid non-empty request must be non-empty")
-        } else {
-            self.requested_range
-        }
-    }
 }
 
 struct ReplayWorkload {
     name: &'static str,
     requests: Box<[TraceRequest]>,
-    expanded_downloads: Box<[ByteRange]>,
 }
 
 /// A cache receiving insertions and lookups while replaying a workload.
 trait ReplayCache {
     fn name(&self) -> &'static str;
 
-    /// Looks up a request and reports a hit, without returning the cached payload.
-    /// Uses the range this downloader would fetch on a miss.
-    fn lookup_hit(&mut self, request: &TraceRequest, downloaded_range: ByteRange) -> bool;
+    /// Looks up an object and reports a hit, without returning the cached payload.
+    fn lookup_hit(&mut self, request: &TraceRequest) -> bool;
 
-    /// Inserts a payload whose length matches the valid download range.
-    fn insert(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes);
+    /// Inserts the complete object payload.
+    fn insert(&mut self, request: &TraceRequest, payload: Bytes);
 
     fn used_payload_bytes(&self) -> u64;
 }
@@ -187,42 +114,17 @@ impl ReplayCache for FeuerReplayCache {
         "feuer-value-density"
     }
 
-    /// Looks up the requested bytes in Feuer and reports whether the lookup hit.
-    fn lookup_hit(&mut self, request: &TraceRequest, _downloaded_range: ByteRange) -> bool {
-        self.cache
-            .access_histories()
-            .record_access(&request.object_key, request.requested_range);
-        self.cache.get(&request.object_key, request.requested_range).is_some()
+    fn lookup_hit(&mut self, request: &TraceRequest) -> bool {
+        self.cache.access_histories().record_access(&request.object_key);
+        self.cache.get(&request.object_key).is_some()
     }
 
-    fn insert(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes) {
-        let download = Download::new(downloaded_range.start(), payload)
-            .expect("the payload matches a representable download range");
-        debug_assert_eq!(download.downloaded_range(), downloaded_range);
-        self.cache.insert(request.object_key, download);
+    fn insert(&mut self, request: &TraceRequest, payload: Bytes) {
+        self.cache.insert(request.object_key, Download::new(payload));
     }
 
     fn used_payload_bytes(&self) -> u64 {
         self.cache.used_bytes()
-    }
-}
-
-type FoyerRangeKey = (ObjectKeyHash, ByteRange);
-
-#[derive(Clone, Copy)]
-enum FoyerKeyRange {
-    /// Key entries by the application's exact requested range.
-    ExactRequest,
-    /// Expand before lookup and key entries by that exact expanded range.
-    ExpandedDownload,
-}
-
-impl FoyerKeyRange {
-    const fn range(self, request: &TraceRequest, downloaded_range: ByteRange) -> ByteRange {
-        match self {
-            Self::ExactRequest => request.requested_range,
-            Self::ExpandedDownload => downloaded_range,
-        }
     }
 }
 
@@ -233,51 +135,40 @@ enum FoyerEvictionPolicy {
 }
 
 impl FoyerEvictionPolicy {
-    const fn engine_name(self, key_range: FoyerKeyRange) -> &'static str {
-        match (self, key_range) {
-            (Self::S3Fifo, FoyerKeyRange::ExactRequest) => "foyer-native-exact-key",
-            (Self::S3Fifo, FoyerKeyRange::ExpandedDownload) => "foyer-native-expanded-key",
-            (Self::CostAware, FoyerKeyRange::ExactRequest) => "foyer-cost-aware-exact-key",
-            (Self::CostAware, FoyerKeyRange::ExpandedDownload) => "foyer-cost-aware-expanded-key",
+    const fn engine_name(self) -> &'static str {
+        match self {
+            Self::S3Fifo => "foyer-native",
+            Self::CostAware => "foyer-cost-aware",
         }
     }
 }
 
 /// Foyer's native key-value cache used for workload replay.
 struct FoyerReplayCache {
-    cache: FoyerCache<FoyerRangeKey, Bytes>,
-    key_range: FoyerKeyRange,
+    cache: FoyerCache<ObjectKeyHash, Bytes>,
     eviction_policy: FoyerEvictionPolicy,
 }
 
 impl FoyerReplayCache {
-    fn new(capacity: usize, num_shards: usize, key_range: FoyerKeyRange, eviction_policy: FoyerEvictionPolicy) -> Self {
+    fn new(capacity: usize, num_shards: usize, eviction_policy: FoyerEvictionPolicy) -> Self {
         Self {
             cache: build_foyer_cache(capacity, num_shards, eviction_policy),
-            key_range,
             eviction_policy,
         }
-    }
-
-    fn key(&self, request: &TraceRequest, downloaded_range: ByteRange) -> FoyerRangeKey {
-        (request.object_key, self.key_range.range(request, downloaded_range))
     }
 }
 
 impl ReplayCache for FoyerReplayCache {
     fn name(&self) -> &'static str {
-        self.eviction_policy.engine_name(self.key_range)
+        self.eviction_policy.engine_name()
     }
 
-    /// Looks up the selected Foyer key and reports whether the lookup hit.
-    fn lookup_hit(&mut self, request: &TraceRequest, downloaded_range: ByteRange) -> bool {
-        let key = self.key(request, downloaded_range);
-        self.cache.get(&key).is_some()
+    fn lookup_hit(&mut self, request: &TraceRequest) -> bool {
+        self.cache.get(&request.object_key).is_some()
     }
 
-    fn insert(&mut self, request: &TraceRequest, downloaded_range: ByteRange, payload: Bytes) {
-        let key = self.key(request, downloaded_range);
-        self.cache.insert(key, payload);
+    fn insert(&mut self, request: &TraceRequest, payload: Bytes) {
+        self.cache.insert(request.object_key, payload);
     }
 
     fn used_payload_bytes(&self) -> u64 {
@@ -290,10 +181,10 @@ fn build_foyer_cache(
     capacity: usize,
     num_shards: usize,
     eviction_policy: FoyerEvictionPolicy,
-) -> FoyerCache<FoyerRangeKey, Bytes> {
+) -> FoyerCache<ObjectKeyHash, Bytes> {
     let builder = CacheBuilder::new(capacity)
         .with_shards(num_shards)
-        .with_weighter(|_key: &FoyerRangeKey, payload: &Bytes| payload.len());
+        .with_weighter(|_key: &ObjectKeyHash, payload: &Bytes| payload.len());
     match eviction_policy {
         FoyerEvictionPolicy::S3Fifo => builder.with_eviction_config(S3FifoConfig::default()).build(),
         FoyerEvictionPolicy::CostAware => builder
@@ -316,7 +207,6 @@ struct ReplayTraffic {
 
 struct ReplayReport {
     workload: &'static str,
-    downloader: &'static str,
     shards: usize,
     capacity: usize,
     engine: &'static str,
@@ -334,7 +224,7 @@ impl ReplayReport {
         self.traffic.hit_bytes as f64 / self.traffic.requested_bytes.max(1) as f64
     }
 
-    /// Returns the source-cost savings ratio against fetching every exact request. Extra bytes can make it negative.
+    /// Returns the source-cost savings ratio against fetching every requested object.
     fn source_cost_savings_ratio(&self) -> f64 {
         let fixed_cost = u128::from(SOURCE_FIXED_EQUIVALENT_BYTES);
         let uncached_source_cost =
@@ -354,64 +244,47 @@ fn main() -> Result<(), String> {
     if args.shards.contains(&0) {
         return Err("--shards values must be nonzero".to_owned());
     }
-    let download_config = DownloadExpansionConfig::from_env()?;
-    let workload = load_trace_workload(&args, download_config)?;
+    let workload = load_trace_workload(&args)?;
 
     if args.csv {
         eprintln!(
-            "foyer_revision={PINNED_FOYER_REVISION} foyer_source=https://github.com/PSeitz/foyer foyer_cost_estimator=residence_access_rate foyer_cost_fixed_retrieval={SOURCE_FIXED_EQUIVALENT_BYTES} foyer_cost_sample_size={FOYER_COST_SAMPLE_SIZE} feuer_cost_estimator=decayed_frequency feuer_cost_half_life_accesses={} feuer_max_access_age_accesses={} feuer_max_access_events_per_key={} feuer_fixed_retrieval_equivalent_bytes={} trace={TRACE_FILE} shards={:?} downloaders={:?} warmup_iterations={} coalescing_window_ms={COALESCING_WINDOW_MILLIS} coalescing_distance_bytes={} whole_split_threshold_bytes={}",
-            *ACCESS_COUNT_HALF_LIFE,
-            *MAX_ACCESS_AGE_ACCESSES,
-            *MAX_ACCESS_EVENTS_PER_KEY,
-            *FIXED_RETRIEVAL_EQUIVALENT_BYTES,
-            args.shards,
-            args.downloaders,
-            args.warmup_iterations,
-            download_config.coalescing_distance_bytes,
-            download_config.whole_split_threshold_bytes,
+            "foyer_revision={PINNED_FOYER_REVISION} foyer_source=https://github.com/PSeitz/foyer foyer_cost_estimator=residence_access_rate foyer_cost_fixed_retrieval={SOURCE_FIXED_EQUIVALENT_BYTES} foyer_cost_sample_size={FOYER_COST_SAMPLE_SIZE} feuer_cost_estimator=decayed_frequency feuer_cost_half_life_accesses={} feuer_fixed_retrieval_equivalent_bytes={} trace={TRACE_FILE} shards={:?} warmup_iterations={}",
+            *ACCESS_COUNT_HALF_LIFE, *FIXED_RETRIEVAL_EQUIVALENT_BYTES, args.shards, args.warmup_iterations,
         );
         println!("{CSV_HEADER}");
     } else {
-        print_human_header(&args, &workload, download_config);
+        print_human_header(&args, &workload);
     }
 
-    for &downloader in &args.downloaders {
-        let max_download_bytes = max_download_len(&workload, downloader);
-        let max_download_bytes =
-            usize::try_from(max_download_bytes).map_err(|_| "largest callback payload does not fit usize")?;
-        let source_payload = Bytes::from(vec![0x5a; max_download_bytes]);
+    let max_payload_len = workload
+        .requests
+        .iter()
+        .map(|request| request.payload_len)
+        .max()
+        .unwrap();
+    let max_payload_len = usize::try_from(max_payload_len).map_err(|_| "largest object payload does not fit usize")?;
+    let source_payload = Bytes::from(vec![0x5a; max_payload_len]);
 
-        for &shards in &args.shards {
-            for &capacity in &args.capacities {
-                let mut caches: Vec<Box<dyn ReplayCache>> = vec![Box::new(FeuerReplayCache::new(capacity, shards))];
-                for eviction_policy in [FoyerEvictionPolicy::S3Fifo, FoyerEvictionPolicy::CostAware] {
-                    for key_range in [FoyerKeyRange::ExactRequest, FoyerKeyRange::ExpandedDownload] {
-                        caches.push(Box::new(FoyerReplayCache::new(
-                            capacity,
-                            shards,
-                            key_range,
-                            eviction_policy,
-                        )));
-                        if matches!(downloader, DownloadRangePolicy::Exact) {
-                            break;
-                        }
-                    }
-                }
-                for cache in caches {
-                    let report = replay_cache(
-                        cache,
-                        &workload,
-                        downloader,
-                        shards,
-                        capacity,
-                        args.warmup_iterations,
-                        &source_payload,
-                    );
-                    if args.csv {
-                        print_csv_report(&report);
-                    } else {
-                        print_human_report(&report);
-                    }
+    for &shards in &args.shards {
+        for &capacity in &args.capacities {
+            let caches: Vec<Box<dyn ReplayCache>> = vec![
+                Box::new(FeuerReplayCache::new(capacity, shards)),
+                Box::new(FoyerReplayCache::new(capacity, shards, FoyerEvictionPolicy::S3Fifo)),
+                Box::new(FoyerReplayCache::new(capacity, shards, FoyerEvictionPolicy::CostAware)),
+            ];
+            for cache in caches {
+                let report = replay_cache(
+                    cache,
+                    &workload,
+                    shards,
+                    capacity,
+                    args.warmup_iterations,
+                    &source_payload,
+                );
+                if args.csv {
+                    print_csv_report(&report);
+                } else {
+                    print_human_report(&report);
                 }
             }
         }
@@ -419,8 +292,8 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// Loads the validated trace, checks request order, and precomputes download ranges.
-fn load_trace_workload(args: &ReplayArgs, download_config: DownloadExpansionConfig) -> Result<ReplayWorkload, String> {
+/// Loads the validated trace and checks request order.
+fn load_trace_workload(args: &ReplayArgs) -> Result<ReplayWorkload, String> {
     let requests = load_trace(args.operations)?;
     if requests.is_empty() {
         return Err("trace is empty".to_owned());
@@ -428,34 +301,30 @@ fn load_trace_workload(args: &ReplayArgs, download_config: DownloadExpansionConf
     if !requests.is_sorted_by_key(|request| request.timestamp_millis) {
         return Err("trace timestamps are not in chronological order".to_owned());
     }
-    let expanded_downloads = expanded_download_ranges(&requests, download_config);
     Ok(ReplayWorkload {
         name: "trace",
         requests,
-        expanded_downloads,
     })
 }
 
 fn replay_cache(
     mut cache: Box<dyn ReplayCache>,
     workload: &ReplayWorkload,
-    downloader: DownloadRangePolicy,
     shards: usize,
     capacity: usize,
     warmup_iterations: usize,
     source_payload: &Bytes,
 ) -> ReplayReport {
     for _ in 0..warmup_iterations {
-        replay_pass(&mut *cache, workload, downloader, source_payload);
+        replay_pass(&mut *cache, workload, source_payload);
     }
 
     let started = Instant::now();
-    let traffic = replay_pass(&mut *cache, workload, downloader, source_payload);
+    let traffic = replay_pass(&mut *cache, workload, source_payload);
     let elapsed = started.elapsed();
 
     ReplayReport {
         workload: workload.name,
-        downloader: downloader.name(),
         shards,
         capacity,
         engine: cache.name(),
@@ -465,138 +334,53 @@ fn replay_cache(
     }
 }
 
-fn expanded_download_ranges(workload: &[TraceRequest], config: DownloadExpansionConfig) -> Box<[ByteRange]> {
-    let mut request_indices_by_object: HashMap<(&ObjectKeyHash, u64), Vec<usize>> = HashMap::new();
-    for (request_index, request) in workload.iter().enumerate() {
-        request_indices_by_object
-            .entry((&request.object_key, request.object_size))
-            .or_default()
-            .push(request_index);
-    }
-
-    // The first batch that claims a request fixes its expansion. Recomputing a
-    // sliding window for each member would produce different native Foyer keys
-    // for requests served by the same coalesced download.
-    let mut expanded_ranges = vec![None; workload.len()];
-    for request_indices in request_indices_by_object.values() {
-        for (object_request_index, &request_index) in request_indices.iter().enumerate() {
-            if expanded_ranges[request_index].is_some() {
-                continue;
-            }
-
-            let coalescing_deadline_millis = workload[request_index]
-                .timestamp_millis
-                .saturating_add(COALESCING_WINDOW_MILLIS);
-            let mut pending_downloads = request_indices[object_request_index..]
-                .iter()
-                .copied()
-                .take_while(|&candidate_index| workload[candidate_index].timestamp_millis <= coalescing_deadline_millis)
-                .filter(|&candidate_index| expanded_ranges[candidate_index].is_none())
-                .map(|index| (workload[index].expanded_download_range(config), index))
-                .collect::<Vec<_>>();
-            let (downloaded_range, members) =
-                coalesced_download(&mut pending_downloads, config.coalescing_distance_bytes, request_index);
-            for &(_, member_index) in members {
-                expanded_ranges[member_index] = Some(downloaded_range);
-            }
-        }
-    }
-    expanded_ranges.into_iter().map(Option::unwrap).collect()
-}
-
-fn max_download_len(workload: &ReplayWorkload, downloader: DownloadRangePolicy) -> u64 {
-    downloader.ranges(workload).map(|range| range.len()).max().unwrap_or(1)
-}
-
-/// Replays one pass of the workload through the cache and records its traffic.
+/// Replays one pass using a source buffer sized to the largest object, whose length fits usize.
 fn replay_pass<C: ReplayCache + ?Sized>(
     cache: &mut C,
     workload: &ReplayWorkload,
-    downloader: DownloadRangePolicy,
     source_payload: &Bytes,
 ) -> ReplayTraffic {
     let mut traffic = ReplayTraffic::default();
-    for (request, downloaded_range) in workload.requests.iter().zip(downloader.ranges(workload)) {
-        let hit = cache.lookup_hit(request, downloaded_range);
+    for request in &workload.requests {
+        let hit = cache.lookup_hit(request);
         traffic.requests += 1;
-        traffic.requested_bytes += request.requested_range.len();
+        traffic.requested_bytes += request.payload_len;
         if hit {
             traffic.hits += 1;
-            traffic.hit_bytes += request.requested_range.len();
+            traffic.hit_bytes += request.payload_len;
             continue;
         }
 
-        let payload = source_payload_slice(source_payload, downloaded_range);
-        cache.insert(request, downloaded_range, payload);
-        traffic.source_bytes += downloaded_range.len();
+        let payload = source_payload.slice(..request.payload_len as usize);
+        cache.insert(request, payload);
+        traffic.source_bytes += request.payload_len;
     }
     traffic
 }
 
-/// Returns the coalesced range and member requests containing this request.
-/// Inputs include this request and share an object key and size.
-fn coalesced_download(
-    pending_downloads: &mut [(ByteRange, usize)],
-    coalescing_distance_bytes: u64,
-    request_index: usize,
-) -> (ByteRange, &[(ByteRange, usize)]) {
-    pending_downloads.sort_unstable();
-    let mut remaining = &*pending_downloads;
-    loop {
-        let mut range = remaining[0].0;
-        let mut end = 1;
-        while end < remaining.len() && remaining[end].0.start().saturating_sub(range.end()) < coalescing_distance_bytes
-        {
-            range = ByteRange::new(range.start(), range.end().max(remaining[end].0.end())).unwrap();
-            end += 1;
-        }
-        let (members, rest) = remaining.split_at(end);
-        if members.iter().any(|&(_, index)| index == request_index) {
-            return (range, members);
-        }
-        remaining = rest;
-    }
-}
-
-/// Slices a download from the source buffer sized to the largest download, whose length fits usize.
-fn source_payload_slice(source_payload: &Bytes, downloaded_range: ByteRange) -> Bytes {
-    source_payload.slice(..downloaded_range.len() as usize)
-}
-
-fn print_human_header(args: &ReplayArgs, workload: &ReplayWorkload, config: DownloadExpansionConfig) {
+fn print_human_header(args: &ReplayArgs, workload: &ReplayWorkload) {
     let shards = args.shards.iter().map(usize::to_string).collect::<Vec<_>>().join(", ");
     println!("Feuer memory benchmark");
     println!("Trace: {TRACE_FILE} ({} operations)", workload.requests.len());
     println!("Shards: {shards} | Warm-up passes: {}", args.warmup_iterations);
     println!("Feuer cost-aware half-life: {} requests", *ACCESS_COUNT_HALF_LIFE);
-    println!("Feuer trimming age: {} requests", *MAX_ACCESS_AGE_ACCESSES);
-    println!(
-        "Feuer trimming history: {} events per object",
-        *MAX_ACCESS_EVENTS_PER_KEY
-    );
     println!(
         "Feuer fixed retrieval cost: {} equivalent bytes",
         *FIXED_RETRIEVAL_EQUIVALENT_BYTES
-    );
-    println!(
-        "Expanded: {COALESCING_WINDOW_MILLIS}-ms coalescing within {} | Whole below {}",
-        format_decimal_bytes(config.coalescing_distance_bytes),
-        format_binary_bytes(config.whole_split_threshold_bytes),
     );
     println!("Source model: 125 ms per GET + transfer at 80 MB/s");
     println!("Foyer fork revision: {PINNED_FOYER_REVISION}");
     println!();
     println!(
-        "Capacity   Downloader Engine                   Request hit Source-cost hit Source GETs Source bytes         Used   Throughput"
+        "Capacity   Engine                   Request hit Source-cost hit Source GETs Source bytes         Used   Throughput"
     );
-    println!("{}", "-".repeat(131));
+    println!("{}", "-".repeat(120));
 }
 
 fn print_human_report(report: &ReplayReport) {
     println!(
-        "{:<10} {:<10} {:<24} {:>11.2}% {:>14.2}% {:>11} {:>12} {:>12} {:>12}",
+        "{:<10} {:<24} {:>11.2}% {:>14.2}% {:>11} {:>12} {:>12} {:>12}",
         format_binary_bytes(report.capacity as u64),
-        report.downloader,
         human_engine_name(report.engine),
         report.cache_hit_rate() * 100.0,
         report.source_cost_savings_ratio() * 100.0,
@@ -610,24 +394,14 @@ fn print_human_report(report: &ReplayReport) {
 fn human_engine_name(engine: &str) -> &str {
     match engine {
         "feuer-value-density" => "Feuer",
-        "foyer-native-exact-key" => "Foyer S3FIFO",
-        "foyer-native-expanded-key" => "Foyer S3FIFO (expanded)",
-        "foyer-cost-aware-exact-key" => "Foyer cost-aware",
-        "foyer-cost-aware-expanded-key" => "Foyer cost-aware (expanded)",
+        "foyer-native" => "Foyer S3FIFO",
+        "foyer-cost-aware" => "Foyer cost-aware",
         other => other,
     }
 }
 
-fn format_decimal_bytes(bytes: u64) -> String {
-    format_bytes(bytes, [(1_000_000_000, "GB"), (1_000_000, "MB"), (1_000, "KB")])
-}
-
 fn format_binary_bytes(bytes: u64) -> String {
-    format_bytes(bytes, [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")])
-}
-
-fn format_bytes(bytes: u64, units: [(u64, &str); 3]) -> String {
-    for (unit_bytes, suffix) in units {
+    for (unit_bytes, suffix) in [(1 << 30, "GiB"), (1 << 20, "MiB"), (1 << 10, "KiB")] {
         if bytes >= unit_bytes {
             if bytes.is_multiple_of(unit_bytes) {
                 return format!("{} {suffix}", bytes / unit_bytes);
@@ -651,9 +425,8 @@ fn format_operations_per_second(operations_per_second: f64) -> String {
 
 fn print_csv_report(report: &ReplayReport) {
     println!(
-        "{},{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{:.4},{:.3},{:.0}",
+        "{},{},{},{},{},{},{},{},{:.4},{:.4},{:.4},{},{},{},{:.4},{:.3},{:.0}",
         report.workload,
-        report.downloader,
         report.shards,
         report.capacity,
         report.engine,
@@ -687,21 +460,24 @@ fn load_trace(operation_limit: Option<usize>) -> Result<Box<[TraceRequest]>, Str
         .collect()
 }
 
+/// Converts each legacy requested slice into an independent full object.
 fn parse_trace_line(line: &str) -> Result<TraceRequest, String> {
     let object_key = find_json_string(line, "object_id")?;
     let object_size = find_json_u64(line, "object_num_bytes")?;
     let start = find_json_u64(line, "requested_range_start")?;
     let end = find_json_u64(line, "requested_range_end")?;
-    let requested_range = ByteRange::new(start, end).map_err(|error| error.to_string())?;
+    let payload_len = end
+        .checked_sub(start)
+        .ok_or_else(|| format!("request ends before it starts: {start}..{end}"))?;
     if end > object_size {
         return Err(format!("requests {start}..{end} beyond object size {object_size}"));
     }
     let timestamp = find_json_string(line, "timestamp")?;
     let timestamp_millis = parse_timestamp_millis(timestamp)?;
     Ok(TraceRequest {
-        object_key: ObjectKeyHash::from(object_key),
-        object_size,
-        requested_range,
+        // Fixed-width offsets keep the original key and both endpoints unambiguous.
+        object_key: ObjectKeyHash::from(format!("{object_key}{start:016x}{end:016x}")),
+        payload_len,
         timestamp_millis,
     })
 }
@@ -810,51 +586,22 @@ mod history_bench;
 mod tests {
     use super::*;
 
-    #[derive(Default)]
-    struct CoveringRangeTestCache {
-        entries: Vec<(ObjectKeyHash, ByteRange)>,
-    }
-
-    impl ReplayCache for CoveringRangeTestCache {
-        fn name(&self) -> &'static str {
-            "range-test"
-        }
-
-        /// Reports a lookup hit when a test entry covers the requested range.
-        fn lookup_hit(&mut self, request: &TraceRequest, _downloaded_range: ByteRange) -> bool {
-            self.entries.iter().any(|(key, downloaded_range)| {
-                key == &request.object_key && downloaded_range.contains(request.requested_range)
-            })
-        }
-
-        fn insert(&mut self, request: &TraceRequest, downloaded_range: ByteRange, _payload: Bytes) {
-            assert!(downloaded_range.contains(request.requested_range));
-            self.entries.push((request.object_key, downloaded_range));
-        }
-
-        fn used_payload_bytes(&self) -> u64 {
-            self.entries.iter().map(|(_, range)| range.len()).sum()
-        }
-    }
+    const TRACE_LINE: &str = r#"{"object_num_bytes":100,"object_id":"object-a","requested_range_end":11,"requested_range_start":7,"timestamp":"2026-08-08T01:12:49.481Z"}"#;
 
     #[test]
     fn warmup_preserves_cache_state_but_not_reported_traffic() {
-        for (payload_bytes, byte_hit_rate) in [(0, 0.0), (1, 1.0)] {
-            let requested_range = ByteRange::new(0, payload_bytes).unwrap();
+        for (payload_len, byte_hit_rate) in [(0, 0.0), (1, 1.0)] {
             let workload = ReplayWorkload {
                 name: "test",
                 requests: Box::new([TraceRequest {
                     object_key: "object".into(),
-                    object_size: 1,
-                    requested_range,
+                    payload_len,
                     timestamp_millis: 0,
                 }]),
-                expanded_downloads: Box::new([requested_range]),
             };
             let report = replay_cache(
                 Box::new(FeuerReplayCache::new(1, 1)),
                 &workload,
-                DownloadRangePolicy::Exact,
                 1,
                 1,
                 1,
@@ -866,192 +613,74 @@ mod tests {
             assert_eq!(report.cache_hit_rate(), 1.0);
             assert_eq!(report.byte_hit_rate(), byte_hit_rate);
             assert_eq!(report.source_cost_savings_ratio(), 1.0);
-            assert_eq!(report.used_payload_bytes, payload_bytes);
+            assert_eq!(report.used_payload_bytes, payload_len);
         }
     }
 
     #[test]
-    fn foyer_expanded_key_reuses_identical_expansions_for_distinct_requests() {
-        let request = |start, end| TraceRequest {
-            object_key: "object".into(),
-            object_size: 20,
-            requested_range: ByteRange::new(start, end).unwrap(),
-            timestamp_millis: 0,
-        };
-        let first = request(2, 4);
-        let second = request(12, 14);
-        let expanded = ByteRange::new(0, 20).unwrap();
-
-        let mut expanded_key_cache =
-            FoyerReplayCache::new(1 << 20, 1, FoyerKeyRange::ExpandedDownload, FoyerEvictionPolicy::S3Fifo);
-        assert!(!expanded_key_cache.lookup_hit(&first, expanded));
-        expanded_key_cache.insert(&first, expanded, Bytes::from(vec![0; 20]));
-        assert!(expanded_key_cache.lookup_hit(&second, expanded));
-
-        let mut exact_key_cache =
-            FoyerReplayCache::new(1 << 20, 1, FoyerKeyRange::ExactRequest, FoyerEvictionPolicy::S3Fifo);
-        exact_key_cache.insert(&first, expanded, Bytes::from(vec![0; 20]));
-        assert!(!exact_key_cache.lookup_hit(&second, expanded));
-    }
-
-    #[test]
-    fn replay_uses_coalesced_ranges_only_for_expanded_downloads() {
-        let request = |start, end, timestamp_millis| TraceRequest {
-            object_key: "object".into(),
-            object_size: 100,
-            requested_range: ByteRange::new(start, end).unwrap(),
-            timestamp_millis,
-        };
-        let requests = vec![
-            request(0, 10, 0),
-            request(10, 20, 1),
-            request(20, 30, 5),
-            request(50, 60, 6),
-        ];
-        let download_config = DownloadExpansionConfig {
-            coalescing_distance_bytes: DEFAULT_COALESCING_DISTANCE_BYTES,
-            whole_split_threshold_bytes: 0,
-        };
-        let expanded_downloads = expanded_download_ranges(&requests, download_config);
+    fn all_engines_replay_the_same_independent_objects() {
+        let first = parse_trace_line(TRACE_LINE).unwrap();
+        let second =
+            parse_trace_line(&TRACE_LINE.replace("\"requested_range_start\":7", "\"requested_range_start\":8"))
+                .unwrap();
         let workload = ReplayWorkload {
             name: "test",
-            requests: requests.into_boxed_slice(),
-            expanded_downloads,
+            requests: vec![first.clone(), second, first].into_boxed_slice(),
         };
-        assert_eq!(&workload.expanded_downloads[..3], &[ByteRange::new(0, 30).unwrap(); 3]);
-        assert_eq!(max_download_len(&workload, DownloadRangePolicy::Expanded), 30);
-        assert_eq!(max_download_len(&workload, DownloadRangePolicy::Exact), 10);
-
-        for (downloader, hits) in [(DownloadRangePolicy::Expanded, 2), (DownloadRangePolicy::Exact, 0)] {
-            let report = replay_cache(
-                Box::new(CoveringRangeTestCache::default()),
-                &workload,
-                downloader,
-                1,
-                100,
-                0,
-                &Bytes::from(vec![0; 60]),
-            );
-
-            assert_eq!(report.traffic.requests, 4);
-            assert_eq!(report.traffic.requested_bytes, 40);
-            assert_eq!(report.traffic.hits, hits);
-            assert_eq!(report.traffic.hit_bytes, hits * 10);
-            assert_eq!(report.traffic.source_bytes, 40);
+        let caches: Vec<Box<dyn ReplayCache>> = vec![
+            Box::new(FeuerReplayCache::new(1024, 1)),
+            Box::new(FoyerReplayCache::new(1024, 1, FoyerEvictionPolicy::S3Fifo)),
+            Box::new(FoyerReplayCache::new(1024, 1, FoyerEvictionPolicy::CostAware)),
+        ];
+        for cache in caches {
+            let report = replay_cache(cache, &workload, 1, 1024, 0, &Bytes::from_static(&[0; 4]));
+            assert_eq!(report.traffic.requests, 3, "{}", report.engine);
+            assert_eq!(report.traffic.requested_bytes, 11);
+            assert_eq!(report.traffic.hits, 1);
+            assert_eq!(report.traffic.hit_bytes, 4);
+            assert_eq!(report.traffic.source_bytes, 7);
+            assert_eq!(report.used_payload_bytes, 7);
+            let expected = (SOURCE_FIXED_EQUIVALENT_BYTES + 4) as f64 / (3 * SOURCE_FIXED_EQUIVALENT_BYTES + 11) as f64;
+            assert!((report.source_cost_savings_ratio() - expected).abs() < 1e-12);
         }
-    }
-
-    #[test]
-    fn coalescing_sorts_ranges_without_combining_object_keys_or_sizes() {
-        let requests =
-            [("a", 100, 20), ("b", 100, 5), ("a", 200, 0), ("a", 100, 0)].map(|(key, object_size, start)| {
-                TraceRequest {
-                    object_key: key.into(),
-                    object_size,
-                    requested_range: ByteRange::new(start, start + 10).unwrap(),
-                    timestamp_millis: 0,
-                }
-            });
-        let ranges = expanded_download_ranges(
-            &requests,
-            DownloadExpansionConfig {
-                coalescing_distance_bytes: 20,
-                whole_split_threshold_bytes: 0,
-            },
-        );
-        assert_eq!(
-            *ranges,
-            [(0, 30), (5, 15), (0, 10), (0, 30)].map(|(start, end)| ByteRange::new(start, end).unwrap())
-        );
-    }
-
-    #[test]
-    fn coalescing_distance_parameter_is_a_strict_upper_bound() {
-        let distance = DEFAULT_COALESCING_DISTANCE_BYTES;
-        let ranges_for_gap = |gap| {
-            let requests = [(1 + gap, 2 + gap, 0), (0, 1, 1)].map(|(start, end, timestamp_millis)| TraceRequest {
-                object_key: "object".into(),
-                object_size: 2 * distance,
-                requested_range: ByteRange::new(start, end).unwrap(),
-                timestamp_millis,
-            });
-            expanded_download_ranges(
-                &requests,
-                DownloadExpansionConfig {
-                    coalescing_distance_bytes: distance,
-                    whole_split_threshold_bytes: 0,
-                },
-            )
-        };
-
-        assert_eq!(
-            *ranges_for_gap(distance - 1),
-            [ByteRange::new(0, distance + 1).unwrap(); 2]
-        );
-        assert_eq!(
-            *ranges_for_gap(distance),
-            [(distance + 1, distance + 2), (0, 1)].map(|(start, end)| ByteRange::new(start, end).unwrap())
-        );
-    }
-
-    #[test]
-    fn source_cost_baseline_uses_requested_bytes_not_downloaded_bytes() {
-        let report = ReplayReport {
-            workload: "test",
-            downloader: "expanded",
-            shards: 1,
-            capacity: 1,
-            engine: "test",
-            traffic: ReplayTraffic {
-                requests: 1,
-                requested_bytes: 100,
-                source_bytes: 200,
-                ..ReplayTraffic::default()
-            },
-            used_payload_bytes: 0,
-            elapsed: Duration::from_secs(1),
-        };
-
-        assert!(report.source_cost_savings_ratio() < 0.0);
     }
 
     #[test]
     fn parses_the_captured_trace_shape() {
-        let line = r#"{"object_num_bytes":100,"object_id":"object-a","requested_range_end":11,"requested_range_start":7,"timestamp":"2026-08-08T01:12:49.481Z"}"#;
-        let request = parse_trace_line(line).unwrap();
-        assert_eq!(request.object_key, ObjectKeyHash::from("object-a"));
-        assert_eq!(request.object_size, 100);
-        assert_eq!(request.requested_range, ByteRange::new(7, 11).unwrap());
+        let request = parse_trace_line(TRACE_LINE).unwrap();
+        assert_eq!(request.payload_len, 4);
         assert_eq!(
             request.timestamp_millis,
             parse_timestamp_millis("2026-08-08T01:12:49.481Z").unwrap()
         );
-        assert!(parse_trace_line(&line.replace("\"object_num_bytes\":100", "\"object_num_bytes\":11")).is_ok());
-        assert!(parse_trace_line(&line.replace("\"object_num_bytes\":100", "\"object_num_bytes\":10")).is_err());
+        assert!(parse_trace_line(&TRACE_LINE.replace("\"object_num_bytes\":100", "\"object_num_bytes\":11")).is_ok());
+        assert!(parse_trace_line(&TRACE_LINE.replace("\"object_num_bytes\":100", "\"object_num_bytes\":10")).is_err());
+        assert!(
+            parse_trace_line(&TRACE_LINE.replace("\"requested_range_start\":7", "\"requested_range_start\":12"))
+                .is_err()
+        );
+        assert_eq!(
+            parse_trace_line(&TRACE_LINE.replace("\"requested_range_start\":7", "\"requested_range_start\":11"))
+                .unwrap()
+                .payload_len,
+            0
+        );
     }
 
     #[test]
-    fn expanded_downloader_honors_the_whole_split_threshold() {
-        let config = DownloadExpansionConfig {
-            coalescing_distance_bytes: DEFAULT_COALESCING_DISTANCE_BYTES,
-            whole_split_threshold_bytes: 8 << 20,
-        };
-        let requested_range = ByteRange::new((1 << 20) + 3, (2 << 20) + 3).unwrap();
-        for (object_size, expected_range) in [
-            (
-                config.whole_split_threshold_bytes - 1,
-                ByteRange::new(0, config.whole_split_threshold_bytes - 1).unwrap(),
-            ),
-            (config.whole_split_threshold_bytes, requested_range),
+    fn object_identity_uses_original_key_and_both_endpoints() {
+        let key = parse_trace_line(TRACE_LINE).unwrap().object_key;
+        assert_eq!(key, parse_trace_line(TRACE_LINE).unwrap().object_key);
+        for changed in [
+            TRACE_LINE.replace("object-a", "object-b"),
+            TRACE_LINE.replace("\"requested_range_start\":7", "\"requested_range_start\":8"),
+            TRACE_LINE.replace("\"requested_range_end\":11", "\"requested_range_end\":12"),
         ] {
-            let request = TraceRequest {
-                object_key: "object".into(),
-                object_size,
-                requested_range,
-                timestamp_millis: 0,
-            };
-            assert_eq!(request.expanded_download_range(config), expected_range);
+            assert_ne!(key, parse_trace_line(&changed).unwrap().object_key);
         }
+        let changed_size = TRACE_LINE.replace("\"object_num_bytes\":100", "\"object_num_bytes\":1000");
+        assert_eq!(key, parse_trace_line(&changed_size).unwrap().object_key);
+        assert_eq!(parse_trace_line(&changed_size).unwrap().payload_len, 4);
     }
 
     #[test]
@@ -1078,8 +707,6 @@ mod tests {
         assert!(!ReplayArgs::try_parse_from(["benchmark"]).unwrap().csv);
         assert!(ReplayArgs::try_parse_from(["benchmark", "--csv"]).unwrap().csv);
         assert_eq!(format_binary_bytes(8 << 20), "8 MiB");
-        assert_eq!(format_decimal_bytes(10_000_000), "10 MB");
-        assert_eq!(format_decimal_bytes(1_500), "1.5 KB");
         assert_eq!(format_binary_bytes(1_536), "1.5 KiB");
         assert_eq!(format_binary_bytes(0), "0 B");
     }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::disk_cache::tests::{download, open_test_cache, range, with_manual_metadata_writes};
+use crate::disk_cache::tests::{download, open_test_cache, with_manual_metadata_writes};
 
 async fn reopen(directory: &Path, cache: DiskCache) -> DiskCache {
     cache.write_dirty_metadata_pages().await;
@@ -35,7 +35,7 @@ async fn metadata_chains_start_at_each_shards_first_chunk_without_a_sidecar() {
     let cache = reopen(directory.path(), cache).await;
     for index in 0..cache.disk.shards.len() {
         assert_eq!(
-            cache.get(&ObjectKeyHash(index as u128), range(0, 1)).await.unwrap(),
+            cache.get(&ObjectKeyHash(index as u128)).await.unwrap().into_bytes(),
             download(0, 1).bytes()
         );
     }
@@ -54,13 +54,10 @@ async fn recovers_separate_metadata_and_contiguous_multi_chunk_payloads() {
     let cache = reopen(directory.path(), cache).await;
     for (i, length) in lengths.into_iter().enumerate() {
         assert_eq!(
-            cache
-                .get(&ObjectKeyHash(i as u128), range(u64::MAX - length as u64, u64::MAX))
-                .await
-                .unwrap(),
+            cache.get(&ObjectKeyHash(i as u128)).await.unwrap().into_bytes(),
             download(u64::MAX - length as u64, length).bytes()
         );
-        cache.disk.shards[0].remove_entry(&ObjectKeyHash(i as u128), u64::MAX - length as u64);
+        cache.disk.shards[0].remove_entry(&ObjectKeyHash(i as u128));
     }
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 12 * CHUNK_BYTES);
     assert_eq!(cache.disk.shards[0].metadata_pages.lock().unwrap().chunks.len(), 1);
@@ -68,7 +65,7 @@ async fn recovers_separate_metadata_and_contiguous_multi_chunk_payloads() {
 
 #[tokio::test]
 async fn concurrent_batches_grow_metadata_chain_and_recover_every_entry() {
-    let (directory, cache) = open_test_cache(100 * CHUNK_BYTES).await;
+    let (directory, cache) = open_test_cache(110 * CHUNK_BYTES).await;
     let entries = ENTRIES_PER_METADATA_CHUNK + 17;
     let inputs = |keys: Range<usize>| keys.map(|i| (ObjectKeyHash(i as u128), download(0, 1))).collect();
     let (first, second) = tokio::join!(
@@ -88,7 +85,7 @@ async fn concurrent_batches_grow_metadata_chain_and_recover_every_entry() {
     let cache = reopen(directory.path(), cache).await;
     for i in 0..entries {
         assert_eq!(
-            cache.get(&ObjectKeyHash(i as u128), range(0, 1)).await.unwrap(),
+            cache.get(&ObjectKeyHash(i as u128)).await.unwrap().into_bytes(),
             download(0, 1).bytes()
         );
     }
@@ -117,7 +114,7 @@ async fn multiple_batches_update_one_metadata_chunk_and_reuse_entry_metadata() {
         .collect();
     let cache = reopen(directory.path(), cache).await;
     for key in live_keys {
-        assert!(cache.get(&key, range(0, 1)).await.is_some());
+        assert!(cache.get(&key).await.is_some());
     }
     assert_eq!(cache.disk.shards[0].metadata_pages.lock().unwrap().chunks.len(), 1);
 }
@@ -128,7 +125,7 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 1)).await.unwrap());
     let shard = &cache.disk.shards[0];
-    let entry = shard.entry_index.lock().unwrap().take_entry(&key, 0).unwrap();
+    let entry = shard.entry_index.lock().unwrap().take_entry(&key).unwrap();
     let address = entry.payload_address;
     let location = entry.metadata;
     let metadata = shard.metadata_pages.lock().unwrap();
@@ -153,11 +150,8 @@ async fn eviction_does_not_recover_an_old_record_for_reused_payload_chunks() {
     assert!(cache.insert(old, download(0, 4096)).await.unwrap());
     assert!(cache.insert(new, download(100, 4096)).await.unwrap());
     let cache = reopen(directory.path(), cache).await;
-    assert!(cache.get(&old, range(0, 1)).await.is_none());
-    assert_eq!(
-        cache.get(&new, range(100, 4196)).await.unwrap(),
-        download(100, 4096).bytes()
-    );
+    assert!(cache.get(&old).await.is_none());
+    assert_eq!(cache.get(&new).await.unwrap().into_bytes(), download(100, 4096).bytes());
 }
 
 #[tokio::test]
@@ -184,14 +178,14 @@ async fn metadata_slot_reuse_preserves_multi_chunk_recovery() {
                 [first, second]
             };
             for key in removed {
-                shard.remove_entry(&key, 0);
+                shard.remove_entry(&key);
             }
             let length = CHUNK_BYTES as usize + 1;
             assert!(cache.insert(large, download(0, length)).await.unwrap());
             let cache = reopen(directory.path(), cache).await;
-            assert!(cache.covers_range(&large, range(0, length as u64)));
+            assert!(cache.contains(&large));
             assert_eq!(
-                cache.get(&large, range(0, length as u64)).await.unwrap(),
+                cache.get(&large).await.unwrap().into_bytes(),
                 download(0, length).bytes()
             );
         }
@@ -228,17 +222,17 @@ async fn torn_entry_metadata_page_does_not_reject_other_pages() {
     let shard = &cache.disk.shards[0];
     assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
     // Reverse publication assigns key 0 a position on the second page.
-    assert!(cache.get(&ObjectKeyHash(0), range(0, 1)).await.is_some());
+    assert!(cache.get(&ObjectKeyHash(0)).await.is_some());
     assert!(
         cache
-            .get(&ObjectKeyHash(ENTRIES_PER_METADATA_PAGE as u128), range(0, 1))
+            .get(&ObjectKeyHash(ENTRIES_PER_METADATA_PAGE as u128))
             .await
             .is_none()
     );
     assert!(cache.insert(ObjectKeyHash(999), download(0, 1)).await.unwrap());
     let cache = reopen(directory.path(), cache).await;
-    assert!(cache.get(&ObjectKeyHash(999), range(0, 1)).await.is_some());
-    assert!(cache.get(&ObjectKeyHash(0), range(0, 1)).await.is_some());
+    assert!(cache.get(&ObjectKeyHash(999)).await.is_some());
+    assert!(cache.get(&ObjectKeyHash(0)).await.is_some());
 }
 
 #[tokio::test]
@@ -266,15 +260,15 @@ async fn corrupt_unaligned_or_cyclic_link_terminates_recovery_and_can_be_repaire
         }
         cache.disk.file.write_at(offset, &page).await.unwrap();
         let cache = reopen(directory.path(), cache).await;
-        assert!(cache.get(&ObjectKeyHash(1), range(0, 1)).await.is_some());
+        assert!(cache.get(&ObjectKeyHash(1)).await.is_some());
         assert!(cache.insert(ObjectKeyHash(2), download(0, 1)).await.unwrap());
         assert_eq!(
             cache.disk.shards[0].metadata_pages.lock().unwrap().chunks[0].next_chunk_address,
             NO_CHUNK
         );
         let cache = reopen(directory.path(), cache).await;
-        assert!(cache.get(&ObjectKeyHash(1), range(0, 1)).await.is_some());
-        assert!(cache.get(&ObjectKeyHash(2), range(0, 1)).await.is_some());
+        assert!(cache.get(&ObjectKeyHash(1)).await.is_some());
+        assert!(cache.get(&ObjectKeyHash(2)).await.is_some());
     }
 }
 
@@ -283,7 +277,7 @@ async fn payload_corruption_remains_a_checksum_miss() {
     let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 1)).await.unwrap());
-    let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&0].payload_address;
+    let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key].payload_address;
     cache
         .disk
         .file
@@ -291,7 +285,7 @@ async fn payload_corruption_remains_a_checksum_miss() {
         .await
         .unwrap();
     let cache = reopen(directory.path(), cache).await;
-    assert!(cache.get(&key, range(0, 1)).await.is_none());
+    assert!(cache.get(&key).await.is_none());
 }
 
 #[tokio::test]
@@ -322,11 +316,11 @@ async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
     assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
     shard.write_dirty_metadata_pages(&short_file).await.unwrap();
     assert_eq!(
-        cache.get(&ObjectKeyHash(0), range(0, 1)).await.unwrap(),
+        cache.get(&ObjectKeyHash(0)).await.unwrap().into_bytes(),
         download(0, 1).bytes()
     );
     for i in 0..entries {
-        shard.remove_entry(&ObjectKeyHash(i as u128), 0);
+        shard.remove_entry(&ObjectKeyHash(i as u128));
     }
     // Freed slots mark their pages for rewriting without the removed records.
     assert_eq!(shard.metadata_pages.lock().unwrap().dirty_pages.len(), 2);
@@ -346,18 +340,15 @@ async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
 }
 
 #[tokio::test]
-async fn a_write_after_open_replaces_recovered_entries() {
+async fn a_write_after_open_preserves_recovered_entries() {
     let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(10, 10)).await.unwrap());
     let cache = reopen(directory.path(), cache).await;
-    assert!(cache.insert(key, download(0, 100)).await.unwrap());
+    assert!(!cache.insert(key, download(0, 100)).await.unwrap());
     let cache = reopen(directory.path(), cache).await;
-    assert_eq!(cache.get(&key, range(0, 100)).await.unwrap(), download(0, 100).bytes());
-    assert_eq!(
-        cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key].len(),
-        1
-    );
+    assert_eq!(cache.get(&key).await.unwrap().into_bytes(), download(10, 10).bytes());
+    assert_eq!(cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key.len(), 1);
 }
 
 #[tokio::test]
@@ -382,17 +373,17 @@ async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
         .await
         .unwrap()
         .to_vec();
-    bytes[PAGE_HEADER_BYTES + 32..PAGE_HEADER_BYTES + 40].copy_from_slice(&address.to_le_bytes());
+    bytes[PAGE_HEADER_BYTES + 24..PAGE_HEADER_BYTES + 32].copy_from_slice(&address.to_le_bytes());
     let checksum = XxHash64::oneshot(0, &bytes[8..]);
     bytes[..8].copy_from_slice(&checksum.to_le_bytes());
     cache.disk.file.write_at(address, &Bytes::from(bytes)).await.unwrap();
     let cache = reopen(directory.path(), cache).await;
-    assert!(cache.get(&ObjectKeyHash(2), range(0, 1)).await.is_none());
-    assert!(cache.get(&ObjectKeyHash(1), range(0, 1)).await.is_some());
+    assert!(cache.get(&ObjectKeyHash(2)).await.is_none());
+    assert!(cache.get(&ObjectKeyHash(1)).await.is_some());
 }
 
 #[tokio::test]
-async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
+async fn recovery_deduplicates_keys_and_restores_allocator_availability() {
     for second_length in [50, 100, 200, CHUNK_BYTES as usize + 1] {
         let retained_length = second_length.max(100);
         let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
@@ -406,7 +397,7 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
             .unwrap();
         cache.write_dirty_metadata_pages().await;
         // Give key 2's record key 1's identity, regardless of which payload was written first.
-        let position = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(2)][&0]
+        let position = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(2)]
             .metadata
             .entry_index as usize;
         let mut page = cache
@@ -437,9 +428,9 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
         let shard = &cache.disk.shards[0];
         {
             let disk_index = shard.entry_index.lock().unwrap();
-            assert_eq!(disk_index.entries_by_key[&key].len(), 1);
-            assert_eq!(disk_index.eviction_candidates, vec![(key, 0)]);
-            assert_eq!(disk_index.entries_by_key[&key][&0].eviction_position, 0);
+            assert_eq!(disk_index.entries_by_key.len(), 1);
+            assert_eq!(disk_index.eviction_candidates, vec![key]);
+            assert_eq!(disk_index.entries_by_key[&key].eviction_position, 0);
         }
         assert_eq!(
             shard.metadata_pages.lock().unwrap().free_slot_count(),
@@ -451,7 +442,7 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
             retained_length as f64
         );
         assert_eq!(
-            cache.get(&key, range(0, retained_length as u64)).await.unwrap(),
+            cache.get(&key).await.unwrap().into_bytes(),
             download(0, retained_length).bytes()
         );
         let recovered_chunks = if retained_length <= CHUNK_BYTES as usize {
@@ -468,8 +459,8 @@ async fn recovery_deduplicates_starts_and_restores_allocator_availability() {
             recovered_chunks
         );
         assert!(cache.insert(ObjectKeyHash(3), download(0, 1)).await.unwrap());
-        let location = shard.entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(3)][&0].metadata;
-        let retained_location = shard.entry_index.lock().unwrap().entries_by_key[&key][&0].metadata;
+        let location = shard.entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(3)].metadata;
+        let retained_location = shard.entry_index.lock().unwrap().entries_by_key[&key].metadata;
         assert_ne!(location, retained_location);
         assert_eq!(shard.metadata_pages.lock().unwrap().chunks.len(), 1);
         drop(cache);
@@ -492,7 +483,7 @@ async fn stale_metadata_after_payload_reuse_recovers_as_a_checksum_miss() {
     assert!(cache.insert(key, download(0, 100)).await.unwrap());
     cache.write_dirty_metadata_pages().await;
     let shard = &cache.disk.shards[0];
-    shard.remove_entry(&key, 0);
+    shard.remove_entry(&key);
     // Simulate a crash before the writer clears the freed record.
     shard.metadata_pages.lock().unwrap().dirty_pages.clear();
     let reused = shard.allocator.reserve_chunks(1).unwrap();
@@ -507,6 +498,6 @@ async fn stale_metadata_after_payload_reuse_recovers_as_a_checksum_miss() {
         .unwrap();
     drop(reused);
     let cache = reopen(directory.path(), cache).await;
-    assert!(cache.covers_range(&key, range(0, 100)));
-    assert!(cache.get(&key, range(0, 100)).await.is_none());
+    assert!(cache.contains(&key));
+    assert!(cache.get(&key).await.is_none());
 }

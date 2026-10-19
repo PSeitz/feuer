@@ -1,4 +1,4 @@
-# Disk cache format v14
+# Disk cache format v15
 
 Experimental, best-effort cache format; no durability or compatibility guarantee.
 
@@ -7,7 +7,7 @@ Experimental, best-effort cache format; no durability or compatibility guarantee
 The first 1-MiB chunk is reserved for a global header. The remaining file is divided into
 1-MiB chunks of two kinds:
 
-- **Metadata chunks** describe cached entries: their keys, object ranges, payload
+- **Metadata chunks** describe cached objects: their keys, payload lengths,
   locations, and checksums. Each metadata chunk also links to the next metadata chunk.
 - **Payload chunks** hold the cached bytes. Each entry's payload is one contiguous
   byte range, separate from metadata, and may span consecutive chunks.
@@ -43,16 +43,10 @@ record's address and length. Only three entry records are shown.
 On open, the cache follows metadata links to rebuild its in-memory index without
 reading payloads. Payload checksums are verified when entries are read.
 
-Before publishing an entry, writers hash distinct, nonempty, recently requested subranges
-fully contained in the payload, using the trusted write buffer outside the index and metadata locks.
-History uses the existing per-key event and global request-age limits. Reads also learn
-requested-range checksums from verified bytes. Reads reuse a whole-entry read while another
-caller still holds it. Otherwise they verify the smallest checksummed range containing the request,
-using the whole entry if no subrange checksum covers it.
-These checksums are memory-only and disappear on entry removal or restart. They neither copy
-payloads on disk nor change disk ownership. Direct I/O rounds reads to 4-KiB alignment.
-Checksum storage and selection scans grow with distinct requested ranges until removal.
-Selection holds the shard's index lock.
+Each entry stores one complete object and one checksum over its entire payload.
+Reads verify the whole object and can share an in-flight read for the same entry.
+Direct I/O rounds physical reads to 4-KiB alignment. Alignment padding is not part
+of the payload checksum.
 
 ## Files and encoding
 
@@ -69,7 +63,7 @@ The first 4 KiB of the file contain:
 | Offset | Bytes | Field |
 | --- | --- | --- |
 | 0 | 8 | Seed-zero XXHash64 of header bytes `[8, 4096)` |
-| 8 | 8 | ASCII disk-format tag: `FEUHDR14` |
+| 8 | 8 | ASCII disk-format tag: `FEUHDR15` |
 | 16 | 8 | Application payload version, default `0` |
 | 24 | 8 | File capacity in bytes, aligned to 1 MiB |
 | 32 | 4064 | Reserved for future global metadata; written as zero |
@@ -96,7 +90,7 @@ A metadata chunk contains 256 independently checksummed **4-KiB pages**:
 
 | Pages | Contents |
 | --- | --- |
-| 0–254 | 84 entry records per page: 21,420 records per chunk |
+| 0–254 | 101 entry records per page: 25,755 records per chunk |
 | 255 | Next metadata chunk's address; `u64::MAX` means there is no next chunk |
 
 Metadata chunks remain reserved while open.
@@ -109,30 +103,30 @@ Every page begins with this 32-byte header:
 | --- | --- | --- |
 | 0 | 8 | Seed-zero XXHash64 of page bytes `[8, 4096)` |
 | 8 | 8 | Reserved; zero |
-| 16 | 8 | Slot count: 84 for records, 1 for next-chunk address |
-| 24 | 8 | ASCII tag: `FEUDES14` for records, `FEUNXT14` for next-chunk address |
+| 16 | 8 | Slot count: 101 for records, 1 for next-chunk address |
+| 24 | 8 | ASCII tag: `FEUDES15` for records, `FEUNXT15` for next-chunk address |
 
-A record page holds 84 consecutive 48-byte records after the header, then 32 zero
+A record page holds 101 consecutive 40-byte records after the header, then 24 zero
 bytes. An all-zero record is unused. The next-chunk page holds one `u64` address
 after its header, with the rest zero. The address must be chunk-aligned within the
 backing file, or `u64::MAX` to end the chain.
 
 ### Entry record layout
 
-Offsets are relative to the start of the 48-byte record:
+Offsets are relative to the start of the 40-byte record:
 
 | Offset | Bytes | Field |
 | --- | --- | --- |
-| 0 | 16 | Object key hash; full key is not stored |
-| 16 | 8 | Object range start |
-| 24 | 8 | Object range length |
-| 32 | 8 | Payload address |
-| 40 | 8 | Seed-zero XXHash64 of payload, excluding alignment padding |
+| 0 | 16 | Object key hash, full key is not stored |
+| 16 | 8 | Complete object payload length |
+| 24 | 8 | Payload address |
+| 32 | 8 | Seed-zero XXHash64 of payload, excluding alignment padding |
 
 ## Payload chunks
 
-Payload chunks contain plain bytes, not pages. Payload length equals object range
-length; disk storage length is at least 4 KiB and rounded up to 4 KiB. Payload addresses are also
+Payload chunks contain plain bytes, not pages. Payload length equals complete
+object length. Disk storage length is at least 4 KiB and rounded up to 4 KiB,
+including for empty objects. Payload addresses are also
 4-KiB-aligned. There are no metadata gaps within a payload.
 
 Entries with 4-KiB-aligned storage length below 512 KiB share unfinished chunks.
@@ -173,9 +167,9 @@ Corrupt record pages are discarded independently.
 
 A page's checksum and type/version tag establish the writer's format contract.
 Readers use fixed-size pages and records and do not recheck reserved fields, slot
-counts, padding, range arithmetic, or payload address alignment. `Download` guarantees a
-representable object range; payload packing places its aligned storage inside
-reserved consecutive chunks, and metadata links use reserved chunk addresses.
+counts, padding, or payload address alignment. Payload packing places each object's
+aligned storage inside reserved consecutive chunks, and metadata links use reserved
+chunk addresses.
 An unused record is all-zero.
 
 Metadata chunks are reserved before decoding entry records and reconstructing payload
@@ -183,7 +177,7 @@ occupancy. Reservations enforce current shard bounds and prevent payloads from c
 metadata chunks; key routing is checked against the current shard count. These checks
 remain necessary because capacity changes and stale records can disagree with current
 ownership even when individual pages are intact. Overlapping stale records can share payload reservations.
-Duplicate starts and contained ranges are removed while rebuilding the index.
+Duplicate object keys are suppressed while rebuilding the index.
 Broken links are repaired by subsequent writes; discarded record pages are rewritten only when reused.
 Closing does not invalidate live records.
 Stale records may survive reuse; missing or corrupt payloads become cache misses when read,

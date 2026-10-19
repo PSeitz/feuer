@@ -35,13 +35,12 @@ async fn shared_slices_charge_capacity_per_entry() {
     let cache = memory_cache(256 << 20, &metrics_registry);
     let mut buffer = cache.allocate_buffer((1 << 20) + 2048).unwrap();
     buffer.as_mut_slice().fill(17);
-    let download = buffer.into_download(100).unwrap();
+    let download = buffer.into_download();
     let allocation_capacity = download.allocation_charge();
     let download_ptr = download.bytes().as_ptr();
     let object_keys = ["first", "second"];
     for (object_key, slice_offset) in object_keys.into_iter().zip([0, (1 << 20) + 1024]) {
-        let slice_bytes =
-            download.bytes_in_range(ByteRange::new(100 + slice_offset, 100 + slice_offset + 1024).unwrap());
+        let slice_bytes = download.bytes().slice(slice_offset..slice_offset + 1024);
         let bytes = cache
             .get_or_fetch_object_with_allocation_charge(object_key.to_owned(), || async {
                 Ok::<_, &str>((slice_bytes, allocation_capacity))
@@ -50,7 +49,7 @@ async fn shared_slices_charge_capacity_per_entry() {
             .unwrap();
         assert_eq!(bytes.len(), 1024);
         assert!(bytes.iter().all(|byte| *byte == 17));
-        assert_eq!(bytes.as_ptr(), download_ptr.wrapping_add(slice_offset as usize));
+        assert_eq!(bytes.as_ptr(), download_ptr.wrapping_add(slice_offset));
         let memory_hit_bytes = cache
             .get_or_fetch_object(object_key.to_owned(), || async { Err::<Bytes, _>("must hit memory") })
             .await
@@ -67,14 +66,8 @@ async fn shared_slices_charge_capacity_per_entry() {
         checked_out_buffer_capacity(&registry, "2 MiB"),
         allocation_capacity as f64
     );
-    // Each source slice is a complete object starting at zero in the cache.
-    let object_range = ByteRange::new(0, 1024).unwrap();
-    assert!(
-        cache
-            .inner
-            .memory
-            .remove(&ObjectKeyHash::from(object_keys[0]), object_range)
-    );
+    // Each source slice is a complete object in the cache.
+    assert!(cache.inner.memory.remove(&ObjectKeyHash::from(object_keys[0])));
     assert_eq!(
         value(&registry, "feuer_memory_used_bytes", &[]),
         allocation_capacity as f64
@@ -83,12 +76,7 @@ async fn shared_slices_charge_capacity_per_entry() {
         checked_out_buffer_capacity(&registry, "2 MiB"),
         allocation_capacity as f64
     );
-    assert!(
-        cache
-            .inner
-            .memory
-            .remove(&ObjectKeyHash::from(object_keys[1]), object_range)
-    );
+    assert!(cache.inner.memory.remove(&ObjectKeyHash::from(object_keys[1])));
     assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 0.0);
     assert_eq!(checked_out_buffer_capacity(&registry, "2 MiB"), 0.0);
 }

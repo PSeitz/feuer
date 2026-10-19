@@ -1,17 +1,13 @@
-//! Shared contract types for Feuer's immutable-object range tiers.
+//! Shared contracts for Feuer's immutable-object cache tiers.
 //!
-//! The top-level `feuer` crate re-exports the range and download contracts.
-//! Private memory and disk components exchange hashed object identities and
-//! byte ranges without a dependency cycle.
+//! Memory and disk exchange hashed object identities and complete downloads.
 
 #[doc(hidden)]
 pub mod config;
 
 mod download;
-mod range;
 
-pub use download::{Download, DownloadError};
-pub use range::{ByteRange, InvalidByteRange};
+pub use download::Download;
 
 /// An immutable object's identity, represented by its XXH3-128 hash with seed zero.
 ///

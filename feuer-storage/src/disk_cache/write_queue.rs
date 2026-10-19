@@ -57,9 +57,9 @@ impl DiskCache {
         };
         metrics.record_queue(DiskWriteQueueOutcome::Queued);
         metrics.queued_entries.increase(1);
-        metrics.pending_bytes.increase(download.downloaded_range().len());
+        metrics.pending_bytes.increase(download.bytes().len() as u64);
         let entry_metrics = DiskWriteQueueEntryMetrics {
-            payload_bytes: download.downloaded_range().len(),
+            payload_bytes: download.bytes().len() as u64,
             queued_at: Some(Instant::now()),
             metrics: metrics.clone(),
         };

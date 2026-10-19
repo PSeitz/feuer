@@ -11,15 +11,10 @@ fn history_recording_contention() {
     let requests = load_trace(None).unwrap();
     assert!(!requests.is_empty());
     let keys: HashSet<_> = requests.iter().map(|request| &request.object_key).collect();
-    let ranges: HashSet<_> = requests
-        .iter()
-        .map(|request| (&request.object_key, request.requested_range))
-        .collect();
     println!(
-        "requests={}, keys={}, distinct_key_ranges={}, available_parallelism={}",
+        "requests={}, keys={}, available_parallelism={}",
         requests.len(),
         keys.len(),
-        ranges.len(),
         thread::available_parallelism().unwrap(),
     );
     println!("Five trials per case; each timed trial distributes one full trace across the workers.");
@@ -31,7 +26,7 @@ fn history_recording_contention() {
                 let history = ObjectAccessHistories::new();
                 if prepopulated {
                     for request in &requests {
-                        history.record_access(&request.object_key, request.requested_range);
+                        history.record_access(&request.object_key);
                     }
                 }
                 let initial_request_count = history.request_count();
@@ -43,7 +38,7 @@ fn history_recording_contention() {
                             barrier.wait(); // All workers ready before timing starts.
                             barrier.wait();
                             for request in requests.iter().skip(worker).step_by(threads) {
-                                history.record_access(&request.object_key, request.requested_range);
+                                history.record_access(&request.object_key);
                             }
                             barrier.wait();
                         });

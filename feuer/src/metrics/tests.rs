@@ -10,12 +10,12 @@ fn memory_operations_exclude_access_hit_miss_and_victim_counters() {
         .into_iter()
         .find(|family| family.name() == "feuer_memory_operations_total")
         .unwrap();
-    assert_eq!(family.get_metric().len(), 5);
+    assert_eq!(family.get_metric().len(), 3);
     assert!(family.get_metric().iter().all(|metric| {
-        metric.get_label().iter().any(|label| {
-            label.name() == "operation"
-                && matches!(label.value(), "insert" | "replace" | "redundant" | "remove" | "compact")
-        })
+        metric
+            .get_label()
+            .iter()
+            .any(|label| label.name() == "operation" && matches!(label.value(), "insert" | "redundant" | "remove"))
     }));
 }
 
@@ -29,7 +29,6 @@ fn lookup_bytes_record_all_successes_but_latency_excludes_memory_hits() {
         (LookupOutcome::DiskHit, "disk_hit"),
         (LookupOutcome::Callback, "callback"),
         (LookupOutcome::CallbackError, "callback_error"),
-        (LookupOutcome::InvalidDownload, "invalid_download"),
         (LookupOutcome::Miss, "miss"),
     ] {
         metrics.record(outcome, Duration::from_micros(10), 7);

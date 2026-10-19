@@ -35,23 +35,19 @@ fn download_preserves_capacity_and_returns_only_after_the_last_owner() {
     let mut buffer = pool.allocate(4).unwrap();
     buffer.as_mut_slice().copy_from_slice(b"abcd");
     let address = buffer.as_ref().as_ptr();
-    let download = buffer.into_download(10).unwrap();
+    let download = buffer.into_download();
     assert_eq!(download.allocation_charge(), BUFFER_SIZES[0]);
     assert_eq!(download.bytes().as_ptr(), address);
     assert_eq!(download.bytes().as_ref(), b"abcd");
     let queued = download.clone();
-    let caller = download.bytes_in_range(feuer_types::ByteRange::new(11, 13).unwrap());
+    let caller = download.bytes().clone();
     drop(download);
     drop(queued);
     assert_eq!(pool.idle_bytes(), 0);
-    assert_eq!(caller.as_ref(), b"bc");
+    assert_eq!(caller.as_ref(), b"abcd");
     drop(caller);
     assert_eq!(pool.idle_bytes(), BUFFER_SIZES[0] as u64);
     assert_eq!(pool.allocate(4).unwrap().as_ref().as_ptr(), address);
-
-    // Invalid downloads also release their destination back to the pool.
-    assert!(pool.allocate(4).unwrap().into_download(u64::MAX).is_err());
-    assert_eq!(pool.idle_bytes(), BUFFER_SIZES[0] as u64);
 }
 
 #[test]
@@ -176,7 +172,7 @@ fn large_buffers_shrink_only_when_capacity_is_at_least_ten_percent_larger() {
     assert_eq!(buffer.as_ref().len(), length);
     assert_eq!(buffer.capacity(), capacity);
     assert_eq!((large("idle"), large("used")), (0.0, capacity as f64));
-    let download = buffer.into_download(0).unwrap();
+    let download = buffer.into_download();
     assert_eq!(download.allocation_charge(), capacity);
     drop(download);
     assert_eq!(pool.idle_bytes(), capacity as u64);

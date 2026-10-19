@@ -3,487 +3,145 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>Feuer × Foyer — Queue explorer</title>
+  <title>Feuer queues</title>
   <style>
-    :root { --ink: #22282d; --muted: #606971; --line: #dedfd9; --paper: #f5f5f0; --orange: #ad431c; --blue: #265eb4; }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.6 system-ui, sans-serif; }
-    button, summary, a { -webkit-tap-highlight-color: transparent; }
-    a { color: inherit; text-underline-offset: 3px; }
-    button { font: inherit; cursor: pointer; }
-    :focus-visible { outline: 3px solid var(--blue); outline-offset: 4px; }
-    .wrap { max-width: 1320px; margin: auto; padding: 0 40px; }
-    header { border-bottom: 1px solid var(--line); }
-    .masthead { min-height: 78px; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
-    .brand { display: flex; align-items: center; gap: 12px; font-weight: 750; letter-spacing: -.5px; }
-    .mark { display: grid; grid-template-columns: repeat(3, 5px); gap: 3px; transform: skewY(-12deg); }
-    .mark i { width: 5px; height: 23px; background: var(--orange); }
-    .mark i:nth-child(2) { height: 17px; margin-top: 6px; }
-    .mark i:nth-child(3) { height: 11px; margin-top: 12px; }
-    .edition, .eyebrow, .section-number, .tag, .path, .source-label { font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
-    .edition { color: var(--muted); text-align: right; }
-    .hero { padding: 55px 0 32px; }
-    .eyebrow { color: var(--orange); letter-spacing: 1.8px; text-transform: uppercase; }
-    h1 { font-size: clamp(36px, 5vw, 62px); line-height: 1.1; letter-spacing: -2.5px; font-weight: 650; margin: 17px 0; }
-    .intro { color: var(--muted); max-width: 660px; font-size: 17px; margin: 0; }
-    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px 0; border-top: 1px solid var(--line); }
-    .hint { color: var(--muted); font-size: 13px; }
-    .hint b { color: var(--ink); font-weight: 550; }
-    button { padding: 7px 13px; background: transparent; border: 1px solid #c9ccc5; border-radius: 6px; font-size: 12px; white-space: nowrap; }
-    button:hover { background: #e9eae3; }
-    .systems { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px; align-items: start; }
-    details { min-width: 0; }
-    summary { cursor: pointer; list-style: none; }
-    summary::-webkit-details-marker { display: none; }
-    .system { --accent: var(--orange); --tint: #fbf1e9; border: 1px solid var(--line); border-radius: 12px; background: #fff; overflow: clip; }
-    .system.foyer { --accent: var(--blue); --tint: #eef3fb; }
-    .system > summary { padding: 26px; border-top: 3px solid var(--accent); }
-    .system > summary:hover { background: #fcfcf9; }
-    .system-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-    .system-title { font-size: 29px; font-weight: 650; letter-spacing: -1px; }
-    .section-number { color: var(--accent); display: block; margin-bottom: 6px; letter-spacing: 1px; }
-    .toggle { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 auto; border: 1px solid var(--line); border-radius: 50%; font-size: 19px; color: var(--muted); }
-    .toggle::before { content: '+'; }
-    details[open] > summary .toggle::before { content: '−'; }
-    .system-description { display: block; color: var(--muted); margin: 8px 0 24px; }
-    .mini-map { display: grid; gap: 9px; margin-bottom: 23px; }
-    .mini-row { display: grid; grid-template-columns: 1fr 24px 1fr; align-items: center; gap: 7px; }
-    .mini-node { background: var(--tint); color: var(--accent); border: 1px solid transparent; border-radius: 5px; padding: 10px 8px; text-align: center; font-size: 12px; font-weight: 550; }
-    .mini-node.end { background: white; border-color: var(--line); color: var(--ink); }
-    .arrow { color: #858b90; text-align: center; }
-    .mini-merge { display: grid; grid-template-columns: 1fr 24px 1fr; align-items: center; gap: 7px; }
-    .mini-inputs { display: grid; gap: 9px; }
-    .mini-merge .end { padding: 23px 8px; }
-    .card-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--accent); font-size: 12px; }
-    .tag { background: var(--tint); color: var(--accent); border-radius: 4px; padding: 3px 7px; }
-    .opened-label { display: none; }
-    details[open] > summary .closed-label { display: none; }
-    details[open] > summary .opened-label { display: inline; }
-    .system-body { padding: 0 24px 24px; border-top: 1px solid var(--line); }
-    .path { margin: 18px 0; color: var(--muted); letter-spacing: .3px; text-transform: uppercase; }
-    .node { border: 1px solid var(--line); border-radius: 7px; margin-top: 10px; background: white; }
-    .node > summary { display: flex; align-items: center; gap: 10px; padding: 13px 14px; }
-    .node > summary::before, .source > summary::before { content: '›'; color: var(--accent); font-size: 20px; line-height: 1; transition: transform .15s; }
-    .node[open] > summary::before, .source[open] > summary::before { transform: rotate(90deg); }
-    .node > summary:hover { background: var(--tint); border-radius: 6px; }
-    .node-name { flex: 1; font-weight: 600; font-size: 14px; }
-    .node-meta { color: var(--muted); font: 11px/1.4 ui-monospace, monospace; text-align: right; }
-    .node-body { padding: 0 16px 16px; font-size: 13px; }
-    .node-body > :first-child { margin-top: 5px; }
-    p { margin: 12px 0; }
-    ul { padding-left: 19px; }
-    li + li { margin-top: 6px; }
-    code { font: .9em ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
-    p code, li code { background: #f0f1ed; border-radius: 3px; padding: 2px 4px; }
-    .flow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 14px 0; font: 11px/1.6 ui-monospace, monospace; }
-    .flow span:not(.arrow) { padding: 4px 7px; background: var(--tint); border-radius: 4px; }
-    .note { padding: 10px 12px; border-left: 2px solid var(--accent); background: var(--tint); font-size: 12px; }
-    .source { margin-top: 13px; border-top: 1px dashed var(--line); padding-top: 10px; }
-    .source > summary { display: flex; gap: 8px; align-items: center; color: var(--muted); font: 11px/1.6 ui-monospace, monospace; }
-    .source-label { display: block; overflow-wrap: anywhere; margin: 12px 0 8px; color: var(--muted); }
-    pre { padding: 15px; margin: 8px 0; border-radius: 6px; overflow: auto; background: #202a32; color: #e1e7eb; font-size: 11px; line-height: 1.8; tab-size: 4; }
-    pre code { font-size: inherit; overflow-wrap: normal; }
-    .comparison { --accent: #465850; --tint: #f0f3ed; background: #fff; border: 1px solid var(--line); border-radius: 9px; margin-top: 22px; }
-    .comparison > summary { display: flex; justify-content: space-between; align-items: center; padding: 19px 24px; gap: 20px; }
-    .comparison > summary:hover { background: #fafbf7; border-radius: 9px; }
-    .comparison-title { display: block; font-weight: 600; }
-    .comparison-subtitle { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
-    .comparison-body { padding: 0 24px 24px; }
-    .table-scroll { overflow-x: auto; }
-    table { border-collapse: collapse; width: 100%; text-align: left; font-size: 13px; }
-    th, td { padding: 13px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
-    th { font-weight: 600; color: var(--muted); font-size: 12px; }
-    th:first-child, td:first-child { padding-left: 0; }
-    footer { margin: 30px 0; padding-top: 18px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 20px; font-size: 11px; color: var(--muted); }
-    footer p { margin: 0; max-width: 690px; }
-    @media (max-width: 850px) { .wrap { padding: 0 20px; } .systems { grid-template-columns: 1fr; } .hero { padding-top: 35px; } h1 { letter-spacing: -1.5px; } }
-    @media (max-width: 480px) { .edition { max-width: 125px; font-size: 10px; } .system > summary { padding: 20px; } .system-body { padding: 0 12px 16px; } .node-body { padding: 0 10px 12px; } .node-meta { max-width: 95px; } .hint { max-width: 205px; } footer { flex-direction: column; } }
-    @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #22282d; background: #f5f5f0; }
+    body { margin: 0; }
+    main { max-width: 960px; margin: auto; padding: 40px 24px 80px; }
+    h1 { font-size: clamp(2rem, 6vw, 3.5rem); margin-bottom: 12px; }
+    h2 { margin-top: 40px; }
+    p, li { line-height: 1.65; }
+    a { color: #265eb4; }
+    details { background: white; border: 1px solid #dedfd9; border-radius: 10px; padding: 18px 22px; margin: 14px 0; }
+    summary { cursor: pointer; font-weight: 650; }
+    code { font-size: .92em; overflow-wrap: anywhere; }
+    .flow { display: flex; flex-wrap: wrap; gap: 10px; margin: 24px 0; }
+    .flow span { padding: 10px 14px; border: 1px solid #dedfd9; border-radius: 8px; background: white; }
+    .note { border-left: 3px solid #ad431c; padding-left: 18px; }
+    .table { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; background: white; }
+    th, td { padding: 12px; border: 1px solid #dedfd9; text-align: left; }
   </style>
 </head>
 <body>
+<main>
   <header>
-    <div class="wrap masthead">
-      <div class="brand"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span> Feuer / engineering</div>
-      <div class="edition">QUEUE EXPLORER<br>Feuer × Foyer · local source snapshot</div>
-    </div>
+    <p>FEUER / SCHEDULING</p>
+    <h1>Where work waits</h1>
+    <p>Whole-object lookups, best-effort writes, and the I/O queues beneath them.</p>
+    <p><a href="README.md">Usage</a> · <a href="architecture.html">Architecture</a> · <a href="metrics.md">Metrics</a></p>
   </header>
-  <main class="wrap">
-    <section class="hero" aria-labelledby="title">
-      <div class="eyebrow">Inside the I/O path</div>
-      <h1 id="title">Follow the work.</h1>
-      <p class="intro">Both have read and write queues. What happens before, between, and after those queues is different.</p>
-    </section>
-    <div class="toolbar">
-      <span class="hint"><b>Click to unfold.</b> Keep opening layers to reach the code.</span>
-      <button id="collapse" type="button" hidden>Collapse all ↖</button>
-    </div>
-    <div class="systems">
-      <details class="system" id="feuer">
-        <summary>
-          <span class="system-heading"><span><span class="section-number">01 / SEPARATE RINGS</span><span class="system-title">Feuer</span></span><span class="toggle" aria-hidden="true"></span></span>
-          <span class="system-description">Independent read and write workers, optionally shared across cache files. Async I/O admission; best-effort background disk writes.</span>
-          <span class="mini-map" aria-label="64 waiting reads to 64 active read slots, 8 waiting writes to 8 active write slots">
-            <span class="mini-row"><span class="mini-node">Read queue · 64</span><span class="arrow" aria-hidden="true">→</span><span class="mini-node end">Read ring · 64 active</span></span>
-            <span class="mini-row"><span class="mini-node">Write queue · 8</span><span class="arrow" aria-hidden="true">→</span><span class="mini-node end">Write ring · 8 active</span></span>
-          </span>
-          <span class="card-foot"><span class="tag">2 workers / 2 rings per queue set</span><span class="closed-label">Explore the path →</span><span class="opened-label">Close overview ↑</span></span>
-        </summary>
-        <div class="system-body">
-          <p class="path">Lookup → memory → disk → callback</p>
-          <p>Range and whole-object lookups use this path. Zero disk capacity skips disk and creates no I/O queues. The Linux-only <code>open(config, metrics_registry, io_queues)</code> accepts metrics and queue sharing independently.</p>
-          <details class="node">
-            <summary><span class="node-name">Read path</span><span class="node-meta">foreground · await</span></summary>
-            <div class="node-body">
-              <p>A memory miss checks the disk range index. If an entry covers the request, the lookup waits for an integrity-checked disk read.</p>
-              <div class="flow"><span>Disk range hit</span><span class="arrow">→</span><span>Read admission</span><span class="arrow">→</span><span>Read ring</span></div>
-              <details class="node">
-                <summary><span class="node-name">Channel admission</span><span class="node-meta">64 waiting + 64 active</span></summary>
-                <div class="node-body">
-                  <p>A Tokio <code>mpsc::channel(64)</code> reserves waiting-channel capacity with <code>reserve().await</code>. A full channel yields the submitting task rather than blocking its executor thread.</p>
-                  <p>Reserved capacity for preparing requests and queued requests share the channel's 64-position limit. The worker has <strong>64 additional active slots</strong>; channel capacity is freed as soon as the worker receives a request. Callers waiting to reserve are outside these counts.</p>
-                  <p class="note">There is no raw-I/O byte budget. Reads reserve initial channel capacity before allocating the whole aligned entry buffer, then reserve again for each subsequent request of at most 1 MiB. Request counts do not cap read-buffer memory.</p>
-                  <p>Startup recovery uses the same <code>reserve().await</code> admission before allocating each 1-MiB metadata-read buffer. Opening waits for all shard recovery to finish before serving lookups.</p>
-                  <details class="source">
-                    <summary>Code · async channel reservation</summary>
-                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · reserve_request</a>
-                    <pre><code>self.sender
-    .as_ref()
-    .unwrap()
-    .reserve()
-    .await
-    .map_err(|_| queue_stopped_error())</code></pre>
-                    <a class="source-label" href="feuer-storage/src/file.rs">feuer-storage/src/file.rs · read_at / read_slice</a>
-                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · ReadQueue::read</a>
-                  </details>
-                </div>
-              </details>
-              <details class="node">
-                <summary><span class="node-name">Channel → active</span><span class="node-meta">no pending list</span></summary>
-                <div class="node-body">
-                  <p>Submission sends through the reserved channel permit without another admission wait, signals the worker's eventfd, then awaits a oneshot reply.</p>
-                  <p>The worker receives requests in channel order directly into free active slots. When all slots are occupied, requests stay in the channel. Each active slot owns its request and buffers through completion; there is no intermediate pending list.</p>
-                  <details class="source">
-                    <summary>Code · enqueue and wake the worker</summary>
-                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · submit_and_wait</a>
-                    <pre><code>let (result_sender, result_receiver) = oneshot::channel();
-permit.send(IoRequest::new(files, offset, buffers, buffer_range, result_sender));
-wake_queue(&amp;self.wake_fd);
-result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
-                    <a class="source-label" href="feuer-storage/src/uring.rs">Same file · receive_requests</a>
-                  </details>
-                </div>
-              </details>
-              <details class="node">
-                <summary><span class="node-name">Verification → memory promotion</span><span class="node-meta">slice / full buffer</span></summary>
-                <div class="node-body">
-                  <p>For a stored entry, the disk cache reads and hashes the <strong>entire covering entry</strong>, excluding alignment padding and without reading metadata or neighboring entries. Concurrent readers of the same stored entry share its I/O and verification. Hits in unfinished small-entry buffers instead copy only the requested bytes without disk I/O.</p>
-                  <p>Readers retain an address and expected checksum, not a disk-region guard. Eviction can release chunks for reuse while a read is outstanding. I/O errors return a miss without removing the entry. A checksum failure removes the indexed entry at that key and range start, even if it was replaced during the read. Misses fall through to the callback; validation is subject to checksum collisions. A disk hit does not schedule another disk write.</p>
-                  <p class="note">Only the requested slice is returned and indexed in memory. Promotion copies it only when the destination buffer saves at least 25% of backing capacity; otherwise, or if allocation fails, it retains the original slice. Memory admission charges the chosen buffer's whole capacity. A small request can still require a large whole-entry read.</p>
-                  <a class="source-label" href="feuer/src/cache.rs">feuer/src/cache.rs · get_or_fetch / feuer-storage/src/file.rs · shrink_read_buffer</a>
-                  <a class="source-label" href="feuer-storage/src/disk_cache.rs">feuer-storage/src/disk_cache.rs · fetch_from_disk</a>
-                  <a class="source-label" href="format.md">format.md · Write ordering and reuse</a>
-                </div>
-              </details>
-            </div>
-          </details>
-          <details class="node">
-            <summary><span class="node-name">Disk-write queue</span><span class="node-meta">512 entries / cache · skip if full</span></summary>
-            <div class="node-body">
-              <p>After a callback download is admitted to memory, Feuer attempts to schedule a disk copy. <code>DiskCache</code> owns this queue <strong>above</strong> the raw write-I/O queue.</p>
-              <div class="flow"><span>Download admitted to memory</span><span class="arrow">→</span><span>try_reserve</span><span class="arrow">→</span><span>Disk-write worker</span></div>
-              <details class="node">
-                <summary><span class="node-name">Skip disk writes when full</span><span class="node-meta">Tokio mpsc</span></summary>
-                <div class="node-body">
-                  <p>Each cache's channel holds up to 512 queued entries. <code>try_reserve()</code> returns immediately. Full or closed queues skip disk writes without failing the successful lookup.</p>
-                  <p class="note">Queued and active payload bytes are tracked, but have no byte cap or separate memory-cache charge. The queue can keep a payload alive after its memory entry is evicted.</p>
-                  <details class="source">
-                    <summary>Code · best-effort disk-write admission</summary>
-                    <a class="source-label" href="feuer-storage/src/disk_cache/write_queue.rs">feuer-storage/src/disk_cache/write_queue.rs · enqueue_if_space_available (excerpt)</a>
-                    <pre><code>let permit = match self.write_sender.try_reserve() {
-    Ok(permit) =&gt; permit,
-    Err(error) =&gt; {
-        metrics.record_queue(match error {
-            mpsc::error::TrySendError::Full(_) =&gt; DiskWriteQueueOutcome::Full,
-            mpsc::error::TrySendError::Closed(_) =&gt; DiskWriteQueueOutcome::Closed,
-        });
-        return;
-    }
-};</code></pre>
-                  </details>
-                </div>
-              </details>
-              <details class="node">
-                <summary><span class="node-name">One worker, small-entry chunks</span><span class="node-meta">60-second partial flush</span></summary>
-                <div class="node-body">
-                  <p>Entries below 512 KiB aligned size share each shard's initialized 1-MiB small-entry buffer, used by queued writes and explicit batches. Copying releases incoming bytes. Flushing reserves payload chunks; metadata positions are taken only at publication. Full/no-fit chunks flush immediately; the small-entry buffer component drives an independent 60-second flush timer for direct and queued writes. Larger entries write separately. Closing drains queued writes, then discards remaining partial chunks.</p>
-                  <p>Lookups can copy requested bytes from buffered entries after memory eviction. Busy/flushing chunks may miss until publication. Queued and active writes proceed independently of memory retention; payloads occupy contiguous aligned disk byte ranges, separate from metadata.</p>
-                  <a class="source-label" href="feuer-storage/src/disk_cache/write_queue.rs">feuer-storage/src/disk_cache/write_queue.rs · background writes</a>
-                  <a class="source-label" href="feuer-storage/src/disk_cache/small_entry_buffer.rs">feuer-storage/src/disk_cache/small_entry_buffer.rs · buffering and timer</a>
-                </div>
-              </details>
-              <details class="node">
-                <summary><span class="node-name">Publish after payload writes finish</span><span class="node-meta">key + range rechecked</span></summary>
-                <div class="node-body">
-                  <p>Payload writes finish before publication and in-memory metadata updates. Dirty metadata pages write every second, independently; failed writes are not retried. No <code>fsync</code>, <code>fdatasync</code>, or shutdown metadata flush is issued.</p>
-                  <p>Publication rechecks disk containment independently of memory residency and takes the earliest free metadata slots in recovery scan order. The writer owns reservations while awaiting I/O, but cancellation can release them while submitted writes continue. Written chunks cannot be appended to; they become reusable after their last entry is removed, without waiting for readers or metadata writes. Removal clears the in-memory metadata slot and marks its page dirty for rewriting without the record; old on-disk records can remain until that write succeeds. Late writes to reused chunks can cause checksum misses.</p>
-                  <a class="source-label" href="feuer-storage/src/disk_cache/writer.rs">feuer-storage/src/disk_cache/writer.rs · payload then publication</a>
-                  <a class="source-label" href="feuer-storage/src/allocation.rs">feuer-storage/src/allocation.rs · hold_chunks_until_payloads_released / release_payload</a>
-                </div>
-              </details>
-            </div>
-          </details>
-          <details class="node">
-            <summary><span class="node-name">Write-I/O queue</span><span class="node-meta">8 waiting + 8 active</span></summary>
-            <div class="node-body">
-              <p>Same admission and worker machinery as reads, but with its own channel, active slots, thread, and ring. All disk-cache shards use the file's queues. Passing clones of <code>IoQueues::new()?</code> to multiple cache opens shares one read/write queue set and its limits across files; <code>None</code> creates dedicated queues.</p>
-              <div class="flow"><span>Payload + metadata writes</span><span class="arrow">→</span><span>reserve().await</span><span class="arrow">→</span><span>Permit send</span><span class="arrow">→</span><span>Write ring</span></div>
-              <details class="node">
-                <summary><span class="node-name">Why eight active writes?</span><span class="node-meta">local SSD measurement</span></summary>
-                <div class="node-body">
-                  <p>The current code caps active writes at 8, with a separate 8-request waiting channel. Its comment cites local-SSD measurements: 1-MiB writes saturated at QD8; QD64 added no write-only throughput and increased write p99 from 4.6 to 47 ms, while worsening small-read latency.</p>
-                  <p>This is hardware/workload-specific evidence, not a universal optimal depth or a measurement of the current metadata-write pipeline.</p>
-                  <a class="source-label" href="experiments/ssd/uring-20260928/REPORT.md">experiments/ssd/uring-20260928/REPORT.md</a>
-                  <details class="source">
-                    <summary>Code · current limits</summary>
-                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · request-size and active-slot limits (excerpt)</a>
-                    <pre><code>pub(crate) const MAX_IO_REQUEST_BYTES: usize = 1024 * 1024;
-const MAX_IN_FLIGHT_READS: usize = 64;
-const MAX_IN_FLIGHT_WRITES: usize = 8;</code></pre>
-                    <a class="source-label" href="feuer-storage/src/uring.rs">Same file · IoQueueHandle::new</a>
-                  </details>
-                </div>
-              </details>
-              <details class="node">
-                <summary><span class="node-name">Two kinds of write pressure</span><span class="node-meta">skip vs await</span></summary>
-                <div class="node-body">
-                  <p><strong>Disk-write queue full:</strong> the lookup skips scheduling a disk copy.</p>
-                  <p><strong>Raw write channel full:</strong> the background work awaits a channel reservation. The successful lookup does not wait for that disk write.</p>
-                  <p>Preparing and queued writes share eight channel positions; up to eight more writes are active. Shared queues apply these limits across all attached files, in arrival order without per-cache fairness. Each physical operation transfers at most 1 MiB, but input slices can share larger backing allocations. There is no byte-budget semaphore.</p>
-                </div>
-              </details>
-            </div>
-          </details>
-          <details class="node">
-            <summary><span class="node-name">Independent caches, shared I/O</span><span class="node-meta">file ownership stays separate</span></summary>
-            <div class="node-body">
-              <p>With shared I/O queues, each cache keeps its own contents, capacities, eviction, history, buffer pools, file locks, and 512-entry background-write queue. Use separate directories or <code>CacheConfig::with_file_name</code> for distinct files in one directory. The default <code>data</code> file uses <code>.feuer.lock</code>; other filenames use <code>.feuer.&lt;filename&gt;.lock</code>.</p>
-              <p>Each queued or active I/O request retains its target file and lock through completion, including after caller cancellation. Idle queues retain no files; returned bytes retain only RAM. Dropping one cache does not stop the others; the last queue owner drains submitted I/O and joins both workers.</p>
-              <p>Read buffers remain pooled per cache. Downloaders can use <code>cache.allocate_buffer</code> and <code>into_download</code> to share that pool without copying; the buffer returns only after its last owner releases it. Active buffers and pending disk writes are outside the cache's retention budget.</p>
-              <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · IoQueues / IoRequest</a>
-              <a class="source-label" href="feuer/examples/shared_io_objects.rs">feuer/examples/shared_io_objects.rs · shared queues and independent files</a>
-            </div>
-          </details>
-          <details class="node">
-            <summary><span class="node-name">Inside each I/O worker</span><span class="node-meta">wake → submit → complete</span></summary>
-            <div class="node-body">
-              <p>Each direction has one thread owning its ring. Physical I/O requests are aligned to 4 KiB and at most 1 MiB; a logical cache read can require multiple I/O requests.</p>
-              <details class="node">
-                <summary><span class="node-name">Sleep without stalling new work</span><span class="node-meta">ring fd + eventfd</span></summary>
-                <div class="node-body">
-                  <p>The loop collects completions, receives incoming requests only into free active slots, and submits. Interrupted and short submissions are retried before sleeping. Temporary resource pressure (<code>EAGAIN</code>) waits up to 1 ms before retrying, even if no accepted request can produce a completion. Once all prepared submissions have reached the kernel, it sleeps in <code>poll</code> watching both the ring and an eventfd.</p>
-                  <p>New submissions signal the eventfd, so fresh work can wake the worker even while a slow operation is outstanding. It does not continuously spin.</p>
-                  <details class="source">
-                    <summary>Code · wait for completion or wakeup</summary>
-                    <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · wait_for_completion_or_wakeup (excerpt)</a>
-                    <pre><code>let mut fds = [
-    libc::pollfd {
-        fd: self.ring.as_raw_fd(),
-        events: libc::POLLIN, revents: 0,
-    },
-    libc::pollfd {
-        fd: self.wake_fd.as_raw_fd(),
-        events: libc::POLLIN, revents: 0,
-    },
-];
-let result = unsafe {
-    libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_millis)
-};</code></pre>
-                  </details>
-                </div>
-              </details>
-              <details class="node">
-                <summary><span class="node-name">Completion and cancellation</span><span class="node-meta">oneshot reply</span></summary>
-                <div class="node-body">
-                  <p>A completion identifies its active slot. Full completion sends buffers or an error through the request's oneshot channel and frees that active slot. Channel capacity was already released when the worker received the request.</p>
-                  <ul>
-                    <li><strong>Still queued:</strong> requests whose reply receiver is closed are discarded when the worker receives them.</li>
-                    <li><strong>Already active:</strong> buffers stay owned through completion, even if the caller has gone away.</li>
-                    <li><strong>Interrupted or aligned short I/O:</strong> retry the remaining work. Invalid short completion becomes an error.</li>
-                    <li><strong>Normal shutdown:</strong> drain outstanding work, then join the worker.</li>
-                    <li><strong>Unrecoverable queue failure or thread unwind:</strong> retain uncertain active buffers, files, and locks until process exit; closing the ring alone does not prove the kernel has stopped using them. Per-request error completions release resources normally.</li>
-                  </ul>
-                  <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · apply_completion_result / receive_requests</a>
-                </div>
-              </details>
-            </div>
-          </details>
-          <details class="node">
-            <summary><span class="node-name">Optional access-trace queue</span><span class="node-meta">65,536 events · await</span></summary>
-            <div class="node-body">
-              <p><code>with_trace(callback)</code> adds a separate event queue shared by that handle and its clones. Lookups enqueue a start before fetching and an outcome before returning; cancellation can leave an unmatched start. A full queue waits rather than dropping events, so trace delivery can delay even memory hits.</p>
-              <p>One worker delivers binary packages serially at 8 MiB or when all trace handles are dropped; there is no timed delivery. Trace buffers are outside cache capacity. Receiver errors stop delivery without changing lookup results; persistence and retries belong to the receiver. Dropping the last trace handle drains the tail asynchronously without waiting, so runtime shutdown can lose it.</p>
-              <a class="source-label" href="access-trace.md">access-trace.md · queue, delivery, and persistence contract</a>
-              <a class="source-label" href="feuer/src/access_trace.rs">feuer/src/access_trace.rs · Trace</a>
-            </div>
-          </details>
-        </div>
-      </details>
 
-      <details class="system foyer" id="foyer">
-        <summary>
-          <span class="system-heading"><span><span class="section-number">02 / SHARED RING PER SHARD</span><span class="system-title">Foyer</span></span><span class="toggle" aria-hidden="true"></span></span>
-          <span class="system-description">Separate input queues, one shared I/O budget per shard. A weighted scheduler chooses the next direction.</span>
-          <span class="mini-map" aria-label="Separate read and write queues feed one shared ring per shard">
-            <span class="mini-merge"><span class="mini-inputs"><span class="mini-node">Read queue</span><span class="mini-node">Write queue</span></span><span class="arrow" aria-hidden="true">→</span><span class="mini-node end">Shared ring<br>64 by default</span></span>
-          </span>
-          <span class="card-foot"><span class="tag">1 worker / ring per shard</span><span class="closed-label">Explore the path →</span><span class="opened-label">Close overview ↑</span></span>
-        </summary>
-        <div class="system-body">
-          <p class="path">Scope: Foyer's io_uring backend</p>
-          <details class="node">
-            <summary><span class="node-name">Read &amp; write input queues</span><span class="node-meta">4,096 each / shard</span></summary>
-            <div class="node-body">
-              <p>Each worker receives two standard-library synchronous channels: one for reads, one for writes. Requests are routed by <code>partition.id() % threads</code>.</p>
-              <div class="flow"><span>Partition</span><span class="arrow">→</span><span>Direction channel</span><span class="arrow">→</span><span>Shard worker</span></div>
-              <details class="node">
-                <summary><span class="node-name">What happens when a channel fills?</span><span class="node-meta">blocking send</span></summary>
-                <div class="node-body">
-                  <p>Submission calls <code>SyncSender::send</code> before returning the asynchronous completion handle. If the channel is full, the calling thread can block until a worker receives an item.</p>
-                  <p><strong>Queue admission</strong> uses a synchronous send; completion is awaited asynchronously.</p>
-                  <details class="source">
-                    <summary>Code · channel capacity and synchronous send</summary>
-                    <a class="source-label" href="foyer/foyer-storage/src/io/engine/uring.rs#L188">foyer/foyer-storage/src/io/engine/uring.rs:188–200 (excerpt)</a>
-                    <pre><code>// Created separately for reads and writes, per worker:
-let (tx, rx) = mpsc::sync_channel(4096);</code></pre>
-                    <a class="source-label" href="foyer/foyer-storage/src/io/engine/uring.rs#L394">Same file:394 / 427 · read / write submission (excerpt)</a>
-                    <pre><code>let _ = shard.send(UringIoCtx {
-    tx,
-    io_type: UringIoType::Read,
-    rbuf,
-    addr,
-    // Optional tracing span omitted.
-});</code></pre>
-                  </details>
-                </div>
-              </details>
-              <details class="node">
-                <summary><span class="node-name">Waiting-channel and in-flight limits</span><span class="node-meta">different boundaries</span></summary>
-                <div class="node-body">
-                  <p>The two channels can each hold 4,096 waiting requests. Separately, the ring limits combined in-flight reads and writes to the configured depth, 64 by default.</p>
-                  <p>Like Feuer's waiting-channel limits, these capacities exclude operations already removed for submission. Feuer separately allows 64 active reads and 8 active writes; Foyer's active limit is shared between directions.</p>
-                  <p class="note">These request-count limits impose no payload-byte cap. Memory limits in Foyer's upper storage layers are outside this comparison's scope.</p>
-                </div>
-              </details>
-            </div>
-          </details>
-          <details class="node">
-            <summary><span class="node-name">Weighted scheduler</span><span class="node-meta">shared depth · default 64</span></summary>
-            <div class="node-body">
-              <p>One worker chooses between both input queues and submits to one ring. Reads and writes share the same in-flight limit.</p>
-              <details class="node">
-                <summary><span class="node-name">How does it choose?</span><span class="node-meta">read/write weight</span></summary>
-                <div class="node-body">
-                  <p>When <code>read_inflight &lt; write_inflight × weight</code>, try reads first; otherwise try writes first. If the preferred channel is empty, try the other.</p>
-                  <p>Default weight is 1.0. This is a target in-flight ratio—not a fixed 32/32 partition, a bandwidth guarantee, or preemption of already-submitted work.</p>
-                  <details class="source">
-                    <summary>Code · shared cap and direction selection</summary>
-                    <a class="source-label" href="foyer/foyer-storage/src/io/engine/uring.rs#L284">foyer/foyer-storage/src/io/engine/uring.rs:284–317 (condensed)</a>
-                    <pre><code>if self.read_inflight + self.write_inflight
-    &gt;= self.io_depth {
-    break 'prepare;
-}
-
-// Check the read queue first, then try the other queue as a fallback:
-(self.read_inflight as f64)
-    &lt; self.write_inflight as f64 * self.weight</code></pre>
-                  </details>
-                </div>
-              </details>
-              <details class="node">
-                <summary><span class="node-name">What is configurable?</span><span class="node-meta">threads / depth / weight</span></summary>
-                <div class="node-body">
-                  <ul>
-                    <li><code>with_threads</code>: number of workers/rings; default 1.</li>
-                    <li><code>with_io_depth</code>: shared ring depth per worker; default 64.</li>
-                    <li><code>with_weight</code>: desired read/write in-flight ratio; default 1.0.</li>
-                    <li>CPU affinity, SQPOLL, and IOPOLL are also available. Both polling flags default to false.</li>
-                  </ul>
-                  <a class="source-label" href="foyer/foyer-storage/src/io/engine/uring.rs#L62">foyer/foyer-storage/src/io/engine/uring.rs:62–151 · configuration</a>
-                </div>
-              </details>
-            </div>
-          </details>
-          <details class="node">
-            <summary><span class="node-name">Worker loop &amp; completions</span><span class="node-meta">continuous userspace polling</span></summary>
-            <div class="node-body">
-              <p>The worker tries to fill the ring, submits when there is in-flight work, drains completion entries, and repeats. The shown loop has no sleep or blocking wait when idle.</p>
-              <details class="node">
-                <summary><span class="node-name">Worker-thread polling and kernel polling</span><span class="node-meta">two different mechanisms</span></summary>
-                <div class="node-body">
-                  <p>This continuous loop runs in Foyer's worker thread even with SQPOLL and IOPOLL disabled. Those optional flags control separate kernel-side behavior.</p>
-                  <p>Feuer instead blocks in <code>poll</code> until a ring completion or eventfd wakeup. That avoids idle spinning, but wakeup cost versus polling latency remains a measurement question.</p>
-                  <details class="source">
-                    <summary>Code · worker loop</summary>
-                    <a class="source-label" href="foyer/foyer-storage/src/io/engine/uring.rs#L283">foyer/foyer-storage/src/io/engine/uring.rs:283–365 (condensed)</a>
-                    <pre><code>loop {
-    // Try both channels and prepare up to io_depth requests.
-    if self.read_inflight + self.write_inflight &gt; 0 {
-        self.uring.submit().unwrap();
-    }
-    for cqe in self.uring.completion() {
-        // Decrement the direction's in-flight count.
-        // Send the result through the request's oneshot.
-    }
-    // Repeat immediately without sleeping.
-}</code></pre>
-                  </details>
-                </div>
-              </details>
-              <details class="node">
-                <summary><span class="node-name">Returning to the caller</span><span class="node-meta">oneshot reply</span></summary>
-                <div class="node-body">
-                  <p>Completion data identifies the request context. The worker decrements the appropriate in-flight counter and sends its result through a oneshot channel.</p>
-                  <p>The caller's asynchronous I/O handle awaits that channel and returns the buffer with the result. Read and write requests use separate completion channels and share one ring per shard.</p>
-                  <a class="source-label" href="foyer/foyer-storage/src/io/engine/uring.rs#L344">foyer/foyer-storage/src/io/engine/uring.rs:344–362 · completions</a>
-                  <a class="source-label" href="foyer/foyer-storage/src/io/engine/uring.rs#L403">Same file:403–412 · caller awaits reply</a>
-                </div>
-              </details>
-            </div>
-          </details>
-        </div>
-      </details>
+  <section>
+    <h2>Limits and ownership</h2>
+    <div class="table">
+      <table>
+        <thead><tr><th>Stage</th><th>Limit</th><th>Owner</th></tr></thead>
+        <tbody>
+          <tr><td>Payload read admission</td><td>64 admitted reads</td><td>IoQueues, shared across attached caches</td></tr>
+          <tr><td>Read pieces</td><td>64 waiting/preparing + 64 active</td><td>Read queue and worker</td></tr>
+          <tr><td>Write pieces</td><td>8 waiting/preparing + 8 active</td><td>Write queue and worker</td></tr>
+          <tr><td>Physical I/O piece</td><td>At most 1 MiB</td><td>File layer</td></tr>
+          <tr><td>Background downloads</td><td>512 queued objects</td><td>Each disk cache</td></tr>
+          <tr><td>Trace events</td><td>65,536 queued events</td><td>Each trace</td></tr>
+        </tbody>
+      </table>
     </div>
-    <details class="comparison" id="pressure">
-      <summary><span><span class="comparison-title">Where does pressure go?</span><span class="comparison-subtitle">Disk-write, raw-I/O, and optional tracing admission.</span></span><span class="toggle" aria-hidden="true"></span></summary>
-      <div class="comparison-body">
-        <div class="table-scroll">
-          <table>
-            <caption class="source-label">Admission behavior in the inspected implementations</caption>
-            <thead><tr><th scope="col">Boundary</th><th scope="col">When full</th><th scope="col">Who pays?</th></tr></thead>
-            <tbody>
-              <tr><th scope="row">Feuer disk-write queue</th><td>Skip the disk copy</td><td>The cache skips a disk write. The successful lookup continues.</td></tr>
-              <tr><th scope="row">Feuer raw I/O</th><td>Await channel reservation</td><td>The submitting task waits: foreground on reads, background for disk-cache writes. Startup recovery also waits for read-channel capacity.</td></tr>
-              <tr><th scope="row">Feuer access-trace queue</th><td>Await event-channel capacity</td><td>The lookup waits before fetching or returning. Slow trace delivery can delay memory hits too.</td></tr>
-              <tr><th scope="row">Foyer io_uring input</th><td>Blocking channel send</td><td>The calling thread can wait for channel space. Later completion is awaited asynchronously.</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="note">Feuer's separate read and write rings compete for the same SSD. Foyer's shared ring offers configurable weighted scheduling. Neither topology alone proves better throughput or latency.</p>
-      </div>
+    <p class="note">These are request-count limits, not a total byte budget. Active reads, callback payloads,
+      queued writes, caller-held results, and trace packages can retain memory outside the cache target.</p>
+  </section>
+
+  <section id="reads">
+    <h2>Read path</h2>
+    <div class="flow"><span>Memory miss</span><span>Object index</span><span>Payload permit</span><span>Read pieces</span><span>Verify object</span><span>Promote to memory</span></div>
+    <details open>
+      <summary>Lookup and shared work</summary>
+      <p>Memory hits perform no disk I/O. A disk lookup first tries its shard's small-entry buffer.
+        Otherwise it finds the object's payload address, length, and checksum in the in-memory index.
+        Absent entries fall through to the source callback.</p>
+      <p>Matching concurrent public misses share one disk-or-callback operation by object key and callback error type.
+        Storage also shares reads for the same indexed entry. Cancellation can leave the result unset so a waiter takes over.</p>
     </details>
-    <footer>
-      <p>Based on local source: Feuer <code>f474ff4</code> · Foyer <code>14c2d88</code>. Foyer details cover only its io_uring backend. Code excerpts are embedded; file links point into this checkout (line fragments are reader-dependent).</p>
-      <p>No dependencies. No network requests.<br>Tab to a section; Enter or Space to expand.</p>
-    </footer>
-  </main>
-  <script>
-    const collapse = document.getElementById('collapse');
-    collapse.hidden = false;
-    collapse.addEventListener('click', () => {
-      document.querySelectorAll('details[open]').forEach(section => { section.open = false; });
-    });
-  </script>
+    <details>
+      <summary>Payload admission before allocation</summary>
+      <p>A persisted-object read acquires one of 64 payload permits before allocating its object buffer.
+        The file layer reserves channel capacity before preparing each I/O request. Large reads submit
+        pieces of at most 1 MiB, with fresh reservations for subsequent pieces.</p>
+      <p>Recovery also reserves low-level queue capacity before allocating metadata-read buffers.
+        Queue slot counts do not limit the combined capacity of all live object buffers.</p>
+      <a href="feuer-storage/src/file.rs">Source: file I/O</a>
+    </details>
+    <details>
+      <summary>Optional source fallthrough under disk pressure</summary>
+      <p>When at least 64 payload reads are waiting, Feuer schedules each unchecked waiter's decision closure.
+        A true result invokes the usual source callback instead of waiting for a permit. Each decision runs at most
+        once in its caller's task, even if earlier decisions have reduced pressure.</p>
+      <p>Memory hits, buffered hits, absent entries, admitted reads, and shared-read waiters skip the decision.
+        Shared public fetches follow their executing caller's decision. A takeover after cancellation uses its own closure.</p>
+      <p>Fallthrough does not cancel submitted I/O or remove the disk entry. Source errors return without retrying disk.
+        APIs without a fallthrough closure always wait.</p>
+    </details>
+    <details>
+      <summary>Whole-object verification and promotion</summary>
+      <p>Reads verify the complete payload against its expected checksum. They do not read neighboring entries
+        or metadata on the lookup path. I/O errors become misses without removing the entry.
+        Checksum failures invalidate only the entry still associated with that read.</p>
+      <p>Readers retain no disk reservation. Eviction can release chunks while I/O is outstanding, so reuse can
+        cause a checksum miss. Successful results promote the complete object to memory and charge retained
+        allocation capacity. Disk hits do not schedule another write.</p>
+    </details>
+  </section>
+
+  <section id="writes">
+    <h2>Write path</h2>
+    <div class="flow"><span>Callback object</span><span>Memory admission</span><span>512-entry queue</span><span>Pack / reserve chunks</span><span>Payload I/O</span><span>Publish</span></div>
+    <details open>
+      <summary>Best-effort queue admission</summary>
+      <p>Newly admitted downloads are queued unless the object is already stored. A full or closed queue skips
+        the write without failing the lookup. Queued and active writes proceed independently of memory retention.</p>
+      <p>The queue limits object count, not payload bytes. Pending-byte metrics cover logical payloads through
+        preparation and completion, excluding padding. Memory eviction does not cancel admitted writes.</p>
+      <a href="feuer-storage/src/disk_cache/write_queue.rs">Source: background write queue</a>
+    </details>
+    <details>
+      <summary>Small-entry buffering and chunk reservation</summary>
+      <p>Objects below 512 KiB aligned size are copied into a per-shard 1-MiB buffer, releasing incoming buffers.
+        Full/no-fit chunks flush immediately, partial chunks every 60 seconds. Larger objects write separately.
+        Closing discards partial chunks.</p>
+      <p>Buffering reserves no disk capacity. Flushing reserves payload chunks, evicting sampled objects if needed.
+        A multi-chunk payload requires consecutive whole chunks. Fragmentation or exhausted eviction budgets can skip admission.</p>
+      <p>Lookups can copy complete buffered objects after memory eviction. Busy/flushing buffers can miss until publication.</p>
+    </details>
+    <details>
+      <summary>Payload completion, publication, and metadata</summary>
+      <p>Payload I/O must succeed before publication. Publication rechecks the object key and requires metadata
+        capacity for the flush. Redundant objects or writes without sufficient metadata capacity are discarded.</p>
+      <p>Metadata occupies separate chunks. A periodic writer persists dirty 4-KiB pages every second.
+        New metadata chunks are written before links to them. No cache API promises a flush or crash durability.</p>
+      <p>Small objects may share a payload chunk. Removing one does not necessarily release a chunk.
+        A chunk can be reused after its last entry is removed, without waiting for readers or old metadata to be rewritten.</p>
+      <a href="format.md">Format, ordering, and recovery</a>
+    </details>
+  </section>
+
+  <section id="sharing">
+    <h2>Sharing I/O queues</h2>
+    <p>Pass clones of <code>IoQueues::new()?</code> to independent caches to share admission, rings, and worker threads.
+      <code>None</code> creates dedicated queues. Read and write workers remain separate and can make progress concurrently.</p>
+    <p>Scheduling follows arrival order without per-cache fairness. Each cache keeps its own contents,
+      capacities, buffer pool, history, lock file, and background-write queue. Dropping one cache does not stop others.
+      Submitted I/O retains buffers, files, and locks through completion.</p>
+    <p>Zero disk capacity creates no I/O queues. Disk-enabled caches require Linux direct I/O and io_uring.</p>
+  </section>
+
+  <section id="tracing">
+    <h2>Trace delivery</h2>
+    <p>Trace starts and outcomes enter a 65,536-event channel. A full channel waits rather than dropping events.
+      One worker delivers binary packages when its batch reaches 8 MiB or all handles are dropped.
+      There is no timed delivery. Slow receivers delay lookups.</p>
+    <p>Receiver errors stop delivery without changing cache results. Dropping handles does not wait for persistence.
+      See the <a href="access-trace.md">whole-object trace format and receiver contract</a>.</p>
+  </section>
+</main>
 </body>
 </html>

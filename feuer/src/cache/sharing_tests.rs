@@ -32,19 +32,14 @@ fn pending_count(cache: &TieredMemoryDiskCache) -> usize {
 
 #[tokio::test]
 async fn shares_successes_and_errors_but_not_completed_failures() {
-    let requested = ByteRange::new(0, 2).unwrap();
-    for download in [
-        Ok(Download::new(0, Bytes::from_static(b"ok")).unwrap()),
-        Err("source failed"),
-        Ok(Download::new(0, Bytes::from_static(b"x")).unwrap()),
-    ] {
+    for download in [Ok(Download::new(Bytes::from_static(b"ok"))), Err("source failed")] {
         let (cache, registry) = cache();
         let release = Notify::new();
-        let mut first = Box::pin(cache.get_or_fetch("object".into(), requested, || async {
+        let mut first = Box::pin(cache.get_or_fetch("object".into(), || async {
             release.notified().await;
             download.clone()
         }));
-        let mut second = Box::pin(cache.get_or_fetch("object".into(), requested, || {
+        let mut second = Box::pin(cache.get_or_fetch("object".into(), || {
             std::future::ready(Err::<Download, &str>("waiter must not execute"))
         }));
         assert_pending(first.as_mut());
@@ -64,7 +59,6 @@ async fn shares_successes_and_errors_but_not_completed_failures() {
                 assert_eq!(*error, "source failed");
                 "callback_error"
             }
-            Err(GetOrFetchError::DownloadDoesNotCover { .. }) => "invalid_download",
         };
         assert_eq!(value(&registry, "feuer_lookup_total", &[("outcome", outcome)]), 2.0);
         assert_eq!(
@@ -73,17 +67,12 @@ async fn shares_successes_and_errors_but_not_completed_failures() {
         );
         let history = cache.inner.memory.access_histories();
         assert_eq!(history.request_count(), 2);
-        assert_eq!(
-            history.recent_requested_ranges(&ObjectKeyHash::from("object")),
-            vec![requested; 2]
-        );
+        assert!(history.decayed_request_count(&ObjectKeyHash::from("object")) > 1.0);
         assert_eq!(pending_count(&cache), 0);
         if first.is_err() {
             assert_eq!(
                 cache
-                    .get_or_fetch("object".into(), requested, || async {
-                        Err::<Download, &str>("new attempt")
-                    })
+                    .get_or_fetch("object".into(), || async { Err::<Download, &str>("new attempt") })
                     .await,
                 Err(GetOrFetchError::Callback("new attempt"))
             );
@@ -92,23 +81,16 @@ async fn shares_successes_and_errors_but_not_completed_failures() {
 }
 
 #[tokio::test]
-async fn different_error_types_ranges_and_keys_do_not_share() {
+async fn different_error_types_and_keys_do_not_share() {
     let (cache, _) = cache();
-    let range = ByteRange::new(0, 1).unwrap();
-    let mut first = Box::pin(cache.get_or_fetch("object".into(), range, pending::<Result<Download, &str>>));
-    let mut different_error = Box::pin(cache.get_or_fetch("object".into(), range, pending::<Result<Download, String>>));
-    let mut different_range = Box::pin(cache.get_or_fetch(
-        "object".into(),
-        ByteRange::new(1, 2).unwrap(),
-        pending::<Result<Download, &str>>,
-    ));
-    let mut different_key = Box::pin(cache.get_or_fetch("other".into(), range, pending::<Result<Download, &str>>));
+    let mut first = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Download, &str>>));
+    let mut different_error = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Download, String>>));
+    let mut different_key = Box::pin(cache.get_or_fetch("other".into(), pending::<Result<Download, &str>>));
     assert_pending(first.as_mut());
     assert_pending(different_error.as_mut());
-    assert_pending(different_range.as_mut());
     assert_pending(different_key.as_mut());
-    assert_eq!(pending_count(&cache), 4);
-    drop((first, different_error, different_range, different_key));
+    assert_eq!(pending_count(&cache), 3);
+    drop((first, different_error, different_key));
     assert_eq!(pending_count(&cache), 0);
 }
 
@@ -165,8 +147,8 @@ async fn old_waiter_cannot_remove_a_new_attempt() {
 #[test]
 fn simultaneous_cancellation_removes_the_last_callers() {
     let pending = PendingFetches::default();
-    let first = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"), None);
-    let second = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"), None);
+    let first = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"));
+    let second = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"));
     let barrier = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -196,7 +178,7 @@ async fn lookup_only_checks_cached_bytes_without_waiting_for_a_callback() {
         cache
             .inner
             .memory
-            .insert(ObjectKeyHash::from(key), Download::new(0, bytes.clone()).unwrap());
+            .insert(ObjectKeyHash::from(key), Download::new(bytes.clone()));
         assert_eq!(cache.get_object(key.into()).await, Some(bytes));
     }
     assert_eq!(cache.inner.memory.access_histories().request_count(), 4);

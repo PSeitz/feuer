@@ -54,9 +54,6 @@ mod linux {
         /// Simulate S3 with 48 slots, 108.599 ms fixed latency and 80.205 MiB/s per GET.
         #[arg(long)]
         simulate_s3: bool,
-        /// Replay each (recorded hash, start, end) as a separate immutable whole object.
-        #[arg(long)]
-        full_objects: bool,
     }
 
     fn parse_cost(value: &str) -> std::result::Result<f64, String> {
@@ -129,18 +126,16 @@ mod linux {
             let started = Instant::now();
             if self.slots.is_some() {
                 tokio::time::sleep(Duration::from_secs_f64(
-                    S3_LATENCY_SECONDS + request.range.len() as f64 / S3_BYTES_PER_SECOND,
+                    S3_LATENCY_SECONDS + request.payload_len as f64 / S3_BYTES_PER_SECOND,
                 ))
                 .await;
             }
-            let download = cache.allocate_buffer(request.range.len() as usize).map(|mut buffer| {
+            let download = cache.allocate_buffer(request.payload_len as usize).map(|mut buffer| {
                 buffer.as_mut_slice().fill(0);
-                buffer
-                    .into_download(request.range.start())
-                    .expect("request range is valid")
+                buffer.into_download()
             });
             if download.is_ok() {
-                self.bytes.inc_by(request.range.len());
+                self.bytes.inc_by(request.payload_len);
             }
             self.service.observe(started.elapsed().as_secs_f64());
             self.active.dec();
@@ -240,18 +235,12 @@ mod linux {
         if let Some(half_life) = args.access_count_half_life {
             config = config.with_access_count_half_life(half_life)?;
         }
-        let mut trace = load_requests(&args.input, args.trace_seconds)?;
-        if args.full_objects {
-            for request in &mut trace.requests {
-                *request = request.full_object();
-            }
-        }
+        let trace = load_requests(&args.input, args.trace_seconds)?;
         eprintln!(
-            "Recorded starts={}, outcomes={:?}, incomplete={}. Replaying every start with successful synthetic downloads. Full objects={}.",
+            "Recorded starts={}, outcomes={:?}, incomplete={}. Replaying every start with successful synthetic whole-object downloads.",
             trace.requests.len(),
             trace.outcomes,
             trace.incomplete,
-            args.full_objects,
         );
         let requests = Arc::new(trace.requests);
         fs::create_dir(&args.cache_dir)?;
@@ -268,8 +257,7 @@ mod linux {
         )?;
         writeln!(
             summary,
-            "scheduling,task_per_arrival\nfull_objects,{}\nfixed_retrieval_equivalent_bytes,{}",
-            u8::from(args.full_objects),
+            "scheduling,task_per_arrival\nfixed_retrieval_equivalent_bytes,{}",
             args.fixed_retrieval_equivalent_bytes,
         )?;
         writeln!(
@@ -356,7 +344,6 @@ mod linux {
         let events = requests.clone();
         let sender_queued = queued.clone();
         let sender = thread::spawn(move || emit(&events, origin, sender, &sender_queued));
-        let full_objects = args.full_objects;
         let mut observations = run_lookups(receiver, queued, active, |index, sent| {
             let (requests, cache, completed) = (requests.clone(), cache.clone(), completed.clone());
             let source = source.clone();
@@ -364,11 +351,9 @@ mod linux {
                 let request = &requests[index];
                 let started = Instant::now();
                 let bytes = cache
-                    .get_or_fetch_by_hash(request.object_key, (!full_objects).then_some(request.range), || {
-                        source.download(&cache, request)
-                    })
+                    .get_or_fetch_by_hash(request.object_key, || source.download(&cache, request))
                     .await?;
-                assert_eq!(bytes.len() as u64, request.range.len());
+                assert_eq!(bytes.len() as u64, request.payload_len);
                 drop(bytes);
                 let observation = Observation {
                     index,
@@ -449,7 +434,7 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use feuer_types::{ByteRange, ObjectKeyHash};
+        use feuer_types::ObjectKeyHash;
 
         #[test]
         fn trace_prefix_is_optional() {
@@ -490,47 +475,40 @@ mod linux {
 
         #[tokio::test]
         async fn source_downloads_charge_buffer_capacity() {
-            for full_objects in [false, true] {
-                let directory = tempfile::tempdir().unwrap();
-                let registry = Registry::new();
-                let metrics: BoxedRegistry = Box::new(PrometheusMetricsRegistry::new(registry.clone()));
-                let config = CacheConfig::new(directory.path(), 0, 4 << 20)
-                    .unwrap()
-                    .with_idle_buffer_pool_percent(7)
-                    .unwrap();
-                let cache = TieredMemoryDiskCache::open(config, Some(&metrics), None).await.unwrap();
-                let source = Source::new(&registry, false).unwrap();
-                let mut request = Request {
-                    request_id: 0,
-                    time_ns: 0,
-                    object_key: ObjectKeyHash(0),
-                    range: ByteRange::new(100, 1124).unwrap(),
-                };
-                if full_objects {
-                    request = request.full_object();
-                }
-                let mut buffer = cache.allocate_buffer(request.range.len() as usize).unwrap();
-                let charge = buffer.capacity();
-                let address = buffer.as_ref().as_ptr();
-                assert!(charge > request.range.len() as usize);
-                buffer.as_mut_slice().fill(17);
-                drop(buffer);
-                let bytes = cache
-                    .get_or_fetch_by_hash(request.object_key, (!full_objects).then_some(request.range), || {
-                        source.download(&cache, &request)
-                    })
-                    .await
-                    .unwrap();
-                assert_eq!(bytes.len(), request.range.len() as usize);
-                assert_eq!(bytes.as_ptr(), address);
-                assert!(bytes.iter().all(|&byte| byte == 0));
-                let used = registry
-                    .gather()
-                    .into_iter()
-                    .find(|family| family.name() == "feuer_memory_used_bytes")
-                    .unwrap();
-                assert_eq!(used.get_metric()[0].get_gauge().get_value(), charge as f64);
-            }
+            let directory = tempfile::tempdir().unwrap();
+            let registry = Registry::new();
+            let metrics: BoxedRegistry = Box::new(PrometheusMetricsRegistry::new(registry.clone()));
+            let config = CacheConfig::new(directory.path(), 0, 4 << 20)
+                .unwrap()
+                .with_idle_buffer_pool_percent(7)
+                .unwrap();
+            let cache = TieredMemoryDiskCache::open(config, Some(&metrics), None).await.unwrap();
+            let source = Source::new(&registry, false).unwrap();
+            let request = Request {
+                request_id: 0,
+                time_ns: 0,
+                object_key: ObjectKeyHash(0),
+                payload_len: 1024,
+            };
+            let mut buffer = cache.allocate_buffer(request.payload_len as usize).unwrap();
+            let charge = buffer.capacity();
+            let address = buffer.as_ref().as_ptr();
+            assert!(charge > request.payload_len as usize);
+            buffer.as_mut_slice().fill(17);
+            drop(buffer);
+            let bytes = cache
+                .get_or_fetch_by_hash(request.object_key, || source.download(&cache, &request))
+                .await
+                .unwrap();
+            assert_eq!(bytes.len(), request.payload_len as usize);
+            assert_eq!(bytes.as_ptr(), address);
+            assert!(bytes.iter().all(|&byte| byte == 0));
+            let used = registry
+                .gather()
+                .into_iter()
+                .find(|family| family.name() == "feuer_memory_used_bytes")
+                .unwrap();
+            assert_eq!(used.get_metric()[0].get_gauge().get_value(), charge as f64);
         }
 
         #[tokio::test]
@@ -560,7 +538,7 @@ mod linux {
                                 request_id: 0,
                                 time_ns: 0,
                                 object_key: ObjectKeyHash(0),
-                                range: ByteRange::new(0, 16).unwrap(),
+                                payload_len: 16,
                             },
                         )
                         .await
@@ -683,7 +661,7 @@ mod linux {
                     request_id: time_ns,
                     time_ns,
                     object_key: ObjectKeyHash(0),
-                    range: ByteRange::new(0, 1).unwrap(),
+                    payload_len: 1,
                 })
                 .collect();
             let deadlines: Vec<_> = requests.iter().map(|r| r.time_ns).collect();

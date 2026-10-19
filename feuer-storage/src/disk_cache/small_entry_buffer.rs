@@ -60,16 +60,17 @@ impl DiskCacheInner {
         completion: impl Send + 'static,
     ) -> Result<usize, DiskCacheError> {
         let shard = &self.shards[self.shard_index_for_key(&key)];
-        let (object_range, bytes) = download.into_parts();
-        let length = payload_disk_bytes(object_range.len()) as usize;
+        let bytes = download.into_bytes();
+        let payload_len = bytes.len() as u64;
+        let length = payload_disk_bytes(payload_len) as usize;
         let mut attempt = DiskWriteAttempt::new(self.metrics.clone());
-        if shard.covers_range(&key, object_range) {
+        if shard.contains(&key) {
             attempt.outcome = DiskWriteOutcome::AlreadyCovered;
             return Ok(0);
         }
         let mut entry = BufferedEntry {
             key,
-            object_range,
+            payload_len,
             payload_checksum: XxHash64::oneshot(0, &bytes),
             offset: 0,
             attempt,
@@ -80,9 +81,10 @@ impl DiskCacheInner {
         }
         let mut buffer = shard.buffered_small_entry_chunk.lock().await;
         let mut published = 0;
-        let mut offset = buffer.entries.last().map_or(0, |entry| {
-            entry.offset + payload_disk_bytes(entry.object_range.len()) as usize
-        });
+        let mut offset = buffer
+            .entries
+            .last()
+            .map_or(0, |entry| entry.offset + payload_disk_bytes(entry.payload_len) as usize);
         if offset + length > CHUNK_BYTES as usize {
             published += buffer.flush(shard, self).await?;
             offset = 0;
@@ -109,22 +111,16 @@ impl BufferedSmallEntryChunk {
         })
     }
 
-    /// Finds the newest buffered entry covering the requested range without copying its payload.
-    pub(super) fn covering_entry(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<&BufferedEntry> {
-        self.entries
-            .iter()
-            .rev()
-            .find(|entry| &entry.key == key && entry.object_range.contains(requested))
+    /// Finds the newest buffered entry without copying its payload.
+    pub(super) fn entry(&self, key: &ObjectKeyHash) -> Option<&BufferedEntry> {
+        self.entries.iter().rev().find(|entry| &entry.key == key)
     }
 
-    /// Checks if a buffered entry covers the requested range, returning its bytes if so.
-    /// We buffer for 60 seconds, so reads may miss during payload I/O.
-    pub(super) fn get(&self, key: &ObjectKeyHash, requested: Option<ByteRange>) -> Option<Bytes> {
-        let entry = self.covering_entry(key, requested.unwrap_or_else(|| ByteRange::new(0, 0).unwrap()))?;
-        let requested = requested.unwrap_or(entry.object_range);
-        let start = entry.offset + (requested.start() - entry.object_range.start()) as usize;
+    /// Copies a buffered object's bytes. Reads may miss during payload I/O.
+    pub(super) fn get(&self, key: &ObjectKeyHash) -> Option<Bytes> {
+        let entry = self.entry(key)?;
         Some(Bytes::copy_from_slice(
-            &self.buffer.as_ref()[start..start + requested.len() as usize],
+            &self.buffer.as_ref()[entry.offset..entry.offset + entry.payload_len as usize],
         ))
     }
 

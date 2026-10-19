@@ -23,11 +23,11 @@ pub(super) struct MetadataPageLocation {
     pub(super) page_index: u8,
 }
 
-/// One entry's key hash, object range, payload disk address, and payload checksum, as recorded on disk.
+/// One entry's key hash, payload length, disk address, and checksum, as recorded on disk.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct EntryMetadata {
     pub(super) key: ObjectKeyHash,
-    pub(super) object_range: ByteRange,
+    pub(super) payload_len: u64,
     pub(super) payload_address: u64,
     pub(super) payload_checksum: u64,
 }

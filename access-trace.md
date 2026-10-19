@@ -20,26 +20,30 @@ Read and replay FETR packages with [the replay tools](feuer-replay/README.md).
   which aren't independently traced. Object keys are hashed, not anonymized;
   payloads aren't traced.
 
-## FETR v1
+## FETR v2
 
-Each package starts with eight bytes `FETR\x01\x00\x00\x00`, then nonempty **65-byte
+Each package starts with eight bytes `FETR\x02\x00\x00\x00`, then nonempty **41-byte
 events**. Integers are little-endian, without padding. Persist one package per file.
+Every event refers to a complete object.
 
 | Event offset | Type | Field |
 | --- | --- | --- |
-| 0 | `u8` | Kind: 0 start, 1 memory hit, 2 disk/buffered hit, 3 callback success, 4 callback error, 5 noncovering download, 6 lookup-only miss |
-| 1 | `u64` | Request ID, starts at 1; local to this trace |
+| 0 | `u8` | Kind: 0 start, 1 memory hit, 2 disk/buffered hit, 3 callback success, 4 callback error, 5 lookup-only miss |
+| 1 | `u64` | Request ID, starts at 1, local to this trace |
 | 9 | `u64` | Elapsed nanoseconds since trace creation |
 | 17 | `u128` | Object key hash, seed-zero XXH3-128 |
-| 33, 41 | `u64`, `u64` | Requested start, end |
-| 49, 57 | `u64`, `u64` | Downloaded start, end; meaningful only for kinds 3 and 5, otherwise zero |
+| 33 | `u64` | Object payload length for successful kinds 1–3, otherwise zero |
 
-Whole-object requests encode the unknown requested length as `0..u64::MAX`.
-Their callback-success events record the actual object range in the downloaded fields.
-A lookup-only `get_object` returning `None` emits kind 6 with zero downloaded fields,
-not a callback error. Existing kinds 0 through 5 retain their meanings.
+Empty objects are valid, including successful lookups with length zero. A lookup-only
+`get_object` returning `None` emits kind 5, not a callback error. Replay learns object
+lengths from successful outcomes and rejects objects whose length is never observed.
 
-Ranges are half-open. Timestamps are captured before enqueue; queue order can differ
-from timestamp order. Join start/outcome by request ID. Python layout: `<B8Q`, with
-the hash split into low/high halves. Check magic, record size, kinds, and ranges;
-a parseable package doesn't prove trace completeness.
+Timestamps are captured before enqueue, so queue order can differ from timestamp
+order. Join start/outcome by request ID. Python layout: `<B5Q`, with the hash split
+into low/high halves. Check magic, record size, and kinds. A parseable package does
+not prove trace completeness.
+
+The replay reader also accepts historical FETR v1 captures. Their 65-byte records
+use a different layout and kind numbering. They must be decoded by version, not
+interpreted as v2 records. See [replay tools](feuer-replay/README.md) for legacy
+input conversion.

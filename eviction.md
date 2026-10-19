@@ -18,16 +18,15 @@ Both tiers sample eligible entries and evict the lowest retention score.
 `AvoidedRetrievalCostScorer` computes:
 
 ```text
-Σ decayed_count × max(cost_per_request + requested_bytes × cost_per_requested_byte, 0)
-───────────────────────────────────────────────────────────────────────────────────
+decayed_object_count × max(cost_per_request + payload_len × cost_per_requested_byte, 0)
+────────────────────────────────────────────────────────────────────────────────────
                               max(entry_size_bytes, 1)
 ```
 
-Only requests fully contained in the cached range contribute. Whole-object demand
-uses the cached payload length. The denominator is the allocation charge in
-memory and payload length on disk, not aligned disk bytes or metadata overhead.
-Negative avoided costs are clamped per request before summing. Coefficients and
-resulting scores must be finite.
+Every request for the object contributes to its decayed count. The denominator
+is the allocation charge in memory and payload length on disk, not aligned disk
+bytes or metadata overhead. Negative avoided costs are clamped to zero.
+Coefficients and resulting scores must be finite.
 
 `cost_per_request` is the cost avoided once per request, regardless of requested
 byte count. `cost_per_requested_byte` is the cost avoided for each requested byte.
@@ -68,35 +67,25 @@ Applications can supply a custom scorer when linear size-based costs are
 insufficient. Eviction accounts for size, demand, and avoided fixed costs.
 Whole objects are queued for disk after memory admission.
 
-## Access history and trimming
+## Access history
 
-Each started request records its requested range or whole-object demand once,
-before lookup, in `feuer-historian`. Failed requests, invalid downloads, and
-requests canceled after starting count as demand. Raw cache reads, insertions,
-and evictions do not record accesses or delete history.
+Each started request records its object once, before lookup, in `feuer-historian`.
+Failed requests and requests canceled after starting count as demand. Raw cache
+reads, insertions, and evictions do not record accesses or delete history.
 
 History hashes keys into 64 independently locked maps, separate from cache
-shards. One atomic request clock supplies global request-age decay. Every distinct
-`(object key, requested range)` counter survives cache eviction for the history
-object's lifetime. Repeated exact requests update the same counter. Counter
-metadata has no capacity limit and is not persisted across restarts.
+shards. One atomic request clock supplies request-age decay across all keys.
+The default half-life is 262,144 requests. Each object's counter survives cache
+eviction for the history object's lifetime. Counter metadata has no capacity
+limit and is not persisted across restarts.
 
-Insertion appends each entry to a compaction deque ordered by insertion request
-count. On its first pressure attempt, admission binary-searches and drains the
-prefix aged at least 64 requests across all keys. Each candidate is checked once,
-with no minimum savings percentage. All byte-saving plans run before sampled
-eviction, even if the first frees enough space. Entries covered by the incoming
-download are skipped. Removal filters candidates without changing their order.
-Entries remain eligible for eviction during grace. Whole-object entries are evicted whole.
-
-Trimming uses recent-access events with per-object count and age limits.
-Each distinct range is copied separately, including overlapping ranges. Newer accesses do not invalidate the history snapshot. Cached-range
-changes are checked before publishing bytes copied outside the shard lock.
+Objects are retained or evicted whole. There is no trimming history or compaction
+grace period.
 
 ## Custom retention scores
 
-A `RetentionScorer` receives the key hash, cached range, tier-specific entry size,
-and caller-demand history. It can own per-object computation costs keyed by
+A `RetentionScorer` receives the key hash, object payload length, tier-specific
+entry size, and caller-demand history. It can own per-object computation costs keyed by
 `ObjectKeyHash::from(key.as_str())`. Higher finite scores favor retention. Any
 byte normalization belongs to the scorer.
 

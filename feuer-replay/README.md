@@ -1,7 +1,7 @@
 # FETR access-trace replay
 
-Reads the current [FETR v1 format](../access-trace.md) without converting object
-hashes into strings. Accepts one `.feuer` package or a `.tar.zst` archive containing
+Reads [FETR v1 and v2 packages](../access-trace.md). Historical v1 replay derives
+an object identity from each recorded hash and exact requested range. Accepts one `.feuer` package or a `.tar.zst` archive containing
 packages from one trace session. Archives are read directly, without extraction.
 The older QWFA format and its derived `requests.bin`/`objects.txt` inputs remain
 in the private `../replay-feuer/` workspace.
@@ -19,22 +19,24 @@ Only request starts drive the replay. The configured cache determines hits,
 misses, eviction, admission, and disk writes independently of recorded outcomes.
 Recorded outcome counts and unmatched starts are reported separately for diagnostics.
 An unmatched start is not an established cache miss. Replay executes **every selected
-start with a successful synthetic exact-range download** on a replay miss,
+start with a successful synthetic whole-object download** on a replay miss,
 including starts originally failed or incomplete. This measures demand under that
 assumption, not original cancellation, actual source latency, retry/coalescing behavior,
 expanded downloads, or the original cache's initial contents. Replays start empty.
-The decoder accepts whole-object events, including empty objects, but replay
-rejects the unknown-length `0..u64::MAX` sentinel.
+Replay learns complete object lengths, including zero, from successful outcomes
+anywhere in the capture. Native v2 identities are preserved. Historical v1 whole-object
+requests use lengths from callback successes. Objects with no observed length or
+conflicting lengths cannot be replayed.
 Parseable packages do not establish trace completeness or detect missing packages.
 
 Keep private traces, object identities, and raw results in ignored local experiment
 directories under `experiments/cache/`. Commit only small settings and summaries.
 Nothing from the historical experiment directories is needed to build this tool.
 
-## Full-object simulation
+## Object identities
 
-`--full-objects` treats each `(recorded object hash, start, end)` as a separate
-immutable whole object with length `end - start`, stored at offset zero. Repeated
+For historical range captures, every `(recorded object hash, start, end)` becomes a separate
+immutable whole object with length `end - start`. Repeated
 identical ranges share one derived identity.
 The transformation runs after recorded outcomes are joined and before replay.
 Arrival times, request counts, returned bytes and synthetic source allocation are
@@ -43,11 +45,10 @@ lookups. Covering or overlapping ranges no longer share entries or demand counte
 
 This simulates full-object caching of each exact recorded range, not full-file
 retrieval or a native whole-object capture. Arrival timing still comes from the
-original deployment. Native unknown-length whole-object starts remain unsupported.
+original deployment. Native object captures use their original identities and observed lengths.
 
-Both range and full-object replays use the current
-[retrieval-cost scorer](../eviction.md#current-scoring).
-Compare the same transformation with matched settings and fresh caches.
+Replay uses the current [retrieval-cost scorer](../eviction.md#current-scoring).
+Compare matched settings with fresh caches.
 
 ## Replay cache configurations (Linux)
 
@@ -66,11 +67,11 @@ queues provide their normal backpressure. Descriptors and unstarted tasks hold n
 payload. Every synthetic source miss independently acquires a buffer through
 `TieredMemoryDiskCache::allocate_buffer` and zero-fills its exposed payload.
 `into_download` preserves the actual backing-capacity charge, including unused
-capacity in the pool's size bucket. Concurrent misses do not share a download.
+capacity in the pool's size bucket. Matching concurrent misses share cache fetch work.
 Identities enter through the cache's `benchmark`-feature API without an additional
-cache-side hash. With no requested range, this passes the same allocation charge
-as `get_or_fetch_object_with_allocation_charge`. Full-object mode derives new
-identities from the recorded hash and exact bounds during input preparation.
+cache-side hash. This passes the same allocation charge
+as `get_or_fetch_object_with_allocation_charge`. Historical range input derives new
+identities from the recorded hash and exact range during input preparation.
 
 This matches the adapter's buffer allocation and charging, not its download
 coalescing or sharing of larger merged downloads between slice-objects. The trace
@@ -156,7 +157,7 @@ cargo clippy --locked -p feuer-replay --all-targets -- -D warnings
 On Linux, these include round trips through the current writer, recorded-hash
 lookup checks, sender timing tests, concurrent scheduling on a single runtime thread,
 lookup-error propagation, scorer/source CLI validation, buffer-capacity charging
-and zero-filling of reused buffers in both lookup modes, simulated-source slot waiting
+and zero-filling of reused buffers, simulated-source slot waiting
 and independent completion, and replaying the same input with disk disabled and enabled.
 The replay binary's Linux-only tests do not run on macOS.
 Decoder tests cover malformed packages, all event kinds, chronological prefixes and full captures, cross-package outcome joins, incomplete requests,

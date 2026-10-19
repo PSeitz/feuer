@@ -6,7 +6,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::{io, path::PathBuf};
 
     use bytes::Bytes;
-    use feuer::{ByteRange, CacheConfig, Download, TieredMemoryDiskCache};
+    use feuer::{CacheConfig, TieredMemoryDiskCache};
 
     let directory = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "trace".to_owned()));
     // Each receiver numbers its own files. Require a fresh directory.
@@ -28,8 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     cache
-        .get_or_fetch("object-v1".to_owned(), ByteRange::new(0, 4)?, || async {
-            Download::new(0, Bytes::from_static(b"data"))
+        .get_or_fetch_object("object-v1".to_owned(), || async {
+            Ok::<_, std::convert::Infallible>(Bytes::from_static(b"data"))
         })
         .await?;
     // This example expects one package. The receiver waits for its own write result.

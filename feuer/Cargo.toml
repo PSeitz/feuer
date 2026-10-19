@@ -1,6 +1,6 @@
 [package]
 name = "feuer"
-description = "A restart-recoverable tiered cache for immutable-object byte ranges"
+description = "A restart-recoverable tiered cache for immutable objects"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

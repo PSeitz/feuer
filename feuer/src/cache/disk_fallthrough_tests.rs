@@ -13,25 +13,22 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
         )
         .await
         .unwrap();
-        let key = "range".to_owned();
+        let key = "download".to_owned();
         let hash = ObjectKeyHash::from(key.as_str());
-        let requested = ByteRange::new(11, 13).unwrap();
-        let source = Download::new(10, Bytes::from_static(b"abcd")).unwrap();
+        let source = Download::new(Bytes::from_static(b"abcd"));
         let bytes = cache
             .get_or_fetch_with_disk_fallthrough(
                 key.clone(),
-                requested,
                 || panic!("disk miss"),
                 || async { Ok::<_, &str>(source.clone()) },
             )
             .await
             .unwrap();
-        assert_eq!(bytes, "bc");
+        assert_eq!(bytes, "abcd");
         assert_eq!(
             cache
                 .get_or_fetch_with_disk_fallthrough(
                     key.clone(),
-                    requested,
                     || panic!("memory hit"),
                     || async { Err::<Download, _>("must not fetch") },
                 )
@@ -39,7 +36,7 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
                 .unwrap(),
             bytes
         );
-        assert!(cache.inner.memory.remove(&hash, source.downloaded_range()));
+        assert!(cache.inner.memory.remove(&hash));
 
         if let Some(disk) = &cache.inner.disk {
             disk.insert_batch(vec![(hash, source.clone())]).await.unwrap();
@@ -47,7 +44,6 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
                 cache
                     .get_or_fetch_with_disk_fallthrough(
                         key,
-                        requested,
                         || panic!("queue has room"),
                         || async { Err::<Download, _>("must not fetch") },
                     )

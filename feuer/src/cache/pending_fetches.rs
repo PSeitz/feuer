@@ -6,9 +6,9 @@ use std::{
 
 use tokio::sync::OnceCell;
 
-use super::{ByteRange, FetchResult, ObjectKeyHash};
+use super::{FetchResult, ObjectKeyHash};
 
-type FetchKey = (ObjectKeyHash, Option<ByteRange>, TypeId);
+type FetchKey = (ObjectKeyHash, TypeId);
 pub(super) type PendingFetches = Arc<Mutex<HashMap<FetchKey, Weak<dyn Any + Send + Sync>>>>;
 
 /// One disk-or-source fetch, owned by its callers rather than the registry.
@@ -19,8 +19,8 @@ pub(super) struct PendingFetch<E> {
 }
 
 impl<E: Send + Sync + 'static> PendingFetch<E> {
-    pub(super) fn join(pending: &PendingFetches, key: ObjectKeyHash, requested: Option<ByteRange>) -> Arc<Self> {
-        let key = (key, requested, TypeId::of::<E>());
+    pub(super) fn join(pending: &PendingFetches, key: ObjectKeyHash) -> Arc<Self> {
+        let key = (key, TypeId::of::<E>());
         let mut entries = pending.lock().unwrap();
         if let Some(fetch) = entries.get(&key).and_then(Weak::upgrade) {
             return fetch.downcast().expect("fetch key includes its error type");

@@ -19,10 +19,7 @@ async fn measured_disk() -> (tempfile::TempDir, DiskCache, prometheus::Registry)
 }
 
 fn enqueue(disk: &DiskCache, key: &str) {
-    disk.enqueue_if_space_available(
-        ObjectKeyHash::from(key),
-        Download::new(3, Bytes::from_static(b"abcd")).unwrap(),
-    );
+    disk.enqueue_if_space_available(ObjectKeyHash::from(key), Download::new(Bytes::from_static(b"abcd")));
 }
 
 #[tokio::test]
@@ -68,11 +65,11 @@ async fn queue_metrics_cover_pressure_dequeue_and_cancellation() {
 #[tokio::test]
 async fn disk_timer_flushes_direct_and_queued_writes() {
     let (_directory, disk, registry) = measured_disk().await;
-    let range = ByteRange::new(3, 7).unwrap();
+
     for (count, queued) in [(0, false), (1, true)] {
         tokio::time::pause();
         let key = ObjectKeyHash(count);
-        let download = Download::new(3, Bytes::from_static(b"abcd")).unwrap();
+        let download = Download::new(Bytes::from_static(b"abcd"));
         if queued {
             disk.enqueue_if_space_available(key, download);
         } else {
@@ -84,7 +81,7 @@ async fn disk_timer_flushes_direct_and_queued_writes() {
         }
         tokio::time::advance(Duration::from_secs(59)).await;
         assert_eq!(value(&registry, "feuer_disk_entries", &[]), count as f64);
-        assert_eq!(disk.get(&key, range).await.unwrap(), b"abcd"[..]);
+        assert_eq!(disk.get(&key).await.unwrap().into_bytes(), b"abcd"[..]);
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::time::resume();
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -115,7 +112,7 @@ async fn closing_disk_drains_writes_and_discards_partial_chunks() {
     disk.write_sender = sender;
     disk.enqueue_if_space_available(
         ObjectKeyHash::from("large"),
-        Download::new(0, Bytes::from(vec![7; 512 * 1024])).unwrap(),
+        Download::new(Bytes::from(vec![7; 512 * 1024])),
     );
     enqueue(&disk, "small");
     let weak = Arc::downgrade(&disk.disk);

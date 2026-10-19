@@ -14,13 +14,12 @@ pub(crate) enum LookupOutcome {
     DiskHit,
     Callback = 2,
     CallbackError,
-    InvalidDownload,
     Miss,
 }
 
 /// Completed public lookups, never keyed by object identity.
 pub(crate) struct LookupMetrics {
-    outcome_counts: [BoxedCounter; 6],
+    outcome_counts: [BoxedCounter; 5],
     success_durations: [BoxedHistogram; 2],
     served_bytes: [BoxedCounter; 3],
     #[cfg(target_os = "linux")]
@@ -45,7 +44,7 @@ impl LookupMetrics {
         );
         let served_bytes = registry.register_counter_vec(
             "feuer_lookup_bytes_total".into(),
-            "Requested bytes returned by successful Feuer lookups".into(),
+            "Object payload bytes returned by successful Feuer lookups".into(),
             &["source"],
         );
         #[cfg(target_os = "linux")]
@@ -59,15 +58,8 @@ impl LookupMetrics {
             disk_write_already_covered: writes.counter(&["already_covered".into()]),
             #[cfg(target_os = "linux")]
             disk_write_redundant: writes.counter(&["redundant".into()]),
-            outcome_counts: [
-                "memory_hit",
-                "disk_hit",
-                "callback",
-                "callback_error",
-                "invalid_download",
-                "miss",
-            ]
-            .map(|label| count.counter(&[label.into()])),
+            outcome_counts: ["memory_hit", "disk_hit", "callback", "callback_error", "miss"]
+                .map(|label| count.counter(&[label.into()])),
             success_durations: ["disk_hit", "callback"].map(|label| duration.histogram(&[label.into()])),
             served_bytes: ["memory", "disk", "callback"].map(|label| served_bytes.counter(&[label.into()])),
         }
