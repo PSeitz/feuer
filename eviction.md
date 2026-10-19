@@ -55,19 +55,18 @@ whole-entry checksum work, multiple I/O submissions, or contention.
 
 Assuming every memory miss falls back to disk can undervalue memory: pending or
 skipped writes, disk eviction, and read failures may leave only source fallback.
-Both scorers use all caller demand, not demand conditional on memory misses, so
+Both scorers use all caller demand, including memory hits, so
 disk can also overvalue copies of memory-hot objects.
 
 Disk alignment and memory allocation buckets make actual costs non-linear. For
 example, a 10-byte payload may require a 4-KiB disk read and occupy a 32-KiB pooled
 memory buffer. `Download::new` defaults to payload-length charges, while disk
 promotions and `AlignedBuffer::into_download` charge backing capacity. Use the
-actual entry charge rather than assuming every entry occupies a pool bucket.
+actual entry charge.
 
 Applications can supply a custom scorer when linear size-based costs are
-insufficient. Size alone is not an eviction rule: demand and avoided fixed costs
-also matter. Whole objects are already queued for disk after memory admission.
-Separate tier scoring does not add a write-on-eviction mechanism.
+insufficient. Eviction accounts for size, demand, and avoided fixed costs.
+Whole objects are queued for disk after memory admission.
 
 ## Access history and trimming
 
@@ -88,11 +87,10 @@ prefix aged at least 64 requests across all keys. Each candidate is checked once
 with no minimum savings percentage. All byte-saving plans run before sampled
 eviction, even if the first frees enough space. Entries covered by the incoming
 download are skipped. Removal filters candidates without changing their order.
-Grace never prevents eviction. Whole-object entries are evicted rather than trimmed.
+Entries remain eligible for eviction during grace. Whole-object entries are evicted whole.
 
-Trimming uses recent-access events with per-object count and age limits, not the
-full counter set. Each distinct range is copied separately, including overlapping
-ranges. Newer accesses do not invalidate the history snapshot. Cached-range
+Trimming uses recent-access events with per-object count and age limits.
+Each distinct range is copied separately, including overlapping ranges. Newer accesses do not invalidate the history snapshot. Cached-range
 changes are checked before publishing bytes copied outside the shard lock.
 
 ## Custom retention scores
@@ -117,4 +115,4 @@ See [environment variables](README.md#environment-variables) for tuning settings
   coefficient derivation and full-object comparisons. These are not defaults.
 - [Scorer consolidation](experiments/cache/cost-scorer-20261012/README.md) and
   [corrected-scheduler retest](experiments/cache/cost-scorer-retest-20261012T1324/README.md):
-  matched coefficients, not a search for better weights.
+  comparisons with matched coefficients.

@@ -49,7 +49,7 @@ its shard's target empties that shard and remains cached, so cached payload byte
 
 ## 3. Public lookup and download boundary
 
-The download callback is supplied per lookup rather than registered when the cache is constructed.
+Each lookup supplies its own download callback.
 Conceptually, usage has this shape:
 
 ```rust

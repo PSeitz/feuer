@@ -1,4 +1,4 @@
-//! Best-effort background writes. Buffer flushing belongs to the disk writer, not this queue.
+//! Best-effort background writes. The disk writer handles buffer flushing.
 
 #[cfg(test)]
 mod tests;

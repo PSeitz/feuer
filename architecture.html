@@ -183,7 +183,7 @@
             </div>
           </details>
           <details class="branch" id="download">
-            <summary>Download callback<small>Your source implementation, not a built-in S3 client</small></summary>
+            <summary>Download callback<small>Your callback fetches or computes the data</small></summary>
             <div class="content">
               <p>The async callback returns a <code>Download</code>: a starting offset and <code>Bytes</code> covering at least the requested range, including empty ranges. Feuer returns an exact slice.</p>
               <p>If several requests miss the cache at once, each calls its own download function. Feuer does not combine downloads or retry failures; your function must do that if needed.</p>
@@ -196,7 +196,7 @@
           <details class="branch">
             <summary><code>DiskCache</code> background writes<small>Queues downloads without delaying lookups</small></summary>
             <div class="content">
-              <p><code>DiskCache</code> owns the background-write queue and accepts entries without waiting for queue space. A full or closed queue skips the write, not the successful lookup.</p>
+              <p><code>DiskCache</code> owns the background-write queue and accepts entries without waiting for queue space. A full or closed queue skips the write while the successful lookup continues.</p>
               <dl><dt>Queued entry limit</dt><dd>512 per cache</dd><dt>Small-entry cutoff</dt><dd>Aligned size &lt;512 KiB</dd><dt>Workers</dt><dd>1</dd><dt>Queued + active payload byte cap</dt><dd>None</dd></dl>
               <details class="deeper"><summary>Buffering, publication, and cancellation</summary><div>
                 <p>Each queued write carries its download and key hash. Queued and active writes proceed independently of memory retention. Publication rechecks disk containment under the disk index lock.</p>
@@ -223,7 +223,7 @@
               <p><code>MemoryCache</code> splits keys among shards so requests for different shards can run without sharing one lock. Each shard stores an object's cached ranges in a <code>BTreeMap</code>, sorted by exact byte range.</p>
               <p>A lookup needs <strong>one entry covering the entire request</strong>; it does not assemble several cached ranges.</p>
               <details class="deeper"><summary>Index structure and admission rules</summary><div>
-                <p><code>ObjectEntries</code> owns the ordered ranges. Each <code>MemoryEntry</code> holds its byte range, <code>Bytes</code>, allocation charge, candidate slot, and admission request clock. Entries are identified by key hash and exact range, not an entry ID or generation. Request history is stored separately and shared by both tiers.</p>
+                <p><code>ObjectEntries</code> owns the ordered ranges. Each <code>MemoryEntry</code> holds its byte range, <code>Bytes</code>, allocation charge, candidate slot, and admission request clock. Entries are identified solely by key hash and exact range. Request history is stored separately and shared by both tiers.</p>
                 <p>If the bytes are already cached, the new copy is skipped. A larger range replaces smaller entries it fully contains. Ranges that overlap only partly can both stay cached.</p>
                 <p>Default shard count: four times available parallelism, capped at 64; four if parallelism is unavailable.</p>
               </div></details>
@@ -271,7 +271,7 @@
               <p><code>DiskCache</code> keeps a lookup table in RAM: object key hash and byte range → payload region, checksum, and metadata slot. Each <code>DiskCacheShard</code> has its own table (<code>DiskEntryIndex</code>), chunk allocator, small-entry buffer, and typed metadata slots with dirty-page tracking. The index, metadata, and buffer have separate locks.</p>
               <p>A stored-entry hit verifies the <strong>whole covering entry</strong>, then returns the requested slice. It does not load neighboring entries or metadata. A hit in the shard's unfinished small-entry buffer copies only the requested bytes without disk I/O.</p>
               <details class="deeper"><summary>Concurrent reads and integrity failures</summary><div>
-                <p>Concurrent readers of the same stored entry share a <code>OnceCell</code> result containing verified bytes or failure. The index holds only a weak reference, so it is not a persistent payload cache.</p>
+                <p>Concurrent readers of the same stored entry share a <code>OnceCell</code> result containing verified bytes or failure. The index holds only a weak reference, allowing the result to be released after readers finish.</p>
                 <p>I/O errors return a miss without removing the entry. A checksum failure removes the indexed entry at that key and range start, which may discard a racing replacement too. Readers retain an address and expected checksum, not disk ownership. Eviction can release chunks while a read is outstanding; validation is subject to checksum collisions.</p>
                 <p>Whole-entry verification means small subrange requests may read much more than the requested bytes.</p>
                 <p>Disk shard count is capacity divided by 128 MiB, clamped to 1–64. Each shard owns a fixed consecutive disk byte range; its count is independent of memory and history shards.</p>
@@ -356,7 +356,7 @@
           <details class="branch">
             <summary><code>ReadQueue</code> &amp; <code>WriteQueue</code><small>Send reads and writes to separate io_uring workers</small></summary>
             <div class="content">
-              <p>Reads and writes each have a waiting channel, active request slots, an io_uring ring, and a worker thread. Pass clones of <code>IoQueues::new()?</code> to <code>open</code> to share these queues and limits across independent caches; <code>None</code> creates dedicated queues. Arrival order determines scheduling, not completion order; there is no per-cache fairness or overlap checking.</p>
+              <p>Reads and writes each have a waiting channel, active request slots, an io_uring ring, and a worker thread. Pass clones of <code>IoQueues::new()?</code> to <code>open</code> to share these queues and limits across independent caches; <code>None</code> creates dedicated queues. Requests are scheduled in arrival order and may complete out of order; there is no per-cache fairness or overlap checking.</p>
               <p>Contents, capacities, eviction, history, buffer pools, file locks, and background-write queues remain independent. Idle shared queues retain no files.</p>
               <dl><dt>Active read slots / waiting channel</dt><dd>64 / 64 requests</dd><dt>Active write slots / waiting channel</dt><dd>8 / 8 requests</dd><dt>Maximum bytes per I/O request</dt><dd>1 MiB</dd><dt>Separate I/O-byte budget</dt><dd>None</dd></dl>
               <details class="deeper"><summary>Admission and completion lifetime</summary><div>
@@ -401,7 +401,7 @@
               <details class="deeper"><summary>Two histories with different purposes</summary><div>
                 <p><strong>Scoring counters:</strong> decayed counts per exact requested range or whole-object demand. Default half-life is 262,144 requests across all keys. Distinct keys and range counters are never removed or capped during the history object's lifetime, even after both tiers evict the data.</p>
                 <p><strong>Trimming history:</strong> a separate event history. Defaults retain up to 64 events per object, aged out after 262,144 requests across all keys. Whole-object events do not supply partial ranges for trimming.</p>
-                <p>History uses 64 independently locked maps and one global request clock, separate from memory and disk shard counts. It is not persisted; aging is request-based, not wall-clock-based.</p>
+                <p>History uses 64 independently locked maps and one global request clock, separate from memory and disk shard counts. It is not persisted; aging advances with the global request clock.</p>
               </div></details>
               <a class="source" href="feuer-historian/src/lib.rs">feuer-historian/src/lib.rs · ObjectAccessHistories</a>
             </div>
@@ -465,10 +465,10 @@
             </div>
           </details>
           <details class="branch">
-            <summary>Current boundaries<small>What this implementation does not provide yet</small></summary>
+            <summary>Current boundaries<small>Current guarantees and limitations</small></summary>
             <div class="content">
               <ul><li><strong>No crash-durability guarantee.</strong> Open waits for best-effort recovery; writes are not synchronized to stable storage.</li><li><strong>No buffered I/O mode.</strong> The disk tier requires Linux direct I/O and io_uring.</li><li><strong>No built-in source client, download coalescing, or retry scheduler.</strong> Those belong to your callback.</li><li><strong>No hard total-memory cap.</strong> Active reads and downloads, caller-held buffers, pending disk writes, typed metadata slots, trace buffers, and uncapped request-history counters sit outside the memory-cache target.</li><li><strong>No multi-entry range assembly.</strong> One cached entry must cover a request.</li></ul>
-              <p>The disk layout and allocator remain experimental; this explorer describes the current implementation, not a stable on-disk interface.</p>
+              <p>This explorer describes the current experimental disk layout and allocator. The on-disk interface may change.</p>
               <a class="source" href="implementation-status.md">implementation-status.md · implemented and remaining work</a>
             </div>
           </details>

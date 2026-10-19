@@ -142,7 +142,7 @@
                 <summary><span class="node-name">Channel admission</span><span class="node-meta">64 waiting + 64 active</span></summary>
                 <div class="node-body">
                   <p>A Tokio <code>mpsc::channel(64)</code> reserves waiting-channel capacity with <code>reserve().await</code>. A full channel yields the submitting task rather than blocking its executor thread.</p>
-                  <p>Reserved capacity for preparing requests and queued requests share the channel's 64-position limit. The worker has <strong>64 additional active slots</strong>; receiving a request frees channel capacity, not completing it. Callers waiting to reserve are outside these counts.</p>
+                  <p>Reserved capacity for preparing requests and queued requests share the channel's 64-position limit. The worker has <strong>64 additional active slots</strong>; channel capacity is freed as soon as the worker receives a request. Callers waiting to reserve are outside these counts.</p>
                   <p class="note">There is no raw-I/O byte budget. Reads reserve initial channel capacity before allocating the whole aligned entry buffer, then reserve again for each subsequent request of at most 1 MiB. Request counts do not cap read-buffer memory.</p>
                   <p>Startup recovery uses the same <code>reserve().await</code> admission before allocating each 1-MiB metadata-read buffer. Opening waits for all shard recovery to finish before serving lookups.</p>
                   <details class="source">
@@ -194,7 +194,7 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
               <p>After a callback download is admitted to memory, Feuer attempts to schedule a disk copy. <code>DiskCache</code> owns this queue <strong>above</strong> the raw write-I/O queue.</p>
               <div class="flow"><span>Download admitted to memory</span><span class="arrow">→</span><span>try_reserve</span><span class="arrow">→</span><span>Disk-write worker</span></div>
               <details class="node">
-                <summary><span class="node-name">Full means skip, not wait</span><span class="node-meta">Tokio mpsc</span></summary>
+                <summary><span class="node-name">Skip disk writes when full</span><span class="node-meta">Tokio mpsc</span></summary>
                 <div class="node-body">
                   <p>Each cache's channel holds up to 512 queued entries. <code>try_reserve()</code> returns immediately. Full or closed queues skip disk writes without failing the successful lookup.</p>
                   <p class="note">Queued and active payload bytes are tracked, but have no byte cap or separate memory-cache charge. The queue can keep a payload alive after its memory entry is evicted.</p>
@@ -224,10 +224,10 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
                 </div>
               </details>
               <details class="node">
-                <summary><span class="node-name">Write completion ≠ publication</span><span class="node-meta">key + range rechecked</span></summary>
+                <summary><span class="node-name">Publish after payload writes finish</span><span class="node-meta">key + range rechecked</span></summary>
                 <div class="node-body">
                   <p>Payload writes finish before publication and in-memory metadata updates. Dirty metadata pages write every second, independently; failed writes are not retried. No <code>fsync</code>, <code>fdatasync</code>, or shutdown metadata flush is issued.</p>
-                  <p>Publication rechecks disk containment, not memory residency, and takes the earliest free metadata slots in recovery scan order. The writer owns reservations while awaiting I/O, but cancellation can release them while submitted writes continue. Written chunks cannot be appended to; they become reusable after their last entry is removed, without waiting for readers or metadata writes. Removal clears the in-memory metadata slot and marks its page dirty for rewriting without the record; old on-disk records can remain until that write succeeds. Late writes to reused chunks can cause checksum misses.</p>
+                  <p>Publication rechecks disk containment independently of memory residency and takes the earliest free metadata slots in recovery scan order. The writer owns reservations while awaiting I/O, but cancellation can release them while submitted writes continue. Written chunks cannot be appended to; they become reusable after their last entry is removed, without waiting for readers or metadata writes. Removal clears the in-memory metadata slot and marks its page dirty for rewriting without the record; old on-disk records can remain until that write succeeds. Late writes to reused chunks can cause checksum misses.</p>
                   <a class="source-label" href="feuer-storage/src/disk_cache/writer.rs">feuer-storage/src/disk_cache/writer.rs · payload then publication</a>
                   <a class="source-label" href="feuer-storage/src/allocation.rs">feuer-storage/src/allocation.rs · hold_chunks_until_payloads_released / release_payload</a>
                 </div>
@@ -240,7 +240,7 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
               <p>Same admission and worker machinery as reads, but with its own channel, active slots, thread, and ring. All disk-cache shards use the file's queues. Passing clones of <code>IoQueues::new()?</code> to multiple cache opens shares one read/write queue set and its limits across files; <code>None</code> creates dedicated queues.</p>
               <div class="flow"><span>Payload + metadata writes</span><span class="arrow">→</span><span>reserve().await</span><span class="arrow">→</span><span>Permit send</span><span class="arrow">→</span><span>Write ring</span></div>
               <details class="node">
-                <summary><span class="node-name">Why depth 8, not 64?</span><span class="node-meta">local SSD measurement</span></summary>
+                <summary><span class="node-name">Why eight active writes?</span><span class="node-meta">local SSD measurement</span></summary>
                 <div class="node-body">
                   <p>The current code caps active writes at 8, with a separate 8-request waiting channel. Its comment cites local-SSD measurements: 1-MiB writes saturated at QD8; QD64 added no write-only throughput and increased write p99 from 4.6 to 47 ms, while worsening small-read latency.</p>
                   <p>This is hardware/workload-specific evidence, not a universal optimal depth or a measurement of the current metadata-write pipeline.</p>
@@ -268,7 +268,7 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;</code></pre>
           <details class="node">
             <summary><span class="node-name">Independent caches, shared I/O</span><span class="node-meta">file ownership stays separate</span></summary>
             <div class="node-body">
-              <p>Queue sharing does not share contents, capacities, eviction, history, buffer pools, file locks, or the 512-entry background-write queues. Use separate directories or <code>CacheConfig::with_file_name</code> for distinct files in one directory. The default <code>data</code> file uses <code>.feuer.lock</code>; other filenames use <code>.feuer.&lt;filename&gt;.lock</code>.</p>
+              <p>With shared I/O queues, each cache keeps its own contents, capacities, eviction, history, buffer pools, file locks, and 512-entry background-write queue. Use separate directories or <code>CacheConfig::with_file_name</code> for distinct files in one directory. The default <code>data</code> file uses <code>.feuer.lock</code>; other filenames use <code>.feuer.&lt;filename&gt;.lock</code>.</p>
               <p>Each queued or active I/O request retains its target file and lock through completion, including after caller cancellation. Idle queues retain no files; returned bytes retain only RAM. Dropping one cache does not stop the others; the last queue owner drains submitted I/O and joins both workers.</p>
               <p>Read buffers remain pooled per cache. Downloaders can use <code>cache.allocate_buffer</code> and <code>into_download</code> to share that pool without copying; the buffer returns only after its last owner releases it. Active buffers and pending disk writes are outside the cache's retention budget.</p>
               <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · IoQueues / IoRequest</a>
@@ -341,7 +341,7 @@ let result = unsafe {
           <span class="card-foot"><span class="tag">1 worker / ring per shard</span><span class="closed-label">Explore the path →</span><span class="opened-label">Close overview ↑</span></span>
         </summary>
         <div class="system-body">
-          <p class="path">io_uring backend · not every Foyer backend</p>
+          <p class="path">Scope: Foyer's io_uring backend</p>
           <details class="node">
             <summary><span class="node-name">Read &amp; write input queues</span><span class="node-meta">4,096 each / shard</span></summary>
             <div class="node-body">
@@ -351,7 +351,7 @@ let result = unsafe {
                 <summary><span class="node-name">What happens when a channel fills?</span><span class="node-meta">blocking send</span></summary>
                 <div class="node-body">
                   <p>Submission calls <code>SyncSender::send</code> before returning the asynchronous completion handle. If the channel is full, the calling thread can block until a worker receives an item.</p>
-                  <p>The completion wait is still asynchronous. The distinction is specifically <strong>queue admission</strong>, not whether Foyer supports async I/O.</p>
+                  <p><strong>Queue admission</strong> uses a synchronous send; completion is awaited asynchronously.</p>
                   <details class="source">
                     <summary>Code · channel capacity and synchronous send</summary>
                     <a class="source-label" href="foyer/foyer-storage/src/io/engine/uring.rs#L188">foyer/foyer-storage/src/io/engine/uring.rs:188–200 (excerpt)</a>
@@ -369,11 +369,11 @@ let (tx, rx) = mpsc::sync_channel(4096);</code></pre>
                 </div>
               </details>
               <details class="node">
-                <summary><span class="node-name">Queued capacity ≠ in-flight depth</span><span class="node-meta">different boundaries</span></summary>
+                <summary><span class="node-name">Waiting-channel and in-flight limits</span><span class="node-meta">different boundaries</span></summary>
                 <div class="node-body">
                   <p>The two channels can each hold 4,096 waiting requests. Separately, the ring limits combined in-flight reads and writes to the configured depth, 64 by default.</p>
                   <p>Like Feuer's waiting-channel limits, these capacities exclude operations already removed for submission. Feuer separately allows 64 active reads and 8 active writes; Foyer's active limit is shared between directions.</p>
-                  <p class="note">These are request counts, not payload-byte limits. This comparison covers the shown driver, not all memory limits in Foyer's upper storage layers.</p>
+                  <p class="note">These request-count limits impose no payload-byte cap. Memory limits in Foyer's upper storage layers are outside this comparison's scope.</p>
                 </div>
               </details>
             </div>
@@ -420,7 +420,7 @@ let (tx, rx) = mpsc::sync_channel(4096);</code></pre>
             <div class="node-body">
               <p>The worker tries to fill the ring, submits when there is in-flight work, drains completion entries, and repeats. The shown loop has no sleep or blocking wait when idle.</p>
               <details class="node">
-                <summary><span class="node-name">Userspace polling is not SQPOLL</span><span class="node-meta">two different mechanisms</span></summary>
+                <summary><span class="node-name">Worker-thread polling and kernel polling</span><span class="node-meta">two different mechanisms</span></summary>
                 <div class="node-body">
                   <p>This continuous loop runs in Foyer's worker thread even with SQPOLL and IOPOLL disabled. Those optional flags control separate kernel-side behavior.</p>
                   <p>Feuer instead blocks in <code>poll</code> until a ring completion or eventfd wakeup. That avoids idle spinning, but wakeup cost versus polling latency remains a measurement question.</p>
@@ -445,7 +445,7 @@ let (tx, rx) = mpsc::sync_channel(4096);</code></pre>
                 <summary><span class="node-name">Returning to the caller</span><span class="node-meta">oneshot reply</span></summary>
                 <div class="node-body">
                   <p>Completion data identifies the request context. The worker decrements the appropriate in-flight counter and sends its result through a oneshot channel.</p>
-                  <p>The caller's asynchronous I/O handle awaits that channel and returns the buffer with the result. Separate completion channels do not mean separate read/write rings.</p>
+                  <p>The caller's asynchronous I/O handle awaits that channel and returns the buffer with the result. Read and write requests use separate completion channels and share one ring per shard.</p>
                   <a class="source-label" href="foyer/foyer-storage/src/io/engine/uring.rs#L344">foyer/foyer-storage/src/io/engine/uring.rs:344–362 · completions</a>
                   <a class="source-label" href="foyer/foyer-storage/src/io/engine/uring.rs#L403">Same file:403–412 · caller awaits reply</a>
                 </div>
@@ -470,11 +470,11 @@ let (tx, rx) = mpsc::sync_channel(4096);</code></pre>
             </tbody>
           </table>
         </div>
-        <p class="note">Separate software queues do not isolate the SSD. Feuer's read and write rings still compete for the same device. Foyer's shared ring offers configurable weighted scheduling. Neither topology alone proves better throughput or latency.</p>
+        <p class="note">Feuer's separate read and write rings compete for the same SSD. Foyer's shared ring offers configurable weighted scheduling. Neither topology alone proves better throughput or latency.</p>
       </div>
     </details>
     <footer>
-      <p>Based on local source: Feuer <code>f474ff4</code> · Foyer <code>14c2d88</code>. Foyer details describe its io_uring backend, not its full storage pipeline. Code excerpts are embedded; file links point into this checkout (line fragments are reader-dependent).</p>
+      <p>Based on local source: Feuer <code>f474ff4</code> · Foyer <code>14c2d88</code>. Foyer details cover only its io_uring backend. Code excerpts are embedded; file links point into this checkout (line fragments are reader-dependent).</p>
       <p>No dependencies. No network requests.<br>Tab to a section; Enter or Space to expand.</p>
     </footer>
   </main>

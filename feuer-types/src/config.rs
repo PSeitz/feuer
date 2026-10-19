@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 
 /// Parses a number with optional `bytesize` suffixes, checking its minimum and integer type.
-/// Suffixes are multipliers even when the setting represents a count rather than bytes.
+/// Suffixes act as multipliers for both counts and byte sizes.
 pub fn parse_config_number<T: TryFrom<u64>>(value: &OsStr, minimum: u64) -> Option<T> {
     let number = value.to_str()?.parse::<bytesize::ByteSize>().ok()?.as_u64();
     if number < minimum {

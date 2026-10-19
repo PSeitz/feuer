@@ -34,7 +34,7 @@ impl Download {
         })
     }
 
-    /// Charges the known backing allocation capacity rather than just the payload length.
+    /// Charges the known backing allocation capacity.
     /// Shared allocations are conservatively charged once per cached entry.
     ///
     /// # Panics

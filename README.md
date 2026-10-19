@@ -49,7 +49,7 @@ length as the object length. Empty objects are supported.
 
 Keys must identify immutable content. Requested ranges for a key may overlap;
 exact repeats update the same access counter. Cached ranges receive retrieval credit
-for every recorded request range they fully contain, not for partial overlaps.
+only for recorded request ranges they fully contain.
 Downloads may cover multiple requests.
 Feuer leaves request coalescing, scheduling, and retries to your downloader.
 
@@ -61,7 +61,7 @@ full keys are not stored or checked for collisions. Keys must not be adversarial
 
 When changing your payload encoding, set `config.with_payload_version(1)` before opening
 (the default is `0`). Any version change invalidates the previous disk entries, including on
-downgrade. The version is stored once in the global file header, not per entry, and is
+downgrade. The version is stored once in the global file header and is
 independent of Feuer's disk-format version.
 
 ## Independent caches on one SSD
@@ -112,7 +112,7 @@ other downloaders can supply a known capacity with `Download::with_allocation_ch
 Whole-object callbacks can return `(bytes, allocation_charge)` through
 `get_or_fetch_object_with_allocation_charge`. This preserves a shared slice's backing-capacity charge
 without copying. Ordinary `get_or_fetch_object` callbacks charge only payload length.
-Shared allocations are conservatively charged once per cached entry, not deduplicated across slices.
+Shared allocations are conservatively charged once per cached entry.
 Correcting the charge does not release unused bytes inside an allocation retained by a slice.
 Entry targets remain split across shards; an oversized entry empties its shard and remains cached.
 Active reads and caller-only results are outside the budget. Metadata and pending disk writes
@@ -129,8 +129,7 @@ Busy/flushing chunks may miss until publication; corrupt or uncertain disk reads
 Exact-range downloads and whole objects are queued for disk immediately after memory admission.
 Expanded downloads stay memory-only until successful compaction queues their retained ranges.
 Compaction requires memory pressure and a 64-request grace period. After that grace, it trims whenever
-the retained ranges reduce payload bytes, without a minimum savings percentage. Expanded entries
-that never compact are never written to disk.
+the retained ranges reduce payload bytes, without a minimum savings percentage.
 
 `DiskCache` owns the 512-entry background-write queue and its buffer-flush timer. Entries below
 512 KiB aligned size share 1-MiB chunks, flushed on full/no-fit or every 60 seconds. Each shard always holds
@@ -159,9 +158,8 @@ packing, partial writes, and padding can still require copies.
 In SSD replays, glibc did not return substantial freed memory to the OS, making RSS
 much larger than live cache memory. Jemalloc avoided that retention in the tested
 workload. Aligning and bucketing synthetic download buffers also reduced RSS, but
-alignment alone was
-not isolated or proven sufficient. These are application allocation choices, not a
-requirement imposed by Feuer; the configured memory target is not an RSS limit.
+the effect of alignment alone remains untested. Applications choose their allocator;
+the configured memory target is not an RSS limit.
 
 ## Eviction
 
@@ -213,7 +211,7 @@ readers. Allocation sizes are 32 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB,
 Aligned read lengths round up to the smallest fitting size; callers receive only the
 requested bytes. Larger allocations share one idle bucket. Reuse grows to fit and shrinks
 only when capacity is at least 10% larger than the requested length. On Linux, buffers over
-64 MiB use `mmap`/`mremap`/`munmap` rather than the allocator.
+64 MiB use `mmap`/`mremap`/`munmap`.
 
 Disk reads and downloads acquired through `cache.allocate_buffer` share this pool.
 Cached entries and idle buffers share the configured memory capacity. The idle pool is

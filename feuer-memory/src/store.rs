@@ -112,7 +112,7 @@ impl MemoryCache {
         }
     }
 
-    /// Uses application-provided retention scores instead of modeled retrieval cost per byte.
+    /// Uses application-provided retention scores.
     pub fn with_retention_scorer(mut self, scorer: Arc<dyn RetentionScorer>) -> Self {
         self.retention_scorer = scorer;
         self
@@ -168,7 +168,7 @@ impl MemoryCache {
     /// If an existing entry contains the download, the supplied payload is
     /// discarded. A larger download replaces entries it fully contains, while
     /// partial overlaps coexist.
-    /// Returns whether the download was inserted rather than already covered.
+    /// Returns whether the download was inserted.
     pub fn insert(&self, object_key: ObjectKeyHash, download: Download) -> bool {
         let shard = &self.shards[self.shard_index(&object_key)];
         let mut compact_before_eviction = true;

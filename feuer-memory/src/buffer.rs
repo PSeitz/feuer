@@ -193,7 +193,7 @@ pub struct AlignedBuffer {
 }
 
 impl AlignedBuffer {
-    /// Allocates zeroed memory that is freed, not pooled, on release (used for write scratch).
+    /// Allocates zeroed memory that is freed on release (used for write scratch).
     pub fn allocate_zeroed(length: usize) -> io::Result<Self> {
         assert!(length > 0);
         let layout = Self::layout(length)?;

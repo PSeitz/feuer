@@ -102,7 +102,7 @@ from resource settings. There is no periodic compaction or separate prefetch-pro
 - Raw capacity must be positive, 4-KiB-aligned, and representable as a Linux signed file offset. Opening
   requires usable io_uring and compatible `STATX_DIOALIGN`. There is no backend or buffered fallback.
 
-This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and its CI target Linux only.
+Disk storage and its CI target Linux only.
 
 ## Validation and benchmarks
 
@@ -117,14 +117,14 @@ This is a raw I/O layer, not a disk cache or disk-write queue. Disk storage and 
   and expanded downloads, 1/4/16/64 shards). All hit counts, hit bytes, source GETs/bytes and cached-payload
   values matched the preceding implementation across all 256 engine rows. In this single same-host comparison,
   Feuer's median elapsed-time ratio across its 64 cases was 1.153 (about 15% slower). The native Foyer medians
-  were approximately unchanged. Shared evidence adds synchronization and metadata. This is not a throughput
-  improvement. CSV artifacts on `m8g-32cpu-local-ssd` are
+  were approximately unchanged. Shared evidence adds synchronization and metadata.
+  CSV artifacts on `m8g-32cpu-local-ssd` are
   `/mnt/local-ssd/feuer-value.BkkxPo/memory-gate.csv` and
   `/mnt/local-ssd/feuer-pressure.RgwqyQ/memory-baseline.csv`.
 - Storage tests cover independent read/write queue capacity and progress, mixed concurrency,
   caller-serialized shared pages, bounds, short I/O, cancellation, and reopening.
-- The [direct-I/O smoke benchmark](experiments/storage/README.md) measures the driver on the local SSD, not
-  an end-to-end cache or matched backend comparison. Separate [SSD measurements](experiments/ssd/ssd-concurrent-read-write.md)
+- The [direct-I/O smoke benchmark](experiments/storage/README.md) measures the driver on the local SSD.
+  Separate [SSD measurements](experiments/ssd/ssd-concurrent-read-write.md)
   explore mixed reads and writes. Small-read-heavy workloads may still warrant write throttling.
 
 ## In progress: disk-cache prototype

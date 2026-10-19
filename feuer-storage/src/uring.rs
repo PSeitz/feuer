@@ -343,8 +343,7 @@ enum IoBuffers {
 }
 
 impl IoBuffers {
-    /// Takes the aligned prefix and copies the rest with zero padding.
-    /// This prepares memory only. It does not issue a disk write.
+    /// Prepares write buffers by taking the aligned prefix and copying the rest with zero padding.
     fn from_write_bytes(length: usize, mut bytes: Bytes) -> io::Result<Self> {
         assert!(bytes.len() <= length && length.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES));
         let aligned_length = if (bytes.as_ptr() as usize).is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {

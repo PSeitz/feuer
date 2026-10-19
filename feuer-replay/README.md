@@ -24,7 +24,7 @@ including starts originally failed or incomplete. This measures demand under tha
 assumption, not original cancellation, actual source latency, retry/coalescing behavior,
 expanded downloads, or the original cache's initial contents. Replays start empty.
 The decoder accepts whole-object events, including empty objects, but replay
-rejects the unknown-length `0..u64::MAX` sentinel rather than allocate it.
+rejects the unknown-length `0..u64::MAX` sentinel.
 Parseable packages do not establish trace completeness or detect missing packages.
 
 Keep private traces, object identities, and raw results in ignored local experiment
@@ -35,7 +35,7 @@ Nothing from the historical experiment directories is needed to build this tool.
 
 `--full-objects` treats each `(recorded object hash, start, end)` as a separate
 immutable whole object with length `end - start`, stored at offset zero. Repeated
-identical ranges share one derived identity. Different objects or bounds do not.
+identical ranges share one derived identity.
 The transformation runs after recorded outcomes are joined and before replay.
 Arrival times, request counts, returned bytes and synthetic source allocation are
 preserved, while the cache receives whole-object demand and performs whole-object
@@ -45,10 +45,9 @@ This simulates full-object caching of each exact recorded range, not full-file
 retrieval or a native whole-object capture. Arrival timing still comes from the
 original deployment. Native unknown-length whole-object starts remain unsupported.
 
-`--full-objects` changes the workload, not the scorer. Both range and full-object
-replays use the current [retrieval-cost scorer](../eviction.md#current-scoring).
-Compare the same transformation with matched settings and fresh caches, not a
-range baseline against a full-object candidate.
+Both range and full-object replays use the current
+[retrieval-cost scorer](../eviction.md#current-scoring).
+Compare the same transformation with matched settings and fresh caches.
 
 ## Replay cache configurations (Linux)
 
@@ -60,7 +59,7 @@ real cache currently requires Linux, even when disk is disabled.
 
 One sender preserves original arrival timing and starts one lookup task per arrival,
 without waiting for earlier lookups to finish. Tokio uses one runtime thread per
-available CPU, not one outstanding lookup per thread. There is no additional
+available CPU. Each thread can run multiple outstanding lookups. There is no additional
 lookup-admission limit. Recorded starts already reflect application admission, and
 Pomsky's split warmup permits do not limit individual cache reads. Feuer's real I/O
 queues provide their normal backpressure. Descriptors and unstarted tasks hold no
@@ -108,7 +107,7 @@ callback wait for one of **48 slots**, then sleep for
 `0.108599 seconds + requested_bytes / (80.205 * 1048576 bytes/second)` before
 independently acquiring and zero-filling its payload buffer. The slot is held through
 allocation and filling. This leaves the arrival scheduler unchanged and adds no coalescing, retries, failures,
-or arrival throttling. It is a deterministic delay model, not a real S3 measurement.
+or arrival throttling. It is a deterministic delay model.
 The fixed calibration comes from [the S3 benchmark](../experiments/s3_benchmark.md),
 on another host with larger objects. Runtime scheduling, allocation and slot waiting
 add measured latency beyond the formula, and the calibration may not represent these

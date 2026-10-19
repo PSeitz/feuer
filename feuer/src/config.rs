@@ -150,7 +150,7 @@ impl CacheConfig {
 }
 
 /// Settings for evicting the lowest-scoring entry from a sample.
-/// Scoring parameters belong to the supplied [`crate::RetentionScorer`], not these settings.
+/// Scoring parameters belong to the supplied [`crate::RetentionScorer`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SampledEvictionConfig {
     sample_size: usize,

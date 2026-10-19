@@ -195,7 +195,7 @@ impl DiskChunkAllocator {
 #[derive(Debug)]
 pub(super) struct ReservedChunks {
     free: Arc<Mutex<FreeChunks>>,
-    /// Numbers of the reserved chunks, not disk byte offsets.
+    /// Numbers of the reserved chunks.
     chunk_numbers: Range<u64>,
     recovered: bool,
 }

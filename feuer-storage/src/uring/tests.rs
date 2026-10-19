@@ -228,7 +228,7 @@ async fn active_request_limit_keeps_channel_full_until_completion() {
             assert!(request.buffer_range.is_empty());
             request.send_result(Ok(()));
         }
-        // Completion alone does not release channel capacity: receiving does.
+        // Receiving a request releases channel capacity.
         assert!(reserve.as_mut().poll(&mut context).is_pending());
         queue.receive_requests();
         drop(reserve.await.unwrap());

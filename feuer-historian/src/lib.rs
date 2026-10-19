@@ -1,7 +1,7 @@
 //! Request history for immutable objects and byte ranges, independent of cache contents.
 //!
-//! Keeps decayed request counts and recent request events. Consumers interpret this
-//! evidence. History does not assign retrieval costs or make retention decisions.
+//! Keeps decayed request counts and recent request events. Consumers use this
+//! evidence to assign retrieval costs and make retention decisions.
 
 use std::{
     collections::VecDeque,
@@ -148,10 +148,10 @@ impl DecayedAccessCount {
     /// Evaluates the count at the supplied request clock, without modifying it.
     /// `half_life` must be positive and match the half-life used to record this count.
     /// The result is between zero and the count stored at the last update, inclusive.
-    /// It is not normalized to [0, 1]. Each matching request decays the stored count
-    /// and adds one, so repeated requests can make it exceed one.
+    /// Each matching request decays the stored count and adds one,
+    /// so repeated requests can make it exceed one.
     ///
-    /// Age is measured in requests across all object keys, not wall-clock time.
+    /// Age is measured in requests across all object keys.
     /// With the default half-life of 262,144 requests, starting at one with no further matching requests:
     ///
     /// | Additional requests across all keys | Value |
@@ -186,8 +186,8 @@ impl DecayedAccessCount {
     /// At 128,000 requests apart, the corresponding limits are 4.096 after adding one and 3.096 before.
     #[inline]
     pub fn decayed_count(&self, request_clock: u64, half_life: u64) -> f64 {
-        // Age is measured in requests across all keys, not wall-clock time.
-        // An earlier clock leaves the count unchanged rather than increasing it.
+        // Age is measured in requests across all keys.
+        // An earlier clock leaves the count unchanged.
         let requests_since_update = request_clock.saturating_sub(self.observed_at_access);
         let half_lives_elapsed = requests_since_update as f64 / half_life as f64;
 

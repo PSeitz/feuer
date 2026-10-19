@@ -1276,7 +1276,7 @@ async fn reads_30_mib_contiguous_payloads_and_trims_final_padding() {
         let (bytes, capacity) = cache.fetch_from_disk(&key, source.downloaded_range()).await.unwrap();
         assert_eq!(capacity, 32 * CHUNK_BYTES as usize);
         assert_eq!(bytes, source.bytes());
-        // Results own only memory, not disk regions or the cache itself.
+        // Returned bytes remain valid after the cache is dropped.
         drop(cache);
         assert_eq!(bytes, source.bytes());
     }

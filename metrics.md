@@ -5,7 +5,7 @@ with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup,
 memory, disk I/O, disk-cache and disk-write metrics in that registry.
 The last argument independently selects dedicated (`None`) or shared (`Some(io_queues)`)
 I/O queues. Passing `None` for the metrics registry disables metrics.
-Feuer does not install an exporter, the application owns the registry and its export endpoint.
+The application owns the registry and installs its exporter.
 
 All labels below have fixed values. Object keys, paths and caller-defined cache
 names are not labels. Multiple caches using the same registry aggregate their
@@ -19,7 +19,7 @@ counters and gauges. Use separate registries if they must be distinguished.
 | `feuer_lookup_duration_seconds` | Histogram | `outcome`: `disk_hit`, `callback`. Successful lookup after a memory miss, including callback work and synchronous disk-write scheduling |
 | `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`. Exact requested bytes successfully returned |
 
-Lookup outcomes count completed operations, not canceled futures. Duration
+Lookup outcomes count only completed operations. Duration
 histograms record successful disk hits and callbacks only, starting after the
 memory lookup. Memory hits do not read the clock or record a duration; their
 outcome and served-byte counters still increase. A non-covering callback result
@@ -38,7 +38,7 @@ operations. Use the public lookup counters to measure caller-visible behavior.
 | `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`. Each chunk is 1 MiB. Excludes the reserved global-header chunk |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
-| `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`. Payload and payload-chunk bytes of successfully written payload regions, before publication. Metadata writes are included in the raw I/O counters, not this packing counter |
+| `feuer_disk_batch_bytes_total` | Counter | `kind`: `payload`, `chunk`. Payload and payload-chunk bytes of successfully written payload regions, before publication. Metadata writes are counted separately in the raw I/O counters |
 
 Disk-tier hits include copies from the shard's buffer; those perform no disk I/O, reserve no disk capacity, and are not yet indexed.
 Read errors and checksum failures are distinct misses. `covers_range()` includes buffered entries but does not count as a lookup.
@@ -52,8 +52,8 @@ Detached writes can outlive the last public cache handle.
 
 `allocated * 1 MiB - indexed payload bytes` measures capacity unavailable for
 indexed payload, including metadata, padding, partially dead chunks, and active
-writes. It is not a pure fragmentation measurement. Indexed payload bytes count
-entry payloads, not a deduplicated union of overlapping object ranges.
+writes. Indexed payload bytes sum individual entry lengths, counting overlapping
+object ranges once per entry.
 
 For byte-weighted packing efficiency, divide the rate of batch `payload` bytes
 by the rate of batch `chunk` bytes. Both exclude failed payload regions and include
@@ -68,16 +68,14 @@ individual kernel submissions.
 |---|---|---|
 | `feuer_disk_recovered_chunks` | Gauge | Currently allocated 1-MiB chunks restored by recovery; no labels |
 
-Recovered chunks are a subset of `feuer_disk_chunks{state="allocated"}`, not
-additional capacity. Each chunk counts once, including shared chunks and every
-chunk of a multi-chunk entry. Temporary scan reservations and normal writes do
+Recovered chunks are a subset of `feuer_disk_chunks{state="allocated"}`.
+Each chunk counts once, including shared chunks and every chunk of a multi-chunk entry. Temporary scan reservations and normal writes do
 not increase this gauge. A recovered payload chunk stops counting after its last
 entry is removed; reuse by a new write does not count as recovered.
 
 Recovery validates metadata; payload checksums are verified on read. A positive
-value shows that recovery restored chunks still reserved by metadata or payload entries,
-not that their payloads have been verified. Zero can mean recovery has not yet
-restored anything, or that all recovered chunks have since been released.
+value shows that recovery restored chunks still reserved by metadata or payload entries.
+Zero can mean recovery has not yet restored anything, or that all recovered chunks have since been released.
 
 ### Recovery logs
 
@@ -100,7 +98,7 @@ Invalid or unsupported pages are discarded without a global reset or generation 
 Each incoming entry counts at most once, even if it evicts several entries.
 Replacement, invalidation, memory compaction and eviction searches that remove
 nothing do not count. Disk admission runs once per flush or independent large write;
-a shared flush attributes its evictions to its first buffered entry, not every neighbor.
+a shared flush attributes its evictions only to its first buffered entry.
 An attempt still counts if it evicts entries but is later skipped, fails or is canceled.
 
 Percentage of memory insertion attempts that trigger eviction:
@@ -118,7 +116,7 @@ Percentage of disk insertion attempts that trigger eviction:
 ```
 
 Both denominators include redundant/already-covered attempts. Disk attempts
-start when the writer handles each download, not at queue admission. The percentage is undefined
+start when the writer handles each download. The percentage is undefined
 when there are no attempts in the window.
 
 ## Disk read sizes
@@ -148,7 +146,7 @@ ceiling, without per-bucket caps or reservations.
 Larger allocations share one idle bucket; reuse grows to fit and shrinks only when capacity
 is at least 10% larger than the requested length. Accounting includes any retained spare capacity.
 On Linux, these buffers use `mmap`/`mremap`/`munmap`. Writes use aligned input slices or unpooled scratch.
-These metrics are registered by `MemoryMetrics`, not `IoMetrics`, and have no `pool`
+These metrics are registered by `MemoryMetrics` and have no `pool`
 or `operation` label. The former `pool=small|medium|large` labels have been removed.
 The buffer gauge has a `bucket` label containing human-readable allocation capacity:
 `32 KiB`, `256 KiB`, `512 KiB`, `1 MiB`, `2 MiB`, `4 MiB`, `8 MiB`, `16 MiB`,
@@ -207,9 +205,9 @@ retains no idle buffers.
 | `feuer_disk_written_entries_total` | Counter | Entries in successfully written payload regions, before publication checks |
 
 Queue and storage counters describe different stages: do not sum all their
-values as a total number of disk-write attempts. `queued` is admission, not a
-terminal outcome. The tiered layer records `already_covered` when disk covers the callback
-download, and `redundant` when memory declined a contained download.
+values as a total number of disk-write attempts. `queued` counts admissions.
+The tiered layer records `already_covered` when disk covers the callback download,
+and `redundant` when memory declined a contained download.
 Queued and active writes proceed independently of memory retention.
 
 A storage `failed` outcome means the entry's payload write failed. `no_capacity` can also mean
@@ -221,7 +219,7 @@ Canceling an `insert_batch` caller does not cancel its detached writer.
 Successful writes may be discarded by disk containment checks. Pending-byte accounting lasts
 until each entry completes or is discarded, including its time in a partial chunk. The writer
 releases small incoming buffers after copying. Each shard always holds a 1-MiB buffer, even when empty;
-flushing retains the detached buffer through I/O as well. This gauge measures logical payload, not backing capacity.
+flushing retains the detached buffer through I/O as well. This gauge measures logical payload bytes.
 
 ## Read I/O queue waits
 
@@ -248,11 +246,11 @@ spikes. These metrics do not measure the proposed payload-read admission queue.
 - `feuer_memory_operations_total{operation}`: `insert`, `replace`, `redundant`,
   `remove`, `compact`. Internal access/hit/miss counters are not emitted.
   Use public lookup counters for hit ratios.
-- `feuer_memory_entries`: cache entries (not idle buffers).
+- `feuer_memory_entries`: cache entries.
 - `feuer_memory_compacted_payload_bytes_total`: cached allocation charges released
   by compaction; does not guarantee the allocation was freed if callers still hold it.
 - `feuer_disk_io_total{operation,outcome}`: logical data-file operations `read` and `write`,
-  outcomes `success` and `error`. A multi-chunk payload run counts as one write, not one per kernel request.
+  outcomes `success` and `error`. A multi-chunk payload run counts as one write.
 - `feuer_disk_io_duration_seconds{operation,outcome}`: operations `read` and
   `write`, outcome `success` only. Errors remain counted but are not timed.
 - `feuer_disk_io_bytes_total{operation}`: operations `read` and `write`.
