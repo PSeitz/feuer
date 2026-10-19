@@ -1,0 +1,687 @@
+diff --git a/README.md b/README.md
+index 5af6ff8..3d4ed6d 100644
+--- a/README.md
++++ b/README.md
+@@ -115,7 +115,9 @@ can also keep additional memory alive.
+ 
+ Disk capacity includes metadata and alignment overhead.
+ The backing file is exclusively locked while open. Lookups first check the shard's buffered entries,
+-then read disk and verify the covering entry's checksum. Both promote requested bytes to memory.
++then read disk and verify a covering checksum. Partial disk reads learn requested-range checksums
++from verified bytes, allowing repeated reads to skip the rest of the entry. These checksums are
++memory-only and disappear on entry removal or restart. Both paths promote requested bytes to memory.
+ Busy/flushing chunks may miss until publication; corrupt or uncertain disk reads are misses.
+ 
+ Exact-range downloads and whole objects are queued for disk immediately after memory admission.
+diff --git a/feuer-storage/disk-prototype.md b/feuer-storage/disk-prototype.md
+index c206110..25b7d91 100644
+--- a/feuer-storage/disk-prototype.md
++++ b/feuer-storage/disk-prototype.md
+@@ -66,12 +66,16 @@ throughput has not yet been compared against v10.
+ 
+ `get` first copies the requested bytes from a covering buffered entry, without disk I/O. Busy buffers and
+ chunks detached for flushing may miss until disk publication; no in-flight lookup state is retained.
+-Otherwise it reads and hashes the complete covering disk entry against its XXHash64 checksum, excluding alignment
+-padding, then returns exactly the requested bytes. It reads neither metadata nor neighboring entries.
++Otherwise it reads and hashes a covering byte range against its XXHash64 checksum, excluding alignment
++padding, then returns exactly the requested bytes. The first partial read verifies the covering entry and
++learns a checksum for the requested range. Later reads use the smallest covering checksum, or share a
++whole-entry read already in progress. Partial checksums are memory-only metadata on the owning entry,
++discarded on removal or restart. They reference existing payload bytes without separate disk ownership.
++Reads load neither metadata nor neighboring entries.
+ A read copies the address and expected checksum under the range-index lock, then reads into an
+ owned memory buffer. Concurrent disk overwrite is allowed: checksum validation happens after I/O
+-and before using the bytes, subject to the usual checksum-collision limitation. A checksum mismatch removes the entry only if its expected
+-checksum still matches the failed read; discarding a newer identical copy remains an allowed miss.
++and before using the bytes, subject to the usual checksum-collision limitation. A checksum mismatch
++removes the entry only if the read still belongs to it, leaving replacement entries untouched.
+ 
+ Disk and memory consult standalone access history through `feuer-historian`, using the shared
+ retrieval-cost policy in `feuer-memory::retention`. Public requests
+diff --git a/feuer-storage/src/disk_cache.rs b/feuer-storage/src/disk_cache.rs
+index 4872975..cb389d3 100644
+--- a/feuer-storage/src/disk_cache.rs
++++ b/feuer-storage/src/disk_cache.rs
+@@ -54,7 +54,8 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
+ /// Small entries share immutable 1-MiB payload chunks. Separate mutable metadata chunks
+ /// hold entry records and links between metadata chunks. Each shard's chain starts at its first chunk.
+ /// Entries have plain payload bytes, 4-KiB-aligned storage, and a checksum in their entry metadata.
+-/// Reads verify the whole covering entry, returning only requested bytes. Reuse requires a wholly free chunk.
++/// Reads verify a covering checksum, learning partial checksums in memory from verified bytes.
++/// Payload reuse requires a wholly free chunk.
+ /// The key hash selects an independently allocated shard. Admission may fail despite space elsewhere.
+ ///
+ /// Pressure eviction uses sampled retention scores, defaulting to retrieval value per payload byte.
+@@ -98,6 +99,7 @@ struct DiskEntry {
+     // In-flight deduplication: concurrent readers share one disk read and checksum verification.
+     // Only concurrent callers retain the result. The index must not cache payload bytes.
+     in_flight_read: Weak<PayloadRead>,
++    partial_checksums: Vec<PartialChecksum>,
+     eviction_position: usize,
+     object_range: ByteRange,
+     payload_checksum: u64,
+@@ -105,6 +107,13 @@ struct DiskEntry {
+     metadata: metadata::EntryMetadataLocation,
+ }
+ 
++/// A requested range's checksum learned from verified bytes, with no separate payload ownership.
++struct PartialChecksum {
++    object_range: ByteRange,
++    payload_checksum: u64,
++    in_flight_read: Weak<PayloadRead>,
++}
++
+ /// One payload read's disk address, object range, checksum, and result shared by concurrent readers.
+ struct PayloadRead {
+     object_range: ByteRange,
+@@ -277,13 +286,15 @@ impl DiskCache {
+     }
+ 
+     /// Returns exactly requested bytes from one covering entry, or a miss on any I/O/integrity uncertainty.
+-    /// Concurrent reads of one stored entry share whole-entry I/O and checksum verification.
++    /// Concurrent callers share reads covered by the same checksum.
+     /// Reads no neighboring entries or metadata. Results retain no disk ownership.
+     pub async fn get(&self, key: &ObjectKeyHash, requested: ByteRange) -> Option<Bytes> {
+         self.fetch_from_disk(key, requested).await.map(|(bytes, _)| bytes)
+     }
+ 
+-    /// Copies buffered bytes, or reads disk after verifying the whole covering entry's checksum.
++    /// Copies buffered bytes, or reads disk using a covering checksum.
++    /// The first partial read verifies the entry, then remembers the requested range's checksum.
++    /// Partial checksums are discarded with the entry and are not persisted.
+     /// Copies a disk-read slice only if it saves at least 25% of backing capacity.
+     /// Allocation failure keeps the original slice.
+     /// Returns the final backing buffer's capacity too. Concurrent callers share the entry read.
+@@ -307,7 +318,7 @@ impl DiskCache {
+             let capacity = bytes.len();
+             return Some((bytes, capacity));
+         }
+-        let read = {
++        let (read, entry_start) = {
+             let mut disk_index = shard.entry_index.lock().unwrap();
+             let Some(entry) =
+                 disk_index.covering_entry(key, requested.unwrap_or_else(|| ByteRange::new(0, 0).unwrap()))
+@@ -316,7 +327,7 @@ impl DiskCache {
+                 metrics.record_lookup(DiskLookupOutcome::Absent, started.elapsed());
+                 return None;
+             };
+-            entry.share_payload_read()
++            (entry.share_payload_read(requested), entry.object_range.start())
+         };
+         // If the initializing caller is canceled, OnceCell lets a waiter take over.
+         let result = read
+@@ -324,7 +335,15 @@ impl DiskCache {
+             .get_or_init(|| async {
+                 let result = read.read_and_verify_payload(&self.disk.file).await;
+                 if matches!(result, Err(DiskLookupOutcome::ChecksumFailed)) {
+-                    shard.remove_entry(key, read.object_range.start());
++                    let mut disk_index = shard.entry_index.lock().unwrap();
++                    if disk_index
++                        .entries_by_key
++                        .get(key)
++                        .and_then(|entries| entries.get(&entry_start))
++                        .is_some_and(|entry| entry.has_read(&read))
++                    {
++                        shard.remove_entry_from_index(&mut disk_index, key, entry_start);
++                    }
+                 }
+                 result
+             })
+@@ -334,6 +353,27 @@ impl DiskCache {
+                 let requested = requested.unwrap_or(read.object_range);
+                 let start = (requested.start() - read.object_range.start()) as usize;
+                 let bytes = bytes.slice(start..start + requested.len() as usize);
++                // Empty requests need no partial checksum or read at a possible end-of-file address.
++                if !requested.is_empty() && requested != read.object_range {
++                    let payload_checksum = XxHash64::oneshot(0, &bytes);
++                    let mut disk_index = shard.entry_index.lock().unwrap();
++                    if let Some(entry) = disk_index
++                        .entries_by_key
++                        .get_mut(key)
++                        .and_then(|entries| entries.get_mut(&entry_start))
++                        .filter(|entry| entry.has_read(&read))
++                        && !entry
++                            .partial_checksums
++                            .iter()
++                            .any(|part| part.object_range == requested)
++                    {
++                        entry.partial_checksums.push(PartialChecksum {
++                            object_range: requested,
++                            payload_checksum,
++                            in_flight_read: Weak::new(),
++                        });
++                    }
++                }
+                 let (bytes, buffer_capacity) = self.disk.file.shrink_read_buffer(bytes, *capacity);
+                 metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
+                 Some((bytes, buffer_capacity))
+@@ -406,6 +446,7 @@ impl DiskEntry {
+     fn new(entry_metadata: &metadata::EntryMetadata, location: metadata::EntryMetadataLocation) -> Self {
+         Self {
+             in_flight_read: Weak::new(),
++            partial_checksums: Vec::new(),
+             eviction_position: 0,
+             object_range: entry_metadata.object_range,
+             payload_checksum: entry_metadata.payload_checksum,
+@@ -414,20 +455,41 @@ impl DiskEntry {
+         }
+     }
+ 
+-    /// Shares the payload read, creating one from this entry's metadata when no readers remain.
+-    fn share_payload_read(&mut self) -> Arc<PayloadRead> {
+-        self.in_flight_read.upgrade().unwrap_or_else(|| {
++    /// Shares a whole-entry read already in progress, or uses the smallest covering checksum.
++    fn share_payload_read(&mut self, requested: Option<ByteRange>) -> Arc<PayloadRead> {
++        if let Some(read) = self.in_flight_read.upgrade() {
++            return read;
++        }
++        let requested = requested.unwrap_or(self.object_range);
++        let (object_range, payload_checksum, in_flight_read) = self
++            .partial_checksums
++            .iter_mut()
++            .filter(|part| part.object_range.contains(requested))
++            .min_by_key(|part| part.object_range.len())
++            .map(|part| (part.object_range, part.payload_checksum, &mut part.in_flight_read))
++            .unwrap_or((self.object_range, self.payload_checksum, &mut self.in_flight_read));
++        in_flight_read.upgrade().unwrap_or_else(|| {
+             let read = Arc::new(PayloadRead {
+-                object_range: self.object_range,
+-                payload_checksum: self.payload_checksum,
+-                payload_address: self.payload_address,
++                object_range,
++                payload_checksum,
++                payload_address: self.payload_address + (object_range.start() - self.object_range.start()),
+                 result: OnceCell::new(),
+             });
+-            self.in_flight_read = Arc::downgrade(&read);
++            *in_flight_read = Arc::downgrade(&read);
+             read
+         })
+     }
+ 
++    /// Read identity prevents a late completion from changing a replacement entry.
++    fn has_read(&self, read: &Arc<PayloadRead>) -> bool {
++        let weak = Arc::downgrade(read);
++        self.in_flight_read.ptr_eq(&weak)
++            || self
++                .partial_checksums
++                .iter()
++                .any(|part| part.in_flight_read.ptr_eq(&weak))
++    }
++
+     fn chunk_count(&self) -> u64 {
+         // Small payloads stay within one chunk. Larger payloads start at a chunk boundary.
+         self.object_range.len().max(1).div_ceil(CHUNK_BYTES)
+@@ -436,6 +498,7 @@ impl DiskEntry {
+ 
+ impl DiskCacheShard {
+     /// Locks the disk index, removes one entry, releases its payload, and frees its metadata slot.
++    #[cfg(test)]
+     fn remove_entry(&self, key: &ObjectKeyHash, start: u64) {
+         self.remove_entry_from_index(&mut self.entry_index.lock().unwrap(), key, start);
+     }
+@@ -545,7 +608,7 @@ impl DiskCacheInner {
+ }
+ 
+ impl PayloadRead {
+-    /// Reads the whole entry payload and verifies its checksum.
++    /// Reads the byte range covered by this checksum and verifies it.
+     async fn read_and_verify_payload(&self, file: &DataFile) -> Result<(Bytes, usize), DiskLookupOutcome> {
+         let (bytes, capacity) = file
+             .read_payload(self.payload_address, self.object_range.len() as usize)
+diff --git a/feuer-storage/src/disk_cache/metrics_tests.rs b/feuer-storage/src/disk_cache/metrics_tests.rs
+index 52b942a..55496d0 100644
+--- a/feuer-storage/src/disk_cache/metrics_tests.rs
++++ b/feuer-storage/src/disk_cache/metrics_tests.rs
+@@ -174,7 +174,7 @@ async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation()
+         .unwrap()
+         .covering_entry(&key, ByteRange::new(10, 18).unwrap())
+         .unwrap()
+-        .share_payload_read();
++        .share_payload_read(None);
+     let mut initializer = Box::pin(read.result.get_or_init(std::future::pending));
+     assert!(
+         std::future::poll_fn(|cx| Poll::Ready(initializer.as_mut().poll(cx)))
+@@ -227,6 +227,238 @@ async fn concurrent_slices_share_one_read_and_survive_initializer_cancellation()
+     assert_eq!(reads(), 3.0);
+ }
+ 
++#[tokio::test]
++async fn partial_checksums_reduce_read_bytes_without_writes_and_reset_on_recovery() {
++    let (directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
++    let key = ObjectKeyHash::from("partial");
++    let source = tests::download(u64::MAX - 3 * CHUNK_BYTES, 2 * CHUNK_BYTES as usize + 17);
++    let start = source.downloaded_range().start();
++    let request = tests::range(start + 4093, start + 4093 + 65_543);
++    let nested = tests::range(request.start() + 7, request.start() + 40_007);
++    // Padding makes a repeated read exceed the 32-KiB buffer bucket, then copying shrinks it back.
++    let threshold = tests::range(start + 1, start + 1 + 32 * 1024);
++    cache.insert(key, source.clone()).await.unwrap();
++    let read_bytes = || value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]);
++    let written = value(&registry, "feuer_disk_io_bytes_total", &[("operation", "write")]);
++    for (range, expected_read) in [
++        (request, source.downloaded_range().len()),
++        (request, request.len()),
++        (nested, request.len()),
++        (nested, nested.len()),
++        (threshold, source.downloaded_range().len()),
++        (threshold, threshold.len()),
++        (source.downloaded_range(), source.downloaded_range().len()),
++    ] {
++        let before = read_bytes();
++        let (bytes, capacity) = cache.fetch_from_disk(&key, range).await.unwrap();
++        assert_eq!(bytes, source.bytes_in_range(range));
++        assert_eq!(capacity, BufferPool::allocation_capacity(bytes.len()));
++        assert_eq!(read_bytes() - before, expected_read as f64);
++    }
++    {
++        let index = cache.disk.shards[0].entry_index.lock().unwrap();
++        let entry = &index.entries_by_key[&key][&start];
++        assert_eq!(entry.partial_checksums.len(), 3);
++        assert!(entry.in_flight_read.upgrade().is_none());
++        assert!(
++            entry
++                .partial_checksums
++                .iter()
++                .all(|part| part.in_flight_read.upgrade().is_none())
++        );
++    }
++    assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
++    assert_eq!(
++        value(&registry, "feuer_disk_payload_bytes", &[]),
++        source.bytes().len() as f64
++    );
++    assert_eq!(
++        value(&registry, "feuer_disk_io_bytes_total", &[("operation", "write")]),
++        written
++    );
++
++    cache.write_dirty_metadata_pages().await;
++    drop(cache);
++    let (recovered_registry, backend) = crate::test_metrics::registry();
++    let cache = DiskCache::open(
++        directory.path(),
++        4 * CHUNK_BYTES,
++        DiskCacheOptions {
++            io_metrics: IoMetrics::new(&backend),
++            ..Default::default()
++        },
++    )
++    .await
++    .unwrap();
++    let read_bytes = || {
++        value(
++            &recovered_registry,
++            "feuer_disk_io_bytes_total",
++            &[("operation", "read")],
++        )
++    };
++    for expected_read in [source.bytes().len() as u64, request.len()] {
++        let before = read_bytes();
++        assert_eq!(cache.get(&key, request).await.unwrap(), source.bytes_in_range(request));
++        assert_eq!(read_bytes() - before, expected_read as f64);
++    }
++}
++
++#[tokio::test]
++async fn partial_reads_detect_corruption_before_and_after_learning_checksums() {
++    for learned in [false, true] {
++        let (_directory, cache, registry) = measured_cache(3 * CHUNK_BYTES).await;
++        let key = ObjectKeyHash::from("corrupt partial");
++        let source = tests::download(17, CHUNK_BYTES as usize);
++        let request = tests::range(17 + 4093, 17 + 8197);
++        cache.insert(key, source.clone()).await.unwrap();
++        if learned {
++            assert_eq!(cache.get(&key, request).await.unwrap(), source.bytes_in_range(request));
++        }
++        let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&17].payload_address;
++        // Before learning, corruption outside the request must still fail full-payload verification.
++        let corrupt_offset = if learned { 4096 } else { 12_288 };
++        cache
++            .disk
++            .file
++            .write_at(address + corrupt_offset, &Bytes::from(vec![0; 4096]))
++            .await
++            .unwrap();
++        let before = value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]);
++        assert!(cache.get(&key, request).await.is_none());
++        assert_eq!(
++            value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]) - before,
++            if learned { request.len() } else { CHUNK_BYTES } as f64,
++        );
++        assert_eq!(
++            value(&registry, "feuer_disk_lookup_total", &[("outcome", "checksum_failed")]),
++            1.0
++        );
++        assert!(!cache.covers_range(&key, source.downloaded_range()));
++        assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
++        assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 1.0);
++    }
++}
++
++#[tokio::test]
++async fn concurrent_partial_reads_share_io_and_learn_each_range_once() {
++    use std::{future::Future, task::Poll};
++
++    let (_directory, cache, registry) = measured_cache(3 * CHUNK_BYTES).await;
++    let key = ObjectKeyHash::from("concurrent partial");
++    let source = tests::download(17, CHUNK_BYTES as usize);
++    let request = tests::range(4110, 69_653);
++    cache.insert(key, source.clone()).await.unwrap();
++    assert!(cache.get(&key, request).await.is_some());
++    let read = cache.disk.shards[0]
++        .entry_index
++        .lock()
++        .unwrap()
++        .covering_entry(&key, request)
++        .unwrap()
++        .share_payload_read(Some(request));
++    assert_eq!(read.object_range, request);
++    let mut initializer = Box::pin(read.result.get_or_init(std::future::pending));
++    assert!(
++        std::future::poll_fn(|cx| Poll::Ready(initializer.as_mut().poll(cx)))
++            .await
++            .is_pending()
++    );
++    let mut first = Box::pin(cache.fetch_from_disk(&key, request));
++    let mut second = Box::pin(cache.fetch_from_disk(&key, request));
++    for waiter in [&mut first, &mut second] {
++        assert!(
++            std::future::poll_fn(|cx| Poll::Ready(waiter.as_mut().poll(cx)))
++                .await
++                .is_pending()
++        );
++    }
++    assert_eq!(Arc::strong_count(&read), 3);
++    let weak = Arc::downgrade(&read);
++    drop(initializer);
++    drop(read);
++    let before = value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]);
++    let (first, second) = tokio::join!(first, second);
++    let (first, first_capacity) = first.unwrap();
++    let (second, second_capacity) = second.unwrap();
++    assert_eq!(first, source.bytes_in_range(request));
++    assert_eq!(first, second);
++    assert_eq!(first.as_ptr(), second.as_ptr());
++    assert_eq!(first_capacity, BufferPool::allocation_capacity(request.len() as usize));
++    assert_eq!(first_capacity, second_capacity);
++    assert!(weak.upgrade().is_none());
++    assert_eq!(
++        value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]) - before,
++        request.len() as f64
++    );
++    assert_eq!(
++        cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&17]
++            .partial_checksums
++            .len(),
++        1
++    );
++}
++
++#[tokio::test]
++async fn late_partial_reads_do_not_modify_replacement_entries() {
++    use std::{future::Future, task::Poll};
++
++    for changed in [false, true] {
++        let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
++        let key = ObjectKeyHash::from("replacement");
++        let source = tests::download(17, CHUNK_BYTES as usize);
++        let request = tests::range(4110, 69_653);
++        let nested = tests::range(4111, 4112);
++        cache.insert(key, source.clone()).await.unwrap();
++        assert!(cache.get(&key, request).await.is_some());
++        let shard = &cache.disk.shards[0];
++        let read = shard
++            .entry_index
++            .lock()
++            .unwrap()
++            .covering_entry(&key, request)
++            .unwrap()
++            .share_payload_read(Some(request));
++        let mut initializer = Box::pin(read.result.get_or_init(std::future::pending));
++        assert!(
++            std::future::poll_fn(|cx| Poll::Ready(initializer.as_mut().poll(cx)))
++                .await
++                .is_pending()
++        );
++        let mut waiter = Box::pin(cache.get(&key, nested));
++        assert!(
++            std::future::poll_fn(|cx| Poll::Ready(waiter.as_mut().poll(cx)))
++                .await
++                .is_pending()
++        );
++        shard.remove_entry(&key, 17);
++        let replacement = if changed {
++            Download::new(17, Bytes::from(vec![0; CHUNK_BYTES as usize])).unwrap()
++        } else {
++            source.clone()
++        };
++        cache.insert(key, replacement.clone()).await.unwrap();
++        let address = shard.entry_index.lock().unwrap().entries_by_key[&key][&17].payload_address;
++        assert_eq!(read.payload_address, address + request.start() - 17);
++        drop(initializer);
++        assert_eq!(waiter.await, (!changed).then(|| source.bytes_in_range(nested)));
++        assert!(
++            shard.entry_index.lock().unwrap().entries_by_key[&key][&17]
++                .partial_checksums
++                .is_empty()
++        );
++        let before = value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]);
++        assert_eq!(
++            cache.get(&key, request).await.unwrap(),
++            replacement.bytes_in_range(request)
++        );
++        assert_eq!(
++            value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]) - before,
++            CHUNK_BYTES as f64
++        );
++    }
++}
++
+ #[tokio::test]
+ async fn records_write_outcomes_packing_and_index_usage() {
+     let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
+diff --git a/feuer-storage/src/disk_cache/tests.rs b/feuer-storage/src/disk_cache/tests.rs
+index 2867b63..ab8564a 100644
+--- a/feuer-storage/src/disk_cache/tests.rs
++++ b/feuer-storage/src/disk_cache/tests.rs
+@@ -168,6 +168,23 @@ async fn exact_unaligned_reads_containment_and_key_hash_identity() {
+     assert_eq!(disk_index.entries_by_key[&key].len(), 1);
+ }
+ 
++#[tokio::test]
++async fn empty_partial_reads_at_end_of_file_do_not_learn_checksums() {
++    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
++    let key = ObjectKeyHash::from("empty suffix");
++    let source = download(17, CHUNK_BYTES as usize);
++    cache.insert(key, source.clone()).await.unwrap();
++    let end = source.downloaded_range().end();
++    for _ in 0..2 {
++        assert!(cache.get(&key, range(end, end)).await.unwrap().is_empty());
++    }
++    assert!(
++        cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key][&17]
++            .partial_checksums
++            .is_empty()
++    );
++}
++
+ #[tokio::test]
+ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers() {
+     let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+@@ -481,7 +498,7 @@ async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
+         .unwrap()
+         .covering_entry(&key, source.downloaded_range())
+         .unwrap()
+-        .share_payload_read();
++        .share_payload_read(None);
+     assert!(
+         cache
+             .insert(ObjectKeyHash::from("new"), download(0, CHUNK_BYTES as usize))
+@@ -1271,7 +1288,7 @@ async fn reads_30_mib_contiguous_payloads_and_trims_final_padding() {
+ }
+ 
+ #[tokio::test]
+-async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
++async fn serves_100_mib_entry_subranges_using_learned_checksums() {
+     let (_directory, cache) = open_test_cache(104 * CHUNK_BYTES).await;
+     let key = ObjectKeyHash::from("large object");
+     let source = download(3, 100 * CHUNK_BYTES as usize + 17);
+@@ -1283,6 +1300,8 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
+             range(3, 3 + 80 * CHUNK_BYTES),
+             100 * CHUNK_BYTES as usize + BUFFER_ALIGNMENT,
+         ),
++        // Reading the learned 80-MiB range retains its buffer, saving less than 25% by copying.
++        (range(3, 3 + 75 * CHUNK_BYTES), 80 * CHUNK_BYTES as usize),
+         (range(3, 3 + 75 * CHUNK_BYTES), 75 * CHUNK_BYTES as usize),
+         (range(7, 33), 32 * 1024),
+         (range(boundary - 3, boundary + 13), 32 * 1024),
+@@ -1304,7 +1323,20 @@ async fn serves_100_mib_entry_subranges_only_after_checking_the_whole_entry() {
+         .write_at(last_aligned_offset, &Bytes::from(vec![0; BUFFER_ALIGNMENT]))
+         .await
+         .unwrap();
+-    // Even a request at the beginning must detect corruption at the end of this entry.
++    // A learned prefix remains readable. Reading the corrupted suffix invalidates its owner.
++    assert_eq!(
++        cache.get(&key, range(3, 13)).await.unwrap(),
++        source.bytes_in_range(range(3, 13))
++    );
++    assert!(
++        cache
++            .get(
++                &key,
++                range(source.downloaded_range().end() - 17, source.downloaded_range().end())
++            )
++            .await
++            .is_none()
++    );
+     assert!(cache.get(&key, range(3, 13)).await.is_none());
+ }
+ 
+diff --git a/feuer-storage/src/file.rs b/feuer-storage/src/file.rs
+index 28f0fae..e9f598e 100644
+--- a/feuer-storage/src/file.rs
++++ b/feuer-storage/src/file.rs
+@@ -159,7 +159,8 @@ impl DataFile {
+     }
+ 
+     /// Reads one contiguous payload, omitting final alignment padding, and returns its backing capacity.
+-    /// The caller supplies the aligned payload address. Even empty payloads occupy one alignment page.
++    /// The address may start inside a payload. Alignment padding is omitted from the result.
++    /// Even empty payloads read one alignment page.
+     pub(crate) async fn read_payload(&self, address: u64, length: usize) -> DataFileResult<(Bytes, usize)> {
+         self.measure_io(IoOperation::Read, address, length, self.read_slice(address, length))
+             .await
+diff --git a/format.md b/format.md
+index 1c221e8..9a937f4 100644
+--- a/format.md
++++ b/format.md
+@@ -42,6 +42,15 @@ record's address and length. Only three entry records are shown.
+ On open, the cache follows metadata links to rebuild its in-memory index without
+ reading payloads. Payload checksums are verified when entries are read.
+ 
++Partial reads initially verify the whole covering entry. From those verified bytes,
++readers remember checksums for requested ranges in memory, attached to the owning entry.
++Later reads use the smallest covering checksum, or share a whole-entry read already in
++progress, without copying payload bytes on disk. Direct I/O still rounds reads to 4-KiB
++alignment. These partial checksums have no disk records or separate payload ownership
++and are discarded on entry removal or restart. Distinct requested ranges add in-memory
++metadata until the entry is removed. Choosing a checksum scans these ranges under the
++shard's index lock, so both memory use and lookup work grow with distinct ranges.
++
+ ## Files and encoding
+ 
+ - The backing filename defaults to `data`, with exclusive lock file `.feuer.lock`.
+diff --git a/implementation-status.md b/implementation-status.md
+index fe36c4f..e92c030 100644
+--- a/implementation-status.md
++++ b/implementation-status.md
+@@ -135,7 +135,8 @@ Each shard owns an initialized 1-MiB buffer shared by all insertion paths; the b
+ Buffering reserves no disk space. A flush reserves payload chunks; metadata positions remain free until publication.
+ Payload completion precedes publication; a separate writer persists metadata every second.
+ Reads first copy requested bytes from buffered entries; busy/flushing chunks may miss until publication.
+-Disk reads verify the whole covering entry's XXHash64 checksum, without reading neighbors or metadata.
++Disk reads verify a covering XXHash64 checksum, without reading neighbors or metadata. Partial reads learn
++requested-range checksums from verified bytes and keep them in memory on the owning entry until removal or restart.
+ 
+ Independent shards have their own allocator and range-index lock. The allocator tracks coalesced free
+ whole-chunk runs; the metadata component reserves entry positions and grows metadata capacity internally.
+@@ -151,7 +152,7 @@ reserved, but removed entries' metadata positions are reused across batches. An
+ metadata chunk in addition to its payload chunks. One periodic writer persists dirty 4-KiB pages every second;
+ see the [write contract](format.md#write-ordering-and-reuse). Payload chunks remain independently reclaimable.
+ Each page and payload has its own XXHash64 checksum. Older formats are not migrated.
+-Read invalidation compares expected payload checksums. Discarding a newer identical copy is an allowed miss.
++Read invalidation checks read identity so a late checksum failure cannot remove a replacement entry.
+ Pressure eviction samples up to 64 live entries and selects the lowest recent retrieval value per payload
+ byte, using the same history, cost calculation and comparison as memory. Ties choose the oldest publication.
+ Alignment, metadata and chunk overhead do not enter the score. Only selected entries are removed. Neighbors
+@@ -170,8 +171,8 @@ cancellation, corruption/reused payload, partial batch failure, metadata-only ch
+ mixed-size packing, exclusive multi-chunk ownership, finalized entry metadata, whole-chunk ownership/reuse,
+ per-admission eviction limits, shared evidence across tiers, payload-only scoring, mixed-size churn,
+ concurrent eviction/reads,
+-rejection of scattered free chunks, contiguous payloads across chunk boundaries, and whole-entry
+-validation of 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable.
++rejection of scattered free chunks, contiguous payloads across chunk boundaries, and learned partial-read
++checksums for 100-MiB subrange hits. A 1-KiB hit succeeds with only its aligned payload block readable.
+ Unrelated entries and metadata are not loaded. Before background recovery was added, on `m8g-32cpu-local-ssd`,
+ all 71 storage tests and all 135 workspace tests passed with real direct I/O
+ and io_uring on the local ext4 SSD. Workspace Clippy passed with warnings denied. Formatting and whitespace
+diff --git a/metrics.md b/metrics.md
+index 4c57dc6..41ac9af 100644
+--- a/metrics.md
++++ b/metrics.md
+@@ -34,7 +34,7 @@ operations. Use the public lookup counters to measure caller-visible behavior.
+ | Metric | Type | Labels / meaning |
+ |---|---|---|
+ | `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `checksum_failed` |
+-| `feuer_disk_lookup_duration_seconds` | Histogram | No labels. Successful hits only: buffered copying, or whole-entry reading, checksum verification and copying |
++| `feuer_disk_lookup_duration_seconds` | Histogram | No labels. Successful hits only: buffered copying, or reading a covering checksummed range, verification and copying |
+ | `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`. Each chunk is 1 MiB |
+ | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
+ | `feuer_disk_entries` | Gauge | Indexed disk entries |
+diff --git a/tiered-plan.md b/tiered-plan.md
+index 19cbdb9..9c053dc 100644
+--- a/tiered-plan.md
++++ b/tiered-plan.md
+@@ -97,8 +97,9 @@ A returned `Bytes` may share a larger heap allocation. Feuer does not require a
+ subrange result. Caller-held results are outside cache-capacity accounting and may keep shared backing memory
+ alive after cache eviction.
+ 
+-A hit on an entry already written to disk reads and verifies the whole covering entry, then returns only the
+-requested bytes. A subrange lookup may therefore read a complete larger download. Packing independent entries
++A hit on an entry already written to disk reads and verifies a covering checksummed range, then returns only the
++requested bytes. The first partial read verifies the covering entry and remembers the requested range's checksum
++in memory. Subsequent reads can use that checksum without reading the complete larger download. Packing independent entries
+ in one allocation chunk does not require reading the neighboring entries. Returned disk results do not retain
+ disk storage, allocation guards, or file mappings.
+ 
+@@ -183,8 +184,8 @@ cost-weighted, request, and byte hit rates together with useful-payload utilizat
+ footprint, read and write amplification, cleaning or relocation traffic, throughput, and tail latency.
+ 
+ The performance hypotheses are that integrated containment can reuse a larger downloaded range and exact
+-range attribution improves frequency-aware retention. The current disk design uses whole-entry checksum
+-validation and 4-KiB-aligned entry allocations. It does not claim smaller reads or sub-alignment packing than
++range attribution improves frequency-aware retention. The current disk design uses whole-entry checksums,
++learned partial-read checksums, and 4-KiB-aligned entry storage. It does not claim smaller reads or sub-alignment packing than
+ Foyer. These are hypotheses to isolate, not evidence of superiority. Feuer must not claim to beat Foyer until
+ the comparison demonstrates the claim without violating correctness or the stated resource guardrails.
+ 
+@@ -306,7 +307,8 @@ results. Direct mode does not imply synchronization or durability.
+ 
+ ## 9. Integrity
+ 
+-Feuer verifies the whole covering payload against its expected checksum before returning disk-backed bytes.
++Feuer verifies a covering byte range against its expected checksum before returning disk-backed bytes.
++Partial-read checksums are learned only from verified bytes and discarded with their owning entry or on restart.
+ Read failures and checksum mismatches become misses. Recovery validates each metadata page's checksum and
+ format tag, then relies on the writer's range and alignment contract; it still enforces current shard routing,
+ bounds, and metadata/payload ownership. Hash collisions and checksum collisions are not detected separately.
+@@ -395,7 +397,7 @@ The MVP is complete when tests demonstrate that:
+ - buffered and direct modes return identical requested bytes, and requested direct mode never silently falls back.
+ - Linux supports direct mode on a capable filesystem, with simultaneous reads and writes through io_uring queues
+   that enforce waiting-request and active-request limits.
+-- disk hits verify the whole covering entry, return only requested bytes, and do not read neighboring entries.
++- disk hits verify a covering checksummed range, return only requested bytes, and do not read neighboring entries.
+ - corrupted or uncertain disk bytes always miss and are never returned.
+ - restart may recover any subset, including none; corrupt recovered payloads become misses.
+ - unsupported metadata page tags are discarded without requiring migration or a global cache reset.

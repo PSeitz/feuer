@@ -1,0 +1,123 @@
+{
+  "question": "Does production memory retention reduce disk reads while copying, write admission, or query CPU queuing offsets latency gains?",
+  "measurement": "Existing cold-sweep metrics and historical full-host CPU profiles, plus an interrupted warm-cache diagnostic",
+  "datadog_org": "byoc-sim.datadoghq.com",
+  "timezone": "UTC",
+  "workspace": "pascal-feuer",
+  "kubernetes_context": "arn:aws:eks:us-east-1:624325725547:cluster/yahoo",
+  "pod_selector": "cloudprem-ws-pascal-feuer-searcher-*",
+  "pod_count": 14,
+  "runs": {
+    "20": {
+      "report": "sweep_20261017T203247Z_cold",
+      "feuer_revision": "2f381acdb13e114593e98d1078f29b341279380d",
+      "from": "2026-10-17T20:39:00Z",
+      "to": "2026-10-17T21:28:00Z"
+    },
+    "21": {
+      "report": "sweep_20261017T220813Z_cold",
+      "feuer_revision": "4e7a7d12478c645d4d534ca6ef0fc33d87d279ca",
+      "from": "2026-10-18T06:29:00Z",
+      "to": "2026-10-18T07:17:00Z"
+    }
+  },
+  "source_report_directory": "/Users/pascal.seitz/go/src/github.com/DataDog/Development/yahoo/byoc-yahoo-sim/user-sim/reports",
+  "offline_stage_inputs": ["raw/stage-source-20.json", "raw/stage-source-21.json"],
+  "stage_results": "results/stage-cache-metrics.csv",
+  "query_denominator": "Report total, including failed and skipped queries",
+  "rollup_seconds": 20,
+  "counter_boundaries": "Prorate each bucket by overlap with the recorded per-workspace measurement window",
+  "query_manifests": [
+    "raw/cold-requests.json",
+    "raw/runtime-cold-requests.json"
+  ],
+  "counter_metric_families": [
+    "feuer_memory_compacted_payload_bytes_total",
+    "feuer_memory_operations_total",
+    "feuer_memory_eviction_triggering_insertions_total",
+    "feuer_lookup_bytes_total",
+    "feuer_disk_write_queue_total",
+    "quickwit_runtime_tokio_worker_busy_duration_milliseconds_total"
+  ],
+  "distribution_metric": "feuer_disk_write_queue_duration_seconds",
+  "distribution_mean": "sum of distribution sums / sum of distribution counts",
+  "gauge_metric_families": [
+    "quickwit_runtime_tokio_scheduled_tasks",
+    "quickwit_thread_pool_pending_tasks"
+  ],
+  "boundary_sensitivity_trim_seconds": [
+    0,
+    20,
+    40
+  ],
+  "limitations": [
+    "Different absolute query datasets and counts between versions",
+    "Split compaction counters combine ordinary trimming and same-range copying",
+    "Rollup and exporter timing obscure short bursts",
+    "CPU samples sometimes exceed host core count",
+    "Neither write rejections nor compaction counts prove a query latency mechanism"
+  ],
+  "source_summary_sha256": {
+    "stage-source-20.json": "4cd8cd78dfe67723e3714cac5134356a704057672af5c2f2dfc976be349dac56",
+    "stage-source-21.json": "87d807fa5d4111eb6d3137fb68b74b55b488adc9b3331d617fa1ca6e34fb7d3d"
+  },
+  "profiling_mcp": {
+    "endpoint": "https://mcp.datadoghq.com/v1/mcp?toolsets=core,profiling",
+    "org": "byoc-sim.datadoghq.com",
+    "tool": "explore_profiling_flame_graph",
+    "profile_type": "ebpf-cpu-time",
+    "query": "service:quickwit family:ebpf pod_name:cloudprem-ws-pascal-feuer-searcher-*",
+    "windows": {
+      "20": ["2026-10-17T21:20:43.436683Z", "2026-10-17T21:26:10.131575Z"],
+      "21": ["2026-10-18T07:10:05.436308Z", "2026-10-18T07:15:30.675415Z"]
+    },
+    "stack_filters": ["tantivy", "feuer_memory", "feuer_memory::store::MemoryCache::insert", "feuer_storage"],
+    "share_method": "Convert totalMatchingValue and totalValue to the same unit, then divide. Inclusive filter populations overlap and must not be added.",
+    "summary": "results/profile-shares.csv",
+    "analysis": "analyze-mcp.py",
+    "calls": "raw/mcp-measured-windows-calls.json",
+    "configuration_reference": "https://datadoghq.atlassian.net/wiki/spaces/PROF/pages/6340905445"
+  },
+  "disjoint_cpu_check": {
+    "pod": "cloudprem-ws-pascal-feuer-searcher-4",
+    "from": "2026-10-18T07:13:47.748Z",
+    "to": "2026-10-18T07:14:48.256Z",
+    "symbolicated_profile_sha256": "11fd564db32194d4f5de04f78ce0e5372ab0bca39e0f70ad3d5e1f486422d93a",
+    "sampling_period_ns": 50000000,
+    "sample_count": 49515,
+    "sampled_cpu_seconds": 2475.75,
+    "go_version": "go1.26.1 darwin/arm64",
+    "method": "Convert symbolicated pprof with go tool pprof -raw, then assign each CPU-time sample to the first matching stack rule. Unknown leaves retain caller-based attribution when available.",
+    "rules_and_results": "raw/host-profiles/pod4-raw-attribution.json",
+    "analysis": "analyze-pprof.py",
+    "comparison_limit": "One historical pod-minute, not the entire fleet window or a separate version comparison."
+  },
+  "pod4_version_comparison": {
+    "manifest": "raw/host-profiles/download-manifest.json",
+    "selection": "Four profiles per version entirely inside the recorded workspace QPS10 measurement window. Boundary-overlapping profiles excluded.",
+    "weighting": "Sum CPU seconds in each disjoint category and divide by total sampled CPU seconds for that version.",
+    "analysis": "analyze-pod4-profiles.py",
+    "identities_hashes_and_results": "raw/host-profiles/pod4-version-attribution.json",
+    "sample_counts": {"20": 202470, "21": 213080},
+    "sampled_cpu_seconds": {"20": 10123.5, "21": 10654.0},
+    "summed_profile_seconds": {"20": 241.567, "21": 242.443},
+    "adjacent_metadata_overlap_ms": {"20": 375, "21": 218},
+    "limitations": ["One pod, different absolute datasets", "Interior profiles exclude the higher-pressure stage boundaries", "Small metadata overlaps are reported, not de-duplicated without per-sample timestamps", "Unknown innermost frames can be attributed only where caller symbols support it"]
+  },
+  "diagnostic": {
+    "artifacts": "raw/diagnostic-20261018T075955Z",
+    "pod": "cloudprem-ws-pascal-feuer-searcher-4",
+    "seed": 136,
+    "query_profile": "splunk",
+    "qps_batch_rate": 10,
+    "range_end": "2026-10-18T07:10:00Z",
+    "intended_traffic_seconds": 180,
+    "intended_profile_seconds": 30,
+    "sampling_hz": 99,
+    "profile_after_seconds": 60,
+    "cache_reset": false,
+    "cache_state": "Retained warm state after the interrupted restart sweep",
+    "result": "Traffic stopped after profiler initialization panicked on CreatingError. No profile or normal final request CSV. Not a completed performance comparison."
+  },
+  "raw_data": "Ignored under raw/; initial app-* metric-discovery files used app.datadoghq.com and are not used in this analysis"
+}

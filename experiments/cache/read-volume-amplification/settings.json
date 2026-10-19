@@ -1,0 +1,26 @@
+{
+  "inspected_at_utc": "2026-10-17T11:36:46.471632+00:00",
+  "head": "2f381acdb13e114593e98d1078f29b341279380d",
+  "working_tree_patch_sha256": "bce41b1fe546d9a1ae83a18edd4cb084a9101bdbbac761faa8ff57f28d9023ee",
+  "source_sha256": {
+    "feuer-storage/src/disk_cache.rs": "618dec49c6e563f3065d31bdaf5a2a77a9c440df26f8bc7f2c25413a541f8e11",
+    "feuer-storage/src/disk_cache/writer.rs": "8ba19afe9afbcc1eb8ac22eda030409a0a8caa02cd72abd3e847671ab81848da",
+    "feuer-storage/src/file.rs": "af92420fd661d0ac4e7e732277b64c00f312cafe29aa08b1f4541fb1c7347227",
+    "feuer-storage/src/uring.rs": "520375aed0a69aa456399eea90678e8915fee4a535cee696933e2d6f0cfc8405",
+    "feuer-storage/src/disk_cache/metrics_tests.rs": "3dc0027a7f55623f99bac5bd565f74abdff490a55c6209f1d767bc4c82ea4e62",
+    "feuer-memory/src/buffer.rs": "f2074017fd85e41056273b6605966fdf1ce187c7d7084eada07d7b2000cd78be",
+    "feuer-historian/src/lib.rs": "c2ce9cb872e6e807eaefd1a755eb31ecf7e4840a7995d9a5b0edc1eff45a9bcd",
+    "feuer/src/cache.rs": "58db326b6ba5b4a3be7dcfe09e53db2de962328538af18b47b9d0ed5ce226c17"
+  },
+  "mode": "offline source and conditional range geometry only",
+  "host": "benchmark_arm_128g_local_ssd",
+  "host_status": "SSH hostname resolution failed, no remote commands executed",
+  "replays_launched": 0,
+  "production_source_changed": false,
+  "static_prefix_seconds": 600,
+  "static_history_events_per_key": 64,
+  "static_history_age_requests": 262144,
+  "next_replay_memory_bytes": 100000000000,
+  "next_replay_disk_bytes": 500000000000,
+  "next_replay_shards": 64
+}

@@ -1,0 +1,620 @@
+{
+  "benchmark": "/Users/pascal.seitz/go/src/github.com/DataDog/Development/yahoo/byoc-yahoo-sim/user-sim/reports/sweep_20261018T160235Z_cold",
+  "workspace": "pascal-feuer",
+  "interstage_recovery": [
+    {
+      "after_qps": 1.0,
+      "gap_seconds": 26.89730405807495,
+      "interior_samples": []
+    },
+    {
+      "after_qps": 2.0,
+      "gap_seconds": 30.921954870224,
+      "interior_samples": [
+        {
+          "utc": "2026-10-18T16:36:30+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        },
+        {
+          "utc": "2026-10-18T16:36:40+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        }
+      ]
+    },
+    {
+      "after_qps": 3.0,
+      "gap_seconds": 34.979126930236816,
+      "interior_samples": [
+        {
+          "utc": "2026-10-18T16:42:20+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        }
+      ]
+    },
+    {
+      "after_qps": 4.0,
+      "gap_seconds": 34.13809609413147,
+      "interior_samples": [
+        {
+          "utc": "2026-10-18T16:48:00+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        },
+        {
+          "utc": "2026-10-18T16:48:10+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        }
+      ]
+    },
+    {
+      "after_qps": 5.0,
+      "gap_seconds": 38.76763701438904,
+      "interior_samples": [
+        {
+          "utc": "2026-10-18T16:53:50+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        },
+        {
+          "utc": "2026-10-18T16:54:00+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        }
+      ]
+    },
+    {
+      "after_qps": 6.0,
+      "gap_seconds": 51.638893127441406,
+      "interior_samples": [
+        {
+          "utc": "2026-10-18T16:59:30+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        },
+        {
+          "utc": "2026-10-18T16:59:40+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        },
+        {
+          "utc": "2026-10-18T16:59:50+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        }
+      ]
+    },
+    {
+      "after_qps": 7.0,
+      "gap_seconds": 39.49717593193054,
+      "interior_samples": [
+        {
+          "utc": "2026-10-18T17:05:40+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        },
+        {
+          "utc": "2026-10-18T17:05:50+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        }
+      ]
+    },
+    {
+      "after_qps": 8.0,
+      "gap_seconds": 43.67904806137085,
+      "interior_samples": [
+        {
+          "utc": "2026-10-18T17:11:20+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        },
+        {
+          "utc": "2026-10-18T17:11:30+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        },
+        {
+          "utc": "2026-10-18T17:11:40+00:00",
+          "nodes": 14,
+          "read_bytes": 0.0
+        }
+      ]
+    },
+    {
+      "after_qps": 9.0,
+      "gap_seconds": 28.679852962493896,
+      "interior_samples": [
+        {
+          "utc": "2026-10-18T17:17:20+00:00",
+          "nodes": 14,
+          "read_bytes": 740452.0
+        }
+      ]
+    }
+  ],
+  "latency_method": "Sum of distribution duration sums divided by distribution counts, using non-null matched ten-second bucket timestamps inside each stage. Successful DataFile reads, not pure device latency or payload-admission wait.",
+  "deployed_source": {
+    "image_digest": "sha256:1d5d24320d66412dfd4ce9e064ad4078119e4b697409da4aaa0f8f8dc3255c49",
+    "pomsky": "85fe717a88aee29ee699270f84a818c75415a6ab",
+    "feuer": "4e7a7d12478c645d4d534ca6ef0fc33d87d279ca",
+    "payload_read_queue_present": false
+  },
+  "org": "byoc-sim.datadoghq.com",
+  "method": "Reuse saved independently validated operation:read queries. Divide as_count buckets by observed 10-second timestamp spacing. Report API interval metadata separately. Queue peaks refer only to Quickwit search thread-pool tasks, not PayloadReadQueue.",
+  "results": [
+    {
+      "qps": 1.0,
+      "start_utc": "2026-10-18T16:25:30.868204+00:00",
+      "end_utc": "2026-10-18T16:30:31.302466+00:00",
+      "nodes": 14,
+      "disk_read_TB": 3.5338235134,
+      "disk_GB_per_second_per_node_over_run": 0.8401703704870317,
+      "search_thread_pool_max_pending": 506.0,
+      "query_p95_seconds": 4.03,
+      "point_spacing_seconds": [
+        10.0
+      ],
+      "api_interval_metadata_seconds": [
+        2
+      ],
+      "null_points": 0,
+      "node_samples": 434,
+      "node_sample_GB_per_second": {
+        "min": 0.0,
+        "p50": 0.0918173354,
+        "p95": 4.2939973487,
+        "max": 6.218804446899999
+      },
+      "fleet_mean_GB_per_second_per_node": {
+        "min": 0.0005758675285714286,
+        "p50": 0.1788942663214286,
+        "p95": 4.833685942157143,
+        "max": 5.1247763685142855
+      },
+      "node_samples_below_1_GB_per_second_fraction": 0.7926267281105991,
+      "node_samples_at_least_3_GB_per_second_fraction": 0.11290322580645161,
+      "query": "sum:feuer_disk_io_bytes_total{kube_cluster_name:yahoo-sim,cloudprem_node_id:cloudprem-ws-pascal-feuer-searcher-*,operation:read} by {kube_cluster_name,cloudprem_node_id,node_id,kube_pod_name,pod_name,container_name,host,version,operation,op}.as_count()",
+      "read_latency_ms": {
+        "all": {
+          "mean": 456.12188737052867,
+          "observations": 653885.0
+        },
+        "split_range": {
+          "mean": 458.11248163730954,
+          "observations": 650924.0
+        },
+        "predicate": {
+          "mean": 18.524595067207034,
+          "observations": 2961.0
+        }
+      }
+    },
+    {
+      "qps": 2.0,
+      "start_utc": "2026-10-18T16:30:58.199770+00:00",
+      "end_utc": "2026-10-18T16:36:19.549380+00:00",
+      "nodes": 14,
+      "disk_read_TB": 14.668504330642,
+      "disk_GB_per_second_per_node_over_run": 3.2604685900028065,
+      "search_thread_pool_max_pending": 360.0,
+      "query_p95_seconds": 8.59,
+      "point_spacing_seconds": [
+        10.0
+      ],
+      "api_interval_metadata_seconds": [
+        2
+      ],
+      "null_points": 0,
+      "node_samples": 448,
+      "node_sample_GB_per_second": {
+        "min": 0.0403127385,
+        "p50": 3.4621999608,
+        "p95": 5.5887721204,
+        "max": 7.1044992267
+      },
+      "fleet_mean_GB_per_second_per_node": {
+        "min": 0.09862590834999999,
+        "p50": 3.4388131149999994,
+        "p95": 5.560466880078572,
+        "max": 5.705798047321429
+      },
+      "node_samples_below_1_GB_per_second_fraction": 0.125,
+      "node_samples_at_least_3_GB_per_second_fraction": 0.6428571428571429,
+      "query": "sum:feuer_disk_io_bytes_total{kube_cluster_name:yahoo-sim,cloudprem_node_id:cloudprem-ws-pascal-feuer-searcher-*,operation:read} by {kube_cluster_name,cloudprem_node_id,node_id,kube_pod_name,pod_name,container_name,host,version,operation,op}.as_count()",
+      "read_latency_ms": {
+        "all": {
+          "mean": 407.7494310781546,
+          "observations": 3105234.0
+        },
+        "split_range": {
+          "mean": 408.7764240664355,
+          "observations": 3095288.0
+        },
+        "predicate": {
+          "mean": 88.13963088608484,
+          "observations": 9946.0
+        }
+      }
+    },
+    {
+      "qps": 3.0,
+      "start_utc": "2026-10-18T16:36:50.471335+00:00",
+      "end_utc": "2026-10-18T16:42:03.342618+00:00",
+      "nodes": 14,
+      "disk_read_TB": 7.685410165495,
+      "disk_GB_per_second_per_node_over_run": 1.7545805520612108,
+      "search_thread_pool_max_pending": 514.0,
+      "query_p95_seconds": 6.77,
+      "point_spacing_seconds": [
+        10.0
+      ],
+      "api_interval_metadata_seconds": [
+        2
+      ],
+      "null_points": 0,
+      "node_samples": 448,
+      "node_sample_GB_per_second": {
+        "min": 0.013653641,
+        "p50": 1.1594805414,
+        "p95": 4.6471520059,
+        "max": 6.491838635300001
+      },
+      "fleet_mean_GB_per_second_per_node": {
+        "min": 0.02402006765,
+        "p50": 1.282300222407143,
+        "p95": 4.365661859542857,
+        "max": 4.708472234592856
+      },
+      "node_samples_below_1_GB_per_second_fraction": 0.453125,
+      "node_samples_at_least_3_GB_per_second_fraction": 0.24553571428571427,
+      "query": "sum:feuer_disk_io_bytes_total{kube_cluster_name:yahoo-sim,cloudprem_node_id:cloudprem-ws-pascal-feuer-searcher-*,operation:read} by {kube_cluster_name,cloudprem_node_id,node_id,kube_pod_name,pod_name,container_name,host,version,operation,op}.as_count()",
+      "read_latency_ms": {
+        "all": {
+          "mean": 362.77421926857187,
+          "observations": 1952954.0
+        },
+        "split_range": {
+          "mean": 378.85544879820054,
+          "observations": 1862534.0
+        },
+        "predicate": {
+          "mean": 31.521877300674614,
+          "observations": 90420.0
+        }
+      }
+    },
+    {
+      "qps": 4.0,
+      "start_utc": "2026-10-18T16:42:38.321745+00:00",
+      "end_utc": "2026-10-18T16:47:47.706555+00:00",
+      "nodes": 14,
+      "disk_read_TB": 13.999596765437,
+      "disk_GB_per_second_per_node_over_run": 3.2321276459093524,
+      "search_thread_pool_max_pending": 417.0,
+      "query_p95_seconds": 8.07,
+      "point_spacing_seconds": [
+        10.0
+      ],
+      "api_interval_metadata_seconds": [
+        2
+      ],
+      "null_points": 0,
+      "node_samples": 434,
+      "node_sample_GB_per_second": {
+        "min": 0.006756171900000001,
+        "p50": 3.6586019853000002,
+        "p95": 5.4032364247,
+        "max": 6.2676466678
+      },
+      "fleet_mean_GB_per_second_per_node": {
+        "min": 0.02839856082857143,
+        "p50": 3.866745512428571,
+        "p95": 4.965658218342857,
+        "max": 5.093148000778572
+      },
+      "node_samples_below_1_GB_per_second_fraction": 0.14055299539170507,
+      "node_samples_at_least_3_GB_per_second_fraction": 0.6336405529953917,
+      "query": "sum:feuer_disk_io_bytes_total{kube_cluster_name:yahoo-sim,cloudprem_node_id:cloudprem-ws-pascal-feuer-searcher-*,operation:read} by {kube_cluster_name,cloudprem_node_id,node_id,kube_pod_name,pod_name,container_name,host,version,operation,op}.as_count()",
+      "read_latency_ms": {
+        "all": {
+          "mean": 338.32504620180237,
+          "observations": 4256697.0
+        },
+        "split_range": {
+          "mean": 341.73872567509187,
+          "observations": 4204878.0
+        },
+        "predicate": {
+          "mean": 61.320362277234246,
+          "observations": 51819.0
+        }
+      }
+    },
+    {
+      "qps": 5.0,
+      "start_utc": "2026-10-18T16:48:21.844651+00:00",
+      "end_utc": "2026-10-18T16:53:37.048076+00:00",
+      "nodes": 14,
+      "disk_read_TB": 12.176238287615,
+      "disk_GB_per_second_per_node_over_run": 2.759269847558869,
+      "search_thread_pool_max_pending": 382.0,
+      "query_p95_seconds": 6.58,
+      "point_spacing_seconds": [
+        10.0
+      ],
+      "api_interval_metadata_seconds": [
+        2
+      ],
+      "null_points": 0,
+      "node_samples": 434,
+      "node_sample_GB_per_second": {
+        "min": 0.0039816967000000005,
+        "p50": 2.8325292708000003,
+        "p95": 5.5463648057,
+        "max": 7.4678852418
+      },
+      "fleet_mean_GB_per_second_per_node": {
+        "min": 0.04324657284285715,
+        "p50": 3.002370124914286,
+        "p95": 5.022381181314286,
+        "max": 5.096025764985714
+      },
+      "node_samples_below_1_GB_per_second_fraction": 0.17511520737327188,
+      "node_samples_at_least_3_GB_per_second_fraction": 0.47465437788018433,
+      "query": "sum:feuer_disk_io_bytes_total{kube_cluster_name:yahoo-sim,cloudprem_node_id:cloudprem-ws-pascal-feuer-searcher-*,operation:read} by {kube_cluster_name,cloudprem_node_id,node_id,kube_pod_name,pod_name,container_name,host,version,operation,op}.as_count()",
+      "read_latency_ms": {
+        "all": {
+          "mean": 235.17867807576613,
+          "observations": 5225153.0
+        },
+        "split_range": {
+          "mean": 238.7687216594066,
+          "observations": 5130354.0
+        },
+        "predicate": {
+          "mean": 40.89187695440886,
+          "observations": 94799.0
+        }
+      }
+    },
+    {
+      "qps": 6.0,
+      "start_utc": "2026-10-18T16:54:15.815713+00:00",
+      "end_utc": "2026-10-18T16:59:17.562310+00:00",
+      "nodes": 14,
+      "disk_read_TB": 5.494529759711,
+      "disk_GB_per_second_per_node_over_run": 1.300649005631664,
+      "search_thread_pool_max_pending": 438.0,
+      "query_p95_seconds": 5.04,
+      "point_spacing_seconds": [
+        10.0
+      ],
+      "api_interval_metadata_seconds": [
+        2
+      ],
+      "null_points": 0,
+      "node_samples": 420,
+      "node_sample_GB_per_second": {
+        "min": 0.019965643100000003,
+        "p50": 0.9485114421,
+        "p95": 3.5418500988000003,
+        "max": 5.4839804221
+      },
+      "fleet_mean_GB_per_second_per_node": {
+        "min": 0.04882686874999999,
+        "p50": 0.9447647940285714,
+        "p95": 3.7276664633000003,
+        "max": 4.234350124614285
+      },
+      "node_samples_below_1_GB_per_second_fraction": 0.5071428571428571,
+      "node_samples_at_least_3_GB_per_second_fraction": 0.09047619047619047,
+      "query": "sum:feuer_disk_io_bytes_total{kube_cluster_name:yahoo-sim,cloudprem_node_id:cloudprem-ws-pascal-feuer-searcher-*,operation:read} by {kube_cluster_name,cloudprem_node_id,node_id,kube_pod_name,pod_name,container_name,host,version,operation,op}.as_count()",
+      "read_latency_ms": {
+        "all": {
+          "mean": 216.15739811471215,
+          "observations": 1973633.0
+        },
+        "split_range": {
+          "mean": 227.6152746542981,
+          "observations": 1863581.0
+        },
+        "predicate": {
+          "mean": 22.1338363482899,
+          "observations": 110052.0
+        }
+      }
+    },
+    {
+      "qps": 7.0,
+      "start_utc": "2026-10-18T17:00:09.201203+00:00",
+      "end_utc": "2026-10-18T17:05:23.967303+00:00",
+      "nodes": 14,
+      "disk_read_TB": 8.097467443172,
+      "disk_GB_per_second_per_node_over_run": 1.8375248534836486,
+      "search_thread_pool_max_pending": 906.0,
+      "query_p95_seconds": 7.91,
+      "point_spacing_seconds": [
+        10.0
+      ],
+      "api_interval_metadata_seconds": [
+        2
+      ],
+      "null_points": 0,
+      "node_samples": 448,
+      "node_sample_GB_per_second": {
+        "min": 0.019962202800000002,
+        "p50": 1.3569367665,
+        "p95": 4.4731991916,
+        "max": 5.9803224635
+      },
+      "fleet_mean_GB_per_second_per_node": {
+        "min": 0.05515057409285714,
+        "p50": 1.6876331868357144,
+        "p95": 4.318946011442858,
+        "max": 4.554951564985714
+      },
+      "node_samples_below_1_GB_per_second_fraction": 0.4174107142857143,
+      "node_samples_at_least_3_GB_per_second_fraction": 0.24107142857142858,
+      "query": "sum:feuer_disk_io_bytes_total{kube_cluster_name:yahoo-sim,cloudprem_node_id:cloudprem-ws-pascal-feuer-searcher-*,operation:read} by {kube_cluster_name,cloudprem_node_id,node_id,kube_pod_name,pod_name,container_name,host,version,operation,op}.as_count()",
+      "read_latency_ms": {
+        "all": {
+          "mean": 138.2569521865741,
+          "observations": 4952668.0
+        },
+        "split_range": {
+          "mean": 147.27939144723868,
+          "observations": 4584457.0
+        },
+        "predicate": {
+          "mean": 25.92194637297909,
+          "observations": 368211.0
+        }
+      }
+    },
+    {
+      "qps": 8.0,
+      "start_utc": "2026-10-18T17:06:03.464479+00:00",
+      "end_utc": "2026-10-18T17:11:08.017336+00:00",
+      "nodes": 14,
+      "disk_read_TB": 11.333082870718,
+      "disk_GB_per_second_per_node_over_run": 2.658014529511399,
+      "search_thread_pool_max_pending": 560.0,
+      "query_p95_seconds": 6.41,
+      "point_spacing_seconds": [
+        10.0
+      ],
+      "api_interval_metadata_seconds": [
+        2
+      ],
+      "null_points": 0,
+      "node_samples": 420,
+      "node_sample_GB_per_second": {
+        "min": 0.0183261469,
+        "p50": 2.8246736476,
+        "p95": 4.8545192195,
+        "max": 6.3204006033
+      },
+      "fleet_mean_GB_per_second_per_node": {
+        "min": 0.5590536127642857,
+        "p50": 3.0088377960642854,
+        "p95": 4.631982414114286,
+        "max": 4.800343133507143
+      },
+      "node_samples_below_1_GB_per_second_fraction": 0.10714285714285714,
+      "node_samples_at_least_3_GB_per_second_fraction": 0.4523809523809524,
+      "query": "sum:feuer_disk_io_bytes_total{kube_cluster_name:yahoo-sim,cloudprem_node_id:cloudprem-ws-pascal-feuer-searcher-*,operation:read} by {kube_cluster_name,cloudprem_node_id,node_id,kube_pod_name,pod_name,container_name,host,version,operation,op}.as_count()",
+      "read_latency_ms": {
+        "all": {
+          "mean": 249.37904575549575,
+          "observations": 4715110.0
+        },
+        "split_range": {
+          "mean": 257.55048324262117,
+          "observations": 4540749.0
+        },
+        "predicate": {
+          "mean": 36.57660370580004,
+          "observations": 174361.0
+        }
+      }
+    },
+    {
+      "qps": 9.0,
+      "start_utc": "2026-10-18T17:11:51.696384+00:00",
+      "end_utc": "2026-10-18T17:17:09.967184+00:00",
+      "nodes": 14,
+      "disk_read_TB": 11.853095047038,
+      "disk_GB_per_second_per_node_over_run": 2.6601549578184027,
+      "search_thread_pool_max_pending": 547.0,
+      "query_p95_seconds": 7.51,
+      "point_spacing_seconds": [
+        10.0
+      ],
+      "api_interval_metadata_seconds": [
+        2
+      ],
+      "null_points": 0,
+      "node_samples": 434,
+      "node_sample_GB_per_second": {
+        "min": 0.0043988875,
+        "p50": 2.800572306,
+        "p95": 5.3299391834,
+        "max": 8.2075249272
+      },
+      "fleet_mean_GB_per_second_per_node": {
+        "min": 0.029567131057142853,
+        "p50": 2.8020337552499996,
+        "p95": 4.961541121835714,
+        "max": 5.714480399985713
+      },
+      "node_samples_below_1_GB_per_second_fraction": 0.18202764976958524,
+      "node_samples_at_least_3_GB_per_second_fraction": 0.4470046082949309,
+      "query": "sum:feuer_disk_io_bytes_total{kube_cluster_name:yahoo-sim,cloudprem_node_id:cloudprem-ws-pascal-feuer-searcher-*,operation:read} by {kube_cluster_name,cloudprem_node_id,node_id,kube_pod_name,pod_name,container_name,host,version,operation,op}.as_count()",
+      "read_latency_ms": {
+        "all": {
+          "mean": 177.37553129261835,
+          "observations": 6464036.0
+        },
+        "split_range": {
+          "mean": 194.72635556255528,
+          "observations": 5763962.0
+        },
+        "predicate": {
+          "mean": 34.51993065526501,
+          "observations": 700074.0
+        }
+      }
+    },
+    {
+      "qps": 10.0,
+      "start_utc": "2026-10-18T17:17:38.647037+00:00",
+      "end_utc": "2026-10-18T17:23:08.129635+00:00",
+      "nodes": 14,
+      "disk_read_TB": 13.567424502636,
+      "disk_GB_per_second_per_node_over_run": 2.941283563610818,
+      "search_thread_pool_max_pending": 515.0,
+      "query_p95_seconds": 8.68,
+      "point_spacing_seconds": [
+        10.0
+      ],
+      "api_interval_metadata_seconds": [
+        2
+      ],
+      "null_points": 0,
+      "node_samples": 462,
+      "node_sample_GB_per_second": {
+        "min": 0.0,
+        "p50": 2.9474274475,
+        "p95": 5.2641776599,
+        "max": 6.6078514897
+      },
+      "fleet_mean_GB_per_second_per_node": {
+        "min": 0.5017629016214287,
+        "p50": 2.8299251309999995,
+        "p95": 5.0268366603857135,
+        "max": 5.4364751653142855
+      },
+      "node_samples_below_1_GB_per_second_fraction": 0.10606060606060606,
+      "node_samples_at_least_3_GB_per_second_fraction": 0.49783549783549785,
+      "query": "sum:feuer_disk_io_bytes_total{kube_cluster_name:yahoo-sim,cloudprem_node_id:cloudprem-ws-pascal-feuer-searcher-*,operation:read} by {kube_cluster_name,cloudprem_node_id,node_id,kube_pod_name,pod_name,container_name,host,version,operation,op}.as_count()",
+      "read_latency_ms": {
+        "all": {
+          "mean": 180.67508743619737,
+          "observations": 7360256.0
+        },
+        "split_range": {
+          "mean": 186.77200414610348,
+          "observations": 7081649.0
+        },
+        "predicate": {
+          "mean": 25.703302370536278,
+          "observations": 278607.0
+        }
+      }
+    }
+  ]
+}

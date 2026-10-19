@@ -1,0 +1,35 @@
+{
+  "question": "Can larger scoring steps improve source or disk traffic beyond the initial 52-case local search?",
+  "prior_evaluations": 52,
+  "maximum_additional_evaluations": 20,
+  "maximum_refinements_per_mode": 4,
+  "unchanged": "Same binary, input, 600-second arrivals, 100000000000 memory bytes, 500000000000 disk bytes, source model, allocator, 32-vCPU instance type and per-byte coefficients of 1. No repeated configurations.",
+  "disk_cost_per_request": 256000,
+  "source_equivalent_request_cost": 9133289,
+  "source_cost_derivation": "Round 0.108599 seconds * 84101038.08 bytes/second to the nearest equivalent byte. This is a diagnostic source-cost contrast, not a claim that every memory miss incurs source service.",
+  "contrasts": [
+    {"name": "byte-weighted", "memory_cost_per_request": 0, "access_count_half_life": 262144},
+    {"name": "source-cost", "memory_cost_per_request": 9133289, "access_count_half_life": 262144},
+    {"name": "request-heavy", "memory_cost_per_request": 1000000000, "access_count_half_life": 262144},
+    {"name": "short-history", "memory_cost_per_request": 256000, "access_count_half_life": 16384},
+    {"name": "long-history", "memory_cost_per_request": 256000, "access_count_half_life": 1048576},
+    {"name": "source-cost-short-history", "memory_cost_per_request": 9133289, "access_count_half_life": 16384}
+  ],
+  "selection_metrics": ["disk_read_bytes", "disk_read_calls", "source_bytes", "source_gets"],
+  "minimum_reduction_fraction_of_baseline": {
+    "disk_read_bytes": 0.2,
+    "disk_read_calls": 0.2,
+    "source_bytes": 0.001,
+    "source_gets": 0.001
+  },
+  "maximum_regression_fraction_of_baseline": {
+    "disk_read_bytes": 0.02,
+    "disk_read_calls": 0.02,
+    "source_bytes": 0.0002,
+    "source_gets": 0.0002
+  },
+  "observed_control_spread_multiplier": 5,
+  "refinement_multipliers": [0.25, 4],
+  "selection": "For each metric separately, require a contrast to improve on the best eligible prior observation by at least the larger of the practical reduction floor and five times the spread among the baseline and original disk-only variants. Reject refinement if another selection metric regresses beyond the larger of its regression allowance and five times that spread. These are decision thresholds, not confidence intervals. Refine at most two distinct qualifying configurations per mode, interleaving memory-cost and half-life changes, at most four new configurations per mode. Retain all metrics and Pareto tradeoffs even if they do not qualify for refinement.",
+  "stop": "Stop after the initial twelve contrasts if none qualifies. Otherwise perform one targeted refinement wave and stop. No further automatic neighborhood expansion. Missing disk eviction means disk coefficients remain unchanged. Conditional disk hit ratios alone do not trigger refinement."
+}

@@ -1,0 +1,53 @@
+{
+  "memory_bytes": 100000000000,
+  "disk_bytes": 500000000000,
+  "trace_prefix_seconds": 600,
+  "observation_tail_seconds": 5,
+  "instance_type": "m8gd.8xlarge",
+  "runtime_threads": 32,
+  "shards": 64,
+  "modes": ["range", "full_objects"],
+  "starting_point": {
+    "memory_cost_per_request": 256000,
+    "disk_cost_per_request": 256000,
+    "access_count_half_life": 262144
+  },
+  "cost_per_requested_byte": 1,
+  "neighborhood_multipliers": [0.9, 1.1],
+  "half_life_rounding": "nearest integer request",
+  "maximum_unique_evaluations_per_mode": 64,
+  "maximum_instances": 128,
+  "initial_parallel_cases": 14,
+  "measurement_repetitions": 0,
+  "source": {
+    "kind": "deterministic simulated S3, independent callbacks",
+    "get_slots": 48,
+    "fixed_service_seconds": 0.108599,
+    "payload_bytes_per_second": 84101038.08,
+    "allocation": "independent zero-filled requested-length payload after service delay",
+    "calibration": "experiments/s3_benchmark.md, warmed 48-concurrent medians",
+    "limitations": "Different calibration host and approximately 110-MiB objects. No latency distribution, retries, coalescing, failures, or shared bandwidth model. Arrivals and cache lookups remain unrestricted."
+  },
+  "environment": {
+    "FEUER_ACCESS_COUNT_HALF_LIFE": "262144",
+    "FEUER_MAX_ACCESS_EVENTS_PER_KEY": "64",
+    "FEUER_MAX_ACCESS_AGE_ACCESSES": "262144",
+    "FEUER_RECLAIM_SAMPLE_SIZE": "256",
+    "FEUER_IDLE_BUFFER_POOL_PERCENT": "7"
+  },
+  "objectives": [
+    "maximize memory caller hit rate",
+    "maximize memory byte hit rate",
+    "maximize conditional disk caller hit rate",
+    "maximize conditional disk byte hit rate",
+    "maximize combined caller hit rate",
+    "maximize combined byte hit rate (minimize source downloaded bytes)",
+    "minimize disk read plus write bytes"
+  ],
+  "search": "Evaluate center and six axial neighbors separately for each mode. Expand untested +/-10% neighbors of each objective's best observed configuration, round-robin across objective leaders. Retain the full Pareto frontier and all metrics, with no scalar aggregate. Stop at exhausted improving leaders or budget. If no valid run in a mode evicts from disk, stop varying its disk cost and use its starting coefficient for subsequent candidates. Do not attribute disk-coefficient-only differences without eviction to that coefficient.",
+  "input_sha256": "a13aeae5c77da3709814fef42708d6cb55a867a553ba01dfc8c7e8338e7807f7",
+  "expected_requests_per_case": 1606645,
+  "expected_returned_bytes_per_case": 2800015397526,
+  "source_base_commit": "eacaf12ad1fa2870ddcf55fba6ed7d05c32659fc",
+  "source_identity": "Working-tree snapshot and patch hashes recorded under raw before building"
+}

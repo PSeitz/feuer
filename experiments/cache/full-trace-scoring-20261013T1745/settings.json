@@ -1,0 +1,93 @@
+{
+  "purpose": "temporary-full-trace-scoring-20261013T1745",
+  "scope": "One parallel wave of 16 unique full-trace configurations, eight per mode, no repetitions or automatic follow-up wave",
+  "user_instance_ceiling": 100,
+  "planned_workers": 16,
+  "runs_per_configuration": 1,
+  "modes": [
+    "range",
+    "full_objects"
+  ],
+  "configurations_per_mode": [
+    {
+      "id": "baseline",
+      "memory_cost_per_request": 256000,
+      "access_count_half_life": 262144
+    },
+    {
+      "id": "byte-cost",
+      "memory_cost_per_request": 0,
+      "access_count_half_life": 262144
+    },
+    {
+      "id": "source-cost",
+      "memory_cost_per_request": 9133289,
+      "access_count_half_life": 262144
+    },
+    {
+      "id": "half-life-65536",
+      "memory_cost_per_request": 256000,
+      "access_count_half_life": 65536
+    },
+    {
+      "id": "half-life-16384",
+      "memory_cost_per_request": 256000,
+      "access_count_half_life": 16384
+    },
+    {
+      "id": "half-life-4096",
+      "memory_cost_per_request": 256000,
+      "access_count_half_life": 4096
+    },
+    {
+      "id": "source-cost-half-life-16384",
+      "memory_cost_per_request": 9133289,
+      "access_count_half_life": 16384
+    },
+    {
+      "id": "source-cost-half-life-4096",
+      "memory_cost_per_request": 9133289,
+      "access_count_half_life": 4096
+    }
+  ],
+  "trace_selection": "full, --trace-seconds omitted",
+  "requests": 17369893,
+  "returned_bytes": 31592172620377,
+  "arrival_span_seconds": 2694.824824702,
+  "trace_sha256": "a13aeae5c77da3709814fef42708d6cb55a867a553ba01dfc8c7e8338e7807f7",
+  "source_archive": "experiments/cache/replay-buffer-allocation/raw/source.tar.gz",
+  "source_archive_sha256": "a2075db34c972befa7ab4bfea1f63cbea3d7538b40d5132d783e421c594cad34",
+  "binary_sha256": "4be4d5d412cef54eb70d4caa448707d60ca88b41599eca12a0fc67c7c501126a",
+  "instance_type": "m8gd.8xlarge",
+  "memory_bytes": 100000000000,
+  "disk_bytes": 500000000000,
+  "disk_cost_per_request": 256000,
+  "cost_per_requested_byte": 1,
+  "runtime_threads": 32,
+  "shards": 64,
+  "history_max_age": 262144,
+  "history_max_events_per_key": 64,
+  "reclaim_sample": 256,
+  "idle_buffer_pool_percent": 7,
+  "allocator": "matched libjemalloc2 via LD_PRELOAD, MALLOC_CONF unset",
+  "simulate_s3": true,
+  "source_slots": 48,
+  "source_latency_seconds": 0.108599,
+  "source_bytes_per_second": 84101038.08,
+  "source_buffer_pool": 1,
+  "source_allocation": "Each miss independently acquires and zero-fills the cache pool's buffer, preserving actual capacity with into_download. No source coalescing or shared merged allocations.",
+  "scheduling": "task_per_arrival",
+  "fresh_cache": true,
+  "full_drain": true,
+  "observation_tail_seconds": 5,
+  "full_objects_semantics": "Each exact recorded range becomes one object, not a whole original file",
+  "comparison": "Use the new baseline in each mode. Earlier exact-length Vec source runs are a different allocation model, not paired controls.",
+  "objectives": [
+    "source_bytes",
+    "source_gets",
+    "disk_read_bytes",
+    "disk_read_calls",
+    "total_disk_transfer_bytes"
+  ],
+  "reporting": "Report all objectives and regressions separately, along with tier request/byte hits, CPU/RSS, latency and drain. No scalar score, confidence claims, automatic refinement or reruns. Preserve any pending-write validation failure."
+}

@@ -1,0 +1,202 @@
+--- a/feuer/src/cache.rs
++++ b/feuer/src/cache.rs
+@@ -389,6 +389,8 @@
+         if let Some(bytes) = self.inner.memory.get(&object_key, requested) {
+             return (LookupOutcome::MemoryHit, None, Ok(bytes));
+         }
++        #[cfg(target_os = "linux")]
++        feuer_storage::read_observer::record("memory_miss", object_key, requested, 0, 0, false);
+         #[cfg(not(target_os = "linux"))]
+         let _ = should_bypass_disk;
+         #[cfg(target_os = "linux")]
+@@ -396,17 +398,19 @@
+         #[cfg(target_os = "linux")]
+         if let Some(disk) = &self.inner.disk
+             && let Some((bytes, buffer_capacity)) = disk
+-                .fetch_from_disk_with_bypass(&object_key, requested, || {
++                .fetch_from_disk_with_probe(&object_key, requested, || {
+                     bypassed_disk = should_bypass_disk();
+                     bypassed_disk
+-                })
++                }, || self.inner.memory.get(&object_key, requested).is_some())
+                 .await
+         {
+             let download = Download::new(requested.map_or(0, ByteRange::start), bytes.clone())
+                 .expect("disk result covers the request");
+-            self.inner
++            feuer_storage::read_observer::record("promotion_begin", object_key, requested, 0, 0, false);
++            let inserted = self.inner
+                 .memory
+                 .insert(object_key, download.with_allocation_charge(buffer_capacity));
++            feuer_storage::read_observer::record("promotion_end", object_key, requested, 0, 0, inserted);
+             return (LookupOutcome::DiskHit, None, Ok(bytes));
+         }
+ 
+--- a/feuer/src/lib.rs
++++ b/feuer/src/lib.rs
+@@ -22,7 +22,7 @@
+     retention::{AvoidedRetrievalCostScorer, RetentionScorer},
+ };
+ #[cfg(target_os = "linux")]
+-pub use feuer_storage::{DiskCacheError, IoQueues};
++pub use feuer_storage::{DiskCacheError, IoQueues, read_observer};
+ pub use feuer_types::{ByteRange, Download, DownloadError, InvalidByteRange, ObjectKeyHash};
+ 
+ /// The complete UTF-8 identity supplied at the public cache boundary.
+--- a/feuer-replay/src/bin/replay.rs
++++ b/feuer-replay/src/bin/replay.rs
+@@ -400,6 +400,7 @@
+                 .saturating_sub(Duration::from_nanos(requests.last().unwrap().time_ns))
+                 .as_secs_f64()
+         )?;
++        feuer::read_observer::dump(args.output.join("read-events.csv"))?;
+         // Outside the measured phase: verify no omissions/duplication and calculate exact percentiles.
+         observations.sort_unstable_by_key(|o| o.index);
+         assert_eq!(observations.len(), requests.len());
+--- a/feuer-storage/src/disk_cache.rs
++++ b/feuer-storage/src/disk_cache.rs
+@@ -120,6 +120,7 @@
+ 
+ /// One payload read's disk address, object range, checksum, and result shared by concurrent readers.
+ struct PayloadRead {
++    observation_id: u64,
+     object_range: ByteRange,
+     payload_checksum: u64,
+     payload_address: u64,
+@@ -335,6 +336,16 @@
+         requested: impl Into<Option<ByteRange>>,
+         should_bypass_disk: impl FnOnce() -> bool,
+     ) -> Option<(Bytes, usize)> {
++        self.fetch_from_disk_with_probe(key, requested, should_bypass_disk, || false).await
++    }
++
++    pub async fn fetch_from_disk_with_probe(
++        &self,
++        key: &ObjectKeyHash,
++        requested: impl Into<Option<ByteRange>>,
++        should_bypass_disk: impl FnOnce() -> bool,
++        memory_covers: impl Fn() -> bool,
++    ) -> Option<(Bytes, usize)> {
+         let requested = requested.into();
+         let started = Instant::now();
+         let metrics = &self.disk.metrics;
+@@ -343,6 +354,7 @@
+         if let Ok(pending) = shard.buffered_small_entry_chunk.try_lock()
+             && let Some(bytes) = pending.get(key, requested)
+         {
++            crate::read_observer::record("buffer_hit", *key, requested, 0, 0, false);
+             metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
+             let capacity = bytes.len();
+             return Some((bytes, capacity));
+@@ -358,6 +370,7 @@
+             };
+             (entry.share_covering_read(requested), entry.object_range.start())
+         };
++        crate::read_observer::record("selected", *key, requested, read.observation_id, read.payload_address, memory_covers());
+         // Cancellation or bypass leaves the shared result unset so another caller can read.
+         let Ok(result) = read
+             .result
+@@ -365,7 +378,9 @@
+                 let Some(_read_permit) = self.disk.file.acquire_payload_read_permit(should_bypass_disk).await else {
+                     return Err(());
+                 };
++                crate::read_observer::record("read_start", *key, Some(read.object_range), read.observation_id, read.payload_address, memory_covers());
+                 let result = read.read_and_verify_payload(&self.disk.file).await;
++                crate::read_observer::record("read_end", *key, Some(read.object_range), read.observation_id, read.payload_address, result.is_ok());
+                 if matches!(result, Err(DiskLookupOutcome::ChecksumFailed)) {
+                     let mut disk_index = shard.entry_index.lock().unwrap();
+                     if disk_index
+@@ -411,6 +426,7 @@
+                     }
+                 }
+                 let (bytes, buffer_capacity) = self.disk.file.shrink_read_buffer(bytes, *capacity);
++                crate::read_observer::record("disk_return", *key, Some(requested), read.observation_id, read.payload_address, false);
+                 metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
+                 Some((bytes, buffer_capacity))
+             }
+@@ -509,6 +525,7 @@
+         };
+         shared_read.upgrade().unwrap_or_else(|| {
+             let read = Arc::new(PayloadRead {
++                observation_id: crate::read_observer::next_read(),
+                 object_range,
+                 payload_checksum,
+                 payload_address: self.payload_address + (object_range.start() - self.object_range.start()),
+--- a/feuer-storage/src/lib.rs
++++ b/feuer-storage/src/lib.rs
+@@ -18,6 +18,7 @@
+ #[cfg(all(target_os = "linux", feature = "io-bench"))]
+ pub mod io_bench;
+ mod metrics;
++pub mod read_observer;
+ #[cfg(test)]
+ #[path = "../../test_support/metrics.rs"]
+ mod test_metrics;
+--- /dev/null
++++ b/feuer-storage/src/read_observer.rs
+@@ -0,0 +1,37 @@
++use std::{hash::{Hash, Hasher}, io::Write, sync::{Mutex, OnceLock, atomic::{AtomicU64, Ordering}}, time::Instant};
++use feuer_types::{ByteRange, ObjectKeyHash};
++
++static NEXT: AtomicU64 = AtomicU64::new(1);
++static EVENTS: Mutex<Vec<Event>> = Mutex::new(Vec::new());
++static ORIGIN: OnceLock<Instant> = OnceLock::new();
++
++struct Event {
++    time: u128,
++    kind: &'static str,
++    task: u64,
++    key: u128,
++    start: u64,
++    end: u64,
++    read: u64,
++    address: u64,
++    flag: bool,
++}
++
++pub fn next_read() -> u64 { NEXT.fetch_add(1, Ordering::Relaxed) }
++
++pub fn record(kind: &'static str, key: ObjectKeyHash, range: Option<ByteRange>, read: u64, address: u64, flag: bool) {
++    let mut hasher = std::hash::DefaultHasher::new();
++    tokio::task::try_id().hash(&mut hasher);
++    let mut events = EVENTS.lock().unwrap();
++    let time = ORIGIN.get_or_init(Instant::now).elapsed().as_nanos();
++    events.push(Event { time, kind, task: hasher.finish(), key: key.0, start: range.map_or(0, ByteRange::start), end: range.map_or(0, ByteRange::end), read, address, flag });
++}
++
++pub fn dump(path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
++    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
++    writeln!(file, "time_ns,kind,task,key,start,end,read,address,flag")?;
++    for event in EVENTS.lock().unwrap().iter() {
++        writeln!(file, "{},{},{},{},{},{},{},{},{}", event.time, event.kind, event.task, event.key, event.start, event.end, event.read, event.address, u8::from(event.flag))?;
++    }
++    file.flush()
++}
+--- a/feuer-storage/src/uring.rs
++++ b/feuer-storage/src/uring.rs
+@@ -457,6 +457,7 @@
+     /// Advances the remaining buffer range after a kernel completion. EINTR leaves it unchanged.
+     fn apply_completion_result(&mut self, result: i32) -> io::Result<()> {
+         if result == -libc::EINTR {
++            crate::read_observer::record("io_eintr", feuer_types::ObjectKeyHash(0), None, 0, 0, false);
+             return Ok(());
+         }
+         if result < 0 {
+@@ -486,6 +487,9 @@
+         if completion_bytes == 0 || !completion_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
+             return Err(self.incomplete_io_error());
+         }
++        if completion_bytes < self.buffer_range.len() {
++            crate::read_observer::record("io_short", feuer_types::ObjectKeyHash(0), None, 0, completion_bytes as u64, false);
++        }
+         self.buffer_range.start += completion_bytes;
+         Ok(())
+     }
+@@ -548,6 +552,7 @@
+                 Ok(_) => {}
+                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
++                    crate::read_observer::record("submit_eagain", feuer_types::ObjectKeyHash(0), None, 0, 0, false);
+                     // EAGAIN leaves requests owned by their slots. Avoid spinning, but retry
+                     // after 1 ms even if no request was accepted and no completion can wake us.
+                     self.wait_for_completion_or_wakeup(1)?;

@@ -1,0 +1,30 @@
+{
+  "task": "Measure request-range reuse and identify what existing replay output can establish about disk-byte savings",
+  "mode": "Offline trace analysis and review of existing replay outputs, no new replay",
+  "assigned_host": "benchmark_arm_128g_local_ssd_4",
+  "resolved_host": "ec2-3-238-71-140.compute-1.amazonaws.com",
+  "host_mapping": "../benchmarks/terraform/terraform.tfstate, matching Name tag",
+  "host_preflight": "Accessible and idle, 1774007050240 SSD bytes available, no checkout or Rust toolchain",
+  "inspected_head": "2f381acdb13e114593e98d1078f29b341279380d",
+  "working_tree": "Uncommitted shared source inspected, not modified. Tracked diff and relevant source hashes saved under raw/",
+  "input": "experiments/cache/cost-scorer-retest-20261012T1324/raw/input/trace.tar.zst",
+  "input_sha256": "a13aeae5c77da3709814fef42708d6cb55a867a553ba01dfc8c7e8338e7807f7",
+  "trace_seconds": 600,
+  "first_start_ns": 467995852934,
+  "required_future_replay": {
+    "memory_bytes": 100000000000,
+    "disk_bytes": 500000000000,
+    "shards": 64,
+    "fresh_cache": true,
+    "trace_seconds": 600,
+    "preserve_arrival_timing": true,
+    "exactly_once_completion": true,
+    "match_allocator": true
+  },
+  "existing_telemetry": "experiments/cache/partial-read-checksums/raw/replay/results/candidate/report.json",
+  "existing_telemetry_revision": "033284d264062e438010784cb6a2118568130786 plus that experiment's candidate.patch, not current source",
+  "existing_candidate_patch_sha256": "5b55d22c690a9634ee5fe50617a32e03cc605d20b9f20888758587270b6e84d6",
+  "existing_candidate_binary_sha256": "f9deb7f69c66098c8866fbc2c5655513b91ad790edb57b67000789d3cbbc06b0",
+  "production_changes": false,
+  "replay_repetitions": 0
+}
