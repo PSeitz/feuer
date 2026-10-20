@@ -31,5 +31,12 @@ and recovery panics during arithmetic. Running that same test against the
 unchanged baseline `44b79fce4005ced1e66cbc08607500ba1f11ebc8` also failed. This pre-existing issue was left unchanged and
 excluded from the final combined validation, not counted as passing.
 
+## Follow-up: remove overflow-input test
+
+At the user's request, removed `overflowing_fields_preserve_chunk_ownership` and
+its overflow-only input generators. Production recovery code is unchanged.
+The unfiltered storage suite then passed on the same Linux SSD host:
+**135 passed, 1 benchmark ignored, 0 filtered out**.
+
 Commands, test logs, and the isolated Linux checkout location are stored locally
 under ignored `raw/`.

@@ -37,7 +37,7 @@ enum LinkTarget {
     NoChunk,
 }
 
-/// One entry's metadata fields, written without validation so they can overflow.
+/// One entry's metadata fields, written without validation.
 #[derive(Clone, Debug)]
 struct EntryFields {
     index_in_page: usize,
@@ -110,53 +110,32 @@ fn capacity_chunks() -> impl Strategy<Value = u64> {
     prop_oneof![Just(4u64), Just(9), Just(257), Just(259)]
 }
 
-/// Disk byte addresses within the selected chunks, optionally including addresses throughout `u64`.
-fn disk_address(allow_overflow: bool) -> BoxedStrategy<u64> {
+/// Disk byte addresses within the selected chunks.
+fn disk_address() -> impl Strategy<Value = u64> {
     let page = prop_oneof![Just(0u64), Just(1), Just(255), 0..256u64];
-    let chunk_relative = prop_oneof![
+    prop_oneof![
         Just(0),
         (chunk_number(), page).prop_map(|(chunk, page)| chunk * CHUNK_BYTES + page * PAGE_BYTES),
         (chunk_number(), 0..CHUNK_BYTES).prop_map(|(chunk, offset)| chunk * CHUNK_BYTES + offset),
-    ];
-    if !allow_overflow {
-        return chunk_relative.boxed();
-    }
-    prop_oneof![
-        1 => chunk_relative,
-        1 => prop_oneof![
-            Just(u64::MAX),
-            Just(u64::MAX - (PAGE_BYTES - 1)),
-            Just(u64::MAX / CHUNK_BYTES * CHUNK_BYTES),
-            any::<u64>(),
-        ],
     ]
-    .boxed()
 }
 
-/// A payload length, optionally including values that overflow alignment arithmetic.
-fn payload_length(allow_overflow: bool) -> BoxedStrategy<u64> {
-    let length = prop_oneof![
+/// Payload lengths within and beyond the test file's capacity.
+fn payload_length() -> impl Strategy<Value = u64> {
+    prop_oneof![
         0..9000u64,
         CHUNK_BYTES - PAGE_BYTES..=CHUNK_BYTES + PAGE_BYTES,
         2 * CHUNK_BYTES..=3 * CHUNK_BYTES + 1,
         Just(1 << 40),
-    ];
-    if !allow_overflow {
-        return length.boxed();
-    }
-    let length = prop_oneof![
-        1 => length,
-        1 => prop_oneof![Just(u64::MAX), Just(u64::MAX - (PAGE_BYTES - 1)), Just(u64::MAX - PAGE_BYTES)],
-    ];
-    length.boxed()
+    ]
 }
 
-fn entry_fields(allow_overflow: bool) -> impl Strategy<Value = EntryFields> {
+fn entry_fields() -> impl Strategy<Value = EntryFields> {
     (
         0..ENTRIES_PER_METADATA_PAGE,
         prop_oneof![0..6u128, any::<u128>()],
-        payload_length(allow_overflow),
-        disk_address(allow_overflow),
+        payload_length(),
+        disk_address(),
         prop::option::weighted(0.3, any::<u64>()),
     )
         .prop_map(
@@ -184,21 +163,18 @@ fn page_change() -> impl Strategy<Value = PageChange> {
     ]
 }
 
-fn disk_image(allow_overflow: bool) -> impl Strategy<Value = DiskImage> {
+fn disk_image() -> impl Strategy<Value = DiskImage> {
     let page_index = prop_oneof![Just(0usize), Just(1), Just(254), 0..ENTRY_METADATA_PAGES_PER_CHUNK];
-    let page = (
-        page_index,
-        prop::collection::vec(entry_fields(allow_overflow), 0..6),
-        page_change(),
-    )
-        .prop_map(|(page_index, entries, change)| EntryPageImage {
+    let page = (page_index, prop::collection::vec(entry_fields(), 0..6), page_change()).prop_map(
+        |(page_index, entries, change)| EntryPageImage {
             page_index,
             entries,
             change,
-        });
+        },
+    );
     let link_target = prop_oneof![
         2 => (0..6usize).prop_map(LinkTarget::MetadataChunkIndex),
-        1 => disk_address(allow_overflow).prop_map(LinkTarget::DiskAddress),
+        1 => disk_address().prop_map(LinkTarget::DiskAddress),
         1 => Just(LinkTarget::NoChunk),
     ];
     let chunk = (
@@ -242,16 +218,11 @@ fn cache_changes(include_metadata_payloads: bool) -> impl Strategy<Value = Vec<C
 proptest! {
     #[test]
     fn malformed_metadata_preserves_chunk_ownership(
-        image in disk_image(false),
+        image in disk_image(),
         capacity_chunks in capacity_chunks(),
         changes in cache_changes(false),
     ) {
         check_disk_image(image, capacity_chunks, changes);
-    }
-
-    #[test]
-    fn overflowing_fields_preserve_chunk_ownership(image in disk_image(true), capacity_chunks in capacity_chunks()) {
-        check_disk_image(image, capacity_chunks, Vec::new());
     }
 
     #[test]
