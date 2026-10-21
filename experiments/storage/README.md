@@ -1,5 +1,26 @@
 # Direct io_uring driver smoke benchmark
 
+## Quick read-trace benchmark
+
+[`read_trace.rs`](../../feuer-storage/benches/read_trace.rs) replays a short sequence
+of actual disk reads through the production DataFile path. It preserves recorded
+arrival spacing, request sizes, disk addresses, and repeated ranges. No writes
+run during measurement. Setup initializes only the referenced ranges in a fresh
+temporary file, removed on normal exit.
+
+```sh
+cargo bench --locked -p feuer-storage --bench read_trace -- \
+  /mnt/local-ssd experiments/storage/read-trace/raw/reads.csv
+```
+
+See [snippet extraction, workload, and results](read-trace/README.md). The input is
+a local ignored CSV, not a full replay archive. No new Rust dependencies.
+Output includes throughput and read latency percentiles by size, plus scheduling
+lag. The earlier fixed-size read/write sweep is superseded, with its historical
+results retained in [payload-io](payload-io/README.md).
+
+## Larger direct-I/O sweep
+
 For the real two-tier cache comparison, use the separate
 [timestamp-paced SSD replay instructions](timed-replay.md).
 The [recorded request-size histogram](request-sizes.md) covers the full FETR

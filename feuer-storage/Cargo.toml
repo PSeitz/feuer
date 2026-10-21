@@ -12,6 +12,10 @@ license.workspace = true
 readme.workspace = true
 exclude.workspace = true
 
+[[bench]]
+name = "read_trace"
+harness = false
+
 [features]
 io-bench = []
 
