@@ -1,6 +1,6 @@
 //! Shared contracts for Feuer's immutable-object cache tiers.
 //!
-//! Memory and disk exchange hashed object identities and complete downloads.
+//! Memory and disk exchange hashed object identities and downloads.
 
 #[doc(hidden)]
 pub mod config;

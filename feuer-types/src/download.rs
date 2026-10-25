@@ -2,7 +2,7 @@ use std::fmt;
 
 use bytes::Bytes;
 
-/// One complete immutable object returned by an application download callback.
+/// An immutable object returned by an application download callback.
 ///
 /// The object identity comes from the lookup call. Constructing a download creates
 /// no cache-access event.
@@ -13,7 +13,7 @@ pub struct Download {
 }
 
 impl Download {
-    /// Creates a download containing the complete object, including an empty object.
+    /// Creates a download, allowing empty objects.
     pub fn new(bytes: Bytes) -> Self {
         let allocation_charge = bytes.len();
         Self {
@@ -40,12 +40,12 @@ impl Download {
         self.allocation_charge
     }
 
-    /// Returns the complete object's bytes.
+    /// Returns the object's bytes.
     pub const fn bytes(&self) -> &Bytes {
         &self.bytes
     }
 
-    /// Returns the complete object's bytes, consuming the download.
+    /// Returns the object's bytes, consuming the download.
     pub fn into_bytes(self) -> Bytes {
         self.bytes
     }

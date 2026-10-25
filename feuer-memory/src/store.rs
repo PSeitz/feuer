@@ -20,10 +20,10 @@ use crate::{
 /// Caps lock partitioning to avoid excessive per-cache metadata.
 const MAX_SHARDS: usize = 64;
 
-/// A sharded cache of complete objects with Foyer-style soft capacity.
+/// A sharded object cache with soft capacity.
 ///
-/// Each [`ObjectKeyHash`] identifies one immutable object. Lookups return its
-/// complete payload, sharing the entry's allocation without holding an entry guard.
+/// Each [`ObjectKeyHash`] identifies an immutable object. Lookups return its
+/// payload, sharing the entry's allocation without holding an entry guard.
 /// Request history is supplied separately. Cache operations consult it for
 /// retention decisions but never record accesses or remove history.
 ///
@@ -34,7 +34,7 @@ const MAX_SHARDS: usize = 64;
 /// Under pressure, a rotating sample selects the lowest-scoring entry for eviction.
 /// Default scores model recent retrieval value per charged allocation byte.
 pub struct MemoryCache {
-    /// Independently locked partitions selected by complete object identity.
+    /// Independently locked partitions selected by object identity.
     shards: Box<[Mutex<MemoryCacheShard>]>,
     access_histories: Arc<ObjectAccessHistories>,
     retention_scorer: Arc<dyn RetentionScorer>,
@@ -138,13 +138,13 @@ impl MemoryCache {
         self.buffer_pool.clone()
     }
 
-    /// Looks up a complete object without recording an access.
+    /// Looks up an object without recording an access.
     pub fn get(&self, object_key: &ObjectKeyHash) -> Option<Bytes> {
         let shard_index = self.shard_index(object_key);
         self.shards[shard_index].lock().get(object_key)
     }
 
-    /// Caches a complete object without creating an access, using its allocation charge.
+    /// Caches an object without creating an access, using its allocation charge.
     /// An existing entry for the key is retained and the supplied download is discarded.
     /// Returns whether the download was inserted.
     pub fn insert(&self, object_key: ObjectKeyHash, download: Download) -> bool {

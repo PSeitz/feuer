@@ -16,7 +16,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 /// Independent of the number of memory or disk cache shards.
 const ACCESS_HISTORY_SHARDS: usize = 64;
 
-/// Standalone request history shared by both cache tiers, independent of their shards and entries.
+/// Request history shared by both cache tiers, independent of their shards and entries.
 /// Object keys select one of 64 independently locked history maps. The request clock remains global.
 /// Each key's counter lasts for this object's lifetime, even after cache eviction.
 /// History is not persisted across restarts.
@@ -72,7 +72,7 @@ impl ObjectAccessHistories {
         self.request_count.load(AtomicOrdering::Relaxed)
     }
 
-    /// Returns one object's request count decayed to the global request clock.
+    /// Returns the object's request count decayed to the global request clock.
     /// Unknown keys have a count of zero.
     pub fn decayed_request_count(&self, key: &ObjectKeyHash) -> f64 {
         let histories = self.shard(key).lock().unwrap();
@@ -143,7 +143,6 @@ impl DecayedAccessCount {
     /// At 128,000 requests apart, the corresponding limits are 4.096 after adding one and 3.096 before.
     #[inline]
     pub fn decayed_count(&self, request_clock: u64, half_life: u64) -> f64 {
-        // Age is measured in requests across all keys.
         // An earlier clock leaves the count unchanged.
         let requests_since_update = request_clock.saturating_sub(self.observed_at_access);
         let half_lives_elapsed = requests_since_update as f64 / half_life as f64;

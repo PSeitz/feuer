@@ -8,7 +8,7 @@ use feuer_memory::{read_idle_buffer_pool_percent, retention::RECLAIM_SAMPLE_SIZE
 use feuer_types::config::read_env_number;
 use thiserror::Error;
 
-/// Explicit capacities and location for one Feuer cache.
+/// Capacities and location for a Feuer cache.
 ///
 /// `disk_capacity` includes the 1-MiB header chunk, shard metadata, and alignment overhead.
 /// Nonzero capacity must be at least 2 MiB. Changing the file capacity invalidates disk entries.

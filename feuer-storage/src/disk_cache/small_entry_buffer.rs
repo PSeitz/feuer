@@ -128,7 +128,7 @@ impl BufferedSmallEntryChunk {
         if self.entries.is_empty() {
             return Ok(0);
         }
-        // Detached chunks are not lookup-visible until publication. Reads may miss during payload I/O.
+        // Detached chunks are invisible to lookups until publication.
         let Self { buffer, entries, .. } = std::mem::replace(self, Self::new()?);
         shard.write_payload(disk, buffer.into_bytes(), entries).await
     }

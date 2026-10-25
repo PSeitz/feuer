@@ -1,4 +1,4 @@
-// Time a bounded-concurrency batch of 500 random 4 KiB O_DIRECT reads.
+// Time a batch of 500 random 4 KiB O_DIRECT reads at QD32 or QD64.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>

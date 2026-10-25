@@ -9,11 +9,11 @@ pub enum IoOperation {
     OpenLockFile,
     /// Acquire exclusive ownership of the data file.
     LockFile,
-    /// Open the raw payload data file.
+    /// Open the data file.
     OpenDataFile,
-    /// Inspect the raw payload data file.
+    /// Inspect the data file.
     InspectDataFile,
-    /// Set the raw payload data file to its configured capacity.
+    /// Set the data file to its configured capacity.
     ResizeDataFile,
     /// Positionally read payload bytes.
     Read,
@@ -54,7 +54,7 @@ pub enum DataFileErrorKind {
     RangeExceedsCapacity,
     /// An operating-system file operation failed.
     Io,
-    /// The blocking I/O task failed before returning its result.
+    /// The blocking I/O task failed.
     Task,
 }
 
@@ -131,7 +131,7 @@ pub enum DataFileError {
     /// No compatible Tokio runtime was active when the file was opened.
     #[error("opening a data file requires an active Tokio runtime")]
     RuntimeUnavailable,
-    /// A blocking I/O task failed before returning its operation result.
+    /// A blocking I/O task failed.
     #[error("blocking {operation} task failed: {source}")]
     Task {
         /// The operation run by the failed task.
@@ -169,5 +169,5 @@ impl DataFileError {
     }
 }
 
-/// A data-file operation result using the data-file error type.
+/// A data-file operation result.
 pub type DataFileResult<T> = std::result::Result<T, DataFileError>;

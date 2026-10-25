@@ -1,4 +1,4 @@
-//! Recover entries by following metadata-only chunks, never by scanning payload chunks.
+//! Recover entries by following metadata chunks, never by scanning payload chunks.
 
 use std::ops::Range;
 
@@ -11,7 +11,7 @@ use super::{
 /// Records of a page that failed validation: all unused.
 const UNUSED_RECORDS: &[RawMetadataBytes] = &[[0; ENTRY_METADATA_BYTES]; ENTRIES_PER_METADATA_PAGE];
 
-/// The disk byte range assigned to one shard, excluding the file's header chunk.
+/// The disk byte range assigned to a shard, excluding the file's header chunk.
 pub(super) fn shard_disk_range(capacity: u64, num_shards: usize, shard_index: usize) -> Range<u64> {
     let chunks_after_header = capacity / CHUNK_BYTES - 1;
     (1 + chunks_after_header * shard_index as u64 / num_shards as u64) * CHUNK_BYTES
@@ -60,7 +60,7 @@ impl DiskCacheShard {
     async fn load_metadata_chain(&self, file: &DataFile, mut address: u64) {
         let mut metadata = metadata::MetadataPages::default();
         while address != NO_CHUNK && address.is_multiple_of(CHUNK_BYTES) {
-            // Reservations enforce current shard bounds and stop cycles.
+            // Reservations enforce shard bounds and stop cycles.
             let Some(mut reserved_chunk) = self.allocator.reserve_chunks_at(address / CHUNK_BYTES, 1) else {
                 break;
             };
@@ -78,8 +78,7 @@ impl DiskCacheShard {
                 .0
                 .iter()
                 .flat_map(|page| {
-                    // An invalid page holds no entries. It is safe to leave on disk until a later insertion rewrites
-                    // it.
+                    // An invalid page holds no entries and can stay on disk until an insertion rewrites it.
                     validate_page(page, ENTRY_METADATA_PAGE_TAG).map_or(UNUSED_RECORDS, |contents| {
                         contents[..PAGE_CONTENT_BYTES].as_chunks::<ENTRY_METADATA_BYTES>().0
                     })
@@ -110,7 +109,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
-/// Decodes one record from a validated page. The writer guarantees
+/// Decodes a record from a validated page. The writer guarantees
 /// representable lengths and aligned payloads. All-zero records are unused.
 fn decode_entry_metadata(bytes: &RawMetadataBytes) -> Option<EntryMetadata> {
     if bytes == &[0; ENTRY_METADATA_BYTES] {

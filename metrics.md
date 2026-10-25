@@ -17,7 +17,7 @@ counters and gauges. Use separate registries if they must be distinguished.
 |---|---|---|
 | `feuer_lookup_total` | Counter | `outcome`: `memory_hit`, `disk_hit`, `callback`, `callback_error`, `miss` |
 | `feuer_lookup_duration_seconds` | Histogram | `outcome`: `disk_hit`, `callback`. Successful lookup after a memory miss, including callback work and synchronous disk-write scheduling |
-| `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`. Complete object payload bytes successfully returned |
+| `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`. Object payload bytes returned |
 
 Lookup outcomes count only completed operations. Duration
 histograms record successful disk hits and callbacks only, including time spent
@@ -37,7 +37,7 @@ operations. Use the public lookup counters to measure caller-visible behavior.
 | Metric | Type | Labels / meaning |
 |---|---|---|
 | `feuer_disk_lookup_total` | Counter | `outcome`: `hit`, `absent`, `io_error`, `checksum_failed`, `fallthrough` |
-| `feuer_disk_lookup_duration_seconds` | Histogram | No labels. Successful hits only: buffered copying, or reading and verifying the complete object |
+| `feuer_disk_lookup_duration_seconds` | Histogram | No labels. Successful hits only: buffered copying, or reading and verifying the object |
 | `feuer_disk_chunks` | Gauge | `state`: `free`, `allocated`. Each chunk is 1 MiB. Excludes the reserved global-header chunk |
 | `feuer_disk_payload_bytes` | Gauge | Payload bytes in indexed entries, excluding padding and metadata |
 | `feuer_disk_entries` | Gauge | Indexed disk entries |
@@ -61,12 +61,12 @@ Detached writes can outlive the last public cache handle.
 
 `allocated * 1 MiB - indexed payload bytes` measures capacity unavailable for
 indexed payload, including metadata, padding, partially dead chunks, and active
-writes. Indexed payload bytes sum complete object lengths.
+writes. Indexed payload bytes sum object lengths.
 
 For byte-weighted packing efficiency, divide the rate of batch `payload` bytes
 by the rate of batch `chunk` bytes. Both exclude failed payload regions and include
 successful writes later discarded at publication. Raw disk-I/O byte counters
-still include successful writes from partially failed batches. Existing read-I/O
+still include successful writes from partially failed batches. Read-I/O
 byte counters measure completed DataFile read lengths, not alignment padding or
 individual kernel submissions.
 
@@ -74,7 +74,7 @@ individual kernel submissions.
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `feuer_disk_recovered_chunks` | Gauge | Currently allocated 1-MiB chunks restored by recovery; no labels |
+| `feuer_disk_recovered_chunks` | Gauge | Allocated 1-MiB chunks restored by recovery; no labels |
 
 Recovered chunks are a subset of `feuer_disk_chunks{state="allocated"}`.
 Each chunk counts once, including shared chunks and every chunk of a multi-chunk entry. Temporary scan reservations and normal writes do
@@ -132,7 +132,7 @@ when there are no attempts in the window.
 byte length of each successful DataFile read. It excludes alignment padding,
 failed reads and canceled futures, and records once per DataFile call rather
 than per kernel submission. These are not necessarily caller-requested lookup
-sizes: disk lookups also read metadata and whole cached entries.
+sizes: disk lookups also read metadata and cached entries.
 
 Buckets double from 1 KiB through 1 GiB. For the p95 read size in bytes:
 
@@ -171,8 +171,8 @@ Gauge values remain in bytes. Update filters using the former numeric bucket lab
 Disk promotions charge the retained allocation's whole capacity, including padding
 and unused bytes.
 Callback downloads without capacity metadata use their payload length.
-Shared allocations are conservatively charged per cached entry. The existing oversized-entry
-exception can still make cached charges exceed the target.
+Shared allocations are conservatively charged per cached entry. Oversized entries
+can make cached charges exceed the target.
 
 **Memory utilization (%)** — cached and idle allocation charges relative to capacity:
 
@@ -195,7 +195,7 @@ the gauge if freed. Idle bytes are included in `feuer_memory_used_bytes`; used b
 are charged there only when held by cache entries. Do not add the two gauges.
 Write scratch bypasses the pool gauge. Admission frees
 idle buffers as necessary before retaining cached allocations. Gauges sum across
-cache instances sharing a registry. Standalone storage without a memory cache
+cache instances sharing a registry. Storage without a memory cache
 retains no idle buffers.
 
 ## Best-effort disk writes
@@ -246,7 +246,7 @@ registry, including when multiple files share an I/O queue. Sum cache labels to
 see their combined waits on a shared queue. Periodic gauge samples can miss short
 spikes. These metrics do not measure the proposed payload-read admission queue.
 
-## Existing metrics
+## Other metrics
 
 - `feuer_memory_operations_total{operation}`: `insert`, `redundant`, `remove`.
   Internal access/hit/miss counters are not emitted. Use public lookup counters for hit ratios.

@@ -23,7 +23,7 @@ start with a successful synthetic whole-object download** on a replay miss,
 including starts originally failed or incomplete. This measures demand under that
 assumption, not original cancellation, actual source latency, retry/coalescing behavior,
 expanded downloads, or the original cache's initial contents. Replays start empty.
-Replay learns complete object lengths, including zero, from successful outcomes
+Replay learns object lengths, including zero, from successful outcomes
 anywhere in the capture. Native v2 identities are preserved. Historical v1 whole-object
 requests use lengths from callback successes. Objects with no observed length or
 conflicting lengths cannot be replayed.
@@ -36,7 +36,7 @@ Nothing from the historical experiment directories is needed to build this tool.
 ## Object identities
 
 For historical range captures, every `(recorded object hash, start, end)` becomes a separate
-immutable whole object with length `end - start`. Repeated
+immutable object with length `end - start`. Repeated
 identical ranges share one derived identity.
 The transformation runs after recorded outcomes are joined and before replay.
 Arrival times, request counts, returned bytes and synthetic source allocation are
@@ -52,25 +52,25 @@ Compare matched settings with fresh caches.
 
 ## Replay cache configurations (Linux)
 
-One executable uses the real `TieredMemoryDiskCache` for all configurations:
+The executable uses `TieredMemoryDiskCache` for all configurations:
 **`--disk-bytes 0` disables disk, a positive capacity enables it.** Request timing,
 concurrency, synthetic downloads, and metrics collection are identical in both cases.
 There is no separate memory-policy simulator or disk build feature. Opening the
-real cache currently requires Linux, even when disk is disabled.
+cache requires Linux, even when disk is disabled.
 
 One sender preserves original arrival timing and starts one lookup task per arrival,
 without waiting for earlier lookups to finish. Tokio uses one runtime thread per
 available CPU. Each thread can run multiple outstanding lookups. There is no additional
 lookup-admission limit. Recorded starts already reflect application admission, and
-Pomsky's split warmup permits do not limit individual cache reads. Feuer's real I/O
-queues provide their normal backpressure. Descriptors and unstarted tasks hold no
+Pomsky's split warmup permits do not limit individual cache reads. Feuer's I/O
+queues provide backpressure. Descriptors and unstarted tasks hold no
 payload. Every synthetic source miss independently acquires a buffer through
 `TieredMemoryDiskCache::allocate_buffer` and zero-fills its exposed payload.
-`into_download` preserves the actual backing-capacity charge, including unused
+`into_download` preserves the backing-capacity charge, including unused
 capacity in the pool's size bucket. Matching concurrent misses share cache fetch work.
 Identities enter through the cache's `benchmark`-feature API without an additional
 cache-side hash. This passes the same allocation charge
-as `get_or_fetch_object_with_allocation_charge`. Historical range input derives new
+as `get_or_fetch_object_with_allocation_charge`. Historical range input derives
 identities from the recorded hash and exact range during input preparation.
 
 This matches the adapter's buffer allocation and charging, not its download
@@ -98,8 +98,8 @@ retrieval-equivalent bytes, so comparisons must pass both capacity arguments.
 with finite nonnegative floating-point values. Both `cost_per_requested_byte`
 coefficients remain 1. `--access-count-half-life` sets a positive number of caller-demand
 requests via `CacheConfig`, overriding `FEUER_ACCESS_COUNT_HALF_LIFE`. Omit it to
-use the cache's environment/default setting. Both tiers share the same historian.
-Eviction sample size and buffer retention use the current cache environment variables.
+use the cache's environment/default setting. Both tiers share the historian.
+Eviction sample size and buffer retention use the cache environment variables.
 
 ### Simulated source
 

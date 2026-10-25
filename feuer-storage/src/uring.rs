@@ -40,7 +40,7 @@ use crate::{IoMetrics, IoOperation};
 // Buffer addresses, physical offsets, and I/O lengths use this alignment.
 // Opening verifies that the filesystem's direct-I/O requirements divide it.
 pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = feuer_memory::BUFFER_ALIGNMENT;
-// Maximum bytes transferred by one I/O request, including alignment padding.
+// Maximum bytes transferred per I/O request, including alignment padding.
 pub(crate) const MAX_IO_REQUEST_BYTES: usize = 1024 * 1024;
 // Each direction has this many active requests plus an equally sized waiting channel.
 const MAX_IN_FLIGHT_READS: usize = 64;
@@ -204,7 +204,7 @@ pub(crate) struct ReadQueue {
     metrics: Arc<IoMetrics>,
 }
 
-/// Tracks one read-piece request waiting for channel capacity, including cancellation.
+/// Tracks a read-piece request waiting for channel capacity, including cancellation.
 struct ReadQueueWait<'a> {
     metrics: &'a IoMetrics,
     started: Instant,
@@ -331,7 +331,7 @@ fn queue_stopped_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "io_uring queue stopped")
 }
 
-/// One read's allocation and pointer, shared only by requests writing disjoint byte ranges.
+/// A read's allocation and pointer, shared only by requests writing disjoint byte ranges.
 struct ReadBuffer {
     buffer: AlignedBuffer,
     ptr: *mut u8,
@@ -451,7 +451,7 @@ struct WriteRequestError {
     hint: &'static str,
 }
 
-/// One I/O request, owning its buffers through completion. Writes cover both buffers.
+/// An I/O request, owning its buffers through completion. Writes cover both buffers.
 struct IoRequest {
     // Each request retains its target file and lock until completion, including on cancellation.
     files: Arc<DataFileAndDirectoryLock>,
@@ -559,7 +559,7 @@ impl IoRequest {
 }
 
 struct IoQueue {
-    // Thread-owned kernel submission and completion queues. Only this thread accesses the ring.
+    // Kernel submission and completion queues accessed only by this thread.
     ring: IoUring,
     // Eventfd polled alongside the ring so new work need not wait for completion.
     wake_fd: Arc<OwnedFd>,
@@ -624,7 +624,7 @@ impl IoQueue {
         }
     }
 
-    /// Receives uncanceled requests into the active array where it is empty and prepares their submissions.
+    /// Receives uncanceled requests into empty active slots and prepares their submissions.
     fn receive_requests(&mut self) {
         for request_index in 0..self.active.len() {
             if self.active[request_index].is_some() {
@@ -660,9 +660,8 @@ impl IoQueue {
 
     /// Retains active slots at their original addresses after failure and notifies their callers.
     fn retain_active_requests(&mut self) -> &'static [Option<IoRequest>] {
-        // This failure path does not drain outstanding requests. Ring close does not
-        // wait for teardown. Leak the fixed active slots and their file owner rather
-        // than risk use-after-free or early reuse.
+        // Ring close does not wait for outstanding requests. Leak active slots and their file owner
+        // to prevent use-after-free or early reuse.
         tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
         let requests = Box::leak(std::mem::take(&mut self.active));
         for request in requests.iter_mut().flatten() {

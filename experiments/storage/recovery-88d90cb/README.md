@@ -5,7 +5,7 @@ reuse one process and underestimate recovery in a fresh process.
 
 Commit: `88d90cbf005f5040024f7656cefea4bfa603ee8c` (tracked source snapshot; untracked files excluded).
 Host: `m8g-32cpu-local-ssd`, ARM64 Linux, local NVMe/ext4 at `/mnt/local-ssd`.
-Release build, locked dependencies, real O_DIRECT/io_uring. No profiling or production changes.
+Release build, locked dependencies, O_DIRECT/io_uring. No profiling or production changes.
 
 ## Results
 

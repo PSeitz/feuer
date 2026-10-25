@@ -50,7 +50,7 @@ the same caller-demand history. `CacheConfig` keeps candidate sampling settings 
 
 Separate scorers can model memory's fallback cost and disk's source-minus-disk
 cost. The linear model does not inspect residency or account for aligned reads,
-whole-entry checksum work, multiple I/O submissions, or contention.
+checksum work, multiple I/O submissions, or contention.
 
 Assuming every memory miss falls back to disk can undervalue memory: pending or
 skipped writes, disk eviction, and read failures may leave only source fallback.
@@ -65,7 +65,7 @@ actual entry charge.
 
 Applications can supply a custom scorer when linear size-based costs are
 insufficient. Eviction accounts for size, demand, and avoided fixed costs.
-Whole objects are queued for disk after memory admission.
+Objects are queued for disk after memory admission.
 
 ## Access history
 
@@ -78,9 +78,6 @@ shards. One atomic request clock supplies request-age decay across all keys.
 The default half-life is 262,144 requests. Each object's counter survives cache
 eviction for the history object's lifetime. Counter metadata has no capacity
 limit and is not persisted across restarts.
-
-Objects are retained or evicted whole. There is no trimming history or compaction
-grace period.
 
 ## Custom retention scores
 

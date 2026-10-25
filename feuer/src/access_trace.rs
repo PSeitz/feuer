@@ -68,7 +68,7 @@ impl Trace {
     }
 }
 
-/// One cache access's encoded trace bytes, retained to report its lookup outcome.
+/// A cache access's encoded trace bytes, retained to report its lookup outcome.
 pub(crate) struct Access<'a> {
     trace: &'a Trace,
     bytes: [u8; EVENT_BYTES],

@@ -66,7 +66,7 @@ async fn shared_slices_charge_capacity_per_entry() {
         checked_out_buffer_capacity(&registry, "2 MiB"),
         allocation_capacity as f64
     );
-    // Each source slice is a complete object in the cache.
+    // Each source slice is an object in the cache.
     assert!(cache.inner.memory.remove(&ObjectKeyHash::from(object_keys[0])));
     assert_eq!(
         value(&registry, "feuer_memory_used_bytes", &[]),

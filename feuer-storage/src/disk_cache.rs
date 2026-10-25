@@ -1,4 +1,4 @@
-//! Cache complete objects on disk, looked up by object key.
+//! Cache objects on disk by object key.
 
 #[cfg(test)]
 mod adversarial_tests;
@@ -49,7 +49,7 @@ use crate::{
 const MAX_EVICTION_ATTEMPTS: usize = 64;
 const MAX_EVICTION_CHUNKS: usize = 4096;
 
-/// Caches complete objects on disk, looked up by object key.
+/// Caches objects on disk by object key.
 ///
 /// Background writes use a nonblocking 512-entry queue. Partial small-entry buffers flush every 60 seconds.
 /// Closing finishes queued writes and discards remaining partial chunks.
@@ -79,7 +79,7 @@ struct DiskCacheInner {
     reclaim_sample_size: usize,
 }
 
-/// One shard's small-entry buffer, allocator, published entry index, and metadata pages.
+/// A shard's small-entry buffer, allocator, published entry index, and metadata pages.
 struct DiskCacheShard {
     allocator: DiskChunkAllocator,
     entry_index: Mutex<DiskEntryIndex>,
@@ -96,7 +96,7 @@ struct DiskEntryIndex {
     metrics: Arc<DiskMetrics>,
 }
 
-/// One disk entry's payload length, address, checksum, shared read, metadata, and eviction position.
+/// An entry's payload length, address, checksum, shared read, metadata, and eviction position.
 struct DiskEntry {
     // Weak references share reads without keeping payload bytes alive after callers finish.
     shared_read: Weak<PayloadRead>,
@@ -107,7 +107,7 @@ struct DiskEntry {
     metadata: metadata::EntryMetadataLocation,
 }
 
-/// One payload read's disk address, length, checksum, and result shared by concurrent readers.
+/// A payload read's disk address, length, checksum, and result shared by concurrent readers.
 struct PayloadRead {
     payload_len: u64,
     payload_checksum: u64,
@@ -285,7 +285,7 @@ impl DiskCache {
         self.disk.shards[self.disk.shard_index_for_key(key)].contains(key)
     }
 
-    /// Returns the complete object, or a miss on any I/O/integrity uncertainty.
+    /// Returns the object, or a miss on I/O/integrity uncertainty.
     /// Concurrent callers share reads. Results retain no disk ownership.
     pub async fn get(&self, key: &ObjectKeyHash) -> Option<Download> {
         self.get_with_fallthrough(key, || false)
@@ -456,13 +456,13 @@ impl DiskEntry {
 }
 
 impl DiskCacheShard {
-    /// Locks the disk index, removes one entry, releases its payload, and frees its metadata position.
+    /// Locks the disk index, removes an entry, releases its payload, and frees its metadata position.
     #[cfg(test)]
     fn remove_entry(&self, key: &ObjectKeyHash) {
         self.remove_entry_from_index(&mut self.entry_index.lock().unwrap(), key);
     }
 
-    /// Removes and releases one entry while the caller holds the disk-index lock.
+    /// Removes and releases an entry while the caller holds the disk-index lock.
     fn remove_entry_from_index(&self, disk_index: &mut DiskEntryIndex, key: &ObjectKeyHash) {
         let Some(entry) = disk_index.take_entry(key) else {
             return;
@@ -470,7 +470,7 @@ impl DiskCacheShard {
         self.release_entry(entry, &mut self.metadata_pages.lock().unwrap());
     }
 
-    /// Releases one held payload and frees its metadata slot.
+    /// Releases a held payload and frees its metadata slot.
     fn release_entry(&self, entry: DiskEntry, metadata: &mut metadata::MetadataPages) {
         self.allocator.release_payload(entry.payload_address);
         metadata.free_entry_metadata(entry.metadata);
@@ -506,7 +506,7 @@ impl DiskEntryIndex {
         }
     }
 
-    /// Takes one entry out of the index and eviction candidates without releasing its payload or metadata slot.
+    /// Removes an entry from the index and eviction candidates without releasing its payload or metadata slot.
     fn take_entry(&mut self, key: &ObjectKeyHash) -> Option<DiskEntry> {
         let entry = self.entries_by_key.remove(key)?;
         self.metrics.entries.decrease(1);
@@ -535,7 +535,7 @@ impl DiskCacheInner {
 }
 
 impl PayloadRead {
-    /// Reads the complete payload and verifies its checksum.
+    /// Reads the payload and verifies its checksum.
     async fn read_and_verify_payload(&self, file: &DataFile) -> Result<(Bytes, usize), DiskLookupOutcome> {
         let (bytes, capacity) = file
             .read_payload(self.payload_address, self.payload_len as usize)

@@ -1,6 +1,6 @@
-//! Feuer is a tiered cache for immutable whole objects.
+//! Feuer is a tiered cache for immutable objects.
 //!
-//! The public boundary provides complete object payloads, opaque object identities,
+//! The public boundary provides object payloads, opaque object identities,
 //! a soft-capacity memory tier, integrity-checked disk hits,
 //! best-effort disk writes through a 512-entry queue, and per-call asynchronous download callbacks.
 //! Zero disk capacity disables the disk tier. With disk enabled, opening requires
@@ -25,6 +25,6 @@ pub use feuer_memory::{
 pub use feuer_storage::{DiskCacheError, IoQueues};
 pub use feuer_types::{Download, ObjectKeyHash};
 
-/// The complete UTF-8 identity supplied at the public cache boundary.
+/// The UTF-8 identity supplied at the public cache boundary.
 /// Internally only its XXH3-128 hash is stored. Collisions are not verified against full keys.
 pub type ObjectKey = String;

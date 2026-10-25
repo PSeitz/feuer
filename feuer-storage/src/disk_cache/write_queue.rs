@@ -8,7 +8,7 @@ use crate::disk_metrics::DiskWriteQueueOutcome;
 
 pub(super) const MAX_QUEUED_ENTRIES: usize = 512;
 
-/// One queued download, retaining the disk internals until its write finishes.
+/// A queued download, retaining the disk internals until its write finishes.
 pub(super) struct PendingDiskWrite {
     disk: Arc<DiskCacheInner>,
     key: ObjectKeyHash,

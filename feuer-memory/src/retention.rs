@@ -13,7 +13,7 @@ use feuer_types::ObjectKeyHash;
 /// application locks across cache operations if scoring acquires those locks.
 /// The cache owns sampling and removal. The application owns custom metadata.
 pub trait RetentionScorer: Send + Sync {
-    /// Returns the retention score for one object's payload length and tier-specific entry size.
+    /// Returns the retention score for an object's payload length and tier-specific entry size.
     fn score(
         &self,
         key: &ObjectKeyHash,
@@ -78,7 +78,7 @@ impl RetentionScorer for AvoidedRetrievalCostScorer {
     }
 }
 
-/// Default maximum entries inspected in one retention-policy sample.
+/// Default maximum entries inspected per retention-policy sample.
 pub const RECLAIM_SAMPLE_SIZE: usize = 64;
 
 /// Chooses up to `sample_size` candidates, advancing through the list and wrapping at its end.

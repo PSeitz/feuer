@@ -85,7 +85,7 @@ trait ReplayCache {
     /// Looks up an object and reports a hit, without returning the cached payload.
     fn lookup_hit(&mut self, request: &TraceRequest) -> bool;
 
-    /// Inserts the complete object payload.
+    /// Inserts the object payload.
     fn insert(&mut self, request: &TraceRequest, payload: Bytes);
 
     fn used_payload_bytes(&self) -> u64;

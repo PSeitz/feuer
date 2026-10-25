@@ -90,7 +90,7 @@ impl BufferPool {
         })
     }
 
-    /// A standalone storage reader without a memory cache retains no idle buffers.
+    /// A storage reader without a memory cache retains no idle buffers.
     pub fn unpooled() -> Arc<Self> {
         Self::new(0, MemoryMetrics::noop())
     }
@@ -123,7 +123,7 @@ impl BufferPool {
         state.cached_bytes + state.idle_bytes
     }
 
-    /// Allocation bytes currently available for reuse.
+    /// Allocation bytes available for reuse.
     pub fn idle_bytes(&self) -> u64 {
         self.state.lock().idle_bytes
     }
@@ -151,7 +151,7 @@ impl BufferPool {
         self.metrics.used_bytes.decrease(bytes);
     }
 
-    /// Takes one idle buffer and subtracts its bytes from accounting and metrics under the pool lock.
+    /// Takes an idle buffer and subtracts its bytes from accounting and metrics under the pool lock.
     fn take_idle_buffer(&self, state: &mut EntryAllocationBytesAndIdleBuffers, index: usize) -> Option<AlignedBuffer> {
         let buffer = state.by_size[index].pop()?;
         let capacity = buffer.capacity() as u64;
@@ -178,7 +178,7 @@ impl Drop for BufferPool {
     }
 }
 
-/// One owned, initialized, 4-KiB-aligned allocation with a separate exposed length.
+/// An owned, initialized, 4-KiB-aligned allocation with a separate exposed length.
 /// It returns to its originating pool only after the last Bytes owner drops it.
 /// On Linux, capacities above 64 MiB use anonymous mappings. Resizing stays in that
 /// bucket, so capacity also determines how the allocation is released.
@@ -280,7 +280,7 @@ impl AlignedBuffer {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "buffer length exceeds allocation limit"))
     }
 
-    /// Actual backing allocation bytes, including spare capacity.
+    /// Backing allocation bytes, including spare capacity.
     pub fn capacity(&self) -> usize {
         self.layout.size()
     }

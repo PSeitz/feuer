@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// One entry's identity, checksum, offset in the write buffer, and completion accounting.
+/// An entry's identity, checksum, offset in the write buffer, and completion accounting.
 pub(super) struct BufferedEntry {
     pub(super) key: ObjectKeyHash,
     pub(super) payload_len: u64,

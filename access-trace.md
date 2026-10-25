@@ -24,7 +24,7 @@ Read and replay FETR packages with [the replay tools](feuer-replay/README.md).
 
 Each package starts with eight bytes `FETR\x02\x00\x00\x00`, then nonempty **41-byte
 events**. Integers are little-endian, without padding. Persist one package per file.
-Every event refers to a complete object.
+Every event refers to an object.
 
 | Event offset | Type | Field |
 | --- | --- | --- |

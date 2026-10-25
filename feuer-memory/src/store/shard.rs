@@ -22,7 +22,7 @@ pub(super) enum InsertResult {
     Evicted,
 }
 
-/// One memory-cache shard's object index and allocation accounting.
+/// A memory-cache shard's object index and allocation accounting.
 pub(super) struct MemoryCacheShard {
     capacity: u64,
     used_bytes: u64,

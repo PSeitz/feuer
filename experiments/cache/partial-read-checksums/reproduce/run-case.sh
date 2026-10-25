@@ -89,7 +89,7 @@ monitors=()
 if (( replay_status != 0 )); then exit "$replay_status"; fi
 report_status=0
 python3 "$root/report.py" "$output" "$case_id" "$mode" "$memory_cost" "$disk_cost" "$half_life" > "$output/report.json" 2> "$output/report-errors.txt" || report_status=$?
-# Inventory all captured telemetry even when validation rejects a complete report.
+# Inventory all captured telemetry even when validation rejects the report.
 inventory_status=0
 python3 "$root/report-metrics.py" "$output" > "$output/metric-report.log" 2>&1 || inventory_status=$?
 if (( report_status != 0 )); then exit "$report_status"; fi

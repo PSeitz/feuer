@@ -13,7 +13,7 @@ use rustc_hash::FxHashMap;
 /// Errors from trace decoding, input files, or replay preparation.
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-/// One recorded request start or lookup outcome.
+/// A recorded request start or lookup outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
     /// 0 start, 1 memory hit, 2 disk hit, 3 callback success, 4 callback error, 5 historical noncovering download, 6 miss.
@@ -29,7 +29,7 @@ pub struct Event {
     pub requested: Option<Range<u64>>,
     /// Historical v1 callback range, present only for kinds 3 and 5.
     pub downloaded: Option<Range<u64>>,
-    /// Complete object length from a successful v2 lookup.
+    /// Object length from a successful v2 lookup.
     pub payload_len: Option<u64>,
 }
 
@@ -108,7 +108,7 @@ pub fn decode_package(data: &[u8]) -> Result<impl Iterator<Item = Result<Event>>
     }))
 }
 
-/// One arrival to replay as a complete object.
+/// An object request to replay.
 #[derive(Clone, Copy, Debug)]
 pub struct Request {
     /// Identity used to break ties between equal arrival timestamps.
@@ -117,7 +117,7 @@ pub struct Request {
     pub time_ns: u64,
     /// Recorded object hash, or an identity derived from an exact historical range.
     pub object_key: ObjectKeyHash,
-    /// Full object payload length in bytes.
+    /// Object payload length in bytes.
     pub payload_len: u64,
 }
 

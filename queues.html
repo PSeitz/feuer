@@ -28,7 +28,7 @@
   <header>
     <p>FEUER / SCHEDULING</p>
     <h1>Where work waits</h1>
-    <p>Whole-object lookups, best-effort writes, and the I/O queues beneath them.</p>
+    <p>Lookups, best-effort writes, and the I/O queues beneath them.</p>
     <p><a href="README.md">Usage</a> · <a href="architecture.html">Architecture</a> · <a href="metrics.md">Metrics</a></p>
   </header>
 
@@ -59,7 +59,7 @@
       <p>Memory hits perform no disk I/O. A disk lookup first tries its shard's small-entry buffer.
         Otherwise it finds the object's payload address, length, and checksum in the in-memory index.
         Absent entries fall through to the source callback.</p>
-      <p>Matching concurrent public misses share one disk-or-callback operation by object key and callback error type.
+      <p>Concurrent public misses share one disk-or-callback operation by object key and callback error type.
         Storage also shares reads for the same indexed entry. Cancellation can leave the result unset so a waiter takes over.</p>
     </details>
     <details>
@@ -68,13 +68,13 @@
         The file layer reserves channel capacity before preparing each I/O request. Large reads submit
         pieces of at most 1 MiB, with fresh reservations for subsequent pieces.</p>
       <p>Recovery also reserves low-level queue capacity before allocating metadata-read buffers.
-        Queue slot counts do not limit the combined capacity of all live object buffers.</p>
+        Queue slot counts do not limit the combined capacity of live object buffers.</p>
       <a href="feuer-storage/src/file.rs">Source: file I/O</a>
     </details>
     <details>
       <summary>Optional source fallthrough under disk pressure</summary>
       <p>When at least 64 payload reads are waiting, Feuer schedules each unchecked waiter's decision closure.
-        A true result invokes the usual source callback instead of waiting for a permit. Each decision runs at most
+        A true result invokes the source callback instead of waiting for a permit. Each decision runs at most
         once in its caller's task, even if earlier decisions have reduced pressure.</p>
       <p>Memory hits, buffered hits, absent entries, admitted reads, and shared-read waiters skip the decision.
         Shared public fetches follow their executing caller's decision. A takeover after cancellation uses its own closure.</p>
@@ -82,12 +82,12 @@
         APIs without a fallthrough closure always wait.</p>
     </details>
     <details>
-      <summary>Whole-object verification and promotion</summary>
-      <p>Reads verify the complete payload against its expected checksum. They do not read neighboring entries
+      <summary>Verification and promotion</summary>
+      <p>Reads verify the payload against its expected checksum. They do not read neighboring entries
         or metadata on the lookup path. I/O errors become misses without removing the entry.
         Checksum failures invalidate only the entry still associated with that read.</p>
       <p>Readers retain no disk reservation. Eviction can release chunks while I/O is outstanding, so reuse can
-        cause a checksum miss. Successful results promote the complete object to memory and charge retained
+        cause a checksum miss. Successful results promote the object to memory and charge retained
         allocation capacity. Disk hits do not schedule another write.</p>
     </details>
   </section>
@@ -97,7 +97,7 @@
     <div class="flow"><span>Callback object</span><span>Memory admission</span><span>512-entry queue</span><span>Pack / reserve chunks</span><span>Payload I/O</span><span>Publish</span></div>
     <details open>
       <summary>Best-effort queue admission</summary>
-      <p>Newly admitted downloads are queued unless the object is already stored. A full or closed queue skips
+      <p>Admitted downloads are queued unless the object is already stored. A full or closed queue skips
         the write without failing the lookup. Queued and active writes proceed independently of memory retention.</p>
       <p>The queue limits object count, not payload bytes. Pending-byte metrics cover logical payloads through
         preparation and completion, excluding padding. Memory eviction does not cancel admitted writes.</p>
@@ -110,7 +110,7 @@
         Closing discards partial chunks.</p>
       <p>Buffering reserves no disk capacity. Flushing reserves payload chunks, evicting sampled objects if needed.
         A multi-chunk payload requires consecutive whole chunks. Fragmentation or exhausted eviction budgets can skip admission.</p>
-      <p>Lookups can copy complete buffered objects after memory eviction. Busy/flushing buffers can miss until publication.</p>
+      <p>Lookups can copy buffered objects after memory eviction. Busy/flushing buffers can miss until publication.</p>
     </details>
     <details>
       <summary>Payload completion, publication, and metadata</summary>
@@ -126,7 +126,7 @@
 
   <section id="sharing">
     <h2>Sharing I/O queues</h2>
-    <p>Pass clones of <code>IoQueues::new()?</code> to independent caches to share admission, rings, and worker threads.
+    <p>Pass clones of <code>IoQueues::new()?</code> to caches to share admission, rings, and worker threads.
       <code>None</code> creates dedicated queues. Read and write workers remain separate and can make progress concurrently.</p>
     <p>Scheduling follows arrival order without per-cache fairness. Each cache keeps its own contents,
       capacities, buffer pool, history, lock file, and background-write queue. Dropping one cache does not stop others.
@@ -140,7 +140,7 @@
       One worker delivers binary packages when its batch reaches 8 MiB or all handles are dropped.
       There is no timed delivery. Slow receivers delay lookups.</p>
     <p>Receiver errors stop delivery without changing cache results. Dropping handles does not wait for persistence.
-      See the <a href="access-trace.md">whole-object trace format and receiver contract</a>.</p>
+      See the <a href="access-trace.md">trace format and receiver contract</a>.</p>
   </section>
 </main>
 </body>

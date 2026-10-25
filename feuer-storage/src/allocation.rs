@@ -20,7 +20,7 @@ pub(super) struct DiskChunkAllocator {
     payload_chunks: Mutex<FxHashMap<u64, (ReservedChunks, usize)>>,
 }
 
-/// Consecutive free chunks and their metrics.
+/// Free chunks and their metrics.
 #[derive(Debug)]
 struct FreeChunks {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
@@ -149,7 +149,7 @@ impl DiskChunkAllocator {
         }
     }
 
-    /// Reserves one contiguous run of whole chunks. Failure consumes no space.
+    /// Reserves a contiguous run of whole chunks. Failure consumes no space.
     pub(super) fn reserve_chunks(&self, count: u64) -> Option<ReservedChunks> {
         let mut free = self.free.lock().unwrap();
         let (&start, _) = free
@@ -168,7 +168,7 @@ impl DiskChunkAllocator {
             .insert(reserved_chunks.chunk_numbers.start, (reserved_chunks, payload_count));
     }
 
-    /// Releases one held payload's use of its chunks, freeing them after their last payload.
+    /// Releases a held payload's use of its chunks, freeing them after their last payload.
     /// The caller must supply the payload's start address, once per held payload.
     pub(super) fn release_payload(&self, payload_address: u64) {
         let first_chunk_number = payload_address / CHUNK_BYTES;
@@ -195,7 +195,6 @@ impl DiskChunkAllocator {
 #[derive(Debug)]
 pub(super) struct ReservedChunks {
     free: Arc<Mutex<FreeChunks>>,
-    /// Numbers of the reserved chunks.
     chunk_numbers: Range<u64>,
     recovered: bool,
 }

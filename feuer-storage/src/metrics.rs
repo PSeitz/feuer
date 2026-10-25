@@ -12,11 +12,10 @@ struct IoOperationMetrics {
     success_duration: BoxedHistogram,
 }
 
-/// Internal metric handles for fixed-file positional I/O.
+/// Metric handles for fixed-file positional I/O.
 ///
-/// Feuer's public API does not expose this as a statistics snapshot. The
-/// handles emit counters, gauges and histograms through the configured
-/// `mixtrics` registry with read/write operation and success/error outcome labels.
+/// Emits counters, gauges and histograms through the configured `mixtrics` registry
+/// with read/write operation and success/error outcome labels.
 #[derive(Debug)]
 pub struct IoMetrics {
     read: IoOperationMetrics,
@@ -27,7 +26,7 @@ pub struct IoMetrics {
 }
 
 impl IoMetrics {
-    /// Registers fixed-file I/O metrics with read/write operation and success/error outcome labels.
+    /// Registers fixed-file I/O metrics.
     pub fn new(registry: &BoxedRegistry) -> Arc<Self> {
         let operations = registry.register_counter_vec(
             "feuer_disk_io_total".into(),
@@ -100,7 +99,7 @@ impl IoMetrics {
         }
     }
 
-    /// Creates unregistered no-op metrics for caches without a metrics registry.
+    /// Creates no-op I/O metrics.
     pub fn noop() -> Arc<Self> {
         let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         Self::new(&registry)

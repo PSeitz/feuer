@@ -1,6 +1,6 @@
 # Feuer Tiered Cache Contract
 
-This document describes the whole-object behavioral contract. See
+This document describes the cache's behavioral contract. See
 [implementation status](implementation-status.md) for current components and open work.
 
 ## Object identity and results
@@ -9,8 +9,8 @@ Feuer is an embedded read-through cache for immutable objects. It combines a
 soft-capacity memory tier with a fixed-capacity, best-effort local disk tier.
 It is not authoritative storage.
 
-Every successful lookup returns one contiguous `bytes::Bytes` containing the
-complete object. Empty objects are valid. Callers do not supply object lengths.
+Successful lookups return the object as `bytes::Bytes`. Empty objects are valid.
+Callers do not supply object lengths.
 The application owns source correctness and must give different content different
 keys, including across process restarts and application upgrades.
 
@@ -26,7 +26,7 @@ checksum collisions.
 ## Public lookup boundary
 
 - `get_or_fetch(key, callback)` accepts an asynchronous `Result<Download, E>`.
-  `Download::new(Bytes)` is infallible and represents a complete object.
+  `Download::new(Bytes)` is infallible.
 - `get_or_fetch_object(key, callback)` accepts an asynchronous `Result<Bytes, E>`.
 - `get_or_fetch_object_with_allocation_charge` accepts a callback returning
   `(Bytes, allocation_charge)` inside its result.
@@ -34,7 +34,7 @@ checksum collisions.
   callback. A miss returns `None`.
 
 Lookup checks memory, then disk, then invokes the callback on a miss. Disk hits
-promote the complete object to memory without another disk write. Callback errors
+promote the object to memory without another disk write. Callback errors
 return to callers without source retries. Downloads admitted to memory are queued
 for disk unless the object is already stored. Duplicate objects are not retained
 or written again within a tier.
@@ -74,8 +74,7 @@ all keys. The default half-life is 262,144 requests. Counters survive eviction f
 the history object's lifetime, have no capacity limit, and are not persisted.
 
 Both tiers evict the lowest-scoring object from a rotating sample, 64 candidates
-by default. Objects are retained or evicted whole. There is no trimming or
-compaction state. The [default scorer](eviction.md) weights avoided retrieval cost
+by default. The [default scorer](eviction.md) weights avoided retrieval cost
 by the object's decayed demand and divides by memory allocation charge or disk
 payload length. Separate tier scorers may use the same demand history.
 
@@ -85,7 +84,7 @@ avoid I/O, cache re-entry, and incompatible application lock ordering.
 
 ## Memory accounting
 
-Cached allocation charges and idle buffers share one configured memory target.
+Cached allocation charges and idle buffers share a memory target.
 Entry targets are divided among shards. Admission evicts from the selected shard.
 An object larger than its shard's target empties that shard and remains cached,
 so aggregate retained charges can exceed the target. Memory pressure never waits
@@ -96,7 +95,7 @@ capacity. A known backing charge can be supplied explicitly. Disk promotions and
 pooled downloads charge their retained buffer's full capacity. Shared allocations
 are conservatively charged once per cached entry.
 
-One aligned buffer pool is shared by reads and downloader-acquired buffers. All
+An aligned buffer pool is shared by reads and downloader-acquired buffers. All
 buckets share an idle ceiling, 7% of the memory target by default. Admission frees
 idle buffers first. Buffer returns never evict entries. A buffer becomes reusable
 only after its last owner releases it.
@@ -122,7 +121,7 @@ chunks flush immediately, partial chunks every 60 seconds. Buffering reserves no
 disk space. Busy/flushing buffers can miss until publication. Closing discards
 partial chunks. Larger entries write independently.
 
-Each payload occupies one contiguous disk byte range with no metadata gaps.
+Each payload occupies a contiguous disk byte range with no metadata gaps.
 Addresses and storage lengths are aligned to 4 KiB. Multi-chunk objects reserve
 consecutive whole chunks exclusively. Written chunks cannot be appended to and
 individual payload holes cannot be reused. A chunk becomes reusable when its last
@@ -138,7 +137,7 @@ Cleaning and relocation are not required for admission.
 ## I/O and integrity
 
 Readers copy a payload address and expected checksum under the index lock, then
-read the whole object into an owned buffer and verify it. They do not read
+read the object into an owned buffer and verify it. They do not read
 neighboring objects or metadata on the lookup path. Buffered entries can be copied
 without disk I/O.
 
@@ -160,12 +159,12 @@ The backing file is exclusively locked. Different files can share a directory
 and I/O queues. Pending I/O retains its target file and lock through completion.
 
 The global header identifies the disk format, application payload version, and
-capacity. A mismatch invalidates previous entries, including payload-version
+capacity. A mismatch invalidates entries, including payload-version
 downgrades. Older disk formats are discarded rather than migrated.
 
 Recovery follows metadata-chunk links without scanning payloads. Corrupt record
 pages are discarded independently and invalid links terminate a chain. Payloads
-are verified only when read. Recovered stale entries may subsequently miss.
+are verified only when read. Recovered stale entries may miss.
 
 There is no `fsync`, shutdown flush, durability, stable on-disk compatibility, or
 minimum recovered hit-rate guarantee. Recovery may retain any subset, including
@@ -175,7 +174,7 @@ none. The application remains responsible for authoritative data.
 
 Metrics use fixed operation, outcome, source, and buffer-bucket labels, never
 object identities. See [metrics](metrics.md). Optional [access traces](access-trace.md)
-record whole-object requests and completed outcomes without payloads.
+record requests and completed outcomes without payloads.
 
 A shared callback result counts as one completed lookup per caller, not one
 source request. Actual source invocations, retries, and transferred bytes must be

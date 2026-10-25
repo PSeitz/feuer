@@ -16,7 +16,7 @@ metadata chunk: [255 checksummed 4-KiB record pages][4-KiB next-chunk page]
 payload chunks: [contiguous, aligned payload bytes, with no metadata gaps]
 ```
 
-Each metadata page holds 101 fixed 40-byte records. A metadata chunk therefore holds up to **25,755
+Each metadata page holds 101 40-byte records. A metadata chunk therefore holds up to **25,755
 records**, shared across payload chunks and write batches. Its last page contains the next metadata
 chunk address, or `u64::MAX` for the end of the chain. Metadata chunks stay reserved for the cache's
 lifetime. Each active shard needs at least one metadata chunk, charged against its capacity. A one-chunk cache consequently has no room for payloads.
@@ -63,14 +63,14 @@ throughput has not yet been compared against v10.
 
 ## Reads and eviction
 
-`get` first copies the complete object from a buffered entry, without disk I/O. Busy buffers and
+`get` first copies the object from a buffered entry, without disk I/O. Busy buffers and
 chunks detached for flushing may miss until disk publication. Otherwise it reads and verifies the
-complete object's XXHash64 checksum, or shares a read still held by another caller. Results omit
+object's XXHash64 checksum, or shares a read still held by another caller. Results omit
 alignment padding.
 Reads load neither metadata nor neighboring entries.
 A read copies the address and expected checksum under the object-index lock, then reads into an
 owned memory buffer. Concurrent disk overwrite is allowed: checksum validation happens after I/O
-and before using the bytes, subject to the usual checksum-collision limitation. A checksum mismatch
+and before using the bytes, subject to checksum collisions. A checksum mismatch
 removes the entry only if the read still belongs to it, leaving replacement entries untouched.
 
 Disk and memory consult standalone access history through `feuer-historian`, using the shared
@@ -114,7 +114,7 @@ Real device power-loss testing is required before claiming crash hardening.
 
 ## Validation
 
-Run on Linux with real io_uring and direct I/O:
+Run on Linux with io_uring and direct I/O:
 
 ```sh
 TMPDIR=/mnt/local-ssd cargo test --locked -p feuer-storage --lib
@@ -124,5 +124,5 @@ Tests cover links between full metadata chunks, one full-chunk recovery read ind
 size, metadata updates, independently reclaimable payloads, reuse without waiting for readers
 or metadata writes, duplicate-key recovery, stale-record checksum misses, malformed/cyclic links, corrupt record pages,
 metadata/payload ownership conflicts, fixed chain starts, replacement after reopening, and payload checksum
-failures. Existing tests cover packing, fragmentation, cancellation, eviction, and contiguous payloads
+failures. Tests also cover packing, fragmentation, cancellation, eviction, and contiguous payloads
 up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v15.

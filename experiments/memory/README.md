@@ -108,7 +108,7 @@ without floating-point accumulation as:
 source cost = GETs * 10,000,000 + downloaded bytes
 ```
 
-The cache-disabled denominator charges one GET and the full converted object's
+The cache-disabled denominator charges one GET and the converted object's
 payload for every request. Cache misses incur that same cost, while hits avoid
 it entirely. Payload values share one immutable source allocation sized to the
 largest converted object, so `used_payload_bytes` is cache accounting rather

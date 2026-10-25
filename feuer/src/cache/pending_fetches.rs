@@ -11,7 +11,7 @@ use super::{FetchResult, ObjectKeyHash};
 type FetchKey = (ObjectKeyHash, TypeId);
 pub(super) type PendingFetches = Arc<Mutex<HashMap<FetchKey, Weak<dyn Any + Send + Sync>>>>;
 
-/// One disk-or-source fetch, owned by its callers rather than the registry.
+/// A disk-or-source fetch, owned by its callers rather than the registry.
 pub(super) struct PendingFetch<E> {
     key: FetchKey,
     pending: PendingFetches,

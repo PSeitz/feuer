@@ -6,7 +6,7 @@ use bytes::Bytes;
 
 use crate::uring;
 
-/// One production read queue and its driver thread, without a memory cache or idle retention.
+/// The production read queue and its driver thread, without a memory cache or idle retention.
 pub struct ReadQueue(uring::ReadQueue);
 
 impl ReadQueue {

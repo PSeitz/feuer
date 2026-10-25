@@ -7,7 +7,7 @@ use std::{collections::BTreeSet, time::Duration};
 
 use super::{page_format::*, *};
 
-/// The location of one entry's metadata, ordered by metadata chunk then entry within that chunk.
+/// An entry's metadata location, ordered by chunk then entry within that chunk.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct EntryMetadataLocation {
     /// Index into `MetadataPages::chunks`, in metadata-chain order.
@@ -16,14 +16,14 @@ pub(super) struct EntryMetadataLocation {
     pub(super) entry_index: u16,
 }
 
-/// The location of one metadata page within the metadata chain.
+/// A metadata page's location in the chain.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct MetadataPageLocation {
     pub(super) chunk_index: u32,
     pub(super) page_index: u8,
 }
 
-/// One entry's key hash, payload length, disk address, and checksum, as recorded on disk.
+/// An entry's key hash, payload length, disk address, and checksum, as recorded on disk.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct EntryMetadata {
     pub(super) key: ObjectKeyHash,
@@ -42,7 +42,7 @@ pub(super) struct MetadataPages {
     free_slot_count: usize,
 }
 
-/// One reserved metadata chunk: its entry metadata slots in disk order, and the next chunk's address.
+/// A reserved metadata chunk: its entry metadata slots in disk order, and the next chunk's address.
 /// Free slots are `None` and written as zeros.
 pub(super) struct MetadataChunk {
     pub(super) reserved_chunk: ReservedChunks,
@@ -54,7 +54,7 @@ pub(super) struct MetadataChunk {
 }
 
 impl MetadataChunk {
-    /// Encodes one checksummed page: an entry metadata page, or the final next-chunk page.
+    /// Encodes a checksummed page: an entry metadata page, or the final next-chunk page.
     fn encode_page(&self, page_index: usize, page: &mut [u8]) {
         if page_index == ENTRY_METADATA_PAGES_PER_CHUNK {
             encode_page(page, NEXT_CHUNK_PAGE_TAG, 1, &self.next_chunk_address.to_le_bytes());
@@ -77,7 +77,7 @@ impl MetadataChunk {
 }
 
 impl MetadataPages {
-    /// Stores one entry's metadata in the first free slot and marks its page for writing.
+    /// Stores an entry's metadata in the first free slot and marks its page for writing.
     /// Earliest reuse lets live metadata claim reused payload chunks before stale metadata.
     /// Panics without a free slot. Callers reserve slots with `ensure_free_slots`.
     pub(super) fn store_entry_metadata(&mut self, entry: EntryMetadata) -> EntryMetadataLocation {
@@ -102,7 +102,7 @@ impl MetadataPages {
         location
     }
 
-    /// Frees one entry's slot for reuse and marks its page for rewriting without the entry.
+    /// Frees an entry's slot and marks its page for rewriting.
     pub(super) fn free_entry_metadata(&mut self, location: EntryMetadataLocation) {
         assert!(self.slot_mut(location).take().is_some(), "metadata slot freed twice");
         self.free_slot_search_start = self.free_slot_search_start.min(location);

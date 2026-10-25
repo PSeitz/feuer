@@ -16,7 +16,7 @@ These are measurements of the historical snapshot below with diagnostics, not a 
 
 ## What was tested
 
-HEAD **`2f381acdb13e114593e98d1078f29b341279380d`**, plus the actual preexisting working tree, copied into an isolated source snapshot. This includes current writer-prepared and read-learned subrange checksums, read sharing, read admission, and bypass code. The benchmark API supplies a false bypass decision.
+HEAD **`2f381acdb13e114593e98d1078f29b341279380d`**, plus the preexisting working tree, copied into an isolated source snapshot. This includes current writer-prepared and read-learned subrange checksums, read sharing, read admission, and bypass code. The benchmark API supplies a false bypass decision.
 
 - First 600 seconds, original paced arrivals, one task per arrival, 32 runtime threads.
 - Exactly **100,000,000,000 memory bytes**, **500,000,000,000 disk bytes**, 64 shards, fresh cache.
@@ -29,7 +29,7 @@ The diagnostic patch records read identities, selected/requested ranges, actual 
 Provenance:
 
 - `settings.json`, `instrumentation.patch`, `run-case.sh`, `analyze.py`, `results.json` are small reproducible artifacts.
-- `raw/source.tar` is the original current-source snapshot, including untracked Rust files. `raw/source-manifest.json` gives per-file hashes. `raw/current.patch` preserves tracked working-tree changes.
+- `raw/source.tar` is the original source snapshot, including untracked Rust files. `raw/source-manifest.json` gives per-file hashes. `raw/current.patch` preserves tracked working-tree changes.
 - `raw/source/` and `raw/instrumented-manifest.json` preserve the instrumented source.
 - `raw/results/diagnostic/` contains events, all metric samples and phase snapshots, exact latency summary, process/device telemetry, command/environment, report, metric inventory, and witness records. Raw files are ignored by Git.
 - Historical remote workspace: `/home/ubuntu/read-volume-duplicates`.
@@ -40,7 +40,7 @@ Provenance:
 
 `feuer/src/cache.rs:389–410` checks memory once, awaits disk, then synchronously inserts the requested disk slice into memory. Memory access history is recorded once before lookup, not by the diagnostic probes.
 
-`feuer-storage/src/disk_cache.rs:350–390` selects an entry and obtains a shared read under the shard index lock. `PayloadRead.result.get_or_try_init` surrounds **both payload read admission and I/O**. Thus callers waiting for the same checksum share the admission wait and the read. Shared waiters do not each acquire a payload permit or allocate another complete read buffer.
+`feuer-storage/src/disk_cache.rs:350–390` selects an entry and obtains a shared read under the shard index lock. `PayloadRead.result.get_or_try_init` surrounds **both payload read admission and I/O**. Thus callers waiting for the same checksum share the admission wait and the read. Shared waiters do not each acquire a payload permit or allocate another read buffer.
 
 `DiskEntry::share_covering_read` at `disk_cache.rs:496–520` first reuses a live whole-entry read, otherwise selects the shortest covering checksum and reuses that checksum's live read. This supports nonidentical requested slices of one verified read. It does not combine disjoint checksums or overlapping entries into a new read.
 

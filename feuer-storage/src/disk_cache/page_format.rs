@@ -1,4 +1,4 @@
-//! Experimental v15 metadata-only chunks. Each chunk contains 255 independently checksummed
+//! Experimental v15 metadata chunks. Each chunk contains 255 independently checksummed
 //! entry-metadata pages and one checksummed next-chunk page. All-zero entry metadata is unused.
 //! Payloads live in separate chunks. An entry's metadata never crosses a page boundary.
 
@@ -12,17 +12,17 @@ use crate::allocation::CHUNK_BYTES;
 pub(super) const METADATA_PAGE_BYTES: usize = 4096;
 pub(super) const PAGE_HEADER_BYTES: usize = 32;
 pub(super) const ENTRY_METADATA_BYTES: usize = 40;
-/// The bytes of one entry's metadata record.
+/// The bytes of an entry's metadata record.
 pub(super) type RawMetadataBytes = [u8; ENTRY_METADATA_BYTES];
 pub(super) const PAGE_CONTENT_BYTES: usize =
     (METADATA_PAGE_BYTES - PAGE_HEADER_BYTES) / ENTRY_METADATA_BYTES * ENTRY_METADATA_BYTES;
 pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES15";
 pub(super) const NEXT_CHUNK_PAGE_TAG: &[u8; 8] = b"FEUNXT15";
-/// Number of entries whose metadata fits in one page.
+/// Number of entries whose metadata fits in a page.
 pub(super) const ENTRIES_PER_METADATA_PAGE: usize = PAGE_CONTENT_BYTES / ENTRY_METADATA_BYTES;
-/// Number of entry-metadata pages in one chunk.
+/// Number of entry-metadata pages in a chunk.
 pub(super) const ENTRY_METADATA_PAGES_PER_CHUNK: usize = CHUNK_BYTES as usize / METADATA_PAGE_BYTES - 1;
-/// Number of entries whose metadata fits in one chunk.
+/// Number of entries whose metadata fits in a chunk.
 pub(super) const ENTRIES_PER_METADATA_CHUNK: usize = ENTRY_METADATA_PAGES_PER_CHUNK * ENTRIES_PER_METADATA_PAGE;
 pub(super) const NO_CHUNK: u64 = u64::MAX;
 
@@ -38,7 +38,7 @@ pub(super) fn encode_page(page: &mut [u8], page_tag: &[u8; 8], entry_count: u64,
     page[..8].copy_from_slice(&checksum.to_le_bytes());
 }
 
-/// Validates one complete metadata page. The tag identifies the writer's format.
+/// Validates a complete metadata page. The tag identifies the writer's format.
 /// An intact checksum lets readers rely on its field, padding, and alignment guarantees.
 pub(super) fn validate_page<'a>(page: &'a [u8], page_tag: &[u8; 8]) -> Option<&'a [u8]> {
     if page[24..32] != *page_tag || page[..8] != XxHash64::oneshot(0, &page[8..]).to_le_bytes() {

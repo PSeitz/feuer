@@ -1,6 +1,6 @@
 # Feuer Implementation Status
 
-Feuer caches immutable whole objects through **memory → integrity-checked disk →
+Feuer caches immutable objects through **memory → integrity-checked disk →
 callback**. The [contract](tiered-plan.md) describes behavior, and the
 [README](README.md) shows public APIs and configuration.
 
@@ -8,30 +8,29 @@ callback**. The [contract](tiered-plan.md) describes behavior, and the
 
 | Crate | Responsibility |
 | --- | --- |
-| `feuer` | Cloneable tiered handle, whole-object lookup, shared in-flight work, optional disk-pressure fallthrough, metrics, and access tracing |
+| `feuer` | Cloneable tiered handle, lookup, shared in-flight work, optional disk-pressure fallthrough, metrics, and access tracing |
 | `feuer-types` | XXH3-128 object identity and infallible `Download::new(Bytes)` with optional allocation charge |
 | `feuer-historian` | One decayed request counter per object, shared by both tiers and independent of cache residency |
 | `feuer-memory` | Sharded object index, sampled eviction, cached allocation accounting, and aligned buffer pool |
-| `feuer-storage` | Linux direct I/O and io_uring, object index, whole-object checksums, chunk packing, background writes, metadata persistence, and recovery |
+| `feuer-storage` | Linux direct I/O and io_uring, object index, payload checksums, chunk packing, background writes, metadata persistence, and recovery |
 | `feuer-replay` | Trace decoding and workload replay tooling |
 
 ## Lookup and retention
 
-- `get_or_fetch(key, callback)` accepts a complete `Download`. The object convenience
+- `get_or_fetch(key, callback)` accepts a `Download`. The object convenience
   APIs accept `Bytes`, optionally with a backing allocation charge. `get_object`
   performs lookup without a source callback.
-- Empty objects are valid. Keys identify immutable content. Both tiers store one
-  complete payload per key and suppress duplicate insertions.
+- Empty objects are valid. Keys identify immutable content. Both tiers suppress
+  duplicate insertions.
 - Matching concurrent misses share one disk-or-callback operation by key and
   callback error type. Cancellation lets a waiter take over with its own callback.
 - Every started lookup records one object access before checking either tier.
   Failures and cancellation count as demand. Insertion and raw tier reads do not.
 - Both tiers sample objects and evict the lowest retention score. The default
   scorer combines decayed demand with fixed and per-byte avoided retrieval cost.
-  Objects are evicted whole, with no trimming or compaction state.
 - History survives eviction but not restart. There is one counter per object and
   no history-capacity limit. The default half-life is 262,144 requests across all
-  keys, independently configurable per cache.
+  keys, configurable per cache.
 
 ## Memory and buffers
 
@@ -54,7 +53,7 @@ the target. The target is not an RSS limit.
 - Small entries share 1-MiB payload chunks, flushed on full/no-fit or every minute.
   Entries at least 512 KiB after alignment reserve consecutive chunks independently.
   Each payload is contiguous, with metadata in separate chunks.
-- Readers copy buffered objects or read and verify complete persisted objects.
+- Readers copy buffered objects or read and verify persisted objects.
   Read errors and checksum failures become misses. Readers do not delay chunk reuse.
 - Dirty metadata pages are persisted periodically after payload publication.
   Recovery reads linked metadata chunks without scanning payloads. There is no

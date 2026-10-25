@@ -34,13 +34,12 @@ struct DataFileState {
     metrics: Arc<IoMetrics>,
 }
 
-/// One exclusively owned, fixed-capacity Linux direct-I/O payload file.
+/// An exclusively owned, fixed-capacity Linux direct-I/O payload file.
 ///
 /// Reads and writes have separate io_uring rings and worker threads, with up to
 /// 64 active reads and 8 active writes, plus waiting channels for another 64 reads and 8 writes.
 /// Files opened with shared [`crate::IoQueues`] share these limits and threads.
-/// Queues schedule in arrival order without checking for conflicts.
-/// Submission order does not guarantee completion order.
+/// Queues schedule in arrival order. Submission order does not guarantee completion order.
 /// Each I/O request transfers at most 1 MiB. Reads queue multiple pieces concurrently into one
 /// allocation. Request limits do not bound full read-result allocations.
 ///
@@ -124,7 +123,7 @@ impl DataFile {
                     source: Box::new(source),
                 })??;
             let file = Self { state: Arc::new(state) };
-            // Exercise an actual aligned direct read before claiming open succeeded.
+            // Verify an aligned direct read before returning success.
             file.state
                 .read_queue
                 .read(0, uring::DIRECT_IO_ALIGNMENT_BYTES)

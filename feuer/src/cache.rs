@@ -35,7 +35,7 @@ struct TieredMemoryDiskCacheInner {
     disk: Option<DiskCache>,
 }
 
-/// A cloneable handle to one Feuer cache.
+/// A cloneable handle to a Feuer cache.
 ///
 /// Lookups check memory, then integrity-checked disk, then the per-call callback.
 /// Disk writes are best-effort. A full 512-entry queue skips new writes. Zero disk capacity disables disk.
@@ -76,7 +76,7 @@ impl TieredMemoryDiskCache {
         Self::open_with_retention_scorer(config, metrics_registry, io_queues, scorer).await
     }
 
-    /// Opens a cache with one application-provided scorer shared by memory and disk.
+    /// Opens a cache with an application-provided scorer shared by memory and disk.
     /// See [`Self::open`] for resource configuration and [`RetentionScorer`] for the scoring contract.
     #[cfg(target_os = "linux")]
     pub async fn open_with_retention_scorer(
@@ -177,7 +177,7 @@ impl TieredMemoryDiskCache {
         self.inner.memory.buffer_pool().allocate(length)
     }
 
-    /// Returns a complete object from memory or disk, or `None` on a miss.
+    /// Returns an object from memory or disk, or `None` on a miss.
     /// Does not invoke or wait for source callbacks. Disk hits are promoted to memory.
     pub async fn get_object(&self, object_key: crate::ObjectKey) -> Option<Bytes> {
         let object_key = ObjectKeyHash::from(object_key);
@@ -201,11 +201,11 @@ impl TieredMemoryDiskCache {
         bytes
     }
 
-    /// Returns the complete object from memory, disk, or a shared callback.
+    /// Returns the object from memory, disk, or a shared callback.
     /// Concurrent misses share disk and callback work when their error types match.
     /// See [`Self::get_or_fetch`] for sharing and cancellation behavior.
     ///
-    /// The callback returns the entire immutable object as [`Bytes`], including empty objects.
+    /// The callback returns the immutable object as [`Bytes`], including empty objects.
     /// Callback results are charged the payload length. Use [`Self::get_or_fetch_object_with_allocation_charge`]
     /// when the bytes retain a larger backing allocation of known capacity.
     pub async fn get_or_fetch_object<F, Fut, E>(
@@ -241,7 +241,7 @@ impl TieredMemoryDiskCache {
         .await
     }
 
-    /// Returns a complete object and charges memory for the callback's backing allocation.
+    /// Returns an object and charges memory for the callback's backing allocation.
     ///
     /// Like [`Self::get_or_fetch_object`], but the callback returns `(bytes, allocation_charge)`.
     /// Supply the known backing capacity, including bytes outside a shared slice.
@@ -273,14 +273,14 @@ impl TieredMemoryDiskCache {
         .await
     }
 
-    /// Returns the complete object from memory, disk, or this call's callback.
+    /// Returns the object from memory, disk, or this call's callback.
     ///
-    /// Disk hits promote the complete object to memory. Concurrent memory misses with
+    /// Disk hits promote the object to memory. Concurrent memory misses with
     /// the same key and exact error type share one disk-or-callback operation, including errors.
     /// Callbacks for matching requests must be interchangeable. Each callback runs at most once.
     /// Cancellation of the executing caller allows a waiter to take over with its own callback.
     /// Completed failures are not cached for later requests. A successful callback returns
-    /// the entire immutable object, including empty objects. The memory target is soft.
+    /// the immutable object, including empty objects. The memory target is soft.
     ///
     /// Every started request records demand exactly once, before checking either tier.
     /// Failures and cancellation still count. Insertion creates no access event.
@@ -412,7 +412,7 @@ impl TieredMemoryDiskCache {
         (LookupOutcome::Miss, None)
     }
 
-    /// Returns the lookup outcome and complete object bytes.
+    /// Returns the lookup outcome and object bytes.
     async fn fetch<F, Fut, E>(
         &self,
         object_key: ObjectKeyHash,

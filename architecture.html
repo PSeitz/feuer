@@ -25,7 +25,7 @@
 <main>
   <header>
     <p>FEUER / ARCHITECTURE</p>
-    <h1>One key, one complete object</h1>
+    <h1>How Feuer caches objects</h1>
     <p class="intro">How Feuer looks up, retains, and stores immutable object payloads.</p>
     <nav aria-label="Sections">
       <a href="#lookup">Lookup</a><a href="#memory">Memory</a><a href="#disk">Disk</a>
@@ -37,8 +37,8 @@
     <h2>Lookup</h2>
     <div class="flow" aria-label="Lookup order"><span>Object key</span><span>Memory</span><span>Verified disk</span><span>Source callback</span></div>
     <details open>
-      <summary>Public object boundary</summary>
-      <p><code>get_or_fetch(key, callback)</code> returns the complete object as one <code>Bytes</code>.
+      <summary>Lookup API</summary>
+      <p><code>get_or_fetch(key, callback)</code> returns the object as <code>Bytes</code>.
         Its asynchronous callback returns <code>Result&lt;Download, E&gt;</code>.
         <code>Download::new(bytes)</code> is infallible. Empty objects are valid.</p>
       <p><code>get_or_fetch_object</code> accepts a <code>Bytes</code> callback instead.
@@ -64,10 +64,9 @@
     <h2>Memory</h2>
     <details open>
       <summary>Sharded object index</summary>
-      <p>Each key maps to one complete payload. Duplicate insertions are skipped.
+      <p>Each key maps to a payload. Duplicate insertions are skipped.
         Hits clone reference-counted <code>Bytes</code>, and caller-held results survive eviction.</p>
-      <p>Admission evicts the lowest-scoring object from a rotating sample, 64 candidates by default.
-        Objects are retained or evicted whole. There is no trimming or compaction state.</p>
+      <p>Admission evicts the lowest-scoring object from a rotating sample, 64 candidates by default.</p>
       <a href="feuer-memory/src/store.rs">Source: memory store</a>
     </details>
     <details>
@@ -88,11 +87,11 @@
   <section id="disk">
     <h2>Disk</h2>
     <details open>
-      <summary>Whole-object reads and integrity</summary>
+      <summary>Reads and integrity</summary>
       <p>A disk index maps each object hash to its payload address, length, checksum, and metadata position.
-        Lookups copy buffered objects or read and verify the complete persisted payload.
+        Lookups copy buffered objects or read and verify the persisted payload.
         They do not read neighboring objects or metadata on the lookup path.</p>
-      <p>Concurrent readers can share one read. Readers hold an address and expected checksum, not a disk reservation.
+      <p>Concurrent readers can share a read. Readers hold an address and expected checksum, not a disk reservation.
         Eviction may release chunks while reads are outstanding. Read errors and checksum mismatches become misses.
         Checksum-failure invalidation checks read identity so it cannot remove a racing replacement.</p>
       <p>A disk hit promotes the object to memory without another write. Buffered or flushing data can miss before publication.</p>
@@ -101,22 +100,22 @@
     <details>
       <summary>Payload chunks and separate metadata</summary>
       <p>The first 1-MiB chunk holds a global header. Remaining chunks hold payload bytes or metadata.
-        Each payload is one contiguous disk byte range, with 4-KiB-aligned address and storage length.
+        Each payload is a contiguous disk byte range, with 4-KiB-aligned address and storage length.
         Empty objects still reserve at least 4 KiB.</p>
       <p>Entries below 512 KiB aligned size share immutable 1-MiB chunks. Larger objects reserve consecutive chunks
         exclusively. Written chunks cannot be appended to. A chunk becomes reusable after its last entry is removed.</p>
-      <p>Format v15 uses 40-byte records: key hash, payload length, address, and whole-payload checksum.
+      <p>Format v15 uses 40-byte records: key hash, payload length, address, and payload checksum.
         A metadata chunk contains 255 record pages and one next-chunk page. Pages are 4 KiB and independently checksummed.</p>
       <a href="format.md">Disk format and write ordering</a>
     </details>
     <details>
-      <summary>Best-effort writes and restart recovery</summary>
+      <summary>Best-effort writes and recovery</summary>
       <p>A 512-entry queue schedules downloads after memory admission. Queue pressure skips writes without failing
         lookups. Small-entry chunks flush on full/no-fit or every 60 seconds. Larger entries write independently.
         Closing discards partial chunks. Memory eviction does not cancel queued writes.</p>
       <p>Payload completion precedes publication. A separate periodic writer persists dirty metadata pages.
         Opening follows linked metadata chunks without scanning payloads and waits for all shards to recover.</p>
-      <p>Changing disk format, application payload version, or file capacity invalidates old entries.
+      <p>Changing disk format, application payload version, or file capacity invalidates entries.
         There is no migration, sync, shutdown flush, or minimum recovery hit-rate guarantee.</p>
     </details>
   </section>
@@ -125,7 +124,7 @@
     <h2>I/O</h2>
     <details open>
       <summary>Linux direct I/O and shared queues</summary>
-      <p>Disk-enabled caches require usable io_uring and direct I/O. Zero disk capacity disables storage.
+      <p>Disk-enabled caches require io_uring and direct I/O. Zero disk capacity disables storage.
         No buffered backend is selected silently.</p>
       <p>Pass clones of <code>IoQueues::new()?</code> to <code>open</code> to share read admission, rings, and worker threads.
         Shared queues allow 64 payload reads, 64 active read pieces, and 8 active writes.

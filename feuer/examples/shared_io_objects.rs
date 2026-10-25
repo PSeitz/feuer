@@ -1,4 +1,4 @@
-//! Independent whole-object caches on one SSD, sharing only low-level I/O queues.
+//! Independent caches on one SSD, sharing only low-level I/O queues.
 
 #[cfg(target_os = "linux")]
 #[tokio::main]
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    // The callbacks return complete immutable objects. Their lengths are not needed.
+    // The callbacks return immutable objects. Their lengths are not needed.
     // Replace these callbacks with downloads from the respective sources.
     // The same key can identify different content in independent caches.
     let image = images

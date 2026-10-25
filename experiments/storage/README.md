@@ -21,7 +21,7 @@ results retained in [payload-io](payload-io/README.md).
 
 ## Larger direct-I/O sweep
 
-For the real two-tier cache comparison, use the separate
+For the two-tier cache comparison, use the separate
 [timestamp-paced SSD replay instructions](timed-replay.md).
 The [recorded request-size histogram](request-sizes.md) covers the full FETR
 capture, including a detailed breakdown of requests at most 4 KiB.
@@ -59,7 +59,7 @@ additionally synchronized initialization writes to disk before measurement.
 - Release build, one io_uring driver thread, maximum **64 total outstanding operations**, four Tokio workers.
 - No polling modes, registered buffers, CPU pinning, compression, checksums, cache lookup, or eviction.
 - Every operation uses O_DIRECT. The benchmark includes alignment-buffer allocation/copying, admission,
-  scheduling, completion delivery, and compact read-result allocation through the actual `DataFile` API.
+  scheduling, completion delivery, and compact read-result allocation through the `DataFile` API.
 - Uniform pseudorandom reads from the first 6 GiB; zero or four sequential 1-MiB writer streams, each using
   its own lane in the final 2 GiB. All requests are aligned and nonoverlapping between streams.
 - Two seconds warmup and five seconds measurement per cell; one run per cell in the CSV's order.

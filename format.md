@@ -9,7 +9,7 @@ The first 1-MiB chunk is reserved for a global header. The remaining file is div
 
 - **Metadata chunks** describe cached objects: their keys, payload lengths,
   locations, and checksums. Each metadata chunk also links to the next metadata chunk.
-- **Payload chunks** hold the cached bytes. Each entry's payload is one contiguous
+- **Payload chunks** hold the cached bytes. Each entry's payload is a contiguous
   byte range, separate from metadata, and may span consecutive chunks.
 
 Example: A and B share a payload chunk; C spans consecutive payload chunks.
@@ -30,7 +30,7 @@ flowchart TB
         PA["A bytes"]
         PB["B bytes"]
     end
-    PC["<table border='1' cellspacing='0' cellpadding='8' style='border-collapse:collapse;white-space:nowrap'><tr><td colspan='3'>C payload — one contiguous range</td></tr><tr><td>1 MiB chunk<br/>C bytes</td><td>1 MiB chunk<br/>C continued</td><td>1 MiB chunk<br/>C tail + unused</td></tr></table>"]
+    PC["<table border='1' cellspacing='0' cellpadding='8' style='border-collapse:collapse;white-space:nowrap'><tr><td colspan='3'>C payload — contiguous range</td></tr><tr><td>1 MiB chunk<br/>C bytes</td><td>1 MiB chunk<br/>C continued</td><td>1 MiB chunk<br/>C tail + unused</td></tr></table>"]
     NEXT --> M2
     A -.-> PA
     B -.-> PB
@@ -43,8 +43,8 @@ record's address and length. Only three entry records are shown.
 On open, the cache follows metadata links to rebuild its in-memory index without
 reading payloads. Payload checksums are verified when entries are read.
 
-Each entry stores one complete object and one checksum over its entire payload.
-Reads verify the whole object and can share an in-flight read for the same entry.
+Each entry stores an object and a checksum over its payload.
+Reads verify the payload and can share an in-flight read for the same entry.
 Direct I/O rounds physical reads to 4-KiB alignment. Alignment padding is not part
 of the payload checksum.
 
@@ -78,7 +78,7 @@ or invalid header checksum causes the first metadata chunk of every shard to be 
 writing a new header and recovering shards. This breaks the old chains without truncating
 the file to zero. A version change with unchanged capacity leaves payload bytes untouched.
 Clearing writes 1 MiB per shard plus the 4-KiB header.
-Both upgrades and downgrades discard old entries. Existing headerless formats are discarded,
+Both upgrades and downgrades discard old entries. Headerless formats are discarded,
 not migrated. Header reads or initialization writes that fail abort opening.
 Matching headers are not rewritten. Capacity changes also clear the chains because shard
 starts move and could otherwise expose metadata from a previous payload version.
@@ -118,16 +118,15 @@ Offsets are relative to the start of the 40-byte record:
 | Offset | Bytes | Field |
 | --- | --- | --- |
 | 0 | 16 | Object key hash, full key is not stored |
-| 16 | 8 | Complete object payload length |
+| 16 | 8 | Object payload length |
 | 24 | 8 | Payload address |
 | 32 | 8 | Seed-zero XXHash64 of payload, excluding alignment padding |
 
 ## Payload chunks
 
-Payload chunks contain plain bytes, not pages. Payload length equals complete
-object length. Disk storage length is at least 4 KiB and rounded up to 4 KiB,
-including for empty objects. Payload addresses are also
-4-KiB-aligned. There are no metadata gaps within a payload.
+Payload chunks contain plain bytes, not pages. Disk storage length is at least
+4 KiB and rounded up to 4 KiB, including for empty objects. Payload addresses are
+also 4-KiB-aligned. There are no metadata gaps within a payload.
 
 Entries with 4-KiB-aligned storage length below 512 KiB share unfinished chunks.
 Larger entries start at a chunk boundary and occupy consecutive whole chunks
@@ -173,7 +172,7 @@ chunk addresses.
 An unused record is all-zero.
 
 Metadata chunks are reserved before decoding entry records and reconstructing payload
-occupancy. Reservations enforce current shard bounds and prevent payloads from claiming
+occupancy. Reservations enforce shard bounds and prevent payloads from claiming
 metadata chunks; key routing is checked against the current shard count. These checks
 remain necessary because capacity changes and stale records can disagree with current
 ownership even when individual pages are intact. Overlapping stale records can share payload reservations.
@@ -181,4 +180,4 @@ Duplicate object keys are suppressed while rebuilding the index.
 Broken links are repaired by subsequent writes; discarded record pages are rewritten only when reused.
 Closing does not invalidate live records.
 Stale records may survive reuse; missing or corrupt payloads become cache misses when read,
-subject to the usual checksum-collision limitation.
+subject to checksum collisions.

@@ -1,4 +1,4 @@
-//! Linux cache replay: one timestamp-paced sender, one task per arrival, real tiered cache.
+//! Linux cache replay: one timestamp-paced sender, one task per arrival, tiered cache.
 //! Only request descriptors are queued. Synthetic downloads optionally simulate calibrated S3 delay.
 #[cfg(target_os = "linux")]
 mod linux {

@@ -37,7 +37,7 @@ enum LinkTarget {
     NoChunk,
 }
 
-/// One entry's metadata fields, written without validation.
+/// An entry's metadata fields, written without validation.
 #[derive(Clone, Debug)]
 struct EntryFields {
     index_in_page: usize,
@@ -48,7 +48,7 @@ struct EntryFields {
     payload_checksum: Option<u64>,
 }
 
-/// Entry metadata and byte changes for one page in an image.
+/// Entry metadata and byte changes for a page in an image.
 #[derive(Clone, Debug)]
 struct EntryPageImage {
     page_index: usize,
@@ -56,7 +56,7 @@ struct EntryPageImage {
     change: PageChange,
 }
 
-/// One metadata chunk's entry pages and optional next-chunk page.
+/// A metadata chunk's entry pages and optional next-chunk page.
 #[derive(Clone, Debug)]
 struct MetadataChunkImage {
     chunk_number: u64,
