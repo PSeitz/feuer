@@ -2,6 +2,22 @@ use std::{fs::OpenOptions, future::Future, os::unix::fs::OpenOptionsExt, task::C
 
 use super::*;
 
+#[test]
+fn ring_creation_error_identifies_io_uring_and_preserves_os_error() {
+    let error = RingCreationError {
+        source: io::Error::from_raw_os_error(libc::EPERM),
+    };
+    let message = error.to_string();
+    assert!(message.contains("failed to create io_uring ring"));
+    assert!(message.contains("Operation not permitted (os error 1)"));
+    assert!(message.contains("seccomp"));
+    let source = std::error::Error::source(&error)
+        .unwrap()
+        .downcast_ref::<io::Error>()
+        .unwrap();
+    assert_eq!(source.raw_os_error(), Some(libc::EPERM));
+}
+
 type IoResultReceiver = oneshot::Receiver<io::Result<Option<Arc<ReadBuffer>>>>;
 
 fn request(
@@ -287,6 +303,7 @@ async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
             wake_fd: queue.wake_fd.clone(),
             thread: None,
         }),
+        payload_reads: Arc::new(PayloadReadQueue::new()),
         files,
         buffer_pool: buffer_pool(),
         metrics: IoMetrics::new(&backend),

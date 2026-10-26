@@ -35,6 +35,17 @@ When your block sizes are right, your can read and write at the same time, at al
 
 The tiered cache API is Linux-only, because I don't respect any other OS.
 
+## Runtime requirements
+
+Disk caching requires Linux with usable `io_uring` and a filesystem supporting
+`O_DIRECT` and `STATX_DIOALIGN`. Opening a disk cache fails when these requirements
+are unmet. Set disk capacity to `0` for memory-only operation without `io_uring`.
+
+Verify customer environments before enabling disk caching. Kernel support alone
+is insufficient: `kernel.io_uring_disabled` can restrict ring creation, and
+container seccomp policies can block the io_uring syscalls. A blocked
+`io_uring_setup` can return `Operation not permitted (os error 1)`.
+
 ## Quick start
 
 Add to your `Cargo.toml`:

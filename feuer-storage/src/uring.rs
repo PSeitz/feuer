@@ -116,6 +116,16 @@ impl IoQueues {
     }
 }
 
+/// A failure to create an io_uring ring.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "failed to create io_uring ring: {source}. Feuer disk caching requires io_uring. Check kernel support, kernel.io_uring_disabled, and container seccomp policy"
+)]
+struct RingCreationError {
+    #[source]
+    source: io::Error,
+}
+
 /// A handle that submits I/O requests and owns the queue thread's lifetime.
 struct IoQueueHandle {
     // Sends admitted requests. Dropping the sender signals shutdown before joining.
@@ -133,7 +143,8 @@ impl IoQueueHandle {
             IoOperation::Write => ("feuer-write-io", MAX_IN_FLIGHT_WRITES),
             _ => unreachable!("queue only supports reads and writes"),
         };
-        let ring = IoUring::new(max_in_flight as u32)?;
+        let ring = IoUring::new(max_in_flight as u32)
+            .map_err(|source| io::Error::new(source.kind(), RingCreationError { source }))?;
         // SAFETY: eventfd has no pointer arguments and returns a new owned fd.
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if fd < 0 {
