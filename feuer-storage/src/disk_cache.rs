@@ -477,7 +477,8 @@ impl DiskCacheShard {
     }
 
     /// Inserts an entry and releases any previous entry for its key.
-    /// The caller holds both locks and has reserved the payload and metadata slot.
+    /// The caller holds both locks, has reserved the payload and metadata slot,
+    /// and records inserted entry counts and payload bytes once its batch is complete.
     fn insert_entry(
         &self,
         disk_index: &mut DiskEntryIndex,
@@ -489,8 +490,6 @@ impl DiskCacheShard {
             self.release_entry(previous, metadata);
         }
         entry.eviction_position = disk_index.eviction_candidates.len();
-        disk_index.metrics.entries.increase(1);
-        disk_index.metrics.payload_bytes.increase(entry.payload_len);
         disk_index.eviction_candidates.push(key);
         disk_index.entries_by_key.insert(key, entry);
     }

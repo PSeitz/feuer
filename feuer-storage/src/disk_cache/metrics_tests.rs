@@ -89,11 +89,17 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
             capacity,
             DiskCacheOptions {
                 io_metrics: IoMetrics::new(&backend),
+                metrics: DiskMetrics::new(&backend),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
+        assert_eq!(value(&registry, "feuer_disk_entries", &[]), entries as f64);
+        assert_eq!(
+            value(&registry, "feuer_disk_payload_bytes", &[]),
+            (entries * payload_bytes as u128) as f64
+        );
         assert_eq!(
             value(
                 &registry,
@@ -116,6 +122,9 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
         for (key, _) in inputs {
             assert!(cache.contains(&key));
         }
+        drop(cache);
+        assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
+        assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
     }
 }
 

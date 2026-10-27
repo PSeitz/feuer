@@ -59,6 +59,7 @@ impl DiskCacheShard {
             self.allocator
                 .hold_chunks_until_payloads_released(chunks, entries.len());
             let mut published = 0;
+            let mut published_payload_bytes = 0;
             for mut buffered in entries.drain(..).rev() {
                 if disk_index.entries_by_key.contains_key(&buffered.key) {
                     buffered.attempt.outcome = DiskWriteOutcome::AlreadyCovered;
@@ -74,7 +75,12 @@ impl DiskCacheShard {
                 let entry = DiskEntry::new(&entry_metadata, pages.store_entry_metadata(entry_metadata));
                 self.insert_entry(&mut disk_index, &mut pages, buffered.key, entry);
                 published += 1;
+                published_payload_bytes += buffered.payload_len;
                 buffered.attempt.outcome = DiskWriteOutcome::Published;
+            }
+            if published != 0 {
+                disk.metrics.entries.increase(published as u64);
+                disk.metrics.payload_bytes.increase(published_payload_bytes);
             }
             Ok(published)
         }

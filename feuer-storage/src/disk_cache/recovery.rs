@@ -27,6 +27,8 @@ impl DiskCacheInner {
         shard.load_metadata_chain(&self.file, shard_disk_range.start).await;
         let mut metadata = shard.metadata_pages.lock().unwrap();
         let mut disk_index = shard.entry_index.lock().unwrap();
+        let mut recovered_entries = 0;
+        let mut recovered_payload_bytes = 0;
         for chunk_index in 0..metadata.chunks.len() {
             for entry_index in 0..ENTRIES_PER_METADATA_CHUNK {
                 let slot = &mut metadata.chunks[chunk_index].slots[entry_index];
@@ -49,7 +51,13 @@ impl DiskCacheInner {
                 };
                 let entry = DiskEntry::new(&entry_metadata, location);
                 shard.insert_entry(&mut disk_index, &mut metadata, entry_metadata.key, entry);
+                recovered_entries += 1;
+                recovered_payload_bytes += entry_metadata.payload_len;
             }
+        }
+        if recovered_entries != 0 {
+            self.metrics.entries.increase(recovered_entries);
+            self.metrics.payload_bytes.increase(recovered_payload_bytes);
         }
         metadata.reset_free_slots();
     }
