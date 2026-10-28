@@ -22,8 +22,8 @@ impl Download {
         }
     }
 
-    /// Charges the known backing allocation capacity.
-    /// Shared allocations are conservatively charged once per cached entry.
+    /// Sets the backing allocation capacity charged per cached entry.
+    /// Entries sharing an allocation each charge its capacity.
     ///
     /// # Panics
     ///
@@ -65,7 +65,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retains_complete_bytes_without_copying() {
+    fn retains_bytes_without_copying() {
         for payload in [Bytes::new(), Bytes::from_static(b"payload")] {
             let download = Download::new(payload.clone());
             assert_eq!(download.bytes().as_ptr(), payload.as_ptr());

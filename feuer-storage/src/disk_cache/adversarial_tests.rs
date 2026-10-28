@@ -520,7 +520,6 @@ fn check_entries_and_chunks(cache: &DiskCache) {
         }
 
         let mut payload_counts = BTreeMap::<u64, usize>::new();
-        let mut entry_count = 0;
         for (key, entry) in &disk_index.entries_by_key {
             assert_ne!(
                 key.0 >> 64,
@@ -528,7 +527,6 @@ fn check_entries_and_chunks(cache: &DiskCache) {
                 "payload bytes were recovered as metadata"
             );
             assert_eq!(disk.shard_index_for_key(key), shard_index);
-            entry_count += 1;
             let first_chunk = entry.payload_address / CHUNK_BYTES;
             let storage_end = entry
                 .payload_len
@@ -565,7 +563,7 @@ fn check_entries_and_chunks(cache: &DiskCache) {
             .collect();
         assert_eq!(payload_counts, reservation_counts);
         let metadata_entry_count = metadata.chunks.iter().flat_map(|chunk| &chunk.slots).flatten().count();
-        assert_eq!(metadata_entry_count, entry_count);
+        assert_eq!(metadata_entry_count, disk_index.entries_by_key.len());
         assert_eq!(
             metadata.free_slot_count(),
             metadata.chunks.len() * ENTRIES_PER_METADATA_CHUNK - metadata_entry_count

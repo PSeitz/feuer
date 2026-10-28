@@ -8,7 +8,7 @@ use crate::IoOperation;
 struct IoOperationMetrics {
     success: BoxedCounter,
     error: BoxedCounter,
-    bytes: BoxedCounter,
+    successful_bytes: BoxedCounter,
     success_duration: BoxedHistogram,
 }
 
@@ -67,7 +67,7 @@ impl IoMetrics {
         let operation_metrics = |label: &'static str| IoOperationMetrics {
             success: operations.counter(&[label.into(), "success".into()]),
             error: operations.counter(&[label.into(), "error".into()]),
-            bytes: bytes.counter(&[label.into()]),
+            successful_bytes: bytes.counter(&[label.into()]),
             success_duration: duration.histogram(&[label.into(), "success".into()]),
         };
 
@@ -89,7 +89,7 @@ impl IoMetrics {
 
         if success {
             metrics.success.increase(1);
-            metrics.bytes.increase(bytes);
+            metrics.successful_bytes.increase(bytes);
             metrics.success_duration.record(elapsed.as_secs_f64());
             if operation == IoOperation::Read {
                 self.read_size.record(bytes as f64);

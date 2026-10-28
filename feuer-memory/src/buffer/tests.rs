@@ -21,7 +21,7 @@ fn size_boundaries_round_up_without_exposing_spare_capacity() {
             assert_eq!(buffer.as_ref().len(), length);
             assert_eq!(buffer.as_ref().as_ptr() as usize % BUFFER_ALIGNMENT, 0);
             drop(buffer);
-            assert_eq!(pool.state.lock().by_size[index].len(), 1);
+            assert_eq!(pool.state.lock().idle_buffers[index].len(), 1);
         }
         lower_bound = size;
     }
@@ -69,7 +69,7 @@ fn cache_pressure_frees_larger_idle_buffers_and_updates_bucket_gauges() {
     assert_eq!(pool.used_bytes(), capacity);
     assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), capacity as f64);
     assert_eq!(pool.idle_bytes(), BUFFER_SIZES[0] as u64);
-    assert_eq!(pool.state.lock().by_size[0].len(), 1);
+    assert_eq!(pool.state.lock().idle_buffers[0].len(), 1);
     for (index, &size) in BUFFER_SIZES.iter().enumerate() {
         assert_eq!(idle(size), if index == 0 { size as f64 } else { 0.0 });
     }
@@ -239,7 +239,7 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         drop(other);
         assert_eq!(pool.used_bytes(), size as u64);
         assert_eq!(pool.idle_bytes(), pool.idle_limit);
-        assert_eq!(pool.state.lock().by_size[index].len(), 1);
+        assert_eq!(pool.state.lock().idle_buffers[index].len(), 1);
         assert_eq!(buffer_bytes("idle"), size as f64);
         assert_eq!(buffer_bytes("used"), 0.0);
         assert_eq!(gauge("feuer_memory_used_bytes"), size as f64);
@@ -307,12 +307,12 @@ fn buckets_compete_for_the_same_idle_limit() {
     drop(buffers);
     drop(pool.allocate(1).unwrap());
     assert_eq!(pool.idle_bytes(), pool.idle_limit);
-    assert!(pool.state.lock().by_size[0].is_empty());
+    assert!(pool.state.lock().idle_buffers[0].is_empty());
 
     let buffer = pool.allocate(size).unwrap();
     drop(pool.allocate(1).unwrap());
-    assert_eq!(pool.state.lock().by_size[0].len(), 1);
+    assert_eq!(pool.state.lock().idle_buffers[0].len(), 1);
     drop(buffer); // The smaller buffer now occupies part of the shared budget.
     assert_eq!(pool.idle_bytes(), (6 * size + BUFFER_SIZES[0]) as u64);
-    assert_eq!(pool.state.lock().by_size[1].len(), 6);
+    assert_eq!(pool.state.lock().idle_buffers[1].len(), 6);
 }

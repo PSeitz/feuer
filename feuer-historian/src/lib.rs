@@ -6,7 +6,7 @@ use std::{
     hash::BuildHasher,
     sync::{
         Mutex,
-        atomic::{AtomicU64, Ordering as AtomicOrdering},
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -18,8 +18,8 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 
 /// Request history shared by both cache tiers, independent of their shards and entries.
 /// Object keys select one of 64 independently locked history maps. The request clock remains global.
-/// Each key's counter lasts for this object's lifetime, even after cache eviction.
-/// History is not persisted across restarts.
+/// Each key's counter lasts for the history's lifetime, including after cache eviction.
+/// A restart begins with empty history.
 pub struct ObjectAccessHistories {
     shards: [Mutex<FxHashMap<ObjectKeyHash, DecayedAccessCount>>; ACCESS_HISTORY_SHARDS],
     request_count: AtomicU64,
@@ -62,14 +62,17 @@ impl ObjectAccessHistories {
         let mut histories = self.shard(key).lock().unwrap();
         // Assign the clock under the shard lock so this key's updates cannot arrive out of order.
         // The atomic only measures request age. The shard mutex protects the history itself.
-        let request_clock = self.request_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
-        histories.entry(*key).or_default().record(request_clock, self.half_life);
+        let request_clock = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
+        histories
+            .entry(*key)
+            .or_default()
+            .add_request(request_clock, self.half_life);
     }
 
     /// Number of requests recorded across all keys and cache tiers.
     /// Other shards may still be applying their counter updates.
     pub fn request_count(&self) -> u64 {
-        self.request_count.load(AtomicOrdering::Relaxed)
+        self.request_count.load(Ordering::Relaxed)
     }
 
     /// Returns the object's request count decayed to the global request clock.
@@ -93,13 +96,13 @@ pub const DEFAULT_ACCESS_COUNT_HALF_LIFE: u64 = 262_144;
 #[derive(Default)]
 pub struct DecayedAccessCount {
     count: f64,
-    observed_at_access: u64,
+    last_update_clock: u64,
 }
 
 impl DecayedAccessCount {
-    fn record(&mut self, request_clock: u64, half_life: u64) {
+    fn add_request(&mut self, request_clock: u64, half_life: u64) {
         self.count = self.decayed_count(request_clock, half_life) + 1.0;
-        self.observed_at_access = request_clock;
+        self.last_update_clock = request_clock;
     }
 
     /// Evaluates the count at the supplied request clock, without modifying it.
@@ -143,15 +146,14 @@ impl DecayedAccessCount {
     /// At 128,000 requests apart, the corresponding limits are 4.096 after adding one and 3.096 before.
     #[inline]
     pub fn decayed_count(&self, request_clock: u64, half_life: u64) -> f64 {
-        // An earlier clock leaves the count unchanged.
-        let requests_since_update = request_clock.saturating_sub(self.observed_at_access);
+        let requests_since_update = request_clock.saturating_sub(self.last_update_clock);
         let half_lives_elapsed = requests_since_update as f64 / half_life as f64;
 
         if half_lives_elapsed >= 126.0 {
             return 0.0; // Discard negligible counts rather than constructing subnormal floats.
         }
 
-        // Approximate 2^(-age) through IEEE-754 bits: the exponent gives powers of two,
+        // Approximate 2^(-half_lives_elapsed) through IEEE-754 bits: the exponent gives powers of two,
         // and the mantissa interpolates between them. Each decay is up to ~6.15% high.
         // Repeated updates can compound that error.
         let exponent_bias = 127.0;

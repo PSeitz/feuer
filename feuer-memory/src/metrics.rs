@@ -11,9 +11,9 @@ use crate::buffer::{BUCKET_COUNT, BUFFER_SIZES};
 /// cache names are never metric labels.
 #[derive(Debug)]
 pub struct MemoryMetrics {
-    insert: BoxedCounter,
-    redundant: BoxedCounter,
-    remove: BoxedCounter,
+    pub(crate) insertions: BoxedCounter,
+    pub(crate) redundant_insertions: BoxedCounter,
+    pub(crate) removals: BoxedCounter,
     pub(crate) eviction_triggering_insertions: BoxedCounter,
     pub(crate) used_bytes: BoxedGauge,
     pub(crate) capacity_bytes: BoxedGauge,
@@ -67,9 +67,9 @@ impl MemoryMetrics {
         };
 
         Arc::new(Self {
-            insert: operation_counter("insert"),
-            redundant: operation_counter("redundant"),
-            remove: operation_counter("remove"),
+            insertions: operation_counter("insert"),
+            redundant_insertions: operation_counter("redundant"),
+            removals: operation_counter("remove"),
             eviction_triggering_insertions: eviction_triggering_insertions.counter(&[]),
             used_bytes: used_bytes.gauge(&[]),
             capacity_bytes: capacity_bytes.gauge(&[]),
@@ -77,18 +77,6 @@ impl MemoryMetrics {
             used_buffer_bytes: buffer_gauges("used"),
             entries: entries.gauge(&[]),
         })
-    }
-
-    pub(crate) fn record_insert(&self) {
-        self.insert.increase(1);
-    }
-
-    pub(crate) fn record_redundant(&self) {
-        self.redundant.increase(1);
-    }
-
-    pub(crate) fn record_remove(&self) {
-        self.remove.increase(1);
     }
 
     pub(crate) fn noop() -> Arc<Self> {

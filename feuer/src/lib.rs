@@ -4,7 +4,7 @@
 //! a soft-capacity memory tier, integrity-checked disk hits,
 //! best-effort disk writes through a 512-entry queue, and per-call asynchronous download callbacks.
 //! Zero disk capacity disables the disk tier. With disk enabled, opening requires
-//! Linux direct I/O and io_uring, and waits for every disk shard's metadata recovery.
+//! Linux direct I/O and io_uring, and waits for metadata recovery.
 
 mod access_trace;
 mod cache;

@@ -56,8 +56,8 @@ pub fn read_idle_buffer_pool_percent() -> Result<u64, String> {
     Ok(percent)
 }
 
-/// Idle aligned buffers and the cached-allocation charges sharing one cache's budget.
-/// Active allocations and caller-only results are not charged to this budget.
+/// Idle aligned buffers and entry allocation charges sharing one cache's budget.
+/// Checked-out buffers are charged when admitted to the cache.
 pub struct BufferPool {
     pub(crate) capacity: u64,
     idle_limit: u64,
@@ -68,9 +68,9 @@ pub struct BufferPool {
 /// Entry allocation byte counts and idle buffers grouped by size, protected by one lock.
 #[derive(Default)]
 struct EntryAllocationBytesAndIdleBuffers {
-    cached_bytes: u64,
+    entry_bytes: u64,
     idle_bytes: u64,
-    by_size: [Vec<AlignedBuffer>; BUCKET_COUNT],
+    idle_buffers: [Vec<AlignedBuffer>; BUCKET_COUNT],
 }
 
 impl BufferPool {
@@ -108,7 +108,7 @@ impl BufferPool {
         let capacity = BUFFER_SIZES.get(index).copied().unwrap_or(length);
         let idle_buffer = self.take_idle_buffer(&mut self.state.lock(), index);
         let mut buffer = match idle_buffer {
-            Some(buffer) => buffer.resize(capacity)?,
+            Some(buffer) => buffer.resize_for_reuse(capacity)?,
             None => AlignedBuffer::allocate_zeroed(capacity)?,
         };
         buffer.length = length;
@@ -120,7 +120,7 @@ impl BufferPool {
     /// Entry allocation charges plus idle buffer capacity.
     pub fn used_bytes(&self) -> u64 {
         let state = self.state.lock();
-        state.cached_bytes + state.idle_bytes
+        state.entry_bytes + state.idle_bytes
     }
 
     /// Allocation bytes available for reuse.
@@ -131,9 +131,9 @@ impl BufferPool {
     /// Adds entry-allocation bytes to accounting and metrics, freeing idle buffers if needed.
     pub(crate) fn add_entry_bytes(&self, bytes: u64) {
         let mut state = self.state.lock();
-        state.cached_bytes += bytes;
+        state.entry_bytes += bytes;
         self.metrics.used_bytes.increase(bytes);
-        let idle_limit = self.capacity.saturating_sub(state.cached_bytes);
+        let idle_limit = self.capacity.saturating_sub(state.entry_bytes);
         // Cache entries take precedence over idle buffers. Free larger buffers first.
         for index in (0..BUCKET_COUNT).rev() {
             while state.idle_bytes > idle_limit
@@ -147,13 +147,13 @@ impl BufferPool {
 
     /// Subtracts entry-allocation bytes from accounting and metrics.
     pub(crate) fn remove_entry_bytes(&self, bytes: u64) {
-        self.state.lock().cached_bytes -= bytes;
+        self.state.lock().entry_bytes -= bytes;
         self.metrics.used_bytes.decrease(bytes);
     }
 
     /// Takes an idle buffer and subtracts its bytes from accounting and metrics under the pool lock.
     fn take_idle_buffer(&self, state: &mut EntryAllocationBytesAndIdleBuffers, index: usize) -> Option<AlignedBuffer> {
-        let buffer = state.by_size[index].pop()?;
+        let buffer = state.idle_buffers[index].pop()?;
         let capacity = buffer.capacity() as u64;
         state.idle_bytes -= capacity;
         self.decrease_idle_buffer_metrics(index, capacity);
@@ -170,7 +170,7 @@ impl BufferPool {
 impl Drop for BufferPool {
     fn drop(&mut self) {
         for index in 0..BUCKET_COUNT {
-            let buffers = &self.state.get_mut().by_size[index];
+            let buffers = &self.state.get_mut().idle_buffers[index];
             let bytes = buffers.iter().map(|buffer| buffer.capacity() as u64).sum();
             self.decrease_idle_buffer_metrics(index, bytes);
         }
@@ -179,7 +179,7 @@ impl Drop for BufferPool {
 }
 
 /// An owned, initialized, 4-KiB-aligned allocation with a separate exposed length.
-/// It returns to its originating pool only after the last Bytes owner drops it.
+/// After conversion to `Bytes`, it returns to its pool only when the last owner drops it.
 /// On Linux, capacities above 64 MiB use anonymous mappings. Resizing stays in that
 /// bucket, so capacity also determines how the allocation is released.
 ///
@@ -231,10 +231,11 @@ impl AlignedBuffer {
         })
     }
 
-    /// Resizes a buffer in the above-64-MiB bucket, preserving initialized bytes and zeroing added bytes.
-    /// Both capacities exceed 64 MiB. Shrinks only if the old capacity is at least 10% larger.
-    /// On failure, the original allocation is freed when the returned error drops `self`.
-    fn resize(mut self, capacity: usize) -> io::Result<Self> {
+    /// Prepares an idle buffer for reuse, preserving initialized bytes and zeroing added bytes.
+    /// Fixed capacities stay unchanged. Resizing occurs only above 64 MiB, and shrinking
+    /// requires the old capacity to be at least 10% larger than the requested capacity.
+    /// On failure, dropping `self` frees the original allocation.
+    fn resize_for_reuse(mut self, capacity: usize) -> io::Result<Self> {
         let old_capacity = self.capacity();
         if capacity <= old_capacity && old_capacity - capacity < capacity.div_ceil(10) {
             return Ok(self);
@@ -321,9 +322,9 @@ impl Drop for AlignedBuffer {
             metrics.used_buffer_bytes[index].decrease(capacity);
             if let Some(pool) = pool.upgrade() {
                 let mut state = pool.state.lock();
-                let idle_limit = pool.idle_limit.min(pool.capacity.saturating_sub(state.cached_bytes));
+                let idle_limit = pool.idle_limit.min(pool.capacity.saturating_sub(state.entry_bytes));
                 if state.idle_bytes + capacity <= idle_limit {
-                    state.by_size[index].push(Self {
+                    state.idle_buffers[index].push(Self {
                         ptr: self.ptr,
                         layout: self.layout,
                         length: self.length,

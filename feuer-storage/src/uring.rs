@@ -3,14 +3,14 @@
 //!
 //! # Kernel pointer lifetime
 //!
-//! Active slots keep payload buffers and write descriptors alive at stable addresses until the
+//! Active requests keep payload buffers and write descriptors alive at stable addresses until the
 //! request's completion queue entry (CQE), including an error CQE. An error from submit() or poll()
 //! does not prove the kernel has stopped using those buffers.
 //!
 //! EAGAIN retries pending submissions after a timed wait because no accepted I/O may exist to wake us.
 //!
 //! We do not drain outstanding requests after queue failure. Closing the ring does not wait for
-//! them, so Drop leaks active slots rather than risk use-after-free.
+//! them, so Drop leaks the active request array to keep those pointers valid.
 //!
 //! See <https://man7.org/linux/man-pages/man2/io_uring_enter.2.html> and
 //! <https://man7.org/linux/man-pages/man7/io_uring_cancelation.7.html>.
@@ -42,7 +42,7 @@ use crate::{IoMetrics, IoOperation};
 pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = feuer_memory::BUFFER_ALIGNMENT;
 // Maximum bytes transferred per I/O request, including alignment padding.
 pub(crate) const MAX_IO_REQUEST_BYTES: usize = 1024 * 1024;
-// Each direction has this many active requests plus an equally sized waiting channel.
+// Each direction has its own active-request limit and an equally sized waiting channel.
 const MAX_IN_FLIGHT_READS: usize = 64;
 // Local-SSD benchmarks saturated 1-MiB writes at QD8. QD64 added no write-only
 // throughput, but raised write p99 from 4.6 to 47 ms and worsened small-read latency.
@@ -52,10 +52,10 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;
 #[cfg(test)]
 mod tests;
 
-/// The data file and its optional lock file in the cache directory, retained together by I/O requests.
-pub(crate) struct DataFileAndDirectoryLock {
+/// The data file and its optional lock file, retained together by I/O requests.
+pub(crate) struct DataFileAndLock {
     pub(crate) file: File,
-    pub(crate) _directory_lock: Option<File>,
+    pub(crate) _lock_file: Option<File>,
 }
 
 /// One read queue and one write queue shared by independent caches on the same SSD.
@@ -85,7 +85,7 @@ impl IoQueues {
 
     pub(crate) fn read_queue(
         &self,
-        files: Arc<DataFileAndDirectoryLock>,
+        files: Arc<DataFileAndLock>,
         buffer_pool: Arc<BufferPool>,
         metrics: Arc<IoMetrics>,
     ) -> ReadQueue {
@@ -108,7 +108,7 @@ impl IoQueues {
         self.payload_reads.hold_queued_reads()
     }
 
-    pub(crate) fn write_queue(&self, files: Arc<DataFileAndDirectoryLock>) -> WriteQueue {
+    pub(crate) fn write_queue(&self, files: Arc<DataFileAndLock>) -> WriteQueue {
         WriteQueue {
             handle: self.write.clone(),
             files,
@@ -184,7 +184,7 @@ impl IoQueueHandle {
     /// Submits the admitted request and returns its completion receiver.
     fn submit_request(
         &self,
-        files: Arc<DataFileAndDirectoryLock>,
+        files: Arc<DataFileAndLock>,
         offset: u64,
         buffers: IoBuffers,
         buffer_range: Range<usize>,
@@ -210,7 +210,7 @@ impl Drop for IoQueueHandle {
 pub(crate) struct ReadQueue {
     handle: Arc<IoQueueHandle>,
     payload_reads: Arc<PayloadReadQueue>,
-    files: Arc<DataFileAndDirectoryLock>,
+    files: Arc<DataFileAndLock>,
     buffer_pool: Arc<BufferPool>,
     metrics: Arc<IoMetrics>,
 }
@@ -232,7 +232,7 @@ impl Drop for ReadQueueWait<'_> {
 
 impl ReadQueue {
     pub(crate) fn new(
-        files: Arc<DataFileAndDirectoryLock>,
+        files: Arc<DataFileAndLock>,
         buffer_pool: Arc<BufferPool>,
         metrics: Arc<IoMetrics>,
     ) -> io::Result<Self> {
@@ -269,14 +269,10 @@ impl ReadQueue {
         self.payload_reads.acquire_permit(should_fall_through).await
     }
 
-    pub(crate) fn allocate_buffer(&self, length: usize) -> io::Result<AlignedBuffer> {
-        self.buffer_pool.allocate(length)
-    }
-
     /// Queues disjoint 1-MiB pieces into one allocation before waiting for their completions.
     pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<(Bytes, usize)> {
         let mut permit = Some(self.reserve_request().await?);
-        let buffer = ReadBuffer::new(self.allocate_buffer(length)?);
+        let buffer = ReadBuffer::new(self.buffer_pool.allocate(length)?);
         let mut replies = Vec::with_capacity(length.div_ceil(MAX_IO_REQUEST_BYTES));
         for start in (0..length).step_by(MAX_IO_REQUEST_BYTES) {
             let permit = match permit.take() {
@@ -304,11 +300,11 @@ impl ReadQueue {
 /// Submits writes, retaining input slices or using unpooled scratch buffers.
 pub(crate) struct WriteQueue {
     handle: Arc<IoQueueHandle>,
-    files: Arc<DataFileAndDirectoryLock>,
+    files: Arc<DataFileAndLock>,
 }
 
 impl WriteQueue {
-    pub(crate) fn new(files: Arc<DataFileAndDirectoryLock>) -> io::Result<Self> {
+    pub(crate) fn new(files: Arc<DataFileAndLock>) -> io::Result<Self> {
         Ok(Self {
             handle: Arc::new(IoQueueHandle::new(IoOperation::Write)?),
             files,
@@ -443,7 +439,7 @@ impl IoBuffers {
 }
 
 // SAFETY: read allocations and immutable Bytes stay at stable addresses when moved.
-// Only the queue submits pointers. Write descriptors stay in its fixed active slots.
+// Only the queue submits pointers. Write descriptors stay in its fixed active request array.
 unsafe impl Send for IoBuffers {}
 
 /// An io_uring write request's failure, disk byte range, and buffer alignment.
@@ -465,7 +461,7 @@ struct WriteRequestError {
 /// An I/O request, owning its buffers through completion. Writes cover both buffers.
 struct IoRequest {
     // Each request retains its target file and lock until completion, including on cancellation.
-    files: Arc<DataFileAndDirectoryLock>,
+    files: Arc<DataFileAndLock>,
     // Exclusive disk end of this request, unchanged by short completions.
     disk_end: u64,
     // Aligned memory for disk reads and writes, kept alive until I/O completes.
@@ -478,7 +474,7 @@ struct IoRequest {
 
 impl IoRequest {
     fn new(
-        files: Arc<DataFileAndDirectoryLock>,
+        files: Arc<DataFileAndLock>,
         offset: u64,
         buffers: IoBuffers,
         buffer_range: Range<usize>,
@@ -576,7 +572,7 @@ struct IoQueue {
     wake_fd: Arc<OwnedFd>,
     // Holds up to active.len() waiting requests. Receive only when the active array has room.
     receiver: mpsc::Receiver<IoRequest>,
-    // Fixed addresses for in-flight buffers and write descriptors. Completions identify slot indexes.
+    // Fixed addresses for in-flight buffers and write descriptors. Completions identify request indexes.
     active: Box<[Option<IoRequest>]>,
 }
 
@@ -606,7 +602,7 @@ impl IoQueue {
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    // EAGAIN leaves requests owned by their slots. Avoid spinning, but retry
+                    // EAGAIN leaves requests in the active array. Avoid spinning, but retry
                     // after 1 ms even if no request was accepted and no completion can wake us.
                     self.wait_for_completion_or_wakeup(1)?;
                     continue;
@@ -635,7 +631,7 @@ impl IoQueue {
         }
     }
 
-    /// Receives uncanceled requests into empty active slots and prepares their submissions.
+    /// Adds uncanceled requests to the active array and prepares their submissions.
     fn receive_requests(&mut self) {
         for request_index in 0..self.active.len() {
             if self.active[request_index].is_some() {
@@ -659,7 +655,7 @@ impl IoQueue {
             .as_mut()
             .unwrap()
             .submission_entry(request_index);
-        // SAFETY: the fixed active slot owns buffers and descriptors through completion.
+        // SAFETY: the fixed active array owns buffers and descriptors through completion.
         // The ring is sized for all active requests, each with at most one submitted or queued SQE.
         unsafe {
             self.ring
@@ -669,9 +665,9 @@ impl IoQueue {
         };
     }
 
-    /// Retains active slots at their original addresses after failure and notifies their callers.
+    /// Retains active requests at their original addresses after failure and notifies their callers.
     fn retain_active_requests(&mut self) -> &'static [Option<IoRequest>] {
-        // Ring close does not wait for outstanding requests. Leak active slots and their file owner
+        // Ring close does not wait for outstanding requests. Leak the active array and its file owners
         // to prevent use-after-free or early reuse.
         tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
         let requests = Box::leak(std::mem::take(&mut self.active));

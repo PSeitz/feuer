@@ -47,12 +47,6 @@ pub(super) fn with_manual_metadata_writes(cache: DiskCache) -> DiskCache {
     }
 }
 
-impl DiskEntry {
-    fn single_chunk_start(&self) -> Option<u64> {
-        (self.chunk_count() == 1).then_some(self.payload_address / CHUNK_BYTES * CHUNK_BYTES)
-    }
-}
-
 pub(super) async fn entry_disk_ranges(
     cache: &DiskCache,
     key: &ObjectKeyHash,
@@ -154,25 +148,25 @@ async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers()
     for length in [1, 1024, 4016, 4096, 4097, 3 * 4096 + 9] {
         let key = ObjectKeyHash::from(format!("entry-{length}"));
         let source = download(17, length);
-        let (allocated, entry_metadata) = entry_disk_ranges(&cache, &key).await;
-        assert_eq!(allocated.start, previous_end);
-        assert!(allocated.start.is_multiple_of(BUFFER_ALIGNMENT as u64));
-        assert!(allocated.end <= 3 * CHUNK_BYTES);
+        let (payload, entry_metadata) = entry_disk_ranges(&cache, &key).await;
+        assert_eq!(payload.start, previous_end);
+        assert!(payload.start.is_multiple_of(BUFFER_ALIGNMENT as u64));
+        assert!(payload.end <= 3 * CHUNK_BYTES);
         assert_eq!(
-            allocated.end - allocated.start,
+            payload.end - payload.start,
             (length as u64).next_multiple_of(BUFFER_ALIGNMENT as u64)
         );
         let stored = cache
             .disk
             .file
-            .read_at(allocated.start, (allocated.end - allocated.start) as usize)
+            .read_at(payload.start, (payload.end - payload.start) as usize)
             .await
             .unwrap();
         assert_eq!(&stored[..length], source.bytes().as_ref());
         assert!(stored[length..].iter().all(|&byte| byte == 0));
         assert_eq!(cache.get(&key).await.unwrap().into_bytes(), source.bytes());
         assert_eq!(entry_metadata, CHUNK_BYTES..CHUNK_BYTES + METADATA_PAGE_BYTES as u64);
-        previous_end = allocated.end;
+        previous_end = payload.end;
     }
 }
 
@@ -230,9 +224,11 @@ async fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_
     }
     for entries in owners.values() {
         if entries.len() > 1 {
-            assert!(entries.iter().all(
-                |entry| entry.single_chunk_start().is_some() && payload_disk_bytes(entry.payload_len) < 512 * 1024
-            ));
+            assert!(
+                entries
+                    .iter()
+                    .all(|entry| entry.chunk_count() == 1 && payload_disk_bytes(entry.payload_len) < 512 * 1024)
+            );
         }
     }
     assert_eq!(owners.len(), 7);
@@ -504,7 +500,7 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
 }
 
 #[tokio::test]
-async fn disk_value_uses_payload_size_not_aligned_allocations_or_chunk_size() {
+async fn disk_value_uses_payload_length_rather_than_padding_or_chunk_size() {
     let (_directory, mut cache) = open_test_cache(2 * CHUNK_BYTES).await;
     Arc::get_mut(&mut cache.disk).unwrap().retention_scorer = Arc::new(AvoidedRetrievalCostScorer {
         cost_per_request: 1.0,
@@ -512,7 +508,7 @@ async fn disk_value_uses_payload_size_not_aligned_allocations_or_chunk_size() {
     });
     let small = ObjectKeyHash::from("small");
     let large = ObjectKeyHash::from("large");
-    // Both entries use identical physical capacity, but different payload lengths.
+    // Both entries occupy one payload chunk, with different payload lengths.
     cache.insert(small, download(0, 1)).await.unwrap();
     cache.insert(large, download(0, 3000)).await.unwrap();
     cache.access_histories().record_access(&small);
@@ -749,7 +745,7 @@ async fn multi_chunk_payload_has_no_metadata_gaps() {
     let (payload, metadata) = entry_disk_ranges(&cache, &key).await;
     assert!(metadata.end <= payload.start);
     assert!(payload.start.is_multiple_of(CHUNK_BYTES));
-    // Read the disk bytes directly across physical chunk boundaries: no assembly or skipped headers.
+    // Read the contiguous payload bytes across chunk boundaries.
     assert_eq!(
         cache
             .disk

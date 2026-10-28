@@ -13,7 +13,7 @@ use crate::disk_cache::tests::with_manual_metadata_writes;
 /// Checks recovered entries and releases the reopened cache after timing stops.
 struct CheckRecovery {
     cache: Rc<RefCell<Option<DiskCache>>>,
-    entry_sizes: Rc<[usize]>,
+    expected_entries: usize,
 }
 
 impl EventListener for CheckRecovery {
@@ -42,8 +42,8 @@ impl EventListener for CheckRecovery {
                     .iter()
                     .map(|shard| shard.entry_index.lock().unwrap().entries_by_key.len())
                     .sum();
-                assert_eq!(entries, self.entry_sizes.len());
-                for i in 0..self.entry_sizes.len() {
+                assert_eq!(entries, self.expected_entries);
+                for i in 0..self.expected_entries {
                     assert!(cache.contains(&ObjectKeyHash(i as u128)));
                 }
                 drop(cache);
@@ -114,7 +114,6 @@ fn benchmark_recovery() {
             .into()
     };
     for (entry_sizes, capacity_chunks, label) in cases {
-        let entry_sizes: Rc<[usize]> = entry_sizes.into();
         let entries = entry_sizes.len();
         let payload_bytes: usize = entry_sizes.iter().sum();
         let source = Bytes::from(vec![0x5a; entry_sizes.iter().copied().max().unwrap_or(0)]);
@@ -150,7 +149,7 @@ fn benchmark_recovery() {
         let reopened = Rc::new(RefCell::new(None));
         runner.get_plugin_manager().replace_plugin(CheckRecovery {
             cache: reopened.clone(),
-            entry_sizes,
+            expected_entries: entries,
         });
         let mut group = runner
             .new_group()

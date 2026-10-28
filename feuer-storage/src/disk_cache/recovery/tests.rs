@@ -143,7 +143,7 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
 }
 
 #[tokio::test]
-async fn eviction_does_not_recover_an_old_record_for_reused_payload_chunks() {
+async fn eviction_does_not_recover_old_metadata_for_reused_payload_chunks() {
     let (directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let old = ObjectKeyHash(1);
     let new = ObjectKeyHash(2);
@@ -155,7 +155,7 @@ async fn eviction_does_not_recover_an_old_record_for_reused_payload_chunks() {
 }
 
 #[tokio::test]
-async fn metadata_slot_reuse_preserves_multi_chunk_recovery() {
+async fn metadata_reuse_preserves_multi_chunk_recovery() {
     for recover_before_removal in [false, true] {
         for reverse_removal in [false, true] {
             let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
@@ -322,7 +322,7 @@ async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
     for i in 0..entries {
         shard.remove_entry(&ObjectKeyHash(i as u128));
     }
-    // Freed slots mark their pages for rewriting without the removed records.
+    // Removing entry metadata marks its pages for rewriting.
     assert_eq!(shard.metadata_pages.lock().unwrap().dirty_pages.len(), 2);
     assert!(shard.allocator.reserve_chunks(1).is_some());
     // A failed initialization still requires a full-chunk write, including the unchanged link page.
@@ -396,7 +396,7 @@ async fn recovery_deduplicates_keys_and_restores_allocator_availability() {
             .await
             .unwrap();
         cache.write_dirty_metadata_pages().await;
-        // Give key 2's record key 1's identity, regardless of which payload was written first.
+        // Replace key 2 with key 1 in its metadata, regardless of which payload was written first.
         let position = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&ObjectKeyHash(2)]
             .metadata
             .entry_index as usize;
@@ -484,7 +484,7 @@ async fn stale_metadata_after_payload_reuse_recovers_as_a_checksum_miss() {
     cache.write_dirty_metadata_pages().await;
     let shard = &cache.disk.shards[0];
     shard.remove_entry(&key);
-    // Simulate a crash before the writer clears the freed record.
+    // Simulate a crash before the writer clears the removed entry's metadata.
     shard.metadata_pages.lock().unwrap().dirty_pages.clear();
     let reused = shard.allocator.reserve_chunks(1).unwrap();
     cache

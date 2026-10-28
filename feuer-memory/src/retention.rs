@@ -27,12 +27,12 @@ pub trait RetentionScorer: Send + Sync {
 ///
 /// The object's decayed request count multiplies
 /// `max(cost_per_request + payload_len * cost_per_requested_byte, 0)`.
-/// Empty entries use a one-byte denominator.
+/// A zero entry size uses a one-byte denominator.
 /// Costs must use one consistent unit, such as equivalent bytes, I/O time, or CPU time.
 /// Coefficients must be finite and keep scores finite over the application's sizes and demand.
 ///
 /// Defaults are zero fixed cost and one cost unit per byte, preserving byte-weighted demand.
-/// With a nonempty request whose size equals the entry size, the default score equals its
+/// With a nonzero payload length equal to the entry size, the default score equals the object's
 /// decayed count. Using the default half-life and current decay approximation:
 ///
 /// | Matching request frequency | Score approached immediately after a matching request |
@@ -41,7 +41,7 @@ pub trait RetentionScorer: Send + Sync {
 /// | Every second request | 262,144 |
 ///
 /// Separate tier scorers can model memory's assumed fallback cost and disk's source-minus-disk
-/// cost. Negative savings are clamped to zero. Both use caller-demand history.
+/// cost. Negative savings are clamped to zero. Both use request history.
 /// This linear model does not inspect disk residency or model alignment and whole-entry reads.
 #[derive(Debug)]
 pub struct AvoidedRetrievalCostScorer {

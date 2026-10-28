@@ -11,7 +11,8 @@ use super::{FetchResult, ObjectKeyHash};
 type FetchKey = (ObjectKeyHash, TypeId);
 pub(super) type PendingFetches = Arc<Mutex<HashMap<FetchKey, Weak<dyn Any + Send + Sync>>>>;
 
-/// A disk-or-source fetch, owned by its callers rather than the registry.
+/// A disk-or-source fetch owned by its callers. The registry holds weak references.
+/// Cancelling the initializer lets a waiter initialize the result with its own callback.
 pub(super) struct PendingFetch<E> {
     key: FetchKey,
     pending: PendingFetches,
@@ -36,7 +37,8 @@ impl<E: Send + Sync + 'static> PendingFetch<E> {
 }
 
 impl<E> PendingFetch<E> {
-    /// Remove this attempt without removing a newer attempt for the same request.
+    /// Remove this fetch from the registry. Existing waiters keep its result.
+    /// Pointer identity protects a newer fetch for the same key and error type.
     pub(super) fn remove(&self) {
         let mut entries = self.pending.lock().unwrap();
         if entries

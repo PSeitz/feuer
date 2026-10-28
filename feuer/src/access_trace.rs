@@ -66,19 +66,16 @@ impl AccessTrace {
     }
 
     /// Send the lookup outcome, completion time, and payload length to the access-trace queue.
-    /// Successful lookups supply the payload length, including zero for empty objects.
-    /// Misses and errors supply `None`, leaving the encoded length at zero.
+    /// Successful lookups supply the payload length. Empty objects, misses, and errors supply zero.
     pub(crate) async fn send_outcome(
         &self,
         mut event_bytes: [u8; EVENT_BYTES],
         outcome: LookupOutcome,
-        payload_length: Option<u64>,
+        payload_length: u64,
     ) {
         event_bytes[0] = outcome as u8 + 1;
         event_bytes[9..17].copy_from_slice(&(self.started_at.elapsed().as_nanos() as u64).to_le_bytes());
-        if let Some(payload_length) = payload_length {
-            event_bytes[33..41].copy_from_slice(&payload_length.to_le_bytes());
-        }
+        event_bytes[33..41].copy_from_slice(&payload_length.to_le_bytes());
         let _ = self.event_sender.send(event_bytes).await;
     }
 }
@@ -102,13 +99,13 @@ mod tests {
         });
         let key = ObjectKeyHash(0x1234_5678_9abc_def0_1122_3344_5566_7788);
         let cases = [
-            (LookupOutcome::MemoryHit, Some(1234), 1),
+            (LookupOutcome::MemoryHit, 1234, 1),
             #[cfg(target_os = "linux")]
-            (LookupOutcome::DiskHit, Some(1234), 2),
-            (LookupOutcome::Callback, Some(1234), 3),
-            (LookupOutcome::Callback, Some(0), 3),
-            (LookupOutcome::CallbackError, None, 4),
-            (LookupOutcome::Miss, None, 5),
+            (LookupOutcome::DiskHit, 1234, 2),
+            (LookupOutcome::Callback, 1234, 3),
+            (LookupOutcome::Callback, 0, 3),
+            (LookupOutcome::CallbackError, 0, 4),
+            (LookupOutcome::Miss, 0, 5),
         ];
         for (outcome, length, _) in cases {
             let event_bytes = access_trace.send_request_start(key).await;
@@ -128,7 +125,7 @@ mod tests {
                 assert_eq!(&event[17..33], &key.0.to_le_bytes());
             }
             assert_eq!(&start[33..41], &0u64.to_le_bytes());
-            assert_eq!(&end[33..41], &length.unwrap_or(0).to_le_bytes());
+            assert_eq!(&end[33..41], &length.to_le_bytes());
             assert!(
                 u64::from_le_bytes(end[9..17].try_into().unwrap())
                     >= u64::from_le_bytes(start[9..17].try_into().unwrap())

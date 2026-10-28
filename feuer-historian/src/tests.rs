@@ -32,7 +32,7 @@ fn concurrent_recording_counts_every_request() {
     assert_eq!(histories.shard(&key).lock().unwrap().len(), 1);
     let mut expected = DecayedAccessCount::default();
     for clock in 1..=8000 {
-        expected.record(clock, histories.half_life());
+        expected.add_request(clock, histories.half_life());
     }
     assert_eq!(
         histories.decayed_request_count(&key),
@@ -127,7 +127,7 @@ fn zero_half_life_is_rejected() {
 fn decayed_count_never_increases_and_relative_error_is_at_most_6_15_percent() {
     let request_count = DecayedAccessCount {
         count: 1.0,
-        observed_at_access: 1,
+        last_update_clock: 1,
     };
     assert_eq!(request_count.decayed_count(0, DEFAULT_ACCESS_COUNT_HALF_LIFE), 1.0);
     let mut previous = 1.0;
@@ -151,11 +151,11 @@ fn decayed_count_never_increases_and_relative_error_is_at_most_6_15_percent() {
 }
 
 #[test]
-fn approximate_decayed_counts_limit_individual_event_weights() {
+fn repeated_updates_compound_decay_error() {
     let mut count = DecayedAccessCount::default();
     let clocks = [1, 17, 4097, 9001, 20_000];
     for clock in clocks {
-        count.record(clock, DEFAULT_ACCESS_COUNT_HALF_LIFE);
+        count.add_request(clock, DEFAULT_ACCESS_COUNT_HALF_LIFE);
     }
     let expected: f64 = clocks
         .into_iter()

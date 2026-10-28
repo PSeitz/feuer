@@ -63,13 +63,13 @@ impl MemoryCacheShard {
         cache: &MemoryCache,
     ) -> InsertResult {
         if self.entries_by_key.contains_key(object_key) {
-            self.buffer_pool.metrics.record_redundant();
+            self.buffer_pool.metrics.redundant_insertions.increase(1);
             return InsertResult::AlreadyPresent;
         }
         let max_existing_bytes = self.capacity.saturating_sub(download.allocation_charge() as u64);
         if self.used_bytes <= max_existing_bytes {
             self.add_entry(*object_key, download.clone());
-            self.buffer_pool.metrics.record_insert();
+            self.buffer_pool.metrics.insertions.increase(1);
             return InsertResult::Inserted;
         }
 
@@ -116,17 +116,18 @@ impl MemoryCacheShard {
     }
 
     pub(super) fn remove(&mut self, object_key: &ObjectKeyHash) -> bool {
-        if !self.contains_entry(object_key) {
+        if !self.remove_entry(object_key) {
             return false;
         }
-        self.remove_entry(object_key);
-        self.buffer_pool.metrics.record_remove();
+        self.buffer_pool.metrics.removals.increase(1);
         true
     }
 
-    /// Removes an indexed object, updating shard, buffer-pool, and metric usage.
-    fn remove_entry(&mut self, object_key: &ObjectKeyHash) {
-        let removed_entry = self.entries_by_key.remove(object_key).unwrap();
+    /// Removes an object if present, updating shard, buffer-pool, and metric usage.
+    fn remove_entry(&mut self, object_key: &ObjectKeyHash) -> bool {
+        let Some(removed_entry) = self.entries_by_key.remove(object_key) else {
+            return false;
+        };
         self.eviction_candidates.swap_remove(removed_entry.eviction_index);
         if let Some(key) = self.eviction_candidates.get(removed_entry.eviction_index) {
             self.entries_by_key.get_mut(key).unwrap().eviction_index = removed_entry.eviction_index;
@@ -135,6 +136,7 @@ impl MemoryCacheShard {
         self.used_bytes -= removed_bytes;
         self.buffer_pool.remove_entry_bytes(removed_bytes);
         self.buffer_pool.metrics.entries.decrease(1);
+        true
     }
 
     pub(super) fn entry_count(&self) -> usize {

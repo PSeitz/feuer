@@ -31,7 +31,7 @@ fn pending_count(cache: &TieredMemoryDiskCache) -> usize {
 }
 
 #[tokio::test]
-async fn shares_successes_and_errors_but_not_completed_failures() {
+async fn lookup_methods_share_successes_and_errors_but_not_completed_failures() {
     for download in [Ok(Download::new(Bytes::from_static(b"ok"))), Err("source failed")] {
         let (cache, registry) = cache();
         let release = Notify::new();
@@ -39,8 +39,8 @@ async fn shares_successes_and_errors_but_not_completed_failures() {
             release.notified().await;
             download.clone()
         }));
-        let mut second = Box::pin(cache.get_or_fetch("object".into(), || {
-            std::future::ready(Err::<Download, &str>("waiter must not execute"))
+        let mut second = Box::pin(cache.get_or_fetch_object("object".into(), || {
+            std::future::ready(Err::<Bytes, &str>("waiter must not execute"))
         }));
         assert_pending(first.as_mut());
         assert_pending(second.as_mut());

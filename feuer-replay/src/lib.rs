@@ -127,7 +127,7 @@ pub struct TraceRequests {
     pub requests: Vec<Request>,
     /// Counts of recorded outcomes for selected starts, indexed by FETR kind.
     pub outcomes: [usize; 7],
-    /// Selected starts without a recorded outcome. These are not established cache misses.
+    /// Selected starts whose outcomes are unknown.
     pub incomplete: usize,
 }
 
@@ -146,29 +146,29 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
                 .ok_or("trace seconds must be positive and fit in nanoseconds")
         })
         .transpose()?;
-    let mut first = u64::MAX;
+    let mut first_start_ns = u64::MAX;
     let mut requests = Vec::new();
     visit_events(path, |event| {
         if event.kind == 0 {
-            first = first.min(event.time_ns);
-            if duration.is_none_or(|duration| event.time_ns - first < duration) {
+            first_start_ns = first_start_ns.min(event.time_ns);
+            if duration.is_none_or(|duration| event.time_ns - first_start_ns < duration) {
                 requests.push(event);
             }
         }
         Ok(())
     })?;
-    requests.retain(|request| duration.is_none_or(|duration| request.time_ns - first < duration));
+    requests.retain(|request| duration.is_none_or(|duration| request.time_ns - first_start_ns < duration));
     if requests.is_empty() {
         return Err("selected trace has no request starts".into());
     }
-    let mut requests_by_id = FxHashMap::default();
+    let mut starts_by_id = FxHashMap::default();
     let mut object_lengths = FxHashMap::default();
-    for request in &requests {
-        if requests_by_id.insert(request.request_id, (request, false)).is_some() {
-            return Err("duplicate request start ID".into());
-        }
+    for request in requests {
         if request.requested.as_ref().is_none_or(|range| *range == (0..u64::MAX)) {
             object_lengths.insert(request.object_key, None);
+        }
+        if starts_by_id.insert(request.request_id, (request, false)).is_some() {
+            return Err("duplicate request start ID".into());
         }
     }
     let mut outcomes = [0; 7];
@@ -189,7 +189,7 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
                 *length = Some(observed);
             }
         }
-        if let Some((request, completed)) = requests_by_id.get_mut(&event.request_id) {
+        if let Some((request, completed)) = starts_by_id.get_mut(&event.request_id) {
             if *completed {
                 return Err("duplicate request outcome ID".into());
             }
@@ -204,10 +204,10 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
         }
         Ok(())
     })?;
-    let incomplete = requests_by_id.values().filter(|(_, completed)| !completed).count();
-    let mut requests: Vec<_> = requests
-        .into_iter()
-        .map(|event| {
+    let incomplete = starts_by_id.values().filter(|(_, completed)| !completed).count();
+    let mut requests: Vec<_> = starts_by_id
+        .into_values()
+        .map(|(event, _)| {
             let (object_key, payload_len) = match event.requested {
                 Some(range) if range != (0..u64::MAX) => (
                     ObjectKeyHash::from(format!(
@@ -224,7 +224,7 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
             };
             Ok(Request {
                 request_id: event.request_id,
-                time_ns: event.time_ns - first,
+                time_ns: event.time_ns - first_start_ns,
                 object_key,
                 payload_len,
             })

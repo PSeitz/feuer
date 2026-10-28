@@ -12,8 +12,6 @@ use crate::allocation::CHUNK_BYTES;
 pub(super) const METADATA_PAGE_BYTES: usize = 4096;
 pub(super) const PAGE_HEADER_BYTES: usize = 32;
 pub(super) const ENTRY_METADATA_BYTES: usize = 40;
-/// The bytes of an entry's metadata record.
-pub(super) type RawMetadataBytes = [u8; ENTRY_METADATA_BYTES];
 pub(super) const PAGE_CONTENT_BYTES: usize =
     (METADATA_PAGE_BYTES - PAGE_HEADER_BYTES) / ENTRY_METADATA_BYTES * ENTRY_METADATA_BYTES;
 pub(super) const ENTRY_METADATA_PAGE_TAG: &[u8; 8] = b"FEUDES15";
@@ -38,7 +36,7 @@ pub(super) fn encode_page(page: &mut [u8], page_tag: &[u8; 8], entry_count: u64,
     page[..8].copy_from_slice(&checksum.to_le_bytes());
 }
 
-/// Validates a complete metadata page. The tag identifies the writer's format.
+/// Validates a metadata page. The tag identifies the writer's format.
 /// An intact checksum lets readers rely on its field, padding, and alignment guarantees.
 pub(super) fn validate_page<'a>(page: &'a [u8], page_tag: &[u8; 8]) -> Option<&'a [u8]> {
     if page[24..32] != *page_tag || page[..8] != XxHash64::oneshot(0, &page[8..]).to_le_bytes() {
@@ -48,9 +46,9 @@ pub(super) fn validate_page<'a>(page: &'a [u8], page_tag: &[u8; 8]) -> Option<&'
 }
 
 /// Key hash (u128), payload length, payload address, payload checksum (u64s).
-/// All integers are little-endian. Aligned payload length is derived from object length.
+/// All integers are little-endian. Aligned payload length is derived from payload length.
 /// Payload checksums exclude alignment padding.
-pub(super) fn encode_entry_metadata(bytes: &mut RawMetadataBytes, entry: &EntryMetadata) {
+pub(super) fn encode_entry_metadata(bytes: &mut [u8; ENTRY_METADATA_BYTES], entry: &EntryMetadata) {
     bytes[..16].copy_from_slice(&entry.key.0.to_le_bytes());
     bytes[16..24].copy_from_slice(&entry.payload_len.to_le_bytes());
     bytes[24..32].copy_from_slice(&entry.payload_address.to_le_bytes());

@@ -13,17 +13,17 @@ pub(super) struct PendingDiskWrite {
     disk: Arc<DiskCacheInner>,
     key: ObjectKeyHash,
     download: Download,
-    entry_metrics: DiskWriteQueueEntryMetrics,
+    entry_metrics: QueuedWriteMetrics,
 }
 
 /// Measures queue wait and keeps payload bytes counted as pending until publication or discard.
-struct DiskWriteQueueEntryMetrics {
+struct QueuedWriteMetrics {
     payload_bytes: u64,
     queued_at: Option<Instant>,
     metrics: Arc<DiskMetrics>,
 }
 
-impl DiskWriteQueueEntryMetrics {
+impl QueuedWriteMetrics {
     fn finish_queue_wait(&mut self) {
         let queued_at = self.queued_at.take().expect("queued write dequeued once");
         self.metrics.queued_entries.decrease(1);
@@ -31,7 +31,7 @@ impl DiskWriteQueueEntryMetrics {
     }
 }
 
-impl Drop for DiskWriteQueueEntryMetrics {
+impl Drop for QueuedWriteMetrics {
     fn drop(&mut self) {
         self.metrics.pending_bytes.decrease(self.payload_bytes);
         if self.queued_at.is_some() {
@@ -55,11 +55,12 @@ impl DiskCache {
                 return;
             }
         };
+        let payload_bytes = download.bytes().len() as u64;
         metrics.record_queue(DiskWriteQueueOutcome::Queued);
         metrics.queued_entries.increase(1);
-        metrics.pending_bytes.increase(download.bytes().len() as u64);
-        let entry_metrics = DiskWriteQueueEntryMetrics {
-            payload_bytes: download.bytes().len() as u64,
+        metrics.pending_bytes.increase(payload_bytes);
+        let entry_metrics = QueuedWriteMetrics {
+            payload_bytes,
             queued_at: Some(Instant::now()),
             metrics: metrics.clone(),
         };
@@ -71,8 +72,8 @@ impl DiskCache {
         });
     }
 
-    // The worker owns no sender or idle disk reference. Closing the last handle drains
-    // queued writes. Dropping their disk references then discards any remaining partial chunks.
+    // Closing the last sender drains queued writes. Each write retains the disk until
+    // it finishes. Dropping the last disk reference discards remaining buffered entries.
     pub(super) async fn write_queued(mut receiver: mpsc::Receiver<PendingDiskWrite>) {
         while let Some(PendingDiskWrite {
             disk,

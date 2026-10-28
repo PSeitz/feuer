@@ -9,7 +9,7 @@ mod metadata;
 mod small_entry_buffer;
 mod write_queue;
 mod writer;
-use small_entry_buffer::BufferedSmallEntryChunk;
+use small_entry_buffer::SmallEntryBuffer;
 use write_queue::PendingDiskWrite;
 #[cfg(test)]
 mod metrics_tests;
@@ -84,7 +84,7 @@ struct DiskCacheShard {
     allocator: DiskChunkAllocator,
     entry_index: Mutex<DiskEntryIndex>,
     metadata_pages: Mutex<metadata::MetadataPages>,
-    buffered_small_entry_chunk: tokio::sync::Mutex<BufferedSmallEntryChunk>,
+    small_entry_buffer: tokio::sync::Mutex<SmallEntryBuffer>,
 }
 
 /// Disk entries indexed by object key, with a list sampled in rotation for eviction.
@@ -215,7 +215,7 @@ impl DiskCache {
                 Ok(DiskCacheShard {
                     allocator,
                     entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
-                    buffered_small_entry_chunk: tokio::sync::Mutex::new(BufferedSmallEntryChunk::new()?),
+                    small_entry_buffer: tokio::sync::Mutex::new(SmallEntryBuffer::new()?),
                     metadata_pages: Mutex::new(metadata::MetadataPages::default()),
                 })
             })
@@ -309,9 +309,9 @@ impl DiskCache {
         let started = Instant::now();
         let metrics = &self.disk.metrics;
         let shard = &self.disk.shards[self.disk.shard_index_for_key(key)];
-        // Do not wait on a busy buffer. Flushing chunks may miss until disk publication.
-        if let Ok(pending) = shard.buffered_small_entry_chunk.try_lock()
-            && let Some(bytes) = pending.get(key)
+        // Check the buffer only when unlocked. Flushing entries may miss until disk publication.
+        if let Ok(buffer) = shard.small_entry_buffer.try_lock()
+            && let Some(bytes) = buffer.get(key)
         {
             metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
             let capacity = bytes.len();
@@ -367,9 +367,9 @@ impl DiskCache {
 impl DiskCacheShard {
     /// Checks for a buffered or disk entry without copying payload bytes.
     fn contains(&self, key: &ObjectKeyHash) -> bool {
-        self.buffered_small_entry_chunk
+        self.small_entry_buffer
             .try_lock()
-            .is_ok_and(|pending| pending.entry(key).is_some())
+            .is_ok_and(|buffer| buffer.entry(key).is_some())
             || self.entry_index.lock().unwrap().entries_by_key.contains_key(key)
     }
 
@@ -470,14 +470,14 @@ impl DiskCacheShard {
         self.release_entry(entry, &mut self.metadata_pages.lock().unwrap());
     }
 
-    /// Releases a held payload and frees its metadata slot.
+    /// Releases a held payload and frees its metadata position.
     fn release_entry(&self, entry: DiskEntry, metadata: &mut metadata::MetadataPages) {
         self.allocator.release_payload(entry.payload_address);
         metadata.free_entry_metadata(entry.metadata);
     }
 
     /// Inserts an entry and releases any previous entry for its key.
-    /// The caller holds both locks, has reserved the payload and metadata slot,
+    /// The caller holds both locks, has reserved the payload and metadata position,
     /// and records inserted entry counts and payload bytes once its batch is complete.
     fn insert_entry(
         &self,
@@ -505,7 +505,7 @@ impl DiskEntryIndex {
         }
     }
 
-    /// Removes an entry from the index and eviction candidates without releasing its payload or metadata slot.
+    /// Removes an entry from the index and eviction candidates. Its payload and metadata remain reserved.
     fn take_entry(&mut self, key: &ObjectKeyHash) -> Option<DiskEntry> {
         let entry = self.entries_by_key.remove(key)?;
         self.metrics.entries.decrease(1);

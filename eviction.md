@@ -9,8 +9,7 @@ memory lowers disk's hit percentage but avoids a read, so tier hit percentages
 alone do not measure policy quality.
 
 Costs can represent I/O time, CPU time, or another application cost. Use one
-consistent unit. Source cost is the work needed to obtain a missing result, not
-necessarily its original precomputation cost.
+consistent unit. Source cost is the work needed to obtain a missing result.
 
 ## Current scoring
 
@@ -24,8 +23,9 @@ decayed_object_count × max(cost_per_request + payload_len × cost_per_requested
 ```
 
 Every request for the object contributes to its decayed count. The denominator
-is the allocation charge in memory and payload length on disk, not aligned disk
-bytes or metadata overhead. Negative avoided costs are clamped to zero.
+is the allocation charge in memory and payload length on disk. Disk alignment
+and metadata overhead are excluded. A zero entry size uses a one-byte denominator.
+Negative avoided costs are clamped to zero.
 Coefficients and resulting scores must be finite.
 
 `cost_per_request` is the cost avoided once per request, regardless of requested
@@ -43,7 +43,7 @@ let scorer = std::sync::Arc::new(feuer::AvoidedRetrievalCostScorer {
 
 `open_with_retention_scorer` shares one scorer between tiers.
 `open_with_retention_scorers` accepts separate memory and disk scorers. Both receive
-the same caller-demand history. `CacheConfig` keeps candidate sampling settings in
+the same request history. `CacheConfig` keeps candidate sampling settings in
 `SampledEvictionConfig`, separate from resource settings and scoring parameters.
 
 ### Tier-specific costs and limitations
@@ -57,11 +57,11 @@ skipped writes, disk eviction, and read failures may leave only source fallback.
 Both scorers use all caller demand, including memory hits, so
 disk can also overvalue copies of memory-hot objects.
 
-Disk alignment and memory allocation buckets make actual costs non-linear. For
+Disk alignment and memory allocation buckets make costs non-linear. For
 example, a 10-byte payload may require a 4-KiB disk read and occupy a 32-KiB pooled
 memory buffer. `Download::new` defaults to payload-length charges, while disk
 promotions and `AlignedBuffer::into_download` charge backing capacity. Use the
-actual entry charge.
+entry charge.
 
 Applications can supply a custom scorer when linear size-based costs are
 insufficient. Eviction accounts for size, demand, and avoided fixed costs.
@@ -82,7 +82,7 @@ limit and is not persisted across restarts.
 ## Custom retention scores
 
 A `RetentionScorer` receives the key hash, object payload length, tier-specific
-entry size, and caller-demand history. It can own per-object computation costs keyed by
+entry size, and request history. It can own per-object computation costs keyed by
 `ObjectKeyHash::from(key.as_str())`. Higher finite scores favor retention. Any
 byte normalization belongs to the scorer.
 

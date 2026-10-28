@@ -1,7 +1,8 @@
-//! Inserts and removals update entry metadata slots under the metadata mutex. One periodic writer
+//! Inserts and removals update entry metadata under the metadata mutex. One periodic writer
 //! encodes dirty pages or whole new chunks, releases the mutex, then writes them sequentially.
 //! Changes during I/O remain dirty.
-//! Failed writes are not retried. There is no stable-storage sync or shutdown flush. Recovery is best-effort.
+//! Later changes retry failed chunk initializations. Other failed writes wait for their pages to change.
+//! There is no stable-storage sync or shutdown flush. Recovery is best-effort.
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -32,7 +33,7 @@ pub(super) struct EntryMetadata {
     pub(super) payload_checksum: u64,
 }
 
-/// Metadata chunks with free-slot accounting and dirty-page tracking.
+/// Metadata chunks with counts of unused entries and dirty-page tracking.
 #[derive(Default)]
 pub(super) struct MetadataPages {
     pub(super) chunks: Vec<MetadataChunk>,
@@ -42,8 +43,8 @@ pub(super) struct MetadataPages {
     free_slot_count: usize,
 }
 
-/// A reserved metadata chunk: its entry metadata slots in disk order, and the next chunk's address.
-/// Free slots are `None` and written as zeros.
+/// A reserved metadata chunk: its entry metadata in disk order, and the next chunk's address.
+/// Unused entries are `None` and written as zeros.
 pub(super) struct MetadataChunk {
     pub(super) reserved_chunk: ReservedChunks,
     pub(super) slots: Box<[Option<EntryMetadata>]>,
@@ -95,7 +96,7 @@ impl MetadataPages {
                 entry_index: 0,
             };
         };
-        *self.slot_mut(location) = Some(entry);
+        *self.entry_metadata_mut(location) = Some(entry);
         self.free_slot_search_start = location;
         self.free_slot_count -= 1;
         self.mark_page_dirty(location);
@@ -104,7 +105,10 @@ impl MetadataPages {
 
     /// Frees an entry's slot and marks its page for rewriting.
     pub(super) fn free_entry_metadata(&mut self, location: EntryMetadataLocation) {
-        assert!(self.slot_mut(location).take().is_some(), "metadata slot freed twice");
+        assert!(
+            self.entry_metadata_mut(location).take().is_some(),
+            "metadata slot freed twice"
+        );
         self.free_slot_search_start = self.free_slot_search_start.min(location);
         self.free_slot_count += 1;
         self.mark_page_dirty(location);
@@ -151,7 +155,7 @@ impl MetadataPages {
         }
     }
 
-    fn slot_mut(&mut self, location: EntryMetadataLocation) -> &mut Option<EntryMetadata> {
+    fn entry_metadata_mut(&mut self, location: EntryMetadataLocation) -> &mut Option<EntryMetadata> {
         &mut self.chunks[location.chunk_index as usize].slots[location.entry_index as usize]
     }
 

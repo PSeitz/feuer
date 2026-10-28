@@ -32,9 +32,9 @@ pub(crate) enum DiskWriteQueueOutcome {
 /// All labels have fixed values. Gauges aggregate caches sharing a registry.
 #[derive(Debug)]
 pub struct DiskMetrics {
-    lookup_count: [BoxedCounter; 5],
+    lookup_outcomes: [BoxedCounter; 5],
     hit_duration: BoxedHistogram,
-    write_entries: [BoxedCounter; 5],
+    write_outcomes: [BoxedCounter; 5],
     queue_outcomes: [BoxedCounter; 4],
     pub(crate) queued_entries: BoxedGauge,
     pub(crate) pending_bytes: BoxedGauge,
@@ -55,7 +55,7 @@ impl DiskMetrics {
     pub fn new(registry: &BoxedRegistry) -> Arc<Self> {
         let lookups = registry.register_counter_vec(
             "feuer_disk_lookup_total".into(),
-            "Completed disk-tier lookups, including buffered entries; errors become misses".into(),
+            "Completed disk-tier lookups, including buffered entries. Errors become misses".into(),
             &["outcome"],
         );
         let duration = registry.register_histogram_vec_with_buckets(
@@ -71,7 +71,8 @@ impl DiskMetrics {
         );
         let queue = registry.register_counter_vec(
             "feuer_disk_write_queue_total".into(),
-            "Disk-write queue admissions, rejections and pre-write discards; queued is not a terminal outcome".into(),
+            "Disk-write queue admissions, rejections and pre-write discards. The queued outcome measures admission"
+                .into(),
             &["outcome"],
         );
         let queued = registry.register_gauge_vec(
@@ -107,7 +108,7 @@ impl DiskMetrics {
         );
         let chunks = registry.register_gauge_vec(
             "feuer_disk_chunks".into(),
-            "Live 1-MiB chunks; allocated includes payloads, metadata, and unfinished writes".into(),
+            "1-MiB chunks by state. Allocated includes payloads, metadata, and unfinished writes".into(),
             &["state"],
         );
         let payload = registry.register_gauge_vec(
@@ -124,9 +125,9 @@ impl DiskMetrics {
         );
         let outcomes = ["hit", "absent", "io_error", "checksum_failed", "fallthrough"];
         Arc::new(Self {
-            lookup_count: outcomes.map(|label| lookups.counter(&[label.into()])),
+            lookup_outcomes: outcomes.map(|label| lookups.counter(&[label.into()])),
             hit_duration: duration.histogram(&[]),
-            write_entries: ["published", "already_covered", "no_capacity", "failed", "canceled"]
+            write_outcomes: ["published", "already_covered", "no_capacity", "failed", "canceled"]
                 .map(|label| write_entries.counter(&[label.into()])),
             queue_outcomes: ["queued", "queue_full", "queue_closed", "canceled"]
                 .map(|label| queue.counter(&[label.into()])),
@@ -156,7 +157,7 @@ impl DiskMetrics {
     }
 
     pub(crate) fn record_lookup(&self, outcome: DiskLookupOutcome, elapsed: Duration) {
-        self.lookup_count[outcome as usize].increase(1);
+        self.lookup_outcomes[outcome as usize].increase(1);
         if matches!(outcome, DiskLookupOutcome::Hit) {
             self.hit_duration.record(elapsed.as_secs_f64());
         }
@@ -182,7 +183,7 @@ impl DiskWriteAttempt {
 
 impl Drop for DiskWriteAttempt {
     fn drop(&mut self) {
-        self.metrics.write_entries[self.outcome as usize].increase(1);
+        self.metrics.write_outcomes[self.outcome as usize].increase(1);
         if self.evicted {
             self.metrics.eviction_triggering_insertions.increase(1);
         }

@@ -8,8 +8,8 @@ use super::{
     *,
 };
 
-/// Records of a page that failed validation: all unused.
-const UNUSED_RECORDS: &[RawMetadataBytes] = &[[0; ENTRY_METADATA_BYTES]; ENTRIES_PER_METADATA_PAGE];
+/// Zeroed entry metadata substituted for a page that failed validation.
+const UNUSED_ENTRY_METADATA: &[[u8; ENTRY_METADATA_BYTES]] = &[[0; ENTRY_METADATA_BYTES]; ENTRIES_PER_METADATA_PAGE];
 
 /// The disk byte range assigned to a shard, excluding the file's header chunk.
 pub(super) fn shard_disk_range(capacity: u64, num_shards: usize, shard_index: usize) -> Range<u64> {
@@ -19,11 +19,11 @@ pub(super) fn shard_disk_range(capacity: u64, num_shards: usize, shard_index: us
 }
 
 impl DiskCacheInner {
-    /// Recovers a shard's entries from metadata records before the cache becomes available.
+    /// Recovers a shard's entries from metadata before the cache becomes available.
     pub(super) async fn recover_shard(&self, shard_index: usize) {
         let shard = &self.shards[shard_index];
         let shard_disk_range = shard_disk_range(self.file.capacity(), self.shards.len(), shard_index);
-        // Reserve every metadata chunk before accepting any payload addresses from the records.
+        // Reserve every metadata chunk before accepting any payload addresses.
         shard.load_metadata_chain(&self.file, shard_disk_range.start).await;
         let mut metadata = shard.metadata_pages.lock().unwrap();
         let mut disk_index = shard.entry_index.lock().unwrap();
@@ -31,8 +31,8 @@ impl DiskCacheInner {
         let mut recovered_payload_bytes = 0;
         for chunk_index in 0..metadata.chunks.len() {
             for entry_index in 0..ENTRIES_PER_METADATA_CHUNK {
-                let slot = &mut metadata.chunks[chunk_index].slots[entry_index];
-                let Some(entry_metadata) = *slot else {
+                let stored_metadata = &mut metadata.chunks[chunk_index].slots[entry_index];
+                let Some(entry_metadata) = *stored_metadata else {
                     continue;
                 };
                 let payload = entry_metadata.payload_address
@@ -41,8 +41,8 @@ impl DiskCacheInner {
                     || disk_index.entries_by_key.contains_key(&entry_metadata.key)
                     || shard.allocator.hold_chunks_for_recovered_payload(&payload).is_none()
                 {
-                    // Rejected records stay on disk until a later change rewrites their page.
-                    *slot = None;
+                    // Rejected entry metadata stays on disk until a later change rewrites its page.
+                    *stored_metadata = None;
                     continue;
                 }
                 let location = EntryMetadataLocation {
@@ -64,7 +64,7 @@ impl DiskCacheInner {
 }
 
 impl DiskCacheShard {
-    /// Reads the metadata chain and decodes its records before reserving payload chunks.
+    /// Reads the metadata chain and decodes entry metadata before reserving payload chunks.
     async fn load_metadata_chain(&self, file: &DataFile, mut address: u64) {
         let mut metadata = metadata::MetadataPages::default();
         while address != NO_CHUNK && address.is_multiple_of(CHUNK_BYTES) {
@@ -87,7 +87,7 @@ impl DiskCacheShard {
                 .iter()
                 .flat_map(|page| {
                     // An invalid page holds no entries and can stay on disk until an insertion rewrites it.
-                    validate_page(page, ENTRY_METADATA_PAGE_TAG).map_or(UNUSED_RECORDS, |contents| {
+                    validate_page(page, ENTRY_METADATA_PAGE_TAG).map_or(UNUSED_ENTRY_METADATA, |contents| {
                         contents[..PAGE_CONTENT_BYTES].as_chunks::<ENTRY_METADATA_BYTES>().0
                     })
                 })
@@ -117,9 +117,9 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
-/// Decodes a record from a validated page. The writer guarantees
-/// representable lengths and aligned payloads. All-zero records are unused.
-fn decode_entry_metadata(bytes: &RawMetadataBytes) -> Option<EntryMetadata> {
+/// Decodes entry metadata from a validated page. The writer guarantees
+/// representable lengths and aligned payloads. All-zero entry metadata is unused.
+fn decode_entry_metadata(bytes: &[u8; ENTRY_METADATA_BYTES]) -> Option<EntryMetadata> {
     if bytes == &[0; ENTRY_METADATA_BYTES] {
         return None;
     }

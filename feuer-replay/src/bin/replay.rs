@@ -19,7 +19,7 @@ mod linux {
     use mixtrics::{metrics::BoxedRegistry, registry::prometheus::PrometheusMetricsRegistry};
     use prometheus::{Encoder, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
 
-    const S3_SLOTS: usize = 48;
+    const S3_CONCURRENT_DOWNLOADS: usize = 48;
     const S3_LATENCY_SECONDS: f64 = 0.108599;
     const S3_BYTES_PER_SECOND: f64 = 80.205 * 1_048_576.0;
 
@@ -27,7 +27,7 @@ mod linux {
     struct Args {
         #[arg(long)]
         input: PathBuf,
-        /// Must not already exist. Use the local SSD, not the directory holding benchmark results.
+        /// New cache directory on the local SSD. Store benchmark results separately.
         #[arg(long)]
         cache_dir: PathBuf,
         #[arg(long)]
@@ -51,7 +51,7 @@ mod linux {
         /// Caller-demand requests per access-count half-life. Omit to use cache defaults/environment.
         #[arg(long)]
         access_count_half_life: Option<u64>,
-        /// Simulate S3 with 48 slots, 108.599 ms fixed latency and 80.205 MiB/s per GET.
+        /// Simulate S3 with 48 concurrent GETs, 108.599 ms fixed latency and 80.205 MiB/s per GET.
         #[arg(long)]
         simulate_s3: bool,
     }
@@ -71,9 +71,9 @@ mod linux {
         }
     }
 
-    // Downloads use the cache's buffer pool but do not coalesce concurrent misses.
+    // Each download allocates through the cache's buffer pool.
     struct Source {
-        slots: Option<tokio::sync::Semaphore>,
+        download_permits: Option<tokio::sync::Semaphore>,
         gets: IntCounter,
         bytes: IntCounter,
         waiting: IntGauge,
@@ -85,13 +85,16 @@ mod linux {
     impl Source {
         fn new(registry: &Registry, simulate_s3: bool) -> Result<Self> {
             let source = Self {
-                slots: simulate_s3.then(|| tokio::sync::Semaphore::new(S3_SLOTS)),
+                download_permits: simulate_s3.then(|| tokio::sync::Semaphore::new(S3_CONCURRENT_DOWNLOADS)),
                 gets: IntCounter::new("replay_source_gets_total", "Started synthetic source GETs")?,
                 bytes: IntCounter::new("replay_source_bytes_total", "Downloaded synthetic source bytes")?,
-                waiting: IntGauge::new("replay_source_waiting_requests", "Source GETs waiting for a slot")?,
+                waiting: IntGauge::new(
+                    "replay_source_waiting_requests",
+                    "Source GETs waiting for a download permit",
+                )?,
                 active: IntGauge::new("replay_source_active_requests", "Source GETs in service")?,
                 queue: Histogram::with_opts(
-                    HistogramOpts::new("replay_source_queue_seconds", "Source slot wait duration")
+                    HistogramOpts::new("replay_source_queue_seconds", "Source download permit wait duration")
                         .buckets(prometheus::exponential_buckets(0.001, 2.0, 21)?),
                 )?,
                 service: Histogram::with_opts(
@@ -111,31 +114,31 @@ mod linux {
         async fn download(
             &self,
             cache: &TieredMemoryDiskCache,
-            request: &Request,
+            payload_len: u64,
         ) -> std::result::Result<Download, Arc<std::io::Error>> {
             self.gets.inc();
             self.waiting.inc();
             let queued = Instant::now();
-            let _slot = match &self.slots {
-                Some(slots) => Some(slots.acquire().await.unwrap()),
+            let _download_permit = match &self.download_permits {
+                Some(permits) => Some(permits.acquire().await.unwrap()),
                 None => None,
             };
             self.queue.observe(queued.elapsed().as_secs_f64());
             self.waiting.dec();
             self.active.inc();
             let started = Instant::now();
-            if self.slots.is_some() {
+            if self.download_permits.is_some() {
                 tokio::time::sleep(Duration::from_secs_f64(
-                    S3_LATENCY_SECONDS + request.payload_len as f64 / S3_BYTES_PER_SECOND,
+                    S3_LATENCY_SECONDS + payload_len as f64 / S3_BYTES_PER_SECOND,
                 ))
                 .await;
             }
-            let download = cache.allocate_buffer(request.payload_len as usize).map(|mut buffer| {
+            let download = cache.allocate_buffer(payload_len as usize).map(|mut buffer| {
                 buffer.as_mut_slice().fill(0);
                 buffer.into_download()
             });
             if download.is_ok() {
-                self.bytes.inc_by(request.payload_len);
+                self.bytes.inc_by(payload_len);
             }
             self.service.observe(started.elapsed().as_secs_f64());
             self.active.dec();
@@ -143,10 +146,10 @@ mod linux {
         }
     }
 
-    struct Observation {
+    struct RequestTimings {
         index: usize,
-        sender_ns: u64,
-        queue_ns: u64,
+        sender_lateness_ns: u64,
+        queue_wait_ns: u64,
         service_ns: u64,
     }
 
@@ -174,13 +177,13 @@ mod linux {
         queued: IntGauge,
         active: IntGauge,
         mut lookup: F,
-    ) -> Result<Vec<Observation>>
+    ) -> Result<Vec<RequestTimings>>
     where
         F: FnMut(usize, Instant) -> Fut,
-        Fut: Future<Output = Result<Observation>> + Send + 'static,
+        Fut: Future<Output = Result<RequestTimings>> + Send + 'static,
     {
         let mut lookups = tokio::task::JoinSet::new();
-        let mut observations = Vec::new();
+        let mut timings = Vec::new();
         while let Ok((index, sent)) = receiver.recv().await {
             let (queued, active) = (queued.clone(), active.clone());
             let future = lookup(index, sent);
@@ -192,13 +195,13 @@ mod linux {
                 result
             });
             while let Some(result) = lookups.try_join_next() {
-                observations.push(result??);
+                timings.push(result??);
             }
         }
         while let Some(result) = lookups.join_next().await {
-            observations.push(result??);
+            timings.push(result??);
         }
-        Ok(observations)
+        Ok(timings)
     }
 
     /// Each frame contains every registered metric, with wall-clock timestamps on its samples.
@@ -273,7 +276,7 @@ mod linux {
         if args.simulate_s3 {
             writeln!(
                 summary,
-                "source_slots,{S3_SLOTS}\nsource_latency_seconds,{S3_LATENCY_SECONDS}\nsource_bytes_per_second,{S3_BYTES_PER_SECOND}"
+                "source_slots,{S3_CONCURRENT_DOWNLOADS}\nsource_latency_seconds,{S3_LATENCY_SECONDS}\nsource_bytes_per_second,{S3_BYTES_PER_SECOND}"
             )?;
         } else {
             writeln!(
@@ -341,30 +344,30 @@ mod linux {
             }
         });
         phase.set(1);
-        let events = requests.clone();
+        let sender_requests = requests.clone();
         let sender_queued = queued.clone();
-        let sender = thread::spawn(move || emit(&events, origin, sender, &sender_queued));
-        let mut observations = run_lookups(receiver, queued, active, |index, sent| {
+        let sender = thread::spawn(move || emit(&sender_requests, origin, sender, &sender_queued));
+        let mut timings = run_lookups(receiver, queued, active, |index, sent| {
             let (requests, cache, completed) = (requests.clone(), cache.clone(), completed.clone());
             let source = source.clone();
             async move {
                 let request = &requests[index];
                 let started = Instant::now();
                 let bytes = cache
-                    .get_or_fetch_by_hash(request.object_key, || source.download(&cache, request))
+                    .get_or_fetch_by_hash(request.object_key, || source.download(&cache, request.payload_len))
                     .await?;
                 assert_eq!(bytes.len() as u64, request.payload_len);
                 drop(bytes);
-                let observation = Observation {
+                let timings = RequestTimings {
                     index,
-                    sender_ns: sent
+                    sender_lateness_ns: sent
                         .saturating_duration_since(origin + Duration::from_nanos(request.time_ns))
                         .as_nanos() as u64,
-                    queue_ns: started.duration_since(sent).as_nanos() as u64,
+                    queue_wait_ns: started.duration_since(sent).as_nanos() as u64,
                     service_ns: started.elapsed().as_nanos() as u64,
                 };
                 completed.inc();
-                Ok(observation)
+                Ok(timings)
             }
         })
         .await?;
@@ -375,7 +378,7 @@ mod linux {
             &registry,
             &mut File::create_new(args.output.join("requests-finished.prom"))?,
         )?;
-        // Observe deferred writes without forcing a flush or claiming this wait guarantees drainage.
+        // Sample deferred writes for five seconds.
         tokio::time::sleep(Duration::from_secs(5)).await;
         snapshot(&registry, &mut File::create_new(args.output.join("settled.prom"))?)?;
         phase.set(3);
@@ -389,31 +392,31 @@ mod linux {
                 .saturating_sub(Duration::from_nanos(requests.last().unwrap().time_ns))
                 .as_secs_f64()
         )?;
-        // Outside the measured phase: verify no omissions/duplication and calculate exact percentiles.
-        observations.sort_unstable_by_key(|o| o.index);
-        assert_eq!(observations.len(), requests.len());
-        assert!(observations.iter().enumerate().all(|(index, o)| index == o.index));
+        // After measurement, verify exactly-once completion and calculate percentiles.
+        timings.sort_unstable_by_key(|timing| timing.index);
+        assert_eq!(timings.len(), requests.len());
+        assert!(timings.iter().enumerate().all(|(index, timing)| index == timing.index));
         distribution(
             &mut summary,
             "sender_lateness",
-            observations.iter().map(|o| o.sender_ns).collect(),
+            timings.iter().map(|timing| timing.sender_lateness_ns).collect(),
         )?;
         distribution(
             &mut summary,
             "queue_wait",
-            observations.iter().map(|o| o.queue_ns).collect(),
+            timings.iter().map(|timing| timing.queue_wait_ns).collect(),
         )?;
         distribution(
             &mut summary,
             "service",
-            observations.iter().map(|o| o.service_ns).collect(),
+            timings.iter().map(|timing| timing.service_ns).collect(),
         )?;
         distribution(
             &mut summary,
             "scheduled_to_complete",
-            observations
+            timings
                 .iter()
-                .map(|o| o.sender_ns + o.queue_ns + o.service_ns)
+                .map(|timing| timing.sender_lateness_ns + timing.queue_wait_ns + timing.service_ns)
                 .collect(),
         )?;
         summary.flush()?;
@@ -497,7 +500,7 @@ mod linux {
             buffer.as_mut_slice().fill(17);
             drop(buffer);
             let bytes = cache
-                .get_or_fetch_by_hash(request.object_key, || source.download(&cache, &request))
+                .get_or_fetch_by_hash(request.object_key, || source.download(&cache, request.payload_len))
                 .await
                 .unwrap();
             assert_eq!(bytes.len(), request.payload_len as usize);
@@ -512,7 +515,7 @@ mod linux {
         }
 
         #[tokio::test]
-        async fn source_callbacks_wait_for_slots_then_complete_independently() {
+        async fn source_callbacks_wait_for_download_permits_then_complete_independently() {
             let directory = tempfile::tempdir().unwrap();
             let cache =
                 TieredMemoryDiskCache::open(CacheConfig::new(directory.path(), 0, 4 << 20).unwrap(), None, None)
@@ -520,29 +523,17 @@ mod linux {
                     .unwrap();
             let source = Arc::new(Source::new(&Registry::new(), true).unwrap());
             let mut held = source
-                .slots
+                .download_permits
                 .as_ref()
                 .unwrap()
-                .acquire_many(S3_SLOTS as u32)
+                .acquire_many(S3_CONCURRENT_DOWNLOADS as u32)
                 .await
                 .unwrap();
             let mut tasks = tokio::task::JoinSet::new();
             for _ in 0..2 {
                 let source = source.clone();
                 let cache = cache.clone();
-                tasks.spawn(async move {
-                    source
-                        .download(
-                            &cache,
-                            &Request {
-                                request_id: 0,
-                                time_ns: 0,
-                                object_key: ObjectKeyHash(0),
-                                payload_len: 16,
-                            },
-                        )
-                        .await
-                });
+                tasks.spawn(async move { source.download(&cache, 16).await });
             }
             tokio::time::timeout(Duration::from_secs(5), async {
                 while source.waiting.get() != 2 {
@@ -588,10 +579,10 @@ mod linux {
                     async move {
                         started.try_send(index)?;
                         barrier.wait().await;
-                        Ok(Observation {
+                        Ok(RequestTimings {
                             index,
-                            sender_ns: 0,
-                            queue_ns: 0,
+                            sender_lateness_ns: 0,
+                            queue_wait_ns: 0,
                             service_ns: 0,
                         })
                     }
@@ -620,14 +611,14 @@ mod linux {
             }
             drop(sender);
             barrier.wait().await;
-            let mut observations = tokio::time::timeout(Duration::from_secs(5), lookups)
+            let mut timings = tokio::time::timeout(Duration::from_secs(5), lookups)
                 .await
                 .unwrap()
                 .unwrap()
                 .unwrap();
-            observations.sort_unstable_by_key(|o| o.index);
+            timings.sort_unstable_by_key(|timing| timing.index);
             assert_eq!(
-                observations.iter().map(|o| o.index).collect::<Vec<_>>(),
+                timings.iter().map(|timing| timing.index).collect::<Vec<_>>(),
                 (0..65).collect::<Vec<_>>()
             );
             assert_eq!(queued.get(), 0);

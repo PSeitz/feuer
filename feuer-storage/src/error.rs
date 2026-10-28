@@ -15,9 +15,9 @@ pub enum IoOperation {
     InspectDataFile,
     /// Set the data file to its configured capacity.
     ResizeDataFile,
-    /// Positionally read payload bytes.
+    /// Read file bytes at an offset.
     Read,
-    /// Positionally write payload bytes.
+    /// Write file bytes at an offset.
     Write,
 }
 

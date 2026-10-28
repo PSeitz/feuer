@@ -96,7 +96,7 @@ impl TieredMemoryDiskCache {
     }
 
     /// Opens a cache with separate memory and disk retention scorers.
-    /// Both receive the same caller-demand history. Disk demand is not conditional on memory misses.
+    /// Both receive the same caller-demand history, including memory hits.
     /// Scorers cannot inspect the other tier's residency by re-entering the cache.
     /// See [`Self::open`] for resources and [`RetentionScorer`] for the scoring contract.
     #[cfg(target_os = "linux")]
@@ -188,15 +188,10 @@ impl TieredMemoryDiskCache {
         };
         let started = Instant::now();
         let (outcome, bytes) = self.lookup_cached(object_key, || false).await;
-        self.inner.metrics.record(
-            outcome,
-            started.elapsed(),
-            bytes.as_ref().map_or(0, |bytes| bytes.len() as u64),
-        );
+        let payload_length = bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
+        self.inner.metrics.record(outcome, started.elapsed(), payload_length);
         if let (Some(access_trace), Some(event_bytes)) = (&self.access_trace, event_bytes) {
-            access_trace
-                .send_outcome(event_bytes, outcome, bytes.as_ref().map(|bytes| bytes.len() as u64))
-                .await;
+            access_trace.send_outcome(event_bytes, outcome, payload_length).await;
         }
         bytes
     }
@@ -273,7 +268,7 @@ impl TieredMemoryDiskCache {
         .await
     }
 
-    /// Returns the object from memory, disk, or this call's callback.
+    /// Returns the object from memory, disk, or a shared callback.
     ///
     /// Disk hits promote the object to memory. Concurrent memory misses with
     /// the same key and exact error type share one disk-or-callback operation, including errors.
@@ -379,16 +374,10 @@ impl TieredMemoryDiskCache {
             fetch.remove();
             result
         };
-        let bytes = result.as_ref().map_or(0, |bytes| bytes.len() as u64);
-        self.inner.metrics.record(outcome, started.elapsed(), bytes);
+        let payload_length = result.as_ref().map_or(0, |bytes| bytes.len() as u64);
+        self.inner.metrics.record(outcome, started.elapsed(), payload_length);
         if let (Some(access_trace), Some(event_bytes)) = (&self.access_trace, event_bytes) {
-            access_trace
-                .send_outcome(
-                    event_bytes,
-                    outcome,
-                    result.as_ref().ok().map(|bytes| bytes.len() as u64),
-                )
-                .await;
+            access_trace.send_outcome(event_bytes, outcome, payload_length).await;
         }
         result
     }
@@ -645,7 +634,7 @@ mod tests {
                 "feuer_disk_io_total",
                 &[("operation", "write"), ("outcome", "success")]
             ),
-            4.0 // Global header, one payload chunk, one metadata record page, and one next-chunk link.
+            4.0 // Global header, one payload chunk, one metadata page, and one next-chunk link.
         );
         assert_eq!(
             value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),

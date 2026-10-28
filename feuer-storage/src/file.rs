@@ -34,7 +34,7 @@ struct DataFileState {
     metrics: Arc<IoMetrics>,
 }
 
-/// An exclusively owned, fixed-capacity Linux direct-I/O payload file.
+/// An exclusively owned, fixed-capacity Linux direct-I/O file for payloads and metadata.
 ///
 /// Reads and writes have separate io_uring rings and worker threads, with up to
 /// 64 active reads and 8 active writes, plus waiting channels for another 64 reads and 8 writes.
@@ -142,8 +142,8 @@ impl DataFile {
         self.state.capacity
     }
 
-    /// Reads exactly the requested bytes with at most two partial alignment pages
-    /// of overhead. The result may retain alignment padding in its backing allocation.
+    /// Reads the requested bytes with less than 4 KiB of alignment padding at each end.
+    /// The result may retain alignment padding in its backing allocation.
     /// Callers must either prevent overlapping writes or validate the returned
     /// bytes against an expected checksum. See [`DataFile`]'s concurrency contract.
     pub async fn read_at(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
@@ -325,9 +325,9 @@ fn open_file_state(
     }
     check_direct_io_alignment(&file).map_err(|source| error(IoOperation::InspectDataFile, source))?;
     // Construct both rings before resizing, so unavailable io_uring does not resize an existing cache.
-    let files = Arc::new(uring::DataFileAndDirectoryLock {
+    let files = Arc::new(uring::DataFileAndLock {
         file,
-        _directory_lock: Some(lock_file),
+        _lock_file: Some(lock_file),
     });
     let (read_queue, write_queue) = match io_queues {
         Some(queues) => (
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(file.read_at(0, 3).await.unwrap(), original.slice(..3));
         assert_eq!(file.read_at(4096, 16).await.unwrap(), original.slice(..16));
         // Exercise multi-chunk writes, unaligned reads across a chunk boundary,
-        // and the final physical page.
+        // and the final aligned byte range.
         let payload = Bytes::from(
             (0..uring::MAX_IO_REQUEST_BYTES + 4096)
                 .map(|index| (index % 251) as u8)
@@ -634,7 +634,7 @@ mod tests {
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
         let mut tasks = Vec::new();
         let shared_pages = Arc::new(tokio::sync::Mutex::new(()));
-        // Callers serialize access to shared pages. I/O on disjoint pages runs concurrently.
+        // Callers serialize access to shared byte ranges. I/O on disjoint ranges runs concurrently.
         for i in 0..256u64 {
             let file = file.clone();
             let shared_pages = shared_pages.clone();

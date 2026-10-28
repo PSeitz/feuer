@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    // The callbacks return immutable objects. Their lengths are not needed.
+    // The callbacks return immutable objects.
     // Replace these callbacks with downloads from the respective sources.
     // The same key can identify different content in independent caches.
     let image = images
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let image = images.get_object("object-v1".to_owned()).await.unwrap();
     assert_eq!(image.as_ref(), b"image bytes");
-    // Do not mix get_or_fetch_object and get_or_fetch for the same key within a cache.
+    // Callbacks for the same key must return interchangeable objects.
     Ok(())
 }
 

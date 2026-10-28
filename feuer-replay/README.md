@@ -55,14 +55,12 @@ Compare matched settings with fresh caches.
 The executable uses `TieredMemoryDiskCache` for all configurations:
 **`--disk-bytes 0` disables disk, a positive capacity enables it.** Request timing,
 concurrency, synthetic downloads, and metrics collection are identical in both cases.
-There is no separate memory-policy simulator or disk build feature. Opening the
-cache requires Linux, even when disk is disabled.
+Opening the cache requires Linux, even when disk is disabled.
 
 One sender preserves original arrival timing and starts one lookup task per arrival,
-without waiting for earlier lookups to finish. Tokio uses one runtime thread per
-available CPU. Each thread can run multiple outstanding lookups. There is no additional
-lookup-admission limit. Recorded starts already reflect application admission, and
-Pomsky's split warmup permits do not limit individual cache reads. Feuer's I/O
+while earlier lookups may still be running. Tokio uses one runtime thread per
+available CPU. Each thread can run multiple outstanding lookups. Recorded starts
+reflect application admission. Replay admits every arrival immediately. Feuer's I/O
 queues provide backpressure. Descriptors and unstarted tasks hold no
 payload. Every synthetic source miss independently acquires a buffer through
 `TieredMemoryDiskCache::allocate_buffer` and zero-fills its exposed payload.
@@ -73,9 +71,9 @@ cache-side hash. This passes the same allocation charge
 as `get_or_fetch_object_with_allocation_charge`. Historical range input derives
 identities from the recorded hash and exact range during input preparation.
 
-This matches the adapter's buffer allocation and charging, not its download
-coalescing or sharing of larger merged downloads between slice-objects. The trace
-does not record backing capacities or shared-allocation identities. Historical
+This matches the adapter's buffer allocation and charging. Download coalescing
+and sharing of larger merged downloads between slice-objects remain outside this
+model. The trace omits backing capacities and shared-allocation identities. Historical
 replays using exact-length `Vec` allocations remain a different source model.
 
 ```sh
@@ -103,14 +101,14 @@ Eviction sample size and buffer retention use the cache environment variables.
 
 ### Simulated source
 
-Downloads are immediate by default. `--simulate-s3` makes every independent source
-callback wait for one of **48 slots**, then sleep for
+Downloads are immediate by default. `--simulate-s3` limits the source to
+**48 concurrent downloads**. Each callback acquires a download permit, then sleeps for
 `0.108599 seconds + requested_bytes / (80.205 * 1048576 bytes/second)` before
-independently acquiring and zero-filling its payload buffer. The slot is held through
-allocation and filling. This leaves the arrival scheduler unchanged and adds no coalescing, retries, failures,
-or arrival throttling. It is a deterministic delay model.
+acquiring and zero-filling its payload buffer. The permit is held through allocation
+and filling. This deterministic delay model preserves arrival scheduling.
+Coalescing, retries, and failures remain outside the source model.
 The fixed calibration comes from [the S3 benchmark](../experiments/s3_benchmark.md),
-on another host with larger objects. Runtime scheduling, allocation and slot waiting
+on another host with larger objects. Runtime scheduling, allocation and permit waiting
 add measured latency beyond the formula, and the calibration may not represent these
 trace ranges or this hardware.
 
@@ -118,10 +116,10 @@ Both source modes export `replay_source_gets_total` (callbacks started),
 `replay_source_bytes_total` (bytes allocated after service),
 `replay_source_queue_seconds` and `replay_source_service_seconds` histograms,
 and `replay_source_waiting_requests` / `replay_source_active_requests` gauges.
-Queue duration measures slot acquisition, service includes delay and allocation.
+Queue duration measures permit acquisition. Service includes delay and allocation.
 Histograms use second-based buckets from 0.001 to 1048.576, doubling each step.
 These source metrics are separate from lookup queue/service metrics and count only
-callbacks actually invoked by the cache.
+callbacks invoked by the cache.
 
 Replay writes all registered cache/process metrics in `metrics.prom`, phase
 snapshots in `before.prom`, `requests-finished.prom`, and `settled.prom`, and
@@ -131,14 +129,13 @@ It also records effective `memory_cost_per_request`, `disk_cost_per_request`, bo
 `*_cost_per_requested_byte` coefficients, `access_count_half_life`, `simulate_s3`,
 `source_slots`, `source_latency_seconds`, and `source_bytes_per_second`.
 `source_buffer_pool,1` identifies allocation through the cache's pool in both modes.
-Immediate
-mode records unlimited slots/throughput and zero modeled latency.
+Immediate mode records unlimited concurrency and throughput, with zero modeled latency.
 Queue wait runs from sender emission to the lookup task starting, including descriptor
 and runtime scheduling wait. Service time includes waiting inside Feuer, but excludes
 that scheduling wait. `replay_queued_requests` counts arrivals whose task has not started,
-and `replay_active_requests` counts started lookups awaiting completion. Samples are
-not atomic across these gauges. It verifies exactly-once completion. The five-second
-observation tail is not a forced drain, flush, or durability guarantee.
+and `replay_active_requests` counts started lookups awaiting completion. These gauges
+are sampled separately. Replay verifies exactly-once completion. The five-second
+observation tail samples deferred writes. Pending writes can remain afterward.
 
 Use `ssh m8g-32cpu-local-ssd-2` for SSD tests and follow
 [the timed replay procedure](../experiments/storage/timed-replay.md) for allocator matching,
@@ -157,7 +154,7 @@ cargo clippy --locked -p feuer-replay --all-targets -- -D warnings
 On Linux, these include round trips through the current writer, recorded-hash
 lookup checks, sender timing tests, concurrent scheduling on a single runtime thread,
 lookup-error propagation, scorer/source CLI validation, buffer-capacity charging
-and zero-filling of reused buffers, simulated-source slot waiting
+and zero-filling of reused buffers, simulated-source permit waiting
 and independent completion, and replaying the same input with disk disabled and enabled.
 The replay binary's Linux-only tests do not run on macOS.
 Decoder tests cover malformed packages, all event kinds, chronological prefixes and full captures, cross-package outcome joins, incomplete requests,

@@ -1,4 +1,4 @@
-//! Writes and publishes payload runs with one eviction budget per run. Only publication consumes metadata slots.
+//! Writes payload bytes before publishing entry metadata, with one eviction budget per write.
 
 use super::*;
 
@@ -20,24 +20,30 @@ impl DiskCacheShard {
         mut entries: Vec<BufferedEntry>,
     ) -> Result<usize, DiskCacheError> {
         let result = async {
-            let count = (bytes.len() as u64).div_ceil(CHUNK_BYTES);
-            let mut attempts = MAX_EVICTION_ATTEMPTS;
-            let mut budget = MAX_EVICTION_CHUNKS;
+            let required_chunks = (bytes.len() as u64).div_ceil(CHUNK_BYTES);
+            let mut remaining_eviction_attempts = MAX_EVICTION_ATTEMPTS;
+            let mut remaining_eviction_chunks = MAX_EVICTION_CHUNKS;
             let chunks = loop {
                 let mut pages = self.metadata_pages.lock().unwrap();
-                // Establish the metadata chain before writing payloads. Leave all metadata slots free during I/O.
+                // Establish the metadata chain before writing payloads. Store entry metadata after I/O.
                 let chunks = pages
                     .ensure_free_slots(entries.len(), &self.allocator)
-                    .and_then(|()| self.allocator.reserve_chunks(count));
-                let capacity = self.allocator.chunk_capacity - pages.chunks.len() as u64;
+                    .and_then(|()| self.allocator.reserve_chunks(required_chunks));
+                let payload_chunk_capacity = self.allocator.chunk_capacity - pages.chunks.len() as u64;
                 drop(pages);
                 if let Some(chunks) = chunks {
                     break chunks;
                 }
-                if count > capacity || !self.sample_and_evict_entry(disk, &mut attempts, &mut budget) {
+                if required_chunks > payload_chunk_capacity
+                    || !self.sample_and_evict_entry(
+                        disk,
+                        &mut remaining_eviction_attempts,
+                        &mut remaining_eviction_chunks,
+                    )
+                {
                     return Ok(0);
                 }
-                entries[0].attempt.evicted = budget != MAX_EVICTION_CHUNKS;
+                entries[0].attempt.evicted = remaining_eviction_chunks != MAX_EVICTION_CHUNKS;
             };
             let range = chunks.disk_byte_range();
             disk.file
@@ -60,6 +66,7 @@ impl DiskCacheShard {
                 .hold_chunks_until_payloads_released(chunks, entries.len());
             let mut published = 0;
             let mut published_payload_bytes = 0;
+            // Publish newest entries first so the last buffered write wins for duplicate keys.
             for mut buffered in entries.drain(..).rev() {
                 if disk_index.entries_by_key.contains_key(&buffered.key) {
                     buffered.attempt.outcome = DiskWriteOutcome::AlreadyCovered;

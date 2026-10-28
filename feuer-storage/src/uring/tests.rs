@@ -21,7 +21,7 @@ fn ring_creation_error_identifies_io_uring_and_preserves_os_error() {
 type IoResultReceiver = oneshot::Receiver<io::Result<Option<Arc<ReadBuffer>>>>;
 
 fn request(
-    files: &Arc<DataFileAndDirectoryLock>,
+    files: &Arc<DataFileAndLock>,
     operation: IoOperation,
     offset: u64,
     length: usize,
@@ -40,7 +40,7 @@ fn request(
     )
 }
 
-fn data_file() -> Arc<DataFileAndDirectoryLock> {
+fn data_file() -> Arc<DataFileAndLock> {
     let temporary = tempfile::NamedTempFile::new().unwrap();
     let file = OpenOptions::new()
         .read(true)
@@ -49,13 +49,13 @@ fn data_file() -> Arc<DataFileAndDirectoryLock> {
         .open(temporary.path())
         .unwrap();
     file.set_len(MAX_IO_REQUEST_BYTES as u64).unwrap();
-    Arc::new(DataFileAndDirectoryLock {
+    Arc::new(DataFileAndLock {
         file,
-        _directory_lock: Some(tempfile::tempfile().unwrap()),
+        _lock_file: Some(tempfile::tempfile().unwrap()),
     })
 }
 
-fn queue() -> (IoQueue, mpsc::Sender<IoRequest>, Arc<DataFileAndDirectoryLock>) {
+fn queue() -> (IoQueue, mpsc::Sender<IoRequest>, Arc<DataFileAndLock>) {
     // SAFETY: eventfd returns a fresh descriptor, checked before assuming ownership.
     let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     assert!(fd >= 0);
@@ -131,7 +131,7 @@ fn full_ring_does_not_block_the_other_direction() {
         assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
 
         for i in 0..MAX_IN_FLIGHT_READS {
-            // Use disjoint physical pages on the same backing file.
+            // Use disjoint aligned byte ranges on the same backing file.
             let (request, reply) = request(
                 &files,
                 other_operation,
@@ -191,7 +191,7 @@ fn resource_pressure_retries_pending_submissions() {
                     }
                     2 => Err(io::Error::from_raw_os_error(libc::EINTR)),
                     // Accept only one request so EAGAIN also occurs with a partially consumed SQ.
-                    // SAFETY: active slots own all SQE pointers. This submits one ordinary request.
+                    // SAFETY: active requests own all SQE pointers. This submits one ordinary request.
                     3 => unsafe { ring.submitter().enter::<libc::sigset_t>(1, 0, 0, None) },
                     _ => ring.submit(),
                 }
@@ -349,7 +349,7 @@ async fn shared_queues_use_one_admission_limit_and_independent_buffer_pools() {
         .reserve_many(MAX_IN_FLIGHT_READS)
         .await
         .unwrap();
-    drop(second_read.allocate_buffer(DIRECT_IO_ALIGNMENT_BYTES).unwrap());
+    drop(second_read.buffer_pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap());
     let idle_bytes = second_pool.idle_bytes();
     {
         let read = second_read.read(0, DIRECT_IO_ALIGNMENT_BYTES);
@@ -478,7 +478,7 @@ fn queue_failure_retains_write_descriptors_and_files() {
     drop(other_files);
     drop(sender);
     queue.receive_requests();
-    let slots_address = queue.active.as_ptr();
+    let requests_address = queue.active.as_ptr();
     let IoBuffers::Write { vectors, .. } = &queue.active[0].as_ref().unwrap().buffers else {
         unreachable!()
     };
@@ -503,13 +503,13 @@ fn queue_failure_retains_write_descriptors_and_files() {
         receive.try_recv().unwrap().err().unwrap().kind(),
         io::ErrorKind::BrokenPipe
     );
-    assert!(weak_files.upgrade().unwrap()._directory_lock.is_some());
-    assert!(weak_other_files.upgrade().unwrap()._directory_lock.is_some());
+    assert!(weak_files.upgrade().unwrap()._lock_file.is_some());
+    assert!(weak_other_files.upgrade().unwrap()._lock_file.is_some());
     assert_eq!(
         other_receive.try_recv().unwrap().err().unwrap().kind(),
         io::ErrorKind::BrokenPipe
     );
-    assert_eq!(retained.as_ptr(), slots_address);
+    assert_eq!(retained.as_ptr(), requests_address);
     let IoBuffers::Write { bytes, vectors } = &retained[0].as_ref().unwrap().buffers else {
         unreachable!()
     };
@@ -546,7 +546,7 @@ fn canceled_submitted_write_retains_buffers_on_queue_failure() {
     assert!(queue.active[0].is_some());
     let other = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(other.as_ref().as_ptr(), address);
-    drop(queue); // Failure retains the active slot, even after caller cancellation.
+    drop(queue); // Failure retains the active request, even after caller cancellation.
     let buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(buffer.as_ref().as_ptr(), address);
 
@@ -604,7 +604,7 @@ async fn reads_wait_for_channel_capacity_without_taking_idle_buffers() {
         3 * MAX_IO_REQUEST_BYTES,
     ] {
         // Neither payload nor metadata reads take an idle buffer before admission.
-        drop(handle.allocate_buffer(length).unwrap());
+        drop(handle.buffer_pool.allocate(length).unwrap());
         let idle_bytes = pool.idle_bytes();
         assert!(idle_bytes > 0);
         let read = handle.read(0, length);
@@ -772,7 +772,7 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
     // Force an unaligned source so XFS would reject a submitted empty prefix vector.
     let payload = payload.into_bytes().slice(1..);
     write.write_padded(0, 3 * length, &payload).await.unwrap();
-    let mut buffer = read.allocate_buffer(3 * length).unwrap();
+    let mut buffer = read.buffer_pool.allocate(3 * length).unwrap();
     assert_eq!(buffer.capacity(), 3 * length);
     buffer.as_mut_slice().fill(0x55);
     let address = buffer.as_ref().as_ptr() as usize;
@@ -857,7 +857,7 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
             assert!(weak_files.upgrade().is_some());
             assert_eq!(pool.idle_bytes(), 0);
             queue.complete_request(completion.user_data(), completion.result());
-            queue.receive_requests(); // Discard the canceled queued piece when a slot opens.
+            queue.receive_requests(); // Discard the canceled queued piece when the active array has room.
         }
         assert!(queue.active.iter().all(Option::is_none));
         assert!(queue.receiver.is_empty());

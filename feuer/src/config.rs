@@ -113,7 +113,7 @@ impl CacheConfig {
         self.access_count_half_life
     }
 
-    /// Sets the maximum idle buffers as a percentage of memory capacity (0–100).
+    /// Sets the maximum bytes retained in idle buffers as a percentage of memory capacity (0–100).
     /// Zero disables idle retention. Overrides `FEUER_IDLE_BUFFER_POOL_PERCENT` for this cache.
     pub fn with_idle_buffer_pool_percent(mut self, percent: u64) -> Result<Self, CacheConfigError> {
         if percent > 100 {
@@ -123,7 +123,7 @@ impl CacheConfig {
         Ok(self)
     }
 
-    /// Returns the maximum idle buffers as a percentage of memory capacity.
+    /// Returns the maximum bytes retained in idle buffers as a percentage of memory capacity.
     pub const fn idle_buffer_pool_percent(&self) -> u64 {
         self.idle_buffer_pool_percent
     }
@@ -143,7 +143,7 @@ impl CacheConfig {
         self.disk_capacity
     }
 
-    /// Returns the soft memory payload target in bytes.
+    /// Returns the soft memory eviction target for entry allocation charges in bytes.
     pub const fn memory_capacity(&self) -> u64 {
         self.memory_capacity
     }
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn requires_both_capacity_roles_to_be_explicit() {
+    fn preserves_configured_capacities() {
         for (disk_capacity, memory_capacity) in [(0, 256 << 20), (1 << 40, 256 << 20), (4 * (1 << 40), 1)] {
             let config = CacheConfig::new("cache", disk_capacity, memory_capacity).unwrap();
 

@@ -9,8 +9,8 @@ const SMALL_ENTRY_BYTES: usize = 512 * 1024;
 // Flush partial chunks even when no later writes arrive.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 
-/// One chunk of small-entry bytes and their descriptions, including aligned payload offsets.
-pub(super) struct BufferedSmallEntryChunk {
+/// A buffer that accumulates small entries in one payload chunk, with aligned offsets.
+pub(super) struct SmallEntryBuffer {
     /// Aligned 1-MiB payload storage for packed writes and pre-flush reads.
     buffer: AlignedBuffer,
     /// Entry descriptions and completion state for buffered lookups, publication, and discard.
@@ -26,7 +26,7 @@ impl DiskCache {
     /// Discards buffered entries without writing them and retains each shard's initialized buffer.
     pub async fn discard_pending(&self) {
         for shard in &self.disk.shards {
-            shard.buffered_small_entry_chunk.lock().await.entries.clear();
+            shard.small_entry_buffer.lock().await.entries.clear();
         }
     }
 }
@@ -48,7 +48,7 @@ impl DiskCacheInner {
     pub(super) async fn flush(&self) -> Result<usize, DiskCacheError> {
         let mut published = 0;
         for shard in &self.shards {
-            published += shard.buffered_small_entry_chunk.lock().await.flush(shard, self).await?;
+            published += shard.small_entry_buffer.lock().await.flush(shard, self).await?;
         }
         Ok(published)
     }
@@ -62,7 +62,7 @@ impl DiskCacheInner {
         let shard = &self.shards[self.shard_index_for_key(&key)];
         let bytes = download.into_bytes();
         let payload_len = bytes.len() as u64;
-        let length = payload_disk_bytes(payload_len) as usize;
+        let aligned_payload_len = payload_disk_bytes(payload_len) as usize;
         let mut attempt = DiskWriteAttempt::new(self.metrics.clone());
         if shard.contains(&key) {
             attempt.outcome = DiskWriteOutcome::AlreadyCovered;
@@ -76,16 +76,16 @@ impl DiskCacheInner {
             attempt,
             _completion: Box::new(completion),
         };
-        if length >= SMALL_ENTRY_BYTES {
+        if aligned_payload_len >= SMALL_ENTRY_BYTES {
             return shard.write_payload(self, bytes, vec![entry]).await;
         }
-        let mut buffer = shard.buffered_small_entry_chunk.lock().await;
+        let mut buffer = shard.small_entry_buffer.lock().await;
         let mut published = 0;
         let mut offset = buffer
             .entries
             .last()
             .map_or(0, |entry| entry.offset + payload_disk_bytes(entry.payload_len) as usize);
-        if offset + length > CHUNK_BYTES as usize {
+        if offset + aligned_payload_len > CHUNK_BYTES as usize {
             published += buffer.flush(shard, self).await?;
             offset = 0;
         }
@@ -93,14 +93,14 @@ impl DiskCacheInner {
         buffer.buffer.as_mut_slice()[offset..offset + bytes.len()].copy_from_slice(&bytes);
         drop(bytes);
         buffer.entries.push(entry);
-        if offset + length == CHUNK_BYTES as usize {
+        if offset + aligned_payload_len == CHUNK_BYTES as usize {
             published += buffer.flush(shard, self).await?;
         }
         Ok(published)
     }
 }
 
-impl BufferedSmallEntryChunk {
+impl SmallEntryBuffer {
     pub(super) fn new() -> Result<Self, DataFileError> {
         Ok(Self {
             buffer: AlignedBuffer::allocate_zeroed(CHUNK_BYTES as usize).map_err(|source| DataFileError::Task {
@@ -128,8 +128,8 @@ impl BufferedSmallEntryChunk {
         if self.entries.is_empty() {
             return Ok(0);
         }
-        // Detached chunks are invisible to lookups until publication.
-        let Self { buffer, entries, .. } = std::mem::replace(self, Self::new()?);
+        // Flushing entries become visible to lookups after publication.
+        let Self { buffer, entries } = std::mem::replace(self, Self::new()?);
         shard.write_payload(disk, buffer.into_bytes(), entries).await
     }
 }

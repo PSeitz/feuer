@@ -27,10 +27,11 @@ const MAX_SHARDS: usize = 64;
 /// Request history is supplied separately. Cache operations consult it for
 /// retention decisions but never record accesses or remove history.
 ///
-/// Cached allocations and idle read buffers share the configured capacity.
+/// Cached allocation charges and idle read buffers share the configured capacity.
 /// Each shard evicts locally against its share before insertion. Admission also
-/// frees idle buffers when needed. An allocation larger than its shard's target
-/// is cached after that shard is emptied, so total usage can exceed capacity.
+/// frees idle buffers when needed. An allocation charge larger than its shard's
+/// target is admitted once that shard's charged usage reaches zero, so total usage
+/// can exceed capacity.
 /// Under pressure, a rotating sample selects the lowest-scoring entry for eviction.
 /// Default scores model recent retrieval value per charged allocation byte.
 pub struct MemoryCache {
@@ -122,7 +123,7 @@ impl MemoryCache {
         self.buffer_pool.capacity
     }
 
-    /// Returns cached allocation capacity plus idle buffer capacity.
+    /// Returns cached allocation charges plus idle buffer capacity.
     /// Active reads and caller-only results are excluded.
     pub fn used_bytes(&self) -> u64 {
         self.buffer_pool.used_bytes()

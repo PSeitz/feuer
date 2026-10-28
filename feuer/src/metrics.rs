@@ -50,7 +50,8 @@ impl LookupMetrics {
         #[cfg(target_os = "linux")]
         let writes = registry.register_counter_vec(
             "feuer_disk_write_queue_total".into(),
-            "Disk-write queue admissions, rejections and pre-write discards; queued is not a terminal outcome".into(),
+            "Disk-write queue admissions, rejections and pre-write discards. The queued outcome measures admission"
+                .into(),
             &["outcome"],
         );
         Self {

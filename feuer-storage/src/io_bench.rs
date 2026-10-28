@@ -24,10 +24,7 @@ impl ReadQueue {
             ));
         }
         // Raw read-only benchmarks need no cache file lock.
-        let files = Arc::new(uring::DataFileAndDirectoryLock {
-            file,
-            _directory_lock: None,
-        });
+        let files = Arc::new(uring::DataFileAndLock { file, _lock_file: None });
         uring::ReadQueue::new(files, feuer_memory::BufferPool::unpooled(), crate::IoMetrics::noop()).map(Self)
     }
 
