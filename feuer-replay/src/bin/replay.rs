@@ -71,18 +71,18 @@ mod linux {
         }
     }
 
-    // Each download allocates through the cache's buffer pool.
-    struct Source {
+    /// Generates synthetic downloads through the cache's buffer pool, optionally simulating S3 latency.
+    struct SyntheticDownloads {
         download_permits: Option<tokio::sync::Semaphore>,
         gets: IntCounter,
         bytes: IntCounter,
         waiting: IntGauge,
         active: IntGauge,
-        queue: Histogram,
+        permit_wait_duration: Histogram,
         service: Histogram,
     }
 
-    impl Source {
+    impl SyntheticDownloads {
         fn new(registry: &Registry, simulate_s3: bool) -> Result<Self> {
             let source = Self {
                 download_permits: simulate_s3.then(|| tokio::sync::Semaphore::new(S3_CONCURRENT_DOWNLOADS)),
@@ -93,7 +93,7 @@ mod linux {
                     "Source GETs waiting for a download permit",
                 )?,
                 active: IntGauge::new("replay_source_active_requests", "Source GETs in service")?,
-                queue: Histogram::with_opts(
+                permit_wait_duration: Histogram::with_opts(
                     HistogramOpts::new("replay_source_queue_seconds", "Source download permit wait duration")
                         .buckets(prometheus::exponential_buckets(0.001, 2.0, 21)?),
                 )?,
@@ -106,7 +106,7 @@ mod linux {
             registry.register(Box::new(source.bytes.clone()))?;
             registry.register(Box::new(source.waiting.clone()))?;
             registry.register(Box::new(source.active.clone()))?;
-            registry.register(Box::new(source.queue.clone()))?;
+            registry.register(Box::new(source.permit_wait_duration.clone()))?;
             registry.register(Box::new(source.service.clone()))?;
             Ok(source)
         }
@@ -123,7 +123,7 @@ mod linux {
                 Some(permits) => Some(permits.acquire().await.unwrap()),
                 None => None,
             };
-            self.queue.observe(queued.elapsed().as_secs_f64());
+            self.permit_wait_duration.observe(queued.elapsed().as_secs_f64());
             self.waiting.dec();
             self.active.inc();
             let started = Instant::now();
@@ -304,7 +304,7 @@ mod linux {
         registry.register(Box::new(active.clone()))?;
         registry.register(Box::new(elapsed.clone()))?;
         registry.register(Box::new(phase.clone()))?;
-        let source = Arc::new(Source::new(&registry, args.simulate_s3)?);
+        let source = Arc::new(SyntheticDownloads::new(&registry, args.simulate_s3)?);
         let metrics: BoxedRegistry = Box::new(PrometheusMetricsRegistry::new(registry.clone()));
         let opening = Instant::now();
         let scorer = |cost_per_request| {
@@ -486,7 +486,7 @@ mod linux {
                 .with_idle_buffer_pool_percent(7)
                 .unwrap();
             let cache = TieredMemoryDiskCache::open(config, Some(&metrics), None).await.unwrap();
-            let source = Source::new(&registry, false).unwrap();
+            let source = SyntheticDownloads::new(&registry, false).unwrap();
             let request = Request {
                 request_id: 0,
                 time_ns: 0,
@@ -521,7 +521,7 @@ mod linux {
                 TieredMemoryDiskCache::open(CacheConfig::new(directory.path(), 0, 4 << 20).unwrap(), None, None)
                     .await
                     .unwrap();
-            let source = Arc::new(Source::new(&Registry::new(), true).unwrap());
+            let source = Arc::new(SyntheticDownloads::new(&Registry::new(), true).unwrap());
             let mut held = source
                 .download_permits
                 .as_ref()
@@ -559,7 +559,7 @@ mod linux {
             assert_eq!(source.bytes.get(), 32);
             assert_eq!(source.waiting.get(), 0);
             assert_eq!(source.active.get(), 0);
-            assert_eq!(source.queue.get_sample_count(), 2);
+            assert_eq!(source.permit_wait_duration.get_sample_count(), 2);
             assert!(source.service.get_sample_sum() >= 2.0 * S3_LATENCY_SECONDS);
         }
 

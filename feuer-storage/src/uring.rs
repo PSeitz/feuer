@@ -215,13 +215,13 @@ pub(crate) struct ReadQueue {
     metrics: Arc<IoMetrics>,
 }
 
-/// Tracks a read-piece request waiting for channel capacity, including cancellation.
-struct ReadQueueWait<'a> {
+/// Measures read-piece requests waiting for channel capacity and their wait durations, including cancellation.
+struct ReadQueueWaitMetrics<'a> {
     metrics: &'a IoMetrics,
     started: Instant,
 }
 
-impl Drop for ReadQueueWait<'_> {
+impl Drop for ReadQueueWaitMetrics<'_> {
     fn drop(&mut self) {
         self.metrics.read_queue_waiters.decrease(1);
         self.metrics
@@ -252,7 +252,7 @@ impl ReadQueue {
             let result = reserve.as_mut().poll(cx);
             if result.is_pending() && wait.is_none() {
                 self.metrics.read_queue_waiters.increase(1);
-                wait = Some(ReadQueueWait {
+                wait = Some(ReadQueueWaitMetrics {
                     metrics: &self.metrics,
                     started: Instant::now(),
                 });

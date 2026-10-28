@@ -31,7 +31,7 @@ impl DiskCacheInner {
         let mut recovered_payload_bytes = 0;
         for chunk_index in 0..metadata.chunks.len() {
             for entry_index in 0..ENTRIES_PER_METADATA_CHUNK {
-                let stored_metadata = &mut metadata.chunks[chunk_index].slots[entry_index];
+                let stored_metadata = &mut metadata.chunks[chunk_index].entries[entry_index];
                 let Some(entry_metadata) = *stored_metadata else {
                     continue;
                 };
@@ -66,7 +66,7 @@ impl DiskCacheInner {
 impl DiskCacheShard {
     /// Reads the metadata chain and decodes entry metadata before reserving payload chunks.
     async fn load_metadata_chain(&self, file: &DataFile, mut address: u64) {
-        let mut metadata = metadata::MetadataPages::default();
+        let mut metadata = metadata::MetadataChunks::default();
         while address != NO_CHUNK && address.is_multiple_of(CHUNK_BYTES) {
             // Reservations enforce shard bounds and stop cycles.
             let Some(mut reserved_chunk) = self.allocator.reserve_chunks_at(address / CHUNK_BYTES, 1) else {
@@ -81,7 +81,7 @@ impl DiskCacheShard {
             }
             reserved_chunk.mark_recovered();
             let (entry_pages, link_page) = bytes.split_at(ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES);
-            let slots = entry_pages
+            let entries = entry_pages
                 .as_chunks::<METADATA_PAGE_BYTES>()
                 .0
                 .iter()
@@ -97,7 +97,7 @@ impl DiskCacheShard {
                 validate_page(link_page, NEXT_CHUNK_PAGE_TAG).map(|contents| read_u64(contents, 0));
             metadata.chunks.push(MetadataChunk {
                 reserved_chunk,
-                slots,
+                entries,
                 next_chunk_address: next_chunk_address.unwrap_or(NO_CHUNK),
                 needs_full_write: false,
             });

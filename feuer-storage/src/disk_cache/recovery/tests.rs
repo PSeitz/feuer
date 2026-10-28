@@ -129,8 +129,8 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
     let address = entry.payload_address;
     let location = entry.metadata;
     let metadata = shard.metadata_pages.lock().unwrap();
-    let slot = |metadata: &metadata::MetadataPages| {
-        metadata.chunks[location.chunk_index as usize].slots[location.entry_index as usize]
+    let slot = |metadata: &metadata::MetadataChunks| {
+        metadata.chunks[location.chunk_index as usize].entries[location.entry_index as usize]
     };
     let entry_metadata = slot(&metadata);
     assert!(entry_metadata.is_some());

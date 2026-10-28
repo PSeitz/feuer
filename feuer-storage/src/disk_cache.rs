@@ -83,7 +83,7 @@ struct DiskCacheInner {
 struct DiskCacheShard {
     allocator: DiskChunkAllocator,
     entry_index: Mutex<DiskEntryIndex>,
-    metadata_pages: Mutex<metadata::MetadataPages>,
+    metadata_pages: Mutex<metadata::MetadataChunks>,
     small_entry_buffer: tokio::sync::Mutex<SmallEntryBuffer>,
 }
 
@@ -216,7 +216,7 @@ impl DiskCache {
                     allocator,
                     entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
                     small_entry_buffer: tokio::sync::Mutex::new(SmallEntryBuffer::new()?),
-                    metadata_pages: Mutex::new(metadata::MetadataPages::default()),
+                    metadata_pages: Mutex::new(metadata::MetadataChunks::default()),
                 })
             })
             .collect::<Result<_, DataFileError>>()?;
@@ -471,7 +471,7 @@ impl DiskCacheShard {
     }
 
     /// Releases a held payload and frees its metadata position.
-    fn release_entry(&self, entry: DiskEntry, metadata: &mut metadata::MetadataPages) {
+    fn release_entry(&self, entry: DiskEntry, metadata: &mut metadata::MetadataChunks) {
         self.allocator.release_payload(entry.payload_address);
         metadata.free_entry_metadata(entry.metadata);
     }
@@ -482,7 +482,7 @@ impl DiskCacheShard {
     fn insert_entry(
         &self,
         disk_index: &mut DiskEntryIndex,
-        metadata: &mut metadata::MetadataPages,
+        metadata: &mut metadata::MetadataChunks,
         key: ObjectKeyHash,
         mut entry: DiskEntry,
     ) {

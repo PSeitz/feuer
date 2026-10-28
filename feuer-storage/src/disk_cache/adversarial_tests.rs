@@ -546,7 +546,7 @@ fn check_entries_and_chunks(cache: &DiskCache) {
             let entry_metadata = metadata
                 .chunks
                 .get(location.chunk_index as usize)
-                .and_then(|chunk| chunk.slots.get(location.entry_index as usize))
+                .and_then(|chunk| chunk.entries.get(location.entry_index as usize))
                 .copied()
                 .flatten();
             let expected = EntryMetadata {
@@ -562,7 +562,12 @@ fn check_entries_and_chunks(cache: &DiskCache) {
             .map(|(&first_chunk, &(_, count))| (first_chunk, count))
             .collect();
         assert_eq!(payload_counts, reservation_counts);
-        let metadata_entry_count = metadata.chunks.iter().flat_map(|chunk| &chunk.slots).flatten().count();
+        let metadata_entry_count = metadata
+            .chunks
+            .iter()
+            .flat_map(|chunk| &chunk.entries)
+            .flatten()
+            .count();
         assert_eq!(metadata_entry_count, disk_index.entries_by_key.len());
         assert_eq!(
             metadata.free_slot_count(),
