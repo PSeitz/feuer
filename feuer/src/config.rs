@@ -14,8 +14,9 @@ use thiserror::Error;
 /// Nonzero capacity must be at least 2 MiB. Changing the file capacity invalidates disk entries.
 /// Zero disables the disk tier.
 /// When disk is disabled, `directory`, `file_name`, and `payload_version` are unused.
-/// `memory_capacity` is a soft eviction target divided among the in-memory shards. Oversized entries
-/// can make entry allocation charges exceed it.
+/// `memory_capacity` must be positive. It is a soft eviction target divided among the in-memory shards.
+/// Oversized entries can make entry allocation charges exceed it. Applications using zero memory
+/// capacity to disable caching should bypass cache construction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheConfig {
     directory: PathBuf,

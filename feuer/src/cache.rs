@@ -1,21 +1,18 @@
 use std::{fmt, future::Future, sync::Arc, time::Instant};
 
 use bytes::Bytes;
-use feuer_memory::MemoryCache;
-#[cfg(target_os = "linux")]
 use feuer_memory::{
-    MemoryMetrics,
+    MemoryCache, MemoryMetrics,
     retention::{AvoidedRetrievalCostScorer, RetentionScorer},
 };
 #[cfg(target_os = "linux")]
-use feuer_storage::{DiskCache, DiskCacheError, DiskCacheOptions, IoMetrics, IoQueues};
+use feuer_storage::{DiskCache, DiskCacheOptions, IoMetrics};
 use feuer_types::{Download, ObjectKeyHash};
-#[cfg(target_os = "linux")]
 use mixtrics::metrics::BoxedRegistry;
 use thiserror::Error;
 
 use crate::{
-    CacheConfig,
+    CacheConfig, DiskCacheError, IoQueues,
     access_trace::AccessTrace,
     metrics::{LookupMetrics, LookupOutcome},
 };
@@ -57,7 +54,9 @@ impl fmt::Debug for TieredMemoryDiskCache {
 
 impl TieredMemoryDiskCache {
     /// Opens a cache, using only memory when disk capacity is zero.
-    /// Otherwise requires Tokio, io_uring and direct I/O, locks the backing file,
+    /// Memory-only operation works on every platform without a Tokio runtime.
+    /// Nonzero disk capacity returns an error on platforms other than Linux.
+    /// On Linux, disk caching requires Tokio, io_uring and direct I/O, locks the backing file,
     /// and waits for metadata recovery. Disk failures never fall back to memory.
     ///
     /// `metrics_registry: None` disables metrics. `io_queues: None` creates dedicated queues.
@@ -66,7 +65,7 @@ impl TieredMemoryDiskCache {
     /// Pass clones of the same [`IoQueues`] to caches on the same SSD to share I/O concurrency.
     /// Contents, capacities, eviction, buffer pools, file locks, and background-write queues
     /// remain independent. Zero disk capacity ignores the queues.
-    #[cfg(target_os = "linux")]
+    /// Pass `None` for queues on platforms other than Linux.
     pub async fn open(
         config: CacheConfig,
         metrics_registry: Option<&BoxedRegistry>,
@@ -78,7 +77,6 @@ impl TieredMemoryDiskCache {
 
     /// Opens a cache with an application-provided scorer shared by memory and disk.
     /// See [`Self::open`] for resource configuration and [`RetentionScorer`] for the scoring contract.
-    #[cfg(target_os = "linux")]
     pub async fn open_with_retention_scorer(
         config: CacheConfig,
         metrics_registry: Option<&BoxedRegistry>,
@@ -99,7 +97,6 @@ impl TieredMemoryDiskCache {
     /// Both receive the same caller-demand history, including memory hits.
     /// Scorers cannot inspect the other tier's residency by re-entering the cache.
     /// See [`Self::open`] for resources and [`RetentionScorer`] for the scoring contract.
-    #[cfg(target_os = "linux")]
     pub async fn open_with_retention_scorers(
         config: CacheConfig,
         metrics_registry: Option<&BoxedRegistry>,
@@ -107,6 +104,13 @@ impl TieredMemoryDiskCache {
         memory_scorer: Arc<dyn RetentionScorer>,
         disk_scorer: Arc<dyn RetentionScorer>,
     ) -> Result<Self, DiskCacheError> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            if config.disk_capacity() != 0 {
+                return Err(DiskCacheError::UnsupportedPlatform);
+            }
+            let _ = (io_queues, disk_scorer);
+        }
         let noop_metrics_registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
         let metrics_registry = metrics_registry.unwrap_or(&noop_metrics_registry);
         let memory = MemoryCache::with_metrics(
@@ -119,6 +123,7 @@ impl TieredMemoryDiskCache {
         )))
         .with_reclaim_sample_size(config.eviction().sample_size())
         .with_retention_scorer(memory_scorer);
+        #[cfg(target_os = "linux")]
         let disk = if config.disk_capacity() == 0 {
             None
         } else {
@@ -147,6 +152,7 @@ impl TieredMemoryDiskCache {
                 memory,
                 metrics: LookupMetrics::new(metrics_registry),
                 pending_fetches: PendingFetches::default(),
+                #[cfg(target_os = "linux")]
                 disk,
             }),
             access_trace: None,
@@ -464,6 +470,9 @@ pub enum GetOrFetchError<E> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod disk_fallthrough_tests;
+
+#[cfg(test)]
+mod portable_tests;
 
 #[cfg(test)]
 mod sharing_tests;

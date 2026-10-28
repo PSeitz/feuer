@@ -3,9 +3,7 @@ mod tests;
 
 use std::time::Duration;
 
-use mixtrics::metrics::{BoxedCounter, BoxedHistogram};
-#[cfg(any(target_os = "linux", test))]
-use mixtrics::metrics::{BoxedRegistry, Buckets};
+use mixtrics::metrics::{BoxedCounter, BoxedHistogram, BoxedRegistry, Buckets};
 
 #[derive(Clone, Copy)]
 pub(crate) enum LookupOutcome {
@@ -29,7 +27,6 @@ pub(crate) struct LookupMetrics {
 }
 
 impl LookupMetrics {
-    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn new(registry: &BoxedRegistry) -> Self {
         let count = registry.register_counter_vec(
             "feuer_lookup_total".into(),

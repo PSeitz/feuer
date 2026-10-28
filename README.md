@@ -33,13 +33,15 @@ When your block sizes are right, your can read and write at the same time, at al
 - Source fallthrough under disk pressure. You can choose on the application side to fetch from the source when disk reads are backed up. If your network is faster than your disk, you can avoid disk reads and get the object from the source.
 - In-flight fetch deduplication. Concurrent misses for the same key and share disk reads and source work.
 
-The tiered cache API is Linux-only, because I don't respect any other OS.
+The tiered cache API supports memory-only operation on every platform. Disk caching requires Linux.
 
 ## Runtime requirements
 
 Disk caching requires Linux with usable `io_uring` and a filesystem supporting
 `O_DIRECT` and `STATX_DIOALIGN`. Opening a disk cache fails when these requirements
-are unmet. Set disk capacity to `0` for memory-only operation without `io_uring`.
+are unmet. Set disk capacity to `0` for memory-only operation on any platform,
+including macOS, without a Tokio runtime or `io_uring`. Nonzero disk capacity
+returns an error on other platforms. Access tracing through `with_trace` requires Tokio.
 
 Verify customer environments before enabling disk caching. Kernel support alone
 is insufficient: `kernel.io_uring_disabled` can restrict ring creation, and
@@ -83,8 +85,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The `None` arguments disable metrics and give this cache its own I/O queues.
-Set disk capacity to `0` for memory-only operation.
+The `None` arguments disable metrics and give this cache its own I/O queues when disk is enabled.
+Set disk capacity to `0` for memory-only operation. Pass `None` for I/O queues on
+platforms other than Linux. `open`, `open_with_retention_scorer`, and
+`open_with_retention_scorers` have the same signatures on every platform.
+
+Memory capacity must be positive. Applications using zero memory capacity to
+disable caching should bypass cache construction and fetch directly from the source.
+`CacheConfig::new` rejects zero memory capacity.
 
 ## How lookups work
 
