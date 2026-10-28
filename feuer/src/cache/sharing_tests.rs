@@ -17,7 +17,7 @@ fn cache() -> (TieredMemoryDiskCache, prometheus::Registry) {
             #[cfg(target_os = "linux")]
             disk: None,
         }),
-        trace: None,
+        access_trace: None,
     };
     (cache, registry)
 }

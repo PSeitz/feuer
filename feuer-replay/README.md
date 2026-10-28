@@ -18,16 +18,16 @@ request IDs and clock origins are session-local.
 Only request starts drive the replay. The configured cache determines hits,
 misses, eviction, admission, and disk writes independently of recorded outcomes.
 Recorded outcome counts and unmatched starts are reported separately for diagnostics.
-An unmatched start is not an established cache miss. Replay executes **every selected
+An unmatched start has an unknown outcome. Replay executes **every selected
 start with a successful synthetic whole-object download** on a replay miss,
-including starts originally failed or incomplete. This measures demand under that
-assumption, not original cancellation, actual source latency, retry/coalescing behavior,
-expanded downloads, or the original cache's initial contents. Replays start empty.
+including starts originally failed or incomplete. Replays start with an empty cache
+and use the source behavior described below. Original cancellation, source latency,
+retries, coalescing, and expanded downloads are outside this model.
 Replay learns object lengths, including zero, from successful outcomes
 anywhere in the capture. Native v2 identities are preserved. Historical v1 whole-object
 requests use lengths from callback successes. Objects with no observed length or
 conflicting lengths cannot be replayed.
-Parseable packages do not establish trace completeness or detect missing packages.
+Missing events or packages can leave the remaining packages parseable.
 
 Keep private traces, object identities, and raw results in ignored local experiment
 directories under `experiments/cache/`. Commit only small settings and summaries.
@@ -43,9 +43,9 @@ Arrival times, request counts, returned bytes and synthetic source allocation ar
 preserved, while the cache receives whole-object demand and performs whole-object
 lookups. Covering or overlapping ranges no longer share entries or demand counters.
 
-This simulates full-object caching of each exact recorded range, not full-file
-retrieval or a native whole-object capture. Arrival timing still comes from the
-original deployment. Native object captures use their original identities and observed lengths.
+This simulates caching each requested range as an object. Arrival timing comes from
+the original deployment. Captures of object lookups use their original identities
+and observed lengths.
 
 Replay uses the current [retrieval-cost scorer](../eviction.md#current-scoring).
 Compare matched settings with fresh caches.

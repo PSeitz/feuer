@@ -21,7 +21,7 @@ pub struct Event {
     pub kind: u8,
     /// Identity joining this request's start and outcome within one trace session.
     pub request_id: u64,
-    /// Nanoseconds since trace creation, not necessarily ordered in the package.
+    /// Nanoseconds since access-trace creation. Package order can differ from timestamp order.
     pub time_ns: u64,
     /// The original object identity, already hashed by the writer.
     pub object_key: ObjectKeyHash,
@@ -34,19 +34,19 @@ pub struct Event {
 }
 
 /// Validates a package header and length, then decodes and validates each event.
-/// Consuming the iterator validates the entire package, not trace completeness.
-pub fn decode_package(data: &[u8]) -> Result<impl Iterator<Item = Result<Event>> + '_> {
-    let (version, event_bytes) = match data.get(..8) {
+/// Consuming the iterator validates every event. Missing events or packages can still go undetected.
+pub fn decode_package(package: &[u8]) -> Result<impl Iterator<Item = Result<Event>> + '_> {
+    let (version, event_size) = match package.get(..8) {
         Some(b"FETR\x01\0\0\0") => (1, 65),
         Some(b"FETR\x02\0\0\0") => (2, 41),
         _ => return Err("expected FETR v1 or v2 package header".into()),
     };
-    if data.len() == 8 || !(data.len() - 8).is_multiple_of(event_bytes) {
+    if package.len() == 8 || !(package.len() - 8).is_multiple_of(event_size) {
         return Err("expected nonempty fixed-size FETR events".into());
     }
-    Ok(data[8..].chunks_exact(event_bytes).map(move |record| {
-        let u64_at = |offset| u64::from_le_bytes(record[offset..offset + 8].try_into().unwrap());
-        let kind = record[0];
+    Ok(package[8..].chunks_exact(event_size).map(move |event_bytes| {
+        let u64_at = |offset| u64::from_le_bytes(event_bytes[offset..offset + 8].try_into().unwrap());
+        let kind = event_bytes[0];
         if version == 2 {
             if kind > 5 {
                 return Err("unknown FETR v2 event kind".into());
@@ -58,7 +58,7 @@ pub fn decode_package(data: &[u8]) -> Result<impl Iterator<Item = Result<Event>>
                 kind: if kind == 5 { 6 } else { kind },
                 request_id: u64_at(1),
                 time_ns: u64_at(9),
-                object_key: ObjectKeyHash(u128::from_le_bytes(record[17..33].try_into().unwrap())),
+                object_key: ObjectKeyHash(u128::from_le_bytes(event_bytes[17..33].try_into().unwrap())),
                 requested: None,
                 downloaded: None,
                 payload_len: (1..=3).contains(&kind).then(|| u64_at(33)),
@@ -100,7 +100,7 @@ pub fn decode_package(data: &[u8]) -> Result<impl Iterator<Item = Result<Event>>
             kind,
             request_id: u64_at(1),
             time_ns: u64_at(9),
-            object_key: ObjectKeyHash(u128::from_le_bytes(record[17..33].try_into().unwrap())),
+            object_key: ObjectKeyHash(u128::from_le_bytes(event_bytes[17..33].try_into().unwrap())),
             requested: Some(requested),
             downloaded,
             payload_len: None,
@@ -240,9 +240,9 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
 
 fn visit_events(path: &Path, mut visit: impl FnMut(Event) -> Result<()>) -> Result<()> {
     let mut read_package = |reader: &mut dyn Read| -> Result<()> {
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes)?;
-        decode_package(&bytes)?.try_for_each(|event| visit(event?))
+        let mut package = Vec::new();
+        reader.read_to_end(&mut package)?;
+        decode_package(&package)?.try_for_each(|event| visit(event?))
     };
     let mut file = BufReader::new(File::open(path)?);
     if path.extension().is_some_and(|extension| extension == "feuer") {
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn decodes_v2_objects_and_rejects_invalid_records() {
+    fn decodes_v2_objects_and_rejects_invalid_events() {
         let mut bytes = b"FETR\x02\0\0\0".to_vec();
         for kind in 0u8..=5 {
             bytes.push(kind);
@@ -400,12 +400,12 @@ mod tests {
                     ]),
                 )
                 .unwrap();
-                let trace = load_requests(&path, Some(1)).unwrap();
-                assert_eq!(trace.requests.len(), 1);
-                assert_eq!(trace.requests[0].object_key, ObjectKeyHash(123));
-                assert_eq!(trace.requests[0].payload_len, payload_len);
-                assert_eq!(trace.incomplete, 1);
-                assert_eq!(trace.outcomes, [0; 7]);
+                let access_trace = load_requests(&path, Some(1)).unwrap();
+                assert_eq!(access_trace.requests.len(), 1);
+                assert_eq!(access_trace.requests[0].object_key, ObjectKeyHash(123));
+                assert_eq!(access_trace.requests[0].payload_len, payload_len);
+                assert_eq!(access_trace.incomplete, 1);
+                assert_eq!(access_trace.outcomes, [0; 7]);
             }
         }
     }
@@ -479,9 +479,9 @@ mod tests {
                 ),
             ],
         );
-        let trace = load_requests(&path, Some(1)).unwrap();
+        let access_trace = load_requests(&path, Some(1)).unwrap();
         assert_eq!(
-            trace
+            access_trace
                 .requests
                 .iter()
                 .map(|r| (r.request_id, r.time_ns))
@@ -489,24 +489,24 @@ mod tests {
             [(1, 0), (3, 0), (2, 500)]
         );
         assert_eq!(
-            trace.requests[0].object_key,
+            access_trace.requests[0].object_key,
             ObjectKeyHash::from(format!("slice-v1:10:20:{:032x}", event(0, 1, 0).object_key.0))
         );
-        assert_eq!(trace.requests[0].payload_len, 10);
-        assert_eq!(trace.outcomes, [0, 1, 0, 1, 0, 0, 0]);
-        assert_eq!(trace.incomplete, 1);
+        assert_eq!(access_trace.requests[0].payload_len, 10);
+        assert_eq!(access_trace.outcomes, [0, 1, 0, 1, 0, 0, 0]);
+        assert_eq!(access_trace.incomplete, 1);
 
-        let trace = load_requests(&path, None).unwrap();
+        let access_trace = load_requests(&path, None).unwrap();
         assert_eq!(
-            trace
+            access_trace
                 .requests
                 .iter()
                 .map(|r| (r.request_id, r.time_ns))
                 .collect::<Vec<_>>(),
             [(1, 0), (3, 0), (2, 500), (4, 1_000_000_000), (5, 181_000_000_000)]
         );
-        assert_eq!(trace.outcomes, [0, 2, 0, 1, 1, 0, 0]);
-        assert_eq!(trace.incomplete, 1);
+        assert_eq!(access_trace.outcomes, [0, 2, 0, 1, 1, 0, 0]);
+        assert_eq!(access_trace.incomplete, 1);
     }
 
     #[test]
@@ -590,10 +590,10 @@ mod tests {
                 ..start.clone()
             };
             std::fs::write(&path, package(&[start.clone(), outcome])).unwrap();
-            let trace = load_requests(&path, None).unwrap();
-            assert_eq!(trace.requests[0].payload_len, 0);
-            assert_eq!(trace.outcomes[kind as usize], 1);
-            assert_eq!(trace.incomplete, 0);
+            let access_trace = load_requests(&path, None).unwrap();
+            assert_eq!(access_trace.requests[0].payload_len, 0);
+            assert_eq!(access_trace.outcomes[kind as usize], 1);
+            assert_eq!(access_trace.incomplete, 0);
         }
     }
 }

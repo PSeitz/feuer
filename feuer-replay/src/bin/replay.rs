@@ -235,14 +235,14 @@ mod linux {
         if let Some(half_life) = args.access_count_half_life {
             config = config.with_access_count_half_life(half_life)?;
         }
-        let trace = load_requests(&args.input, args.trace_seconds)?;
+        let access_trace = load_requests(&args.input, args.trace_seconds)?;
         eprintln!(
             "Recorded starts={}, outcomes={:?}, incomplete={}. Replaying every start with successful synthetic whole-object downloads.",
-            trace.requests.len(),
-            trace.outcomes,
-            trace.incomplete,
+            access_trace.requests.len(),
+            access_trace.outcomes,
+            access_trace.incomplete,
         );
-        let requests = Arc::new(trace.requests);
+        let requests = Arc::new(access_trace.requests);
         fs::create_dir(&args.cache_dir)?;
         fs::create_dir_all(&args.output)?;
         fs::write(args.output.join("pid.txt"), format!("{}\n", std::process::id()))?;
@@ -281,8 +281,8 @@ mod linux {
                 "source_slots,unlimited\nsource_latency_seconds,0\nsource_bytes_per_second,unlimited"
             )?;
         }
-        writeln!(summary, "recorded_incomplete,{}", trace.incomplete)?;
-        for (kind, count) in trace.outcomes.iter().enumerate().skip(1) {
+        writeln!(summary, "recorded_incomplete,{}", access_trace.incomplete)?;
+        for (kind, count) in access_trace.outcomes.iter().enumerate().skip(1) {
             writeln!(summary, "recorded_outcome_{kind},{count}")?;
         }
         summary.flush()?;

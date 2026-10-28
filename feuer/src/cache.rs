@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::{
     CacheConfig,
-    access_trace::Trace,
+    access_trace::AccessTrace,
     metrics::{LookupMetrics, LookupOutcome},
 };
 
@@ -43,7 +43,7 @@ struct TieredMemoryDiskCacheInner {
 #[derive(Clone)]
 pub struct TieredMemoryDiskCache {
     inner: Arc<TieredMemoryDiskCacheInner>,
-    trace: Option<Trace>,
+    access_trace: Option<AccessTrace>,
 }
 
 impl fmt::Debug for TieredMemoryDiskCache {
@@ -149,18 +149,18 @@ impl TieredMemoryDiskCache {
                 pending_fetches: PendingFetches::default(),
                 disk,
             }),
-            trace: None,
+            access_trace: None,
         })
     }
 
-    /// Delivers complete, uncompressed binary trace packages as [`Bytes`] for this handle and its clones.
-    /// Requires Tokio. Persist bytes unchanged. The receiver owns retries and error reporting.
-    pub fn with_trace<F, Fut>(mut self, callback: F) -> Self
+    /// Delivers uncompressed binary access-trace packages as [`Bytes`] for this handle and its clones.
+    /// Requires Tokio. Persist packages unchanged. The callback owns retries and error reporting.
+    pub fn with_trace<F, Fut>(mut self, deliver_package: F) -> Self
     where
         F: FnMut(Bytes) -> Fut + Send + 'static,
         Fut: Future<Output = std::io::Result<()>> + Send + 'static,
     {
-        self.trace = Some(Trace::new(callback));
+        self.access_trace = Some(AccessTrace::new(deliver_package));
         self
     }
 
@@ -182,8 +182,8 @@ impl TieredMemoryDiskCache {
     pub async fn get_object(&self, object_key: crate::ObjectKey) -> Option<Bytes> {
         let object_key = ObjectKeyHash::from(object_key);
         self.inner.memory.access_histories().record_access(&object_key);
-        let access = match &self.trace {
-            Some(trace) => Some(trace.send_request_start(object_key).await),
+        let event_bytes = match &self.access_trace {
+            Some(access_trace) => Some(access_trace.send_request_start(object_key).await),
             None => None,
         };
         let started = Instant::now();
@@ -193,9 +193,9 @@ impl TieredMemoryDiskCache {
             started.elapsed(),
             bytes.as_ref().map_or(0, |bytes| bytes.len() as u64),
         );
-        if let Some(access) = access {
-            access
-                .send_outcome(outcome, bytes.as_ref().map(|bytes| bytes.len() as u64))
+        if let (Some(access_trace), Some(event_bytes)) = (&self.access_trace, event_bytes) {
+            access_trace
+                .send_outcome(event_bytes, outcome, bytes.as_ref().map(|bytes| bytes.len() as u64))
                 .await;
         }
         bytes
@@ -362,8 +362,8 @@ impl TieredMemoryDiskCache {
         Fut: Future<Output = Result<Download, E>>,
     {
         self.inner.memory.access_histories().record_access(&object_key);
-        let access = match &self.trace {
-            Some(trace) => Some(trace.send_request_start(object_key).await),
+        let event_bytes = match &self.access_trace {
+            Some(access_trace) => Some(access_trace.send_request_start(object_key).await),
             None => None,
         };
         let started = Instant::now();
@@ -381,9 +381,13 @@ impl TieredMemoryDiskCache {
         };
         let bytes = result.as_ref().map_or(0, |bytes| bytes.len() as u64);
         self.inner.metrics.record(outcome, started.elapsed(), bytes);
-        if let Some(access) = access {
-            access
-                .send_outcome(outcome, result.as_ref().ok().map(|bytes| bytes.len() as u64))
+        if let (Some(access_trace), Some(event_bytes)) = (&self.access_trace, event_bytes) {
+            access_trace
+                .send_outcome(
+                    event_bytes,
+                    outcome,
+                    result.as_ref().ok().map(|bytes| bytes.len() as u64),
+                )
                 .await;
         }
         result

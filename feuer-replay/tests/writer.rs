@@ -84,13 +84,13 @@ fn replays_historical_ranges_as_objects_with_and_without_disk() -> Result<()> {
         package.extend(downloaded.end.to_le_bytes());
     }
     std::fs::write(&path, package)?;
-    let trace = load_requests(&path, None)?;
-    assert_eq!(trace.requests.len(), 2);
-    assert_eq!(trace.incomplete, 1);
-    assert_eq!(trace.outcomes, [0, 0, 0, 1, 0, 0, 0]);
-    assert_eq!(trace.requests[0].object_key, trace.requests[1].object_key);
-    assert_ne!(trace.requests[0].object_key, key);
-    assert_eq!(trace.requests[0].payload_len, 2);
+    let access_trace = load_requests(&path, None)?;
+    assert_eq!(access_trace.requests.len(), 2);
+    assert_eq!(access_trace.incomplete, 1);
+    assert_eq!(access_trace.outcomes, [0, 0, 0, 1, 0, 0, 0]);
+    assert_eq!(access_trace.requests[0].object_key, access_trace.requests[1].object_key);
+    assert_ne!(access_trace.requests[0].object_key, key);
+    assert_eq!(access_trace.requests[0].payload_len, 2);
     for disk_bytes in [0, 4 << 20] {
         let cache_dir = dir.path().join(format!("cache-{disk_bytes}"));
         let output = dir.path().join(format!("results-{disk_bytes}"));
@@ -120,7 +120,7 @@ fn replays_historical_ranges_as_objects_with_and_without_disk() -> Result<()> {
 }
 
 #[tokio::test]
-async fn decodes_empty_whole_object_from_current_writer() -> Result<()> {
+async fn decodes_empty_object_from_current_writer() -> Result<()> {
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
     let cache = TieredMemoryDiskCache::open(CacheConfig::new("unused", 0, 1 << 20)?, None, None)
         .await?
@@ -145,16 +145,16 @@ async fn decodes_empty_whole_object_from_current_writer() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("objects.feuer");
     std::fs::write(&path, package)?;
-    let trace = load_requests(&path, None)?;
-    assert_eq!(trace.requests.len(), 3);
+    let access_trace = load_requests(&path, None)?;
+    assert_eq!(access_trace.requests.len(), 3);
     assert!(
-        trace
+        access_trace
             .requests
             .iter()
             .all(|request| { request.object_key == ObjectKeyHash::from("empty") && request.payload_len == 0 })
     );
-    assert_eq!(trace.incomplete, 0);
-    assert_eq!(trace.outcomes, [0, 1, 0, 1, 0, 0, 1]);
+    assert_eq!(access_trace.incomplete, 0);
+    assert_eq!(access_trace.outcomes, [0, 1, 0, 1, 0, 0, 1]);
     for event in events {
         assert_eq!(event.object_key, ObjectKeyHash::from("empty"));
         assert_eq!(event.requested, None);

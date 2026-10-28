@@ -1,4 +1,4 @@
-//! A receiver persists Feuer's binary packages unchanged.
+//! Write access-trace packages to files.
 
 #[cfg(target_os = "linux")]
 #[tokio::main]
@@ -9,21 +9,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use feuer::{CacheConfig, TieredMemoryDiskCache};
 
     let directory = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "trace".to_owned()));
-    // Each receiver numbers its own files. Require a fresh directory.
+    // File numbers start at zero. Require a fresh directory.
     std::fs::create_dir(&directory)?;
     let mut file_number = 0u64;
-    let (sender, mut results) = tokio::sync::mpsc::unbounded_channel();
+    let (write_result_sender, mut write_results) = tokio::sync::mpsc::unbounded_channel();
     let cache = TieredMemoryDiskCache::open(CacheConfig::new("unused", 0, 1 << 20).unwrap(), None, None)
         .await?
         .with_trace(move |package| {
             let path = directory.join(format!("{file_number:012}.feuer"));
             file_number += 1;
-            let sender = sender.clone();
+            let write_result_sender = write_result_sender.clone();
             async move {
-                let result = tokio::task::spawn_blocking(move || std::fs::write(path, &package))
+                let write_result = tokio::task::spawn_blocking(move || std::fs::write(path, &package))
                     .await
                     .map_err(io::Error::other)?;
-                let _ = sender.send(result);
+                let _ = write_result_sender.send(write_result);
                 Ok(())
             }
         });
@@ -32,16 +32,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok::<_, std::convert::Infallible>(Bytes::from_static(b"data"))
         })
         .await?;
-    // This example expects one package. The receiver waits for its own write result.
+    // Dropping the cache triggers delivery. Wait for the expected package's write result.
     drop(cache);
-    results
+    write_results
         .recv()
         .await
-        .ok_or_else(|| io::Error::other("trace receiver stopped"))??;
+        .ok_or_else(|| io::Error::other("access-trace delivery stopped"))??;
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
-    eprintln!("Opening the public cache currently requires Linux.");
+    eprintln!("Opening the cache requires Linux.");
 }

@@ -13,7 +13,7 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
             #[cfg(target_os = "linux")]
             disk: None,
         }),
-        trace: None,
+        access_trace: None,
     }
     .with_trace(move |package| std::future::ready(sender.send(package).map_err(std::io::Error::other)));
     // Seed an idle disk-read buffer to verify downloads acquire from that same pool.
@@ -61,10 +61,10 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
         assert!(cache.inner.memory.contains_entry(&ObjectKeyHash::from(key)));
     }
     drop(cache);
-    let bytes = receiver.recv().await.unwrap();
-    assert_eq!(&bytes[..8], b"FETR\x02\0\0\0");
-    assert_eq!(bytes.len(), 8 + 12 * 41);
-    let (events, _) = bytes[8..].as_chunks::<41>();
+    let package = receiver.recv().await.unwrap();
+    assert_eq!(&package[..8], b"FETR\x02\0\0\0");
+    assert_eq!(package.len(), 8 + 12 * 41);
+    let (events, _) = package[8..].as_chunks::<41>();
     assert_eq!(
         events.iter().map(|event| event[0]).collect::<Vec<_>>(),
         [0, 3, 0, 1].repeat(3)

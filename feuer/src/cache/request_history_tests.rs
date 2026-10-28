@@ -13,7 +13,7 @@ async fn records_each_started_request_before_any_result() {
             metrics: LookupMetrics::new(&registry),
             pending_fetches: PendingFetches::default(),
         }),
-        trace: None,
+        access_trace: None,
     };
     let history = cache.inner.memory.access_histories();
     let key = "object".to_owned();

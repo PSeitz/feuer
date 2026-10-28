@@ -15,7 +15,7 @@ fn memory_cache(memory_capacity: u64, metrics_registry: &mixtrics::metrics::Boxe
             #[cfg(target_os = "linux")]
             disk: None,
         }),
-        trace: None,
+        access_trace: None,
     }
 }
 
