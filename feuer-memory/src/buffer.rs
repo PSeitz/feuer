@@ -61,13 +61,13 @@ pub fn read_idle_buffer_pool_percent() -> Result<u64, String> {
 pub struct BufferPool {
     pub(crate) capacity: u64,
     idle_limit: u64,
-    state: Mutex<EntryAllocationBytesAndIdleBuffers>,
+    state: Mutex<CachedBytesAndIdleBuffers>,
     pub(crate) metrics: Arc<MemoryMetrics>,
 }
 
-/// Entry allocation byte counts and idle buffers grouped by size, protected by one lock.
+/// Cached-byte accounting and idle buffers, updated under one lock.
 #[derive(Default)]
-struct EntryAllocationBytesAndIdleBuffers {
+struct CachedBytesAndIdleBuffers {
     entry_bytes: u64,
     idle_bytes: u64,
     idle_buffers: [Vec<AlignedBuffer>; BUCKET_COUNT],
@@ -152,7 +152,7 @@ impl BufferPool {
     }
 
     /// Takes an idle buffer and subtracts its bytes from accounting and metrics under the pool lock.
-    fn take_idle_buffer(&self, state: &mut EntryAllocationBytesAndIdleBuffers, index: usize) -> Option<AlignedBuffer> {
+    fn take_idle_buffer(&self, state: &mut CachedBytesAndIdleBuffers, index: usize) -> Option<AlignedBuffer> {
         let buffer = state.idle_buffers[index].pop()?;
         let capacity = buffer.capacity() as u64;
         state.idle_bytes -= capacity;
