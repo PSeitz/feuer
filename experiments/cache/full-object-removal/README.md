@@ -2,9 +2,8 @@
 
 Removed range-aware cache APIs, indexes, compaction, request history, and partial
 payload checksums. Both tiers now cache complete objects by key. Disk format v15
-uses 40-byte metadata records and clears older formats when opened. FETR v2
-records complete-object lookups. The replay reader still accepts historical v1
-captures, converting each exact recorded range into an independent object.
+uses 40-byte metadata records and clears older formats when opened. FETR v1
+records complete-object lookups.
 
 No capture benchmarks were run. Historical benchmark results were not changed.
 

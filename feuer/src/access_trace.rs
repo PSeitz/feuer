@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use crate::metrics::LookupOutcome;
 
-const PACKAGE_HEADER: &[u8; 8] = b"FETR\x02\0\0\0";
+const PACKAGE_HEADER: &[u8; 8] = b"FETR\x01\0\0\0";
 const EVENT_BYTES: usize = 41;
 const PACKAGE_TARGET_BYTES: usize = 8 * 1024 * 1024;
 
@@ -113,7 +113,7 @@ mod tests {
         }
         drop(access_trace);
         let package = receiver.recv().await.unwrap();
-        assert_eq!(&package[..8], b"FETR\x02\0\0\0");
+        assert_eq!(&package[..8], b"FETR\x01\0\0\0");
         assert_eq!(package.len(), 8 + cases.len() * 2 * 41);
         for (index, (_, length, kind)) in cases.into_iter().enumerate() {
             let start = &package[8 + index * 82..8 + index * 82 + 41];

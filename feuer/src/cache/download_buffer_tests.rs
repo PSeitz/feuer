@@ -62,7 +62,7 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
     }
     drop(cache);
     let package = receiver.recv().await.unwrap();
-    assert_eq!(&package[..8], b"FETR\x02\0\0\0");
+    assert_eq!(&package[..8], b"FETR\x01\0\0\0");
     assert_eq!(package.len(), 8 + 12 * 41);
     let (events, _) = package[8..].as_chunks::<41>();
     assert_eq!(

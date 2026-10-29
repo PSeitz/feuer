@@ -3,7 +3,6 @@
 use std::{
     fs::File,
     io::{BufReader, Read},
-    ops::Range,
     path::Path,
 };
 
@@ -16,8 +15,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 /// A recorded request start or lookup outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event {
-    /// 0 start, 1 memory hit, 2 disk hit, 3 callback success, 4 callback error, 5 historical noncovering download, 6 miss.
-    /// V2 miss kind 5 is normalized to 6.
+    /// 0 start, 1 memory hit, 2 disk hit, 3 callback success, 4 callback error, 5 miss.
     pub kind: u8,
     /// Identity joining this request's start and outcome within one trace session.
     pub request_id: u64,
@@ -25,85 +23,35 @@ pub struct Event {
     pub time_ns: u64,
     /// The original object identity, already hashed by the writer.
     pub object_key: ObjectKeyHash,
-    /// Historical v1 requested range. `0..u64::MAX` denotes an unknown-length object.
-    pub requested: Option<Range<u64>>,
-    /// Historical v1 callback range, present only for kinds 3 and 5.
-    pub downloaded: Option<Range<u64>>,
-    /// Object length from a successful v2 lookup.
+    /// Object length from a successful lookup.
     pub payload_len: Option<u64>,
 }
 
 /// Validates a package header and length, then decodes and validates each event.
 /// Consuming the iterator validates every event. Missing events or packages can still go undetected.
 pub fn decode_package(package: &[u8]) -> Result<impl Iterator<Item = Result<Event>> + '_> {
-    let (version, event_size) = match package.get(..8) {
-        Some(b"FETR\x01\0\0\0") => (1, 65),
-        Some(b"FETR\x02\0\0\0") => (2, 41),
-        _ => return Err("expected FETR v1 or v2 package header".into()),
-    };
+    if package.get(..8) != Some(b"FETR\x01\0\0\0") {
+        return Err("expected FETR v1 package header".into());
+    }
+    let event_size = 41;
     if package.len() == 8 || !(package.len() - 8).is_multiple_of(event_size) {
         return Err("expected nonempty fixed-size FETR events".into());
     }
     Ok(package[8..].chunks_exact(event_size).map(move |event_bytes| {
         let u64_at = |offset| u64::from_le_bytes(event_bytes[offset..offset + 8].try_into().unwrap());
         let kind = event_bytes[0];
-        if version == 2 {
-            if kind > 5 {
-                return Err("unknown FETR v2 event kind".into());
-            }
-            if !(1..=3).contains(&kind) && u64_at(33) != 0 {
-                return Err("unexpected payload length for FETR event kind".into());
-            }
-            return Ok(Event {
-                kind: if kind == 5 { 6 } else { kind },
-                request_id: u64_at(1),
-                time_ns: u64_at(9),
-                object_key: ObjectKeyHash(u128::from_le_bytes(event_bytes[17..33].try_into().unwrap())),
-                requested: None,
-                downloaded: None,
-                payload_len: (1..=3).contains(&kind).then(|| u64_at(33)),
-            });
+        if kind > 5 {
+            return Err("unknown FETR v1 event kind".into());
         }
-        if kind > 6 {
-            return Err("unknown FETR event kind".into());
-        }
-        let range_at = |offset| -> Result<Range<u64>> {
-            let range = u64_at(offset)..u64_at(offset + 8);
-            if range.start > range.end {
-                return Err("invalid FETR byte range".into());
-            }
-            Ok(range)
-        };
-        let requested = range_at(33)?;
-        let downloaded = match kind {
-            3 | 5 => Some(range_at(49)?),
-            _ if u64_at(49) != 0 || u64_at(57) != 0 => {
-                return Err("unexpected downloaded range for FETR event kind".into());
-            }
-            _ => None,
-        };
-        if let Some(downloaded) = &downloaded {
-            let covers = downloaded.start <= requested.start && downloaded.end >= requested.end;
-            if kind == 3 {
-                if requested == (0..u64::MAX) {
-                    if downloaded.start != 0 {
-                        return Err("whole-object download must start at zero".into());
-                    }
-                } else if !covers {
-                    return Err("callback success does not cover requested range".into());
-                }
-            } else if covers {
-                return Err("noncovering download covers requested range".into());
-            }
+        if !(1..=3).contains(&kind) && u64_at(33) != 0 {
+            return Err("unexpected payload length for FETR event kind".into());
         }
         Ok(Event {
             kind,
             request_id: u64_at(1),
             time_ns: u64_at(9),
             object_key: ObjectKeyHash(u128::from_le_bytes(event_bytes[17..33].try_into().unwrap())),
-            requested: Some(requested),
-            downloaded,
-            payload_len: None,
+            payload_len: (1..=3).contains(&kind).then(|| u64_at(33)),
         })
     }))
 }
@@ -115,7 +63,7 @@ pub struct Request {
     pub request_id: u64,
     /// Nanoseconds relative to the earliest recorded request start.
     pub time_ns: u64,
-    /// Recorded object hash, or an identity derived from an exact historical range.
+    /// Recorded object hash.
     pub object_key: ObjectKeyHash,
     /// Object payload length in bytes.
     pub payload_len: u64,
@@ -126,7 +74,7 @@ pub struct TraceRequests {
     /// Requests in timestamp order, with request ID as the tie breaker.
     pub requests: Vec<Request>,
     /// Counts of recorded outcomes for selected starts, indexed by FETR kind.
-    pub outcomes: [usize; 7],
+    pub outcomes: [usize; 6],
     /// Selected starts whose outcomes are unknown.
     pub incomplete: usize,
 }
@@ -136,7 +84,6 @@ pub struct TraceRequests {
 /// Joins outcomes, including those outside the prefix.
 /// Scans twice so memory usage follows selected starts rather than the full event history.
 /// Object lengths come from successful outcomes, including outcomes outside the selected prefix.
-/// Historical ranges become independent objects with lengths derived from their endpoints.
 pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests> {
     let duration = seconds
         .map(|seconds| {
@@ -164,39 +111,29 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
     let mut starts_by_id = FxHashMap::default();
     let mut object_lengths = FxHashMap::default();
     for request in requests {
-        if request.requested.as_ref().is_none_or(|range| *range == (0..u64::MAX)) {
-            object_lengths.insert(request.object_key, None);
-        }
+        object_lengths.insert(request.object_key, None);
         if starts_by_id.insert(request.request_id, (request, false)).is_some() {
             return Err("duplicate request start ID".into());
         }
     }
-    let mut outcomes = [0; 7];
+    let mut outcomes = [0; 6];
     visit_events(path, |event| {
         if event.kind == 0 {
             return Ok(());
         }
-        if let Some(length) = object_lengths.get_mut(&event.object_key) {
-            let observed = event.payload_len.or_else(|| {
-                (event.kind == 3 && event.requested == Some(0..u64::MAX))
-                    .then(|| event.downloaded.as_ref().map(|range| range.end - range.start))
-                    .flatten()
-            });
-            if let Some(observed) = observed {
-                if length.is_some_and(|previous| previous != observed) {
-                    return Err("immutable object has inconsistent payload lengths".into());
-                }
-                *length = Some(observed);
+        if let Some(length) = object_lengths.get_mut(&event.object_key)
+            && let Some(observed) = event.payload_len
+        {
+            if length.is_some_and(|previous| previous != observed) {
+                return Err("immutable object has inconsistent payload lengths".into());
             }
+            *length = Some(observed);
         }
         if let Some((request, completed)) = starts_by_id.get_mut(&event.request_id) {
             if *completed {
                 return Err("duplicate request outcome ID".into());
             }
-            if event.object_key != request.object_key
-                || event.requested != request.requested
-                || event.time_ns < request.time_ns
-            {
+            if event.object_key != request.object_key || event.time_ns < request.time_ns {
                 return Err("request outcome disagrees with its start".into());
             }
             *completed = true;
@@ -208,25 +145,12 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
     let mut requests: Vec<_> = starts_by_id
         .into_values()
         .map(|(event, _)| {
-            let (object_key, payload_len) = match event.requested {
-                Some(range) if range != (0..u64::MAX) => (
-                    ObjectKeyHash::from(format!(
-                        "slice-v1:{}:{}:{:032x}",
-                        range.start, range.end, event.object_key.0,
-                    )),
-                    range.end - range.start,
-                ),
-                _ => (
-                    event.object_key,
-                    object_lengths[&event.object_key]
-                        .ok_or("object replay requires a successful outcome with its payload length")?,
-                ),
-            };
             Ok(Request {
                 request_id: event.request_id,
                 time_ns: event.time_ns - first_start_ns,
-                object_key,
-                payload_len,
+                object_key: event.object_key,
+                payload_len: object_lengths[&event.object_key]
+                    .ok_or("object replay requires a successful outcome with its payload length")?,
             })
         })
         .collect::<Result<_>>()?;
@@ -285,12 +209,7 @@ mod tests {
             bytes.extend(event.request_id.to_le_bytes());
             bytes.extend(event.time_ns.to_le_bytes());
             bytes.extend(event.object_key.0.to_le_bytes());
-            let requested = event.requested.as_ref().unwrap();
-            bytes.extend(requested.start.to_le_bytes());
-            bytes.extend(requested.end.to_le_bytes());
-            let downloaded = event.downloaded.clone().unwrap_or(0..0);
-            bytes.extend(downloaded.start.to_le_bytes());
-            bytes.extend(downloaded.end.to_le_bytes());
+            bytes.extend(event.payload_len.unwrap_or(0).to_le_bytes());
         }
         bytes
     }
@@ -301,13 +220,7 @@ mod tests {
             request_id,
             time_ns,
             object_key: ObjectKeyHash(0x112233445566778899aabbccddeeff00),
-            requested: Some(10..20),
-            downloaded: match kind {
-                3 => Some(5..25),
-                5 => Some(0..5),
-                _ => None,
-            },
-            payload_len: None,
+            payload_len: (1..=3).contains(&kind).then_some(10),
         }
     }
 
@@ -325,27 +238,16 @@ mod tests {
     }
 
     #[test]
-    fn decodes_all_kinds_hashes_and_ranges() {
-        let events: Vec<_> = (0..=6).map(|kind| event(kind, 42, 100)).collect();
+    fn decodes_all_kinds_hashes_and_lengths() {
+        let events: Vec<_> = (0..=5).map(|kind| event(kind, 42, 100)).collect();
         let bytes = package(&events);
         let decoded: Vec<_> = decode_package(&bytes).unwrap().collect::<Result<_>>().unwrap();
         assert_eq!(decoded, events);
-        let mut whole = event(3, 1, 0);
-        whole.requested = Some(0..u64::MAX);
-        whole.downloaded = Some(0..0);
-        assert_eq!(
-            decode_package(&package(&[whole.clone()]))
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap(),
-            whole
-        );
     }
 
     #[test]
-    fn decodes_v2_objects_and_rejects_invalid_events() {
-        let mut bytes = b"FETR\x02\0\0\0".to_vec();
+    fn decodes_objects_and_rejects_invalid_events() {
+        let mut bytes = b"FETR\x01\0\0\0".to_vec();
         for kind in 0u8..=5 {
             bytes.push(kind);
             bytes.extend(42u64.to_le_bytes());
@@ -356,15 +258,10 @@ mod tests {
         let events = decode_package(&bytes).unwrap().collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(
             events.iter().map(|event| event.kind).collect::<Vec<_>>(),
-            [0, 1, 2, 3, 4, 6]
+            [0, 1, 2, 3, 4, 5]
         );
         assert_eq!(events[3].payload_len, Some(4));
         assert!(events.iter().all(|event| event.object_key == ObjectKeyHash(123)));
-        assert!(
-            events
-                .iter()
-                .all(|event| event.requested.is_none() && event.downloaded.is_none())
-        );
         assert!(decode_package(&bytes[..bytes.len() - 1]).is_err());
         for (offset, value) in [(8, 6), (8 + 33, 1)] {
             let mut bad = bytes.clone();
@@ -374,7 +271,7 @@ mod tests {
     }
 
     fn object_package(events: &[(u8, u64, u64, u64)]) -> Vec<u8> {
-        let mut bytes = b"FETR\x02\0\0\0".to_vec();
+        let mut bytes = b"FETR\x01\0\0\0".to_vec();
         for &(kind, id, time_ns, payload_len) in events {
             bytes.push(kind);
             bytes.extend(id.to_le_bytes());
@@ -405,7 +302,7 @@ mod tests {
                 assert_eq!(access_trace.requests[0].object_key, ObjectKeyHash(123));
                 assert_eq!(access_trace.requests[0].payload_len, payload_len);
                 assert_eq!(access_trace.incomplete, 1);
-                assert_eq!(access_trace.outcomes, [0; 7]);
+                assert_eq!(access_trace.outcomes, [0; 6]);
             }
         }
     }
@@ -432,7 +329,7 @@ mod tests {
         assert!(decode_package(&[]).is_err());
         assert!(decode_package(&valid[..8]).is_err());
         assert!(decode_package(&valid[..valid.len() - 1]).is_err());
-        for (offset, value) in [(0, b'Q'), (4, 3), (8, 7), (8 + 49, 1), (8 + 33, 21)] {
+        for (offset, value) in [(0, b'Q'), (4, 0), (4, 255), (8, 6), (8 + 33, 1)] {
             let mut bad = valid.clone();
             bad[offset] = value;
             assert!(
@@ -441,18 +338,6 @@ mod tests {
                     .is_err()
             );
         }
-        let mut bad = event(3, 1, 0);
-        bad.downloaded = Some(0..5);
-        assert!(
-            decode_package(&package(&[bad.clone()]))
-                .unwrap()
-                .next()
-                .unwrap()
-                .is_err()
-        );
-        bad.kind = 5;
-        bad.downloaded = bad.requested.clone();
-        assert!(decode_package(&package(&[bad])).unwrap().next().unwrap().is_err());
     }
 
     #[test]
@@ -488,12 +373,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(1, 0), (3, 0), (2, 500)]
         );
-        assert_eq!(
-            access_trace.requests[0].object_key,
-            ObjectKeyHash::from(format!("slice-v1:10:20:{:032x}", event(0, 1, 0).object_key.0))
-        );
+        assert_eq!(access_trace.requests[0].object_key, event(0, 1, 0).object_key);
         assert_eq!(access_trace.requests[0].payload_len, 10);
-        assert_eq!(access_trace.outcomes, [0, 1, 0, 1, 0, 0, 0]);
+        assert_eq!(access_trace.outcomes, [0, 1, 0, 1, 0, 0]);
         assert_eq!(access_trace.incomplete, 1);
 
         let access_trace = load_requests(&path, None).unwrap();
@@ -505,7 +387,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(1, 0), (3, 0), (2, 500), (4, 1_000_000_000), (5, 181_000_000_000)]
         );
-        assert_eq!(access_trace.outcomes, [0, 2, 0, 1, 1, 0, 0]);
+        assert_eq!(access_trace.outcomes, [0, 2, 0, 1, 1, 0]);
         assert_eq!(access_trace.incomplete, 1);
     }
 
@@ -534,65 +416,24 @@ mod tests {
         }
         assert!(load_requests(&path, Some(0)).is_err());
         assert!(load_requests(&path, Some(u64::MAX)).is_err());
-        let mut whole = event(0, 1, 0);
-        whole.requested = Some(0..u64::MAX);
-        std::fs::write(&path, package(&[whole])).unwrap();
+        std::fs::write(&path, package(&[event(0, 1, 0)])).unwrap();
         assert!(load_requests(&path, Some(1)).is_err());
     }
 
     #[test]
-    fn objects_preserve_lengths_but_separate_exact_ranges() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("trace.feuer");
-        let start = event(0, 1, 123);
-        let mut events = vec![
-            start.clone(),
-            Event {
-                request_id: 2,
-                ..start.clone()
-            },
-        ];
-        for (index, requested) in [11..21, 10..21, 10..10].into_iter().enumerate() {
-            events.push(Event {
-                request_id: index as u64 + 3,
-                requested: Some(requested),
-                ..start.clone()
-            });
-        }
-        events.push(Event {
-            request_id: 6,
-            object_key: ObjectKeyHash(2),
-            ..start
-        });
-        std::fs::write(&path, package(&events)).unwrap();
-        let requests = load_requests(&path, None).unwrap().requests;
-        assert_eq!(requests[0].object_key, requests[1].object_key);
-        for request in &requests[2..] {
-            assert_ne!(requests[0].object_key, request.object_key);
-        }
-        assert_eq!(
-            requests.iter().map(|r| r.payload_len).collect::<Vec<_>>(),
-            [10, 10, 10, 11, 0, 10]
-        );
-        assert!(requests.iter().all(|request| request.time_ns == 0));
-    }
-
-    #[test]
-    fn preserves_empty_ranges_and_reports_errors_and_misses() {
+    fn preserves_empty_objects_and_reports_errors_and_misses() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("empty.feuer");
-        let mut start = event(0, 1, 0);
-        start.requested = Some(10..10);
-        for kind in [4, 6] {
-            let outcome = Event {
-                kind,
-                time_ns: 1,
-                ..start.clone()
-            };
-            std::fs::write(&path, package(&[start.clone(), outcome])).unwrap();
+        for kind in [4, 5] {
+            std::fs::write(
+                &path,
+                object_package(&[(0, 1, 0, 0), (kind, 1, 1, 0), (0, 2, 2, 0), (3, 2, 3, 0)]),
+            )
+            .unwrap();
             let access_trace = load_requests(&path, None).unwrap();
-            assert_eq!(access_trace.requests[0].payload_len, 0);
+            assert!(access_trace.requests.iter().all(|request| request.payload_len == 0));
             assert_eq!(access_trace.outcomes[kind as usize], 1);
+            assert_eq!(access_trace.outcomes[3], 1);
             assert_eq!(access_trace.incomplete, 0);
         }
     }

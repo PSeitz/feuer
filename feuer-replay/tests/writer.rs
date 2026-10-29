@@ -1,4 +1,4 @@
-//! Current writer round trips and historical trace replay through both cache configurations.
+//! Current writer round trips and trace replay through both cache configurations.
 #![cfg(target_os = "linux")]
 
 use std::{convert::Infallible, future::pending};
@@ -58,16 +58,11 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
     assert_eq!(events[1].payload_len, Some(4));
     assert_eq!(events[2].object_key, key);
     assert_eq!(events[3].payload_len, Some(4));
-    assert!(
-        events
-            .iter()
-            .all(|event| event.requested.is_none() && event.downloaded.is_none())
-    );
     Ok(())
 }
 
 #[test]
-fn replays_historical_ranges_as_objects_with_and_without_disk() -> Result<()> {
+fn replays_objects_with_and_without_disk() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("trace.feuer");
     let key = ObjectKeyHash::from("object");
@@ -77,19 +72,15 @@ fn replays_historical_ranges_as_objects_with_and_without_disk() -> Result<()> {
         package.extend(request_id.to_le_bytes());
         package.extend(time_ns.to_le_bytes());
         package.extend(key.0.to_le_bytes());
-        package.extend(10u64.to_le_bytes());
-        package.extend(12u64.to_le_bytes());
-        let downloaded = if kind == 3 { 9u64..13u64 } else { 0..0 };
-        package.extend(downloaded.start.to_le_bytes());
-        package.extend(downloaded.end.to_le_bytes());
+        package.extend(if kind == 3 { 2u64 } else { 0 }.to_le_bytes());
     }
     std::fs::write(&path, package)?;
     let access_trace = load_requests(&path, None)?;
     assert_eq!(access_trace.requests.len(), 2);
     assert_eq!(access_trace.incomplete, 1);
-    assert_eq!(access_trace.outcomes, [0, 0, 0, 1, 0, 0, 0]);
+    assert_eq!(access_trace.outcomes, [0, 0, 0, 1, 0, 0]);
     assert_eq!(access_trace.requests[0].object_key, access_trace.requests[1].object_key);
-    assert_ne!(access_trace.requests[0].object_key, key);
+    assert_eq!(access_trace.requests[0].object_key, key);
     assert_eq!(access_trace.requests[0].payload_len, 2);
     for disk_bytes in [0, 4 << 20] {
         let cache_dir = dir.path().join(format!("cache-{disk_bytes}"));
@@ -136,10 +127,10 @@ async fn decodes_empty_object_from_current_writer() -> Result<()> {
     let events = decode_package(&package)?.collect::<Result<Vec<_>>>()?;
     assert_eq!(
         events.iter().map(|event| event.kind).collect::<Vec<_>>(),
-        [0, 6, 0, 3, 0, 1]
+        [0, 5, 0, 3, 0, 1]
     );
     assert_eq!(events[0].request_id, events[1].request_id);
-    assert_eq!(events[1].downloaded, None);
+    assert_eq!(events[1].payload_len, None);
     assert_eq!(events[3].payload_len, Some(0));
     assert_eq!(events[5].payload_len, Some(0));
     let directory = tempfile::tempdir()?;
@@ -154,11 +145,9 @@ async fn decodes_empty_object_from_current_writer() -> Result<()> {
             .all(|request| { request.object_key == ObjectKeyHash::from("empty") && request.payload_len == 0 })
     );
     assert_eq!(access_trace.incomplete, 0);
-    assert_eq!(access_trace.outcomes, [0, 1, 0, 1, 0, 0, 1]);
+    assert_eq!(access_trace.outcomes, [0, 1, 0, 1, 0, 1]);
     for event in events {
         assert_eq!(event.object_key, ObjectKeyHash::from("empty"));
-        assert_eq!(event.requested, None);
-        assert_eq!(event.downloaded, None);
     }
     Ok(())
 }

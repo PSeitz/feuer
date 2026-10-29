@@ -21,9 +21,9 @@ Read and replay FETR packages with [the replay tools](feuer-replay/README.md).
   within those lookups and have no separate events. Object keys are hashed. Hashing
   does not guarantee anonymity. Events contain payload lengths rather than payload bytes.
 
-## FETR v2
+## FETR v1
 
-Each package starts with eight bytes `FETR\x02\x00\x00\x00`, followed by one or more
+Each package starts with eight bytes `FETR\x01\x00\x00\x00`, followed by one or more
 **41-byte events**. Integers are little-endian, without padding. Persist one package per file.
 Every event refers to an object.
 
@@ -43,8 +43,3 @@ Timestamps are captured before enqueue, so queue order can differ from timestamp
 order. Join start/outcome by request ID. Python layout: `<B5Q`, with the hash split
 into low/high halves. Check the package header, event size, and kinds. Missing events
 or packages can leave the remaining packages parseable.
-
-The replay reader also accepts historical FETR v1 captures. Their 65-byte events
-use a different layout and kind numbering. Decode events according to the version
-in the package header. See [replay tools](feuer-replay/README.md) for legacy
-input conversion.
