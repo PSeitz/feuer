@@ -31,7 +31,7 @@ are read directly, without extraction.
 - Use **100 GB memory and 500 GB disk**, with the exact decimal byte counts above.
   Change these capacities only when explicitly requested.
 - Use `ssh m8g-32cpu-local-ssd-2` for SSD tests. Follow the
-  [timed replay procedure](../experiments/storage/timed-replay.md) for allocator
+  [timed replay procedure](../timed-replay.md) for allocator
   matching, host checks, OS/device measurements, and reporting.
 - Replay the first 10 minutes by default with `--trace-seconds 600`. Run additional
   comparison repetitions only when explicitly requested.
@@ -39,7 +39,7 @@ are read directly, without extraction.
   [retrieval-cost scorer](../eviction.md#current-scoring).
 
 Keep private traces, object identities, and raw results in ignored local experiment
-folders under `experiments/cache/`. Commit only small settings and summaries.
+folders under `experiments/cache/`. Preserve useful conclusions in project documentation.
 
 ## Selecting requests
 
@@ -128,10 +128,11 @@ Each callback acquires a download permit, sleeps for this delay, then allocates 
 zero-fills its buffer. It holds the permit through allocation and filling. Arrival
 scheduling continues independently.
 
-The calibration comes from [the S3 benchmark](../experiments/s3_benchmark.md), which
-used another host and larger objects. It may not represent these trace objects or
-this hardware. Runtime scheduling, buffer allocation, and permit waiting add latency
-beyond the formula.
+The calibration uses medians from 761 warmed full-object GETs with 48 workers on
+an m8azn.metal-12xl in us-east-1a: 108.599-ms time to first byte and 80.205 MiB/s
+payload throughput after the first byte. Median object size was 110.110 MiB.
+The model extrapolates to smaller objects and different hardware. Runtime scheduling,
+buffer allocation, and permit waiting add latency beyond the formula.
 
 ### Model limitations
 

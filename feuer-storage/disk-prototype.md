@@ -68,6 +68,10 @@ chunks detached for flushing may miss until disk publication. Otherwise it reads
 object's XXHash64 checksum, or shares a read still held by another caller. Results omit
 alignment padding.
 Reads load neither metadata nor neighboring entries.
+Cached payload reads acquire one of 64 shared permits before allocating their buffers
+and hold it through reading and verification. Limiting individual I/O pieces alone
+would leave whole-read buffer counts unlimited. Active read buffers remain outside
+the cache-entry memory charge.
 A read copies the address and expected checksum under the object-index lock, then reads into an
 owned memory buffer. Concurrent disk overwrite is allowed: checksum validation happens after I/O
 and before using the bytes, subject to checksum collisions. A checksum mismatch

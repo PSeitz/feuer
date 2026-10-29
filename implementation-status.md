@@ -73,9 +73,8 @@ layout, scheduling, and accounting details.
 
 Portable tests cover types, history, memory, configuration, and tier orchestration.
 Storage execution requires Linux with direct I/O and io_uring. Use the repository's
-[SSD testing instructions](experiments/storage/timed-replay.md) for real-device
-validation. Test results and historical measurements live under [experiments](experiments/README.md).
-Older reports describe the implementation tested at that time.
+[SSD testing instructions](timed-replay.md) for real-device validation and the
+[recovery benchmark](feuer-storage/recovery-benchmark.md) for repeated-open measurements.
 
 Remaining evaluation includes crash and power-loss recovery testing, target-scale
 metadata and fragmentation measurements, contention and tail-latency analysis,

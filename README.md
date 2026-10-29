@@ -20,8 +20,7 @@ Each layer uses its model to assign retention scores, then evicts the lowest-sco
 ### SSD I/O and buffer reuse
 
 Disk storage uses Linux `io_uring` for asynchronous I/O and direct I/O to bypass
-the kernel page cache. [SSD experiments](experiments/README.md) guide queue sizing
-and payload packing.
+the kernel page cache.
 
 - Aligned buffer reuse. Downloads can use the disk-read buffer pool. Fill a buffer
   and hand it to the cache without copying its payload.
@@ -171,7 +170,8 @@ cargo test -p feuer -p feuer-memory -p feuer-historian -p feuer-types
 
 For internals, see the [architecture](architecture.html), [I/O queues](queues.html),
 [disk format](format.md), and [implementation status](implementation-status.md).
-[Experiments](experiments/README.md) record historical configurations and results.
+See [timed SSD replay](timed-replay.md) and the
+[recovery benchmark](feuer-storage/recovery-benchmark.md) for performance validation.
 
 ## License
 

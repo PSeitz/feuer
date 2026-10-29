@@ -41,12 +41,14 @@ use crate::{IoMetrics, IoOperation};
 // Opening verifies that the filesystem's direct-I/O requirements divide it.
 pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = feuer_memory::BUFFER_ALIGNMENT;
 // Maximum bytes transferred per I/O request, including alignment padding.
+// Short paced-read comparisons favored 1 MiB over whole-read submissions for
+// small/medium-read tail latency. They did not establish an optimal size.
 pub(crate) const MAX_IO_REQUEST_BYTES: usize = 1024 * 1024;
 // Each direction has its own active-request limit and an equally sized waiting channel.
 const MAX_IN_FLIGHT_READS: usize = 64;
-// Local-SSD benchmarks saturated 1-MiB writes at QD8. QD64 added no write-only
-// throughput, but raised write p99 from 4.6 to 47 ms and worsened small-read latency.
-// See experiments/ssd/uring-20260928/REPORT.md.
+// Local-NVMe O_DIRECT tests saturated 1-MiB writes near 1.83 GB/s at QD8.
+// QD64 left throughput unchanged and raised write p99 from 4.6 to 47 ms.
+// These are medians of three runs.
 const MAX_IN_FLIGHT_WRITES: usize = 8;
 
 #[cfg(test)]

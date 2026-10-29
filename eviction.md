@@ -93,12 +93,14 @@ scorers identify the tier without adding a tier argument to the scoring contract
 
 See [environment variables](README.md#environment-variables) for tuning settings.
 
-## Experiments
+## Lessons from historical comparisons
 
-- [Tier retrieval model](experiments/cache/tier-retrieval-cost-20261011/README.md):
-  residency-aware memory scoring, without changing disk victim scoring.
-- [Historical linear tier costs](experiments/cache/tier-linear-cost-20261012/README.md):
-  coefficient derivation and full-object comparisons. These are not defaults.
-- [Scorer consolidation](experiments/cache/cost-scorer-20261012/README.md) and
-  [corrected-scheduler retest](experiments/cache/cost-scorer-retest-20261012T1324/README.md):
-  comparisons with matched coefficients.
+Residency-aware memory scoring traded source work for disk reads. One 600-second
+pair reduced source payload by 0.277 GB while increasing SSD reads by 1.229 GB.
+It established no total-cost improvement. Matched-coefficient scorer consolidation
+preserved scoring arithmetic, while corrected-scheduler comparisons established
+no performance improvement. These runs exercised no disk eviction.
+
+Historical linear coefficients combined median SSD latency with median S3 transfer
+measurements from different workloads. They were approximations rather than
+measured mean retrieval costs or production defaults.
