@@ -24,6 +24,9 @@ mixtrics = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 
+# i'm in favour of a feature flag instead of this being target dependent (the flag can be target dependent in pomsky)
+# that's in particular because feuer-storage is out of scope for this round of review, so i'd rather it be trully
+# disabled, and not just compiled in and maybe unused
 [target.'cfg(target_os = "linux")'.dependencies]
 feuer-storage = { path = "../feuer-storage" }
 

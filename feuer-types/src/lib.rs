@@ -2,6 +2,7 @@
 //!
 //! Memory and disk exchange hashed object identities.
 
+// why hidden? also maybe this should be feuer-utils more than types (only one type for 2 utils functions)
 #[doc(hidden)]
 pub mod config;
 
@@ -10,6 +11,7 @@ pub mod config;
 /// Cache lookups hash UTF-8 keys before passing them to the memory and disk tiers.
 /// Those tiers store only hashes and treat colliding keys as the same object.
 /// Keys must be non-adversarial.
+// TODO make sure ^this warning is also repeated at higher level
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObjectKeyHash(pub u128);
 

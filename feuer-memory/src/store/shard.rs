@@ -17,6 +17,7 @@ struct MemoryEntry {
 }
 
 /// Whether an insertion attempt inserted the object, found its key, or evicted an entry.
+// should probably enphasis that Evicted means something was evicted, but nothing was inserted
 pub(super) enum InsertResult {
     Inserted,
     AlreadyPresent,
@@ -131,6 +132,7 @@ impl MemoryCacheShard {
             return false;
         };
         self.eviction_candidates.swap_remove(removed_entry.candidate_index);
+        // on none this should probably say something, that's a broken invariant
         if let Some(key) = self.eviction_candidates.get(removed_entry.candidate_index) {
             self.entries_by_key.get_mut(key).unwrap().candidate_index = removed_entry.candidate_index;
         }

@@ -17,6 +17,7 @@ benchmark = []
 
 [dependencies]
 bytes = { workspace = true }
+# workspace
 bytesize = "2.7"
 feuer-historian = { workspace = true }
 feuer-types = { workspace = true }

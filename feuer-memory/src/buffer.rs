@@ -17,6 +17,7 @@ use parking_lot::Mutex;
 use crate::MemoryMetrics;
 
 /// Alignment of buffers used for direct disk I/O.
+// that's correct for most recent ssds, some ssds and most hdd want 512, ideally this would be read from fs metadata, with a convenient default when not using direct-io (so when not using disk buffer)
 pub const BUFFER_ALIGNMENT: usize = 4096;
 /// Largest fixed capacity in the buffer pool.
 const MAX_FIXED_BUFFER_BYTES: usize = 64 * 1024 * 1024;
@@ -44,6 +45,7 @@ pub(crate) fn bucket_index(length: usize) -> usize {
 }
 
 /// Default maximum share of memory capacity occupied by idle buffers across all buckets.
+// note, this is in percent of total capacity, not of current usage
 pub(crate) const DEFAULT_IDLE_BUFFER_POOL_PERCENT: u64 = 7;
 
 /// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT`, defaulting to 7 when unset. It must be between 0 and 100.
@@ -68,6 +70,7 @@ pub struct BufferPool {
 /// Cached-byte accounting and idle buffers, updated under one lock.
 #[derive(Default)]
 struct CachedBytesAndIdleBuffers {
+    // i would expect this to increase when AlignedBuffer::allocate_zeroed is called. What does this actually represent?
     entry_bytes: u64,
     idle_bytes: u64,
     idle_buffers: [Vec<AlignedBuffer>; BUCKET_COUNT],
@@ -105,6 +108,7 @@ impl BufferPool {
     /// Reused bytes are initialized, but must be overwritten before returning a read result.
     pub fn allocate(self: &Arc<Self>, length: usize) -> io::Result<AlignedBuffer> {
         let index = bucket_index(length);
+        // call allocation_capacity()
         let capacity = BUFFER_SIZES.get(index).copied().unwrap_or(length);
         let idle_buffer = self.take_idle_buffer(&mut self.state.lock(), index);
         let mut buffer = match idle_buffer {
@@ -193,11 +197,13 @@ pub struct AlignedBuffer {
 impl AlignedBuffer {
     /// Allocates zeroed memory that is freed on release (used for write scratch).
     pub fn allocate_zeroed(length: usize) -> io::Result<Self> {
+        // NonZeroUsize?
         assert!(length > 0);
         let layout = Self::layout(length)?;
         #[cfg(target_os = "linux")]
         if length > MAX_FIXED_BUFFER_BYTES {
             // SAFETY: length is nonzero and valid. Anonymous private pages are initialized to zero.
+            // good candidate for huge pages
             let ptr = unsafe {
                 libc::mmap(
                     std::ptr::null_mut(),
@@ -240,10 +246,14 @@ impl AlignedBuffer {
         }
         let layout = Self::layout(capacity)?;
         #[cfg(target_os = "linux")]
+        // in a vacuum, this should check length > MAX_FIXED_BUFFER_BYTES so we don't call mremap on a buffer obtained by the global allocator
+        // i think right now it's okay because resize_for_reuse on small allocation must be with allocations of the same class, but it's not marked unsafe, and deviating from that would be immediate UB without changing an unsafe code, and that requirement is not documented
         let ptr = {
             // SAFETY: this buffer owns an anonymous mapping. Both sizes are nonzero and valid.
+            // nonzero isn't necessarily true: if old_capacity = 1 and capacity = 0 we can reach in here. can't happen with current code, but that's a safety pre-condition to a safe function
             let ptr = unsafe { libc::mremap(self.ptr.as_ptr().cast(), old_capacity, capacity, libc::MREMAP_MAYMOVE) };
             if ptr == libc::MAP_FAILED {
+                // munmap called by Drop here, which is correct
                 return Err(io::Error::last_os_error());
             }
             let ptr = NonNull::<u8>::new(ptr.cast()).expect("mremap returned a null address");
@@ -290,6 +300,7 @@ impl AlignedBuffer {
     }
 
     /// Exclusively accesses the requested bytes, never spare capacity.
+    // could be as_mut given we have as_ref already
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: this initialized allocation is exclusively owned by self.
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.length) }

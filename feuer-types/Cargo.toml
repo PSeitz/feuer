@@ -13,6 +13,7 @@ readme.workspace = true
 exclude.workspace = true
 
 [dependencies]
+# maintenance: i'm in favour of workspace deps
 bytesize = "2.7"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 

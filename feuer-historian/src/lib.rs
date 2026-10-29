@@ -17,8 +17,10 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 const ACCESS_HISTORY_SHARDS: usize = 64;
 
 /// Request history shared by both cache tiers, independent of their shards and entries.
+//                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this contains shards, i'm not sure what independent of shard is supposed to mean
 /// Object keys select one of 64 independently locked history maps. The request clock remains global.
 /// Each key's counter lasts for the history's lifetime, including after cache eviction.
+// does that mean unbounded memory usage if a process never restart and the workload is slowly shifting (which is the case in quickwit)
 /// A restart begins with empty history.
 pub struct ObjectAccessHistories {
     shards: [Mutex<FxHashMap<ObjectKeyHash, DecayedAccessCount>>; ACCESS_HISTORY_SHARDS],
@@ -43,6 +45,7 @@ impl ObjectAccessHistories {
     /// # Panics
     ///
     /// Panics if the half-life is zero.
+    //  might be a good candidate for NonZeroU64 then
     pub fn with_half_life(half_life: u64) -> Self {
         assert!(half_life > 0, "access count half-life must be greater than zero");
         Self {
@@ -84,6 +87,7 @@ impl ObjectAccessHistories {
         let histories = self.shard(key).lock().unwrap();
         histories
             .get(key)
+            // nit: map_or is forbidden in quickwit, we might not want it here
             .map_or(0.0, |count| count.decayed_count(self.request_count(), self.half_life))
     }
 
@@ -92,6 +96,7 @@ impl ObjectAccessHistories {
     }
 }
 
+// should be top of file
 /// Default half-life of access counts, in requests across all keys.
 pub const DEFAULT_ACCESS_COUNT_HALF_LIFE: u64 = 262_144;
 
@@ -152,15 +157,18 @@ impl DecayedAccessCount {
         let requests_since_update = request_clock.saturating_sub(self.last_update_clock);
         let half_lives_elapsed = requests_since_update as f64 / half_life as f64;
 
-        if half_lives_elapsed >= 126.0 {
+        if half_lives_elapsed >= (f32::MAX_EXP - 2) as f32 {
             return 0.0; // Discard negligible counts rather than constructing subnormal floats.
         }
 
         // Approximate 2^(-half_lives_elapsed) through IEEE-754 bits: the exponent gives powers of two,
         // and the mantissa interpolates between them. Each decay is up to ~6.15% high.
         // Repeated updates can compound that error.
-        let exponent_bias = 127.0;
-        let mantissa_scale = (1u32 << 23) as f64;
+        // kinda looks like Schraudolph's exponentiation trick, but without the magical const to minimize error²
+        // see doi 10.1162/089976699300016467. Might be worth centering the error so it doesn't compound?
+        // i'm not entirely convinced the tens of cycle we might gain through this trick are really worth this code
+        let exponent_bias = (f32::MAX_EXP - 1) as f32;
+        let mantissa_scale = (1u32 << (f32::MANTISSA_DIGITS-1)) as f64;
         let float_bits = ((exponent_bias - half_lives_elapsed) * mantissa_scale) as u32;
         self.count * f32::from_bits(float_bits) as f64
     }

@@ -27,6 +27,7 @@ pub trait RetentionScorer: Send + Sync {
 ///
 /// The object's decayed request count multiplies
 /// `max(cost_per_request + payload_len * cost_per_requested_byte, 0)`.
+// do negative values make sense for cost multiplier? if not, the max(0) doesn't either imo
 /// A zero entry size uses a one-byte denominator.
 /// Costs must use one consistent unit, such as equivalent bytes, I/O time, or CPU time.
 /// Coefficients must be finite and keep scores finite over the application's sizes and demand.
@@ -106,6 +107,7 @@ pub fn decayed_avoided_retrieval_cost(
     cost_per_request: f64,
     cost_per_requested_byte: f64,
 ) -> f64 {
+    // these are not homogeneous: todo check this conform to intuition (something that cost 2x but is used half as much has rougly the same cost)
     histories.decayed_request_count(key) * (cost_per_request + payload_len as f64 * cost_per_requested_byte).max(0.0)
 }
 

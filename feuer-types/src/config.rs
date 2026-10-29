@@ -74,6 +74,8 @@ mod tests {
     }
 
     #[test]
+    // this test is blocking: i'd be in favour of std::env::set_var to simplify it
+    // it's unsafe, but should be sound, and it's a test, the unsoundness of set_var doesn't scare me in tests
     fn reads_environment_without_mutating_other_tests() {
         const NAME: &str = "FEUER_TEST_CONFIG_NUMBER";
         const CHILD: &str = "FEUER_TEST_CONFIG_NUMBER_CHILD";
