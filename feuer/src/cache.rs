@@ -197,6 +197,11 @@ impl Cache {
         self
     }
 
+    async fn trace_request_start(&self, object_key: ObjectKeyHash) -> Option<u64> {
+        let access_trace = self.access_trace.as_ref()?;
+        Some(access_trace.send_request_start(object_key).await)
+    }
+
     /// Returns this cache's configuration.
     pub fn config(&self) -> &CacheConfig {
         &self.inner.config
@@ -215,16 +220,15 @@ impl Cache {
     pub async fn get(&self, object_key: ObjectKey) -> Option<Bytes> {
         let object_key = ObjectKeyHash::from(object_key);
         self.inner.memory.access_histories().record_access(&object_key);
-        let event_bytes = match &self.access_trace {
-            Some(access_trace) => Some(access_trace.send_request_start(object_key).await),
-            None => None,
-        };
+        let request_id = self.trace_request_start(object_key).await;
         let started = Instant::now();
         let (outcome, bytes) = self.lookup_cached(object_key, || false).await;
         let payload_length = bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
         self.inner.metrics.record(outcome, started.elapsed(), payload_length);
-        if let (Some(access_trace), Some(event_bytes)) = (&self.access_trace, event_bytes) {
-            access_trace.send_outcome(event_bytes, outcome, payload_length).await;
+        if let (Some(access_trace), Some(request_id)) = (&self.access_trace, request_id) {
+            access_trace
+                .send_outcome(request_id, object_key, outcome, payload_length)
+                .await;
         }
         bytes
     }
@@ -307,10 +311,7 @@ impl Cache {
         Fut: Future<Output = Result<BytesAndMemoryCharge, E>>,
     {
         self.inner.memory.access_histories().record_access(&object_key);
-        let event_bytes = match &self.access_trace {
-            Some(access_trace) => Some(access_trace.send_request_start(object_key).await),
-            None => None,
-        };
+        let request_id = self.trace_request_start(object_key).await;
         let started = Instant::now();
         let (outcome, result) = if let Some(bytes) = self.inner.memory.get(&object_key) {
             (LookupOutcome::MemoryHit, Ok(bytes))
@@ -326,8 +327,10 @@ impl Cache {
         };
         let payload_length = result.as_ref().map_or(0, |bytes| bytes.len() as u64);
         self.inner.metrics.record(outcome, started.elapsed(), payload_length);
-        if let (Some(access_trace), Some(event_bytes)) = (&self.access_trace, event_bytes) {
-            access_trace.send_outcome(event_bytes, outcome, payload_length).await;
+        if let (Some(access_trace), Some(request_id)) = (&self.access_trace, request_id) {
+            access_trace
+                .send_outcome(request_id, object_key, outcome, payload_length)
+                .await;
         }
         result
     }

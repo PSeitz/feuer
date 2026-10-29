@@ -33,7 +33,7 @@ impl AccessTrace {
         F: FnMut(Bytes) -> Fut + Send + 'static,
         Fut: Future<Output = io::Result<()>> + Send + 'static,
     {
-        let (event_sender, mut event_receiver) = mpsc::channel::<[u8; EVENT_BYTES]>(65_536);
+        let (event_sender, mut event_receiver) = mpsc::channel::<[u8; EVENT_BYTES]>(262_144);
         tokio::spawn(async move {
             let mut package = new_package();
             while let Some(event_bytes) = event_receiver.recv().await {
@@ -54,8 +54,8 @@ impl AccessTrace {
         }
     }
 
-    /// Send the request-start event to the access-trace queue and return its bytes for the outcome.
-    pub(crate) async fn send_request_start(&self, object_key_hash: ObjectKeyHash) -> [u8; EVENT_BYTES] {
+    /// Send the request-start event to the access-trace queue and return its request ID.
+    pub(crate) async fn send_request_start(&self, object_key_hash: ObjectKeyHash) -> u64 {
         let mut event_bytes = [0; EVENT_BYTES];
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let elapsed_ns = self.started_at.elapsed().as_nanos() as u64;
@@ -63,19 +63,23 @@ impl AccessTrace {
         event_bytes[9..17].copy_from_slice(&elapsed_ns.to_le_bytes());
         event_bytes[17..33].copy_from_slice(&object_key_hash.0.to_le_bytes());
         let _ = self.event_sender.send(event_bytes).await;
-        event_bytes
+        request_id
     }
 
     /// Send the lookup outcome, completion time, and payload length to the access-trace queue.
     /// Successful lookups supply the payload length. Empty objects, misses, and errors supply zero.
     pub(crate) async fn send_outcome(
         &self,
-        mut event_bytes: [u8; EVENT_BYTES],
+        request_id: u64,
+        object_key_hash: ObjectKeyHash,
         outcome: LookupOutcome,
         payload_length: u64,
     ) {
+        let mut event_bytes = [0; EVENT_BYTES];
         event_bytes[0] = outcome as u8 + 1;
+        event_bytes[1..9].copy_from_slice(&request_id.to_le_bytes());
         event_bytes[9..17].copy_from_slice(&(self.started_at.elapsed().as_nanos() as u64).to_le_bytes());
+        event_bytes[17..33].copy_from_slice(&object_key_hash.0.to_le_bytes());
         event_bytes[33..41].copy_from_slice(&payload_length.to_le_bytes());
         let _ = self.event_sender.send(event_bytes).await;
     }
@@ -109,8 +113,8 @@ mod tests {
             (LookupOutcome::Miss, 0, 5),
         ];
         for (outcome, length, _) in cases {
-            let event_bytes = access_trace.send_request_start(key).await;
-            access_trace.send_outcome(event_bytes, outcome, length).await;
+            let request_id = access_trace.send_request_start(key).await;
+            access_trace.send_outcome(request_id, key, outcome, length).await;
         }
         drop(access_trace);
         let package = receiver.recv().await.unwrap();
