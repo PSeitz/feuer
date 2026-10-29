@@ -414,12 +414,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_exact_unaligned_ranges_after_aligned_writes() {
+    async fn reads_exact_aligned_and_unaligned_ranges_after_aligned_writes() {
         let temp = tempdir().unwrap();
         let directory = temp.path().join("cache/inner");
         let file = DataFile::open(&directory, CAPACITY, IoMetrics::noop()).await.unwrap();
-        let original = Bytes::from(vec![0x55; CAPACITY as usize]);
+        let original = Bytes::from(
+            (0..CAPACITY)
+                .map(|offset| 0x55 + (offset / CHUNK_BYTES) as u8)
+                .collect::<Vec<_>>(),
+        );
         file.write_at(0, &original).await.unwrap();
+        assert_eq!(
+            file.read_at(0, CHUNK_BYTES as usize).await.unwrap(),
+            original.slice(..CHUNK_BYTES as usize)
+        );
         let mut page = vec![0x55; 4096];
         page[3..31].copy_from_slice(b"unaligned positional payload");
         file.write_at(0, &Bytes::from(page)).await.unwrap();
@@ -467,22 +475,6 @@ mod tests {
         let (bytes, capacity) = file.read_payload(0, 70 * mib).await.unwrap();
         assert_eq!(bytes.len(), 70 * mib);
         assert_eq!(capacity, 76 * mib);
-    }
-
-    #[tokio::test]
-    async fn recovery_reads_one_metadata_chunk_without_neighbors() {
-        let temp = tempdir().unwrap();
-        let file = DataFile::open(temp.path(), 2 * CHUNK_BYTES, IoMetrics::noop())
-            .await
-            .unwrap();
-        let metadata = Bytes::from(vec![0x55; CHUNK_BYTES as usize]);
-        file.write_at(0, &metadata).await.unwrap();
-        file.write_at(CHUNK_BYTES, &Bytes::from(vec![0x99; CHUNK_BYTES as usize]))
-            .await
-            .unwrap();
-        let recovered = file.read_at(0, CHUNK_BYTES as usize).await.unwrap();
-        assert_eq!(recovered.len(), metadata.len());
-        assert_eq!(recovered, metadata);
     }
 
     #[tokio::test]
@@ -657,7 +649,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn canceled_callers_do_not_release_submitted_buffers_or_lock_early() {
+    async fn shutdown_and_reuse_after_aborting_write_callers() {
         let temp = tempdir().unwrap();
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
         let mut tasks = Vec::new();
@@ -667,6 +659,8 @@ mod tests {
                 file.write_at(i * 4096, &Bytes::from(vec![0xab; 4096])).await
             }));
         }
+        // Stress cancellation across scheduler-dependent request states.
+        // Queue-level tests control submission and completion timing.
         tokio::task::yield_now().await;
         for task in &tasks {
             task.abort();

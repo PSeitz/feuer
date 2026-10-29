@@ -41,7 +41,17 @@ async fn metadata_chains_start_at_each_shards_first_chunk_without_a_sidecar() {
 #[tokio::test]
 async fn recovers_separate_metadata_and_contiguous_multi_chunk_payloads() {
     let (directory, cache) = open_test_cache(12 * CHUNK_BYTES).await;
-    let lengths = [0, 1, 4096, 4097, CHUNK_BYTES as usize, 3 * CHUNK_BYTES as usize + 7];
+    let lengths = [
+        0,
+        1,
+        6,
+        4096,
+        4097,
+        700 * 1024,
+        CHUNK_BYTES as usize,
+        2 * CHUNK_BYTES as usize,
+        3 * CHUNK_BYTES as usize + 7,
+    ];
     let entries = lengths
         .iter()
         .enumerate()
@@ -50,10 +60,12 @@ async fn recovers_separate_metadata_and_contiguous_multi_chunk_payloads() {
     assert_eq!(cache.insert_batch(entries).await.unwrap(), lengths.len());
     let cache = reopen(directory.path(), cache).await;
     for (i, length) in lengths.into_iter().enumerate() {
-        assert_eq!(
-            cache.get(&ObjectKeyHash(i as u128)).await.unwrap(),
-            download(u64::MAX - length as u64, length)
-        );
+        let (bytes, capacity) = cache
+            .get_with_fallthrough(&ObjectKeyHash(i as u128), || false)
+            .await
+            .unwrap();
+        assert_eq!(bytes, download(u64::MAX - length as u64, length));
+        assert!(capacity >= bytes.len());
         cache.disk.shards[0].remove_entry(&ObjectKeyHash(i as u128));
     }
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 12 * CHUNK_BYTES);

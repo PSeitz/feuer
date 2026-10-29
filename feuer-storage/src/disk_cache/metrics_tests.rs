@@ -262,11 +262,13 @@ async fn io_errors_preserve_entries() {
 
     let key = ObjectKeyHash::from("unreadable");
     cache.insert_batch(vec![(key, download(4))]).await.unwrap();
+    let (payload, _) = tests::entry_disk_ranges(&cache, &key).await;
+    // Leave only part of the payload readable so the lookup encounters a partial read.
     std::fs::OpenOptions::new()
         .write(true)
         .open(directory.path().join("data"))
         .unwrap()
-        .set_len(0)
+        .set_len(payload.start + 2)
         .unwrap();
     assert!(cache.get(&key).await.is_none());
     assert_eq!(

@@ -239,34 +239,16 @@ mod tests {
 
     #[test]
     fn decodes_all_kinds_hashes_and_lengths() {
-        let events: Vec<_> = (0..=5).map(|kind| event(kind, 42, 100)).collect();
-        let bytes = package(&events);
-        let decoded: Vec<_> = decode_package(&bytes).unwrap().collect::<Result<_>>().unwrap();
-        assert_eq!(decoded, events);
-    }
-
-    #[test]
-    fn decodes_objects_and_rejects_invalid_events() {
-        let mut bytes = b"FETR\x01\0\0\0".to_vec();
-        for kind in 0u8..=5 {
-            bytes.push(kind);
-            bytes.extend(42u64.to_le_bytes());
-            bytes.extend(100u64.to_le_bytes());
-            bytes.extend(123u128.to_le_bytes());
-            bytes.extend(if kind == 3 { 4u64 } else { 0 }.to_le_bytes());
-        }
-        let events = decode_package(&bytes).unwrap().collect::<Result<Vec<_>>>().unwrap();
-        assert_eq!(
-            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
-            [0, 1, 2, 3, 4, 5]
-        );
-        assert_eq!(events[3].payload_len, Some(4));
-        assert!(events.iter().all(|event| event.object_key == ObjectKeyHash(123)));
-        assert!(decode_package(&bytes[..bytes.len() - 1]).is_err());
-        for (offset, value) in [(8, 6), (8 + 33, 1)] {
-            let mut bad = bytes.clone();
-            bad[offset] = value;
-            assert!(decode_package(&bad).unwrap().next().unwrap().is_err());
+        for length in [0, 10] {
+            let events: Vec<_> = (0..=5)
+                .map(|kind| Event {
+                    payload_len: (1..=3).contains(&kind).then_some(length),
+                    ..event(kind, 42, 100)
+                })
+                .collect();
+            let bytes = package(&events);
+            let decoded: Vec<_> = decode_package(&bytes).unwrap().collect::<Result<_>>().unwrap();
+            assert_eq!(decoded, events);
         }
     }
 

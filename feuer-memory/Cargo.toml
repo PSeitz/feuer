@@ -28,6 +28,7 @@ rustc-hash = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
 mixtrics = { workspace = true, features = ["prometheus"] }
 prometheus = { workspace = true }
 

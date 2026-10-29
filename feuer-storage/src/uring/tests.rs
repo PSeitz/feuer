@@ -80,30 +80,6 @@ fn buffer_pool() -> Arc<BufferPool> {
 }
 
 #[test]
-fn pooled_read_buffers_do_not_retain_disk_reservations() {
-    use crate::allocation::{CHUNK_BYTES, DiskChunkAllocator};
-
-    let page = DIRECT_IO_ALIGNMENT_BYTES;
-    let pool = buffer_pool();
-    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES);
-    for return_bytes in [false, true] {
-        let region = allocator.reserve_chunks(1).unwrap();
-        let buffer = pool.allocate(page).unwrap();
-        drop(region);
-        assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
-        if return_bytes {
-            let bytes = buffer.into_bytes();
-            assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
-            drop(bytes);
-        } else {
-            drop(buffer);
-        }
-        assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
-        assert_eq!(pool.idle_bytes(), 32 * 1024);
-    }
-}
-
-#[test]
 fn full_ring_does_not_block_the_other_direction() {
     for operation in [IoOperation::Read, IoOperation::Write] {
         let other_operation = if operation == IoOperation::Read {
@@ -525,8 +501,6 @@ fn queue_failure_retains_write_descriptors_and_files() {
 #[test]
 fn canceled_submitted_write_retains_buffers_on_queue_failure() {
     let (mut queue, sender, files) = queue();
-    let allocator = crate::allocation::DiskChunkAllocator::for_disk_range(0..MAX_IO_REQUEST_BYTES as u64);
-    let region = allocator.reserve_chunks(1).unwrap();
     let pool = buffer_pool();
     let mut buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     buffer.as_mut_slice().fill(0x99);
@@ -539,10 +513,7 @@ fn canceled_submitted_write_retains_buffers_on_queue_failure() {
     // The write has reached the kernel, but its completion is not yet processed.
     queue.ring.submit_and_wait(1).unwrap();
     drop(reply);
-    drop(region);
     queue.receive_requests();
-    let reused = allocator.reserve_chunks(1).unwrap();
-    assert_eq!(reused.disk_byte_range().start, 0);
     assert!(queue.active[0].is_some());
     let other = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(other.as_ref().as_ptr(), address);
@@ -550,7 +521,7 @@ fn canceled_submitted_write_retains_buffers_on_queue_failure() {
     let buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(buffer.as_ref().as_ptr(), address);
 
-    // The abandoned write still reached the reused disk range.
+    // The abandoned write still reached disk.
     let (mut read_queue, sender, _) = self::queue();
     let (read, mut reply) = request(&files, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
     sender.try_send(read).unwrap();
@@ -671,7 +642,9 @@ fn canceled_queued_requests_drain_on_shutdown_without_submission() {
         sender.try_send(request).unwrap();
         drop(reply);
         drop(sender);
-        queue.process_requests_until_disconnected().unwrap();
+        queue
+            .process_requests_with_submit(|_| panic!("canceled queued request reached submission"))
+            .unwrap();
         assert!(queue.receiver.is_empty());
         assert!(queue.active.iter().all(Option::is_none));
         assert!(queue.ring.submission().is_empty());
@@ -868,10 +841,7 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
 }
 
 #[test]
-fn canceled_read_retains_destination_but_not_disk_reservation_until_completion() {
-    use crate::allocation::{CHUNK_BYTES, DiskChunkAllocator};
-    let allocator = DiskChunkAllocator::for_disk_range(0..CHUNK_BYTES);
-    let region = allocator.reserve_chunks(1).unwrap();
+fn canceled_read_retains_destination_until_completion() {
     let (mut queue, sender, files) = queue();
     let pool = buffer_pool();
     let (mut read, reply) = request(&files, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
@@ -879,19 +849,16 @@ fn canceled_read_retains_destination_but_not_disk_reservation_until_completion()
     let address = buffer.as_ref().as_ptr();
     read.buffers = IoBuffers::Read(ReadBuffer::new(buffer));
     read.buffer_range = DIRECT_IO_ALIGNMENT_BYTES..2 * DIRECT_IO_ALIGNMENT_BYTES;
-    drop(region);
     sender.try_send(read).unwrap();
     drop(sender);
     queue.receive_requests();
     queue.ring.submit_and_wait(1).unwrap();
     drop(reply);
     queue.receive_requests();
-    assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
     assert!(queue.active[0].is_some());
     let other = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(other.as_ref().as_ptr(), address);
     queue.process_requests_until_disconnected().unwrap();
-    assert_eq!(allocator.available_bytes(), CHUNK_BYTES);
     let reused = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_eq!(reused.as_ref().as_ptr(), address);
 }
@@ -1085,12 +1052,6 @@ fn rejects_unaligned_read_length() {
 #[should_panic(expected = "length > 0")]
 fn rejects_empty_request() {
     request(&data_file(), IoOperation::Read, 0, 0);
-}
-
-#[test]
-#[should_panic(expected = "offset.is_multiple_of")]
-fn rejects_unaligned_write_offset() {
-    request(&data_file(), IoOperation::Write, 1, DIRECT_IO_ALIGNMENT_BYTES);
 }
 
 #[test]

@@ -1,38 +1,35 @@
 use super::*;
+use proptest::prelude::*;
 
-#[test]
-fn score_combines_costs_per_request_and_payload_byte() {
-    let histories = ObjectAccessHistories::new();
-    let key = ObjectKeyHash::from("object");
-    histories.record_access(&key);
-    assert_eq!(AvoidedRetrievalCostScorer::default().cost_per_request, 0.0);
-    assert_eq!(AvoidedRetrievalCostScorer::default().cost_per_requested_byte, 1.0);
-    for (cost_per_request, cost_per_requested_byte) in [(0.0, 1.0), (256_000.0, 1.0), (2.0, 0.5), (4.0, 0.0)] {
+proptest! {
+    #[test]
+    fn scores_match_avoided_cost_per_charged_byte(
+        payload_len in any::<u64>(),
+        entry_size in any::<u64>(),
+        fixed_cost in -1_000_000i32..=1_000_000,
+        byte_cost in -16i32..=16,
+        requests in 0i32..8,
+    ) {
+        let histories = ObjectAccessHistories::with_half_life(1);
+        let key = ObjectKeyHash::from("object");
+        for _ in 0..requests {
+            histories.record_access(&key);
+        }
+        // One half-life between requests makes this geometric sum exact.
+        let demand = 2.0 - 2.0_f64.powi(1 - requests);
         let scorer = AvoidedRetrievalCostScorer {
-            cost_per_request,
-            cost_per_requested_byte,
+            cost_per_request: fixed_cost as f64 / 8.0,
+            cost_per_requested_byte: byte_cost as f64 / 8.0,
         };
-        assert_eq!(
-            scorer.score(&key, 4, 8, &histories),
-            (cost_per_request + 4.0 * cost_per_requested_byte) / 8.0
-        );
-        assert_eq!(scorer.score(&ObjectKeyHash::from("unknown"), 4, 8, &histories), 0.0);
+        for (payload_len, entry_size) in [(0, 0), (u64::MAX, u64::MAX), (payload_len, entry_size)] {
+            let savings = (scorer.cost_per_request + payload_len as f64 * scorer.cost_per_requested_byte).max(0.0);
+            prop_assert_eq!(
+                scorer.score(&key, payload_len, entry_size, &histories),
+                demand * savings / entry_size.max(1) as f64
+            );
+            prop_assert_eq!(scorer.score(&ObjectKeyHash::from("unknown"), payload_len, entry_size, &histories), 0.0);
+        }
     }
-}
-
-#[test]
-fn negative_savings_are_clamped_to_zero() {
-    let histories = ObjectAccessHistories::new();
-    let key = ObjectKeyHash::from("object");
-    histories.record_access(&key);
-    histories.record_access(&key);
-    let scorer = AvoidedRetrievalCostScorer {
-        cost_per_request: 4.0,
-        cost_per_requested_byte: -1.0,
-    };
-    let demand = histories.decayed_request_count(&key);
-    assert_eq!(scorer.score(&key, 1, 10, &histories), demand * 3.0 / 10.0);
-    assert_eq!(scorer.score(&key, 10, 10, &histories), 0.0);
 }
 
 #[test]
@@ -51,33 +48,13 @@ fn samples_at_most_64_candidates() {
 }
 
 #[test]
-fn scores_use_payload_length_and_handle_empty_objects() {
-    let histories = ObjectAccessHistories::new();
-    let key = ObjectKeyHash::from("object");
-    let scorer = AvoidedRetrievalCostScorer::default();
-    assert_eq!(scorer.score(&key, 0, 0, &histories), 0.0);
-    histories.record_access(&key);
-    for cost_per_request in [0, 10_000_000] {
-        let scorer = AvoidedRetrievalCostScorer {
-            cost_per_request: cost_per_request as f64,
-            ..Default::default()
-        };
-        for payload_len in [0, 100, u64::MAX] {
-            let cost = cost_per_request as f64 + payload_len as f64;
-            assert_eq!(
-                scorer.score(&key, payload_len, payload_len, &histories),
-                cost / payload_len.max(1) as f64
-            );
-        }
-    }
-}
-
-#[test]
 fn scores_follow_decayed_object_demand() {
     let histories = ObjectAccessHistories::with_half_life(2);
     let key = ObjectKeyHash::from("object");
     histories.record_access(&key);
     let scorer = AvoidedRetrievalCostScorer::default();
+    assert_eq!(scorer.cost_per_request, 0.0);
+    assert_eq!(scorer.cost_per_requested_byte, 1.0);
     assert_eq!(scorer.score(&key, 10, 10, &histories), 1.0);
     for _ in 0..2 {
         histories.record_access(&ObjectKeyHash::from("other"));

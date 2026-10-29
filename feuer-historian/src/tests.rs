@@ -152,18 +152,27 @@ fn decayed_count_never_increases_and_relative_error_is_at_most_6_15_percent() {
 
 #[test]
 fn repeated_updates_compound_decay_error() {
-    let mut count = DecayedAccessCount::default();
-    let clocks = [1, 17, 4097, 9001, 20_000];
-    for clock in clocks {
-        count.add_request(clock, DEFAULT_ACCESS_COUNT_HALF_LIFE);
+    for half_life in [2, 4, DEFAULT_ACCESS_COUNT_HALF_LIFE] {
+        let mut count = DecayedAccessCount::default();
+        let clocks = [
+            1,
+            1 + half_life / 2,
+            1 + 2 * half_life,
+            1 + 7 * half_life / 2,
+            1 + 6 * half_life,
+        ];
+        for clock in clocks {
+            count.add_request(clock, half_life);
+        }
+        let now = 1 + 7 * half_life;
+        let expected: f64 = clocks
+            .into_iter()
+            .map(|clock| (-((now - clock) as f64) / half_life as f64).exp2())
+            .sum();
+        let actual = count.decayed_count(now, half_life);
+        // Each event undergoes at most one decay per recorded access, including the final read.
+        let max_decay_steps = clocks.len() as i32;
+        assert!(actual >= expected * (1.0_f64 - 1e-7).powi(max_decay_steps));
+        assert!(actual <= expected * 1.0615_f64.powi(max_decay_steps));
     }
-    let expected: f64 = clocks
-        .into_iter()
-        .map(|clock| (-((30_000 - clock) as f64) / DEFAULT_ACCESS_COUNT_HALF_LIFE as f64).exp2())
-        .sum();
-    let actual = count.decayed_count(30_000, DEFAULT_ACCESS_COUNT_HALF_LIFE);
-    // Each event undergoes at most one decay per recorded access, including the final read.
-    let max_decay_steps = clocks.len() as i32;
-    assert!(actual >= expected * (1.0_f64 - 1e-7).powi(max_decay_steps));
-    assert!(actual <= expected * 1.0615_f64.powi(max_decay_steps));
 }

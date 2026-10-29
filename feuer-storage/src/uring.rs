@@ -110,6 +110,17 @@ impl IoQueues {
         self.payload_reads.hold_queued_reads()
     }
 
+    #[cfg(test)]
+    pub(crate) async fn hold_write_queue_capacity(&self) -> impl Sized + '_ {
+        self.write
+            .sender
+            .as_ref()
+            .unwrap()
+            .reserve_many(MAX_IN_FLIGHT_WRITES)
+            .await
+            .unwrap()
+    }
+
     pub(crate) fn write_queue(&self, files: Arc<DataFileAndLock>) -> WriteQueue {
         WriteQueue {
             handle: self.write.clone(),

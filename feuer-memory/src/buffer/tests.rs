@@ -162,11 +162,6 @@ fn large_buffers_are_resized_on_reuse() {
     );
     assert_eq!(pool.idle_bytes(), 0);
     assert_eq!((large("idle"), large("used")), (0.0, 0.0));
-
-    let scratch = AlignedBuffer::allocate_zeroed(BUFFER_ALIGNMENT).unwrap();
-    assert_eq!(scratch.capacity(), BUFFER_ALIGNMENT);
-    assert!(scratch.pool.is_none());
-    assert!(scratch.as_ref().iter().all(|byte| *byte == 0));
 }
 
 #[test]

@@ -340,6 +340,7 @@ dependencies = [
  "mixtrics",
  "parking_lot",
  "prometheus",
+ "proptest",
  "rustc-hash",
 ]
 

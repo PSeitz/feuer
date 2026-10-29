@@ -83,6 +83,11 @@ enum CacheChange {
         key: u128,
         next_chunk_number: u64,
     },
+    /// Requires admission and exact readback after reopening at the same capacity.
+    InsertAndRecoverMetadataPayload {
+        key: u128,
+        next_chunk_number: u64,
+    },
     Remove {
         entry_index: usize,
     },
@@ -219,43 +224,43 @@ proptest! {
     #[test]
     fn malformed_metadata_preserves_chunk_ownership(
         image in disk_image(),
-        capacity_chunks in capacity_chunks(),
         changes in cache_changes(false),
     ) {
-        check_disk_image(image, capacity_chunks, changes);
+        check_disk_image(image, changes);
     }
 
     #[test]
     fn payload_bytes_never_recover_as_metadata(
         capacity_chunks in capacity_chunks(),
-        changes in cache_changes(true),
+        key in 0..6u128,
+        next_chunk_number in chunk_number(),
+        mut changes in cache_changes(true),
     ) {
         let image = DiskImage { capacity_chunks, metadata_chunks: Vec::new() };
-        check_disk_image(image, capacity_chunks, changes);
+        // The fresh cache has room for this payload. Random churn follows its required recovery.
+        changes.insert(0, CacheChange::InsertAndRecoverMetadataPayload { key, next_chunk_number });
+        check_disk_image(image, changes);
     }
 }
 
 /// Checks an image before and after each generated cache change. Proptest shrinks assertion failures.
-fn check_disk_image(image: DiskImage, capacity_chunks: u64, changes: Vec<CacheChange>) {
+fn check_disk_image(image: DiskImage, changes: Vec<CacheChange>) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
-        tokio::time::timeout(
-            Duration::from_secs(120),
-            check_cache_changes(image, capacity_chunks, changes),
-        )
-        .await
-        .expect("cache I/O timed out");
+        tokio::time::timeout(Duration::from_secs(120), check_cache_changes(image, changes))
+            .await
+            .expect("cache I/O timed out");
     });
 }
 
-async fn check_cache_changes(image: DiskImage, capacity_chunks: u64, changes: Vec<CacheChange>) {
+async fn check_cache_changes(image: DiskImage, changes: Vec<CacheChange>) {
     let directory = tempfile::tempdir().unwrap();
     let directory = directory.path();
     write_image(directory, &image).await;
-    let mut cache = open_with_manual_metadata_writes(directory, capacity_chunks).await;
+    let mut cache = open_with_manual_metadata_writes(directory, image.capacity_chunks).await;
     check_cache(&cache).await;
     for change in changes {
         match change {
@@ -265,6 +270,18 @@ async fn check_cache_changes(image: DiskImage, capacity_chunks: u64, changes: Ve
             CacheChange::InsertPayloadWithMetadata { key, next_chunk_number } => {
                 let bytes = payload_with_metadata(next_chunk_number);
                 insert_and_check_bytes(&cache, ObjectKeyHash(key), bytes).await;
+            }
+            CacheChange::InsertAndRecoverMetadataPayload { key, next_chunk_number } => {
+                let key = ObjectKeyHash(key);
+                let bytes = payload_with_metadata(next_chunk_number);
+                assert!(cache.insert(key, bytes.clone()).await.unwrap());
+                assert_eq!(cache.get(&key).await, Some(bytes.clone()));
+                check_cache(&cache).await;
+                cache.write_dirty_metadata_pages().await;
+                let capacity_chunks = cache.disk.file.capacity() / CHUNK_BYTES;
+                drop(cache);
+                cache = open_with_manual_metadata_writes(directory, capacity_chunks).await;
+                assert_eq!(cache.get(&key).await, Some(bytes));
             }
             CacheChange::Remove { entry_index } => {
                 let mut entries = entry_lengths(&cache);

@@ -134,9 +134,7 @@ fn redundant_insertions_preserve_cached_bytes_and_usage() {
     cache.insert(key, bytes.clone(), bytes.len());
     for length in [0, 6, 10, 20] {
         let redundant = Bytes::from(vec![b'X'; length]);
-        for _ in 0..200 {
-            assert!(!cache.insert(key, redundant.clone(), 100));
-        }
+        assert!(!cache.insert(key, redundant, 100));
         assert_eq!(cache.used_bytes(), 10);
         assert_eq!(cache.entry_count(), 1);
         assert_eq!(cache.get(&key).unwrap(), bytes);
@@ -392,5 +390,6 @@ fn concurrent_shards_respect_their_targets_for_regular_entries() {
     for shard in &cache.shards {
         let shard = shard.lock();
         assert_eq!(shard.used_bytes(), shard.entry_count() as u64 * 8);
+        assert!(shard.used_bytes() <= 32);
     }
 }

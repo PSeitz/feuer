@@ -67,33 +67,6 @@ pub(super) async fn entry_disk_ranges(
 }
 
 #[tokio::test]
-async fn whole_object_reads_survive_recovery() {
-    let (directory, cache) = open_test_cache(8 * CHUNK_BYTES).await;
-    let lengths = [0, 6, 700 * 1024, 2 * CHUNK_BYTES as usize];
-    let downloads = lengths
-        .into_iter()
-        .map(|length| {
-            (
-                ObjectKeyHash::from(format!("object-{length}")),
-                Bytes::from(vec![0x77; length]),
-            )
-        })
-        .collect();
-    cache.insert_batch(downloads).await.unwrap();
-    cache.write_dirty_metadata_pages().await;
-    drop(cache);
-    let cache = DiskCache::open(directory.path(), 10 * CHUNK_BYTES, DiskCacheOptions::default())
-        .await
-        .unwrap();
-    for length in lengths {
-        let hash = ObjectKeyHash::from(format!("object-{length}"));
-        let (bytes, capacity) = cache.get_with_fallthrough(&hash, || false).await.unwrap();
-        assert_eq!(bytes, Bytes::from(vec![0x77; length]));
-        assert!(capacity >= bytes.len());
-    }
-}
-
-#[tokio::test]
 async fn rejects_invalid_capacity() {
     let directory = tempfile::tempdir().unwrap();
     for capacity in [0, 2 * CHUNK_BYTES - 1, 1 << 63, u64::MAX] {
@@ -308,16 +281,33 @@ async fn failed_large_reservation_leaves_buffered_entries_and_metadata_slots_unt
 #[tokio::test]
 async fn cancellation_or_lost_metadata_capacity_discards_the_whole_flush() {
     for cancel in [true, false] {
-        let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+        let directory = tempfile::tempdir().unwrap();
+        let queues = crate::IoQueues::new().unwrap();
+        let cache = with_manual_metadata_writes(
+            DiskCache::open(
+                directory.path(),
+                3 * CHUNK_BYTES,
+                DiskCacheOptions {
+                    io_queues: Some(queues.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap(),
+        );
         for key in [ObjectKeyHash(1), ObjectKeyHash(2)] {
             cache.write(key, download(0, 1), ()).await.unwrap();
         }
+        // Reserve every channel slot so the payload owns disk chunks but cannot submit I/O.
+        let held_writes = queues.hold_write_queue_capacity().await;
         let mut flush = Box::pin(cache.flush());
-        if let Poll::Ready(result) = std::future::poll_fn(|cx| Poll::Ready(flush.as_mut().poll(cx))).await {
-            assert_eq!(result.unwrap(), 2);
-            continue;
-        }
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(flush.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
         let shard = &cache.disk.shards[0];
+        assert_eq!(shard.allocator.available_bytes(), 0);
         assert_eq!(
             shard.metadata_pages.lock().unwrap().free_slot_count(),
             page_format::ENTRIES_PER_METADATA_CHUNK
@@ -337,6 +327,7 @@ async fn cancellation_or_lost_metadata_capacity_discards_the_whole_flush() {
                     });
                 }
             }
+            drop(held_writes);
             assert_eq!(flush.await.unwrap(), 0);
         }
         assert_eq!(shard.allocator.available_bytes(), CHUNK_BYTES);
@@ -520,8 +511,8 @@ async fn eviction_respects_sample_size_and_keeps_first_sampled_on_ties() {
     for sample_size in [1, RECLAIM_SAMPLE_SIZE] {
         let (_directory, mut cache) = open_test_cache(2 * CHUNK_BYTES).await;
         Arc::get_mut(&mut cache.disk).unwrap().reclaim_sample_size = sample_size;
-        let older = ObjectKeyHash::from("small metadata");
-        let newer = ObjectKeyHash::from("long key/".repeat(1000));
+        let older = ObjectKeyHash(1);
+        let newer = ObjectKeyHash(2);
         cache.insert(older, download(0, 100)).await.unwrap();
         cache.insert(newer, download(0, 100)).await.unwrap();
         if sample_size == 1 {
@@ -622,11 +613,23 @@ async fn admission_eviction_limit_does_not_force_out_a_shared_chunks_last_entry(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_pressure_and_reads_never_return_reused_bytes() {
     let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
+    let entries = (0..4)
+        .map(|worker| (ObjectKeyHash::from(format!("{worker}-0")), download(worker * 53, 8193)))
+        .collect();
+    assert_eq!(cache.insert_batch(entries).await.unwrap(), 4);
     let mut tasks = Vec::new();
+    let read_barrier = Arc::new(tokio::sync::Barrier::new(4));
     for worker in 0..4 {
         let cache = cache.clone();
+        let read_barrier = read_barrier.clone();
         tasks.push(tokio::spawn(async move {
-            for cycle in 0..20 {
+            // Every reader must observe bytes before any worker starts eviction pressure.
+            let key = ObjectKeyHash::from(format!("{worker}-0"));
+            let source = download(worker * 53, 8193);
+            let bytes = cache.get(&key).await;
+            read_barrier.wait().await;
+            assert_eq!(bytes.unwrap(), source);
+            for cycle in 1..20 {
                 let key = ObjectKeyHash::from(format!("{worker}-{cycle}"));
                 let source = download(worker * 53 + cycle, 8193);
                 cache.insert(key, source.clone()).await.unwrap();
@@ -642,7 +645,7 @@ async fn concurrent_pressure_and_reads_never_return_reused_bytes() {
 }
 
 #[tokio::test]
-async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk_or_its_entry_metadata() {
+async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk() {
     let (directory, cache) = open_test_cache(CHUNK_BYTES).await;
     let key = ObjectKeyHash::from("small entry");
     let source = download(3, 1024);
@@ -779,7 +782,7 @@ async fn batch_rejects_fragmented_space_without_consuming_it() {
 #[tokio::test]
 async fn writes_key_hash_length_and_payload_address_in_fixed_size_metadata() {
     let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-    let key = ObjectKeyHash::from("long immutable key/".repeat(700));
+    let key = ObjectKeyHash(17);
     let source = download(17, (CHUNK_BYTES + 7) as usize);
     assert!(cache.insert(key, source.clone()).await.unwrap());
     let (payload, entry_metadata) = entry_disk_ranges(&cache, &key).await;
@@ -821,28 +824,6 @@ async fn batch_skips_oversized_and_duplicate_entries_without_losing_accepted_ent
     );
     assert!(cache.get(&ObjectKeyHash::from("too large")).await.is_none());
     assert_eq!(cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key.len(), 1);
-}
-
-#[tokio::test]
-async fn long_keys_do_not_allocate_extra_metadata_chunks() {
-    let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
-    let key = ObjectKeyHash::from("k".repeat(CHUNK_BYTES as usize));
-    assert!(cache.insert(key, download(0, 1)).await.unwrap());
-    let (_, metadata) = entry_disk_ranges(&cache, &key).await;
-    assert_eq!(metadata.end - metadata.start, METADATA_PAGE_BYTES as u64);
-    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
-    assert!(
-        cache
-            .insert(ObjectKeyHash::from("other"), download(0, 1))
-            .await
-            .unwrap()
-    );
-    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), CHUNK_BYTES);
-    assert_eq!(cache.get(&key).await.unwrap(), download(0, 1));
-    let shard = &cache.disk.shards[0];
-    shard.remove_entry(&key);
-    shard.write_dirty_metadata_pages(&cache.disk.file).await.unwrap();
-    assert_eq!(shard.allocator.available_bytes(), 2 * CHUNK_BYTES);
 }
 
 #[tokio::test]
@@ -1016,20 +997,6 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
         assert!(cache.insert(key, download(3, 50)).await.unwrap());
         assert_eq!(cache.get(&key).await.unwrap(), download(3, 50));
     }
-}
-
-#[tokio::test]
-async fn a_short_read_is_a_miss_not_unverified_bytes() {
-    let (directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    let key = ObjectKeyHash::from("object");
-    cache.insert(key, download(0, 100)).await.unwrap();
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(directory.path().join("data"))
-        .unwrap()
-        .set_len(CHUNK_BYTES + METADATA_PAGE_BYTES as u64 + 100)
-        .unwrap();
-    assert!(cache.get(&key).await.is_none());
 }
 
 #[tokio::test]

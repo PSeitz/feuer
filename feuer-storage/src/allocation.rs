@@ -230,6 +230,7 @@ impl Drop for ReservedChunks {
 mod tests {
     use super::*;
     use crate::test_metrics::{registry, value};
+    use proptest::prelude::*;
     use std::sync::Barrier;
 
     #[test]
@@ -335,51 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn reserves_contiguous_chunks_through_100_mib() {
-        let capacity = 102 * CHUNK_BYTES;
-        let allocator = DiskChunkAllocator::new(capacity);
-        for count in [1, 2, 40, 100, 102] {
-            let reserved_chunks = allocator.reserve_chunks(count).unwrap();
-            assert_eq!(reserved_chunks.disk_byte_range(), 0..count * CHUNK_BYTES);
-            assert_eq!(reserved_chunks.chunk_count(), count);
-            drop(reserved_chunks);
-            assert_all_chunks_free(&allocator, capacity);
-        }
-    }
-
-    #[test]
-    fn reservations_split_and_restore_free_chunks_at_nonzero_addresses() {
-        let allocator = DiskChunkAllocator::for_disk_range(7 * CHUNK_BYTES..12 * CHUNK_BYTES);
-        let reserved_chunks = allocator.reserve_chunks_at(9, 2).unwrap();
-        assert_eq!(reserved_chunks.disk_byte_range(), 9 * CHUNK_BYTES..11 * CHUNK_BYTES);
-        assert!(allocator.reserve_chunks_at(8, 2).is_none());
-        assert_eq!(
-            allocator.free.lock().unwrap().chunk_count_by_start,
-            BTreeMap::from([(7, 2), (11, 1)])
-        );
-        drop(reserved_chunks);
-        assert_eq!(
-            allocator.free.lock().unwrap().chunk_count_by_start,
-            BTreeMap::from([(7, 5)])
-        );
-    }
-
-    #[test]
-    fn rejects_unavailable_chunk_counts_without_consuming_space() {
-        let allocator = DiskChunkAllocator::new(2 * CHUNK_BYTES);
-        for count in [0, 3, u64::MAX] {
-            assert!(allocator.reserve_chunks(count).is_none());
-            assert_all_chunks_free(&allocator, 2 * CHUNK_BYTES);
-        }
-        let first = allocator.reserve_chunks(1).unwrap();
-        assert!(allocator.reserve_chunks(2).is_none());
-        let second = allocator.reserve_chunks(1).unwrap();
-        assert!(allocator.reserve_chunks(1).is_none());
-        drop((first, second));
-        assert_all_chunks_free(&allocator, 2 * CHUNK_BYTES);
-    }
-
-    #[test]
     fn forty_tib_initialization_is_sparse() {
         let capacity = 40 * (1u64 << 40);
         let allocator = DiskChunkAllocator::new(capacity);
@@ -389,62 +345,88 @@ mod tests {
         assert_all_chunks_free(&allocator, capacity);
     }
 
-    #[test]
-    fn fragmented_space_is_not_combined_and_coalesces_after_release() {
-        let allocator = DiskChunkAllocator::new(5 * CHUNK_BYTES);
-        let mut reservations: Vec<_> = (0..5).map(|_| allocator.reserve_chunks(1).unwrap()).collect();
-        drop(reservations.remove(4));
-        drop(reservations.remove(2));
-        drop(reservations.remove(0));
-        assert_eq!(allocator.available_bytes(), 3 * CHUNK_BYTES);
-        assert!(allocator.reserve_chunks(2).is_none());
-        assert!(allocator.reserve_chunks(3).is_none());
-        assert_eq!(allocator.available_bytes(), 3 * CHUNK_BYTES);
-        drop(reservations);
-        assert_all_chunks_free(&allocator, 5 * CHUNK_BYTES);
-        assert_eq!(
-            allocator.reserve_chunks(5).unwrap().disk_byte_range(),
-            0..5 * CHUNK_BYTES
-        );
-    }
-
-    #[test]
-    fn randomized_reuse_matches_contiguous_chunk_ownership() {
-        let capacity = 16 * CHUNK_BYTES;
-        let allocator = DiskChunkAllocator::new(capacity);
-        let mut occupied = [false; 16];
-        let mut reservations = Vec::<ReservedChunks>::new();
-        let mut random = 0x4de3_8129_f307_4a65u64;
-        for _ in 0..10_000 {
-            random ^= random << 13;
-            random ^= random >> 7;
-            random ^= random << 17;
-            if !reservations.is_empty() && random.is_multiple_of(3) {
-                let reserved_chunks = reservations.swap_remove(random as usize % reservations.len());
-                for chunk in reserved_chunks.chunk_numbers.clone() {
-                    assert!(occupied[chunk as usize]);
-                    occupied[chunk as usize] = false;
-                }
-            } else {
-                let count = random % 5 + 1;
-                match allocator.reserve_chunks(count) {
-                    Some(reserved_chunks) => {
-                        for chunk in reserved_chunks.chunk_numbers.clone() {
-                            assert!(!occupied[chunk as usize]);
-                            occupied[chunk as usize] = true;
-                        }
-                        reservations.push(reserved_chunks);
-                    }
-                    None => assert!(!occupied.windows(count as usize).any(|run| run.iter().all(|used| !used))),
-                }
+    proptest! {
+        #[test]
+        fn reservations_match_chunk_occupancy(
+            first in 0u64..1024,
+            (capacity, operations) in (1usize..=102).prop_flat_map(|capacity| (
+                Just(capacity),
+                prop::collection::vec((0u8..3, 0usize..=capacity + 1, 0usize..=capacity + 1), 1..200),
+            )),
+        ) {
+            let disk_range = first * CHUNK_BYTES..(first + capacity as u64) * CHUNK_BYTES;
+            let allocator = DiskChunkAllocator::for_disk_range(disk_range.clone());
+            let mut occupied = vec![false; capacity];
+            let mut reservations = Vec::<ReservedChunks>::new();
+            for count in [0, capacity as u64 + 1, u64::MAX] {
+                prop_assert!(allocator.reserve_chunks(count).is_none());
+                prop_assert!(allocator.reserve_chunks_at(first, count).is_none());
             }
-            assert_eq!(
-                allocator.available_bytes(),
-                occupied.iter().filter(|&&used| !used).count() as u64 * CHUNK_BYTES
+            prop_assert!(allocator.reserve_chunks_at(u64::MAX, 1).is_none());
+
+            // Operations reserve anywhere, reserve at a chunk number, or release a reservation.
+            for (operation, count, position) in operations {
+                if operation == 2 {
+                    if !reservations.is_empty() {
+                        let reserved = reservations.swap_remove(position % reservations.len());
+                        for chunk in reserved.chunk_numbers.clone() {
+                            occupied[(chunk - first) as usize] = false;
+                        }
+                        drop(reserved);
+                    }
+                } else {
+                    let start = (first + position as u64).saturating_sub(1);
+                    let available = if operation == 0 {
+                        count > 0 && occupied.windows(count).any(|run| run.iter().all(|used| !used))
+                    } else {
+                        count > 0 && start >= first
+                            && start + count as u64 <= first + capacity as u64
+                            && occupied[(start - first) as usize..(start - first) as usize + count]
+                                .iter().all(|used| !used)
+                    };
+                    let reserved = if operation == 0 {
+                        allocator.reserve_chunks(count as u64)
+                    } else {
+                        allocator.reserve_chunks_at(start, count as u64)
+                    };
+                    prop_assert_eq!(reserved.is_some(), available);
+                    if let Some(reserved) = reserved {
+                        let chunks = reserved.chunk_numbers.clone();
+                        prop_assert!(chunks.start >= first && chunks.end <= first + capacity as u64);
+                        prop_assert_eq!(reserved.chunk_count(), count as u64);
+                        prop_assert_eq!(reserved.disk_byte_range(), chunks.start * CHUNK_BYTES..chunks.end * CHUNK_BYTES);
+                        if operation == 1 {
+                            prop_assert_eq!(chunks.start, start);
+                        }
+                        for chunk in chunks {
+                            prop_assert!(!occupied[(chunk - first) as usize]);
+                            occupied[(chunk - first) as usize] = true;
+                        }
+                        reservations.push(reserved);
+                    }
+                }
+                prop_assert_eq!(
+                    allocator.available_bytes(),
+                    occupied.iter().filter(|&&used| !used).count() as u64 * CHUNK_BYTES
+                );
+                let mut free_runs = BTreeMap::new();
+                let mut start = first;
+                for (offset, &used) in occupied.iter().enumerate() {
+                    if used {
+                        start = first + offset as u64 + 1;
+                    } else {
+                        *free_runs.entry(start).or_insert(0u64) += 1;
+                    }
+                }
+                prop_assert_eq!(&allocator.free.lock().unwrap().chunk_count_by_start, &free_runs);
+            }
+            drop(reservations);
+            prop_assert_eq!(
+                &allocator.free.lock().unwrap().chunk_count_by_start,
+                &BTreeMap::from([(first, capacity as u64)])
             );
+            prop_assert_eq!(allocator.reserve_chunks(capacity as u64).unwrap().disk_byte_range(), disk_range);
         }
-        drop(reservations);
-        assert_all_chunks_free(&allocator, capacity);
     }
 
     #[test]
