@@ -15,18 +15,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let io_queues = IoQueues::new()?;
     // Each cache uses a different file in the same directory, with its own capacities,
     // contents, eviction, buffer pool, file lock, and background-write queue.
-    let images = Cache::open(
-        CacheConfig::new(&directory, 1 << 30, 64 << 20)?.with_file_name("images")?,
-        None,
-        Some(io_queues.clone()),
-    )
-    .await?;
-    let documents = Cache::open(
-        CacheConfig::new(&directory, 2 << 30, 32 << 20)?.with_file_name("documents")?,
-        None,
-        Some(io_queues),
-    )
-    .await?;
+    let images = Cache::builder(CacheConfig::new(&directory, 1 << 30, 64 << 20)?.with_file_name("images")?)
+        .with_io_queues(io_queues.clone())
+        .open()
+        .await?;
+    let documents = Cache::builder(CacheConfig::new(&directory, 2 << 30, 32 << 20)?.with_file_name("documents")?)
+        .with_io_queues(io_queues)
+        .open()
+        .await?;
 
     // The callbacks return immutable objects.
     // Replace these callbacks with downloads from the respective sources.

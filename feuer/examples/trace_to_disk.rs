@@ -23,7 +23,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     create_dir(&directory)?;
     let mut file_number = 0u64;
     let (write_result_sender, mut write_results) = unbounded_channel();
-    let cache = Cache::open(CacheConfig::new("unused", 0, 1 << 20).unwrap(), None, None)
+    let cache = Cache::builder(CacheConfig::new("unused", 0, 1 << 20).unwrap())
+        .open()
         .await?
         .with_trace(move |package| {
             let path = directory.join(format!("{file_number:012}.feuer"));

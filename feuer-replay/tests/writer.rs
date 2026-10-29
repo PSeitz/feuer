@@ -23,7 +23,8 @@ use tokio::{
 #[tokio::test]
 async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    let cache = Cache::open(CacheConfig::new("unused", 0, 1 << 20)?, None, None)
+    let cache = Cache::builder(CacheConfig::new("unused", 0, 1 << 20)?)
+        .open()
         .await?
         .with_trace(move |package| ready(sender.send(package).map_err(io::Error::other)));
     let key = ObjectKeyHash::from("object");
@@ -126,7 +127,8 @@ fn replays_objects_with_and_without_disk() -> Result<()> {
 #[tokio::test]
 async fn decodes_empty_object_from_current_writer() -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    let cache = Cache::open(CacheConfig::new("unused", 0, 1 << 20)?, None, None)
+    let cache = Cache::builder(CacheConfig::new("unused", 0, 1 << 20)?)
+        .open()
         .await?
         .with_trace(move |package| ready(sender.send(package).map_err(io::Error::other)));
     assert!(cache.get("empty".to_owned()).await.is_none());

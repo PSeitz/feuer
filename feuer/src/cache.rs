@@ -79,67 +79,64 @@ impl fmt::Debug for Cache {
     }
 }
 
-impl Cache {
+/// Configuration and optional resources used to open a [`Cache`].
+/// Created by [`Cache::builder`]. Defaults use no-op metrics, dedicated I/O queues,
+/// and [`AvoidedRetrievalCostScorer`] for both tiers.
+pub struct CacheBuilder<'a> {
+    config: CacheConfig,
+    metrics_registry: Option<&'a BoxedRegistry>,
+    io_queues: Option<IoQueues>,
+    memory_scorer: Arc<dyn RetentionScorer>,
+    disk_scorer: Arc<dyn RetentionScorer>,
+}
+
+impl<'a> CacheBuilder<'a> {
+    /// Records metrics in this registry. Sharing a registry aggregates metrics.
+    /// Labels contain no object identities or cache names.
+    pub fn with_metrics(mut self, registry: &'a BoxedRegistry) -> Self {
+        self.metrics_registry = Some(registry);
+        self
+    }
+
+    /// Shares I/O concurrency with other caches using clones of these queues.
+    /// Available on Linux. Zero disk capacity ignores the queues.
+    /// Contents, capacities, eviction, buffer pools, file locks, and background-write queues
+    /// remain independent.
+    pub fn with_io_queues(mut self, queues: IoQueues) -> Self {
+        self.io_queues = Some(queues);
+        self
+    }
+
+    /// Sets the memory retention scorer. See [`RetentionScorer`] for the scoring contract.
+    /// Both tiers receive the same caller-demand history, including memory hits.
+    pub fn with_memory_retention_scorer(mut self, scorer: Arc<dyn RetentionScorer>) -> Self {
+        self.memory_scorer = scorer;
+        self
+    }
+
+    /// Sets the disk retention scorer, also used during recovery.
+    /// See [`RetentionScorer`] for the scoring contract. Zero disk capacity ignores this scorer.
+    pub fn with_disk_retention_scorer(mut self, scorer: Arc<dyn RetentionScorer>) -> Self {
+        self.disk_scorer = scorer;
+        self
+    }
+
     /// Opens a cache, using only memory when disk capacity is zero.
     /// Memory-only operation works on every platform without a Tokio runtime.
     /// Nonzero disk capacity returns an error on platforms other than Linux.
     /// On Linux, disk caching requires Tokio, io_uring and direct I/O, locks the backing file,
     /// and waits for metadata recovery. Disk failures never fall back to memory.
-    ///
-    /// `metrics_registry: None` disables metrics. `io_queues: None` creates dedicated queues.
-    /// Metrics and queues can be supplied independently. A shared registry aggregates metrics.
-    /// Labels contain no object identities or cache names.
-    /// Pass clones of the same [`IoQueues`] to caches on the same SSD to share I/O concurrency.
-    /// Contents, capacities, eviction, buffer pools, file locks, and background-write queues
-    /// remain independent. Zero disk capacity ignores the queues.
-    /// Pass `None` for queues on platforms other than Linux.
-    pub async fn open(
-        config: CacheConfig,
-        metrics_registry: Option<&BoxedRegistry>,
-        io_queues: Option<IoQueues>,
-    ) -> Result<Self, DiskCacheError> {
-        let scorer = Arc::new(AvoidedRetrievalCostScorer::default());
-        Self::open_with_retention_scorer(config, metrics_registry, io_queues, scorer).await
-    }
-
-    /// Opens a cache with an application-provided scorer shared by memory and disk.
-    /// See [`Self::open`] for resource configuration and [`RetentionScorer`] for the scoring contract.
-    pub async fn open_with_retention_scorer(
-        config: CacheConfig,
-        metrics_registry: Option<&BoxedRegistry>,
-        io_queues: Option<IoQueues>,
-        retention_scorer: Arc<dyn RetentionScorer>,
-    ) -> Result<Self, DiskCacheError> {
-        Self::open_with_retention_scorers(
-            config,
-            metrics_registry,
-            io_queues,
-            retention_scorer.clone(),
-            retention_scorer,
-        )
-        .await
-    }
-
-    /// Opens a cache with separate memory and disk retention scorers.
-    /// Both receive the same caller-demand history, including memory hits.
-    /// Scorers cannot inspect the other tier's residency by re-entering the cache.
-    /// See [`Self::open`] for resources and [`RetentionScorer`] for the scoring contract.
-    pub async fn open_with_retention_scorers(
-        config: CacheConfig,
-        metrics_registry: Option<&BoxedRegistry>,
-        io_queues: Option<IoQueues>,
-        memory_scorer: Arc<dyn RetentionScorer>,
-        disk_scorer: Arc<dyn RetentionScorer>,
-    ) -> Result<Self, DiskCacheError> {
+    pub async fn open(self) -> Result<Cache, DiskCacheError> {
+        let config = self.config;
         #[cfg(not(target_os = "linux"))]
         {
             if config.disk_capacity() != 0 {
                 return Err(DiskCacheError::UnsupportedPlatform);
             }
-            let _ = (io_queues, disk_scorer);
+            let _ = (self.io_queues, self.disk_scorer);
         }
         let noop_metrics_registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
-        let metrics_registry = metrics_registry.unwrap_or(&noop_metrics_registry);
+        let metrics_registry = self.metrics_registry.unwrap_or(&noop_metrics_registry);
         let memory = MemoryCache::with_metrics(
             config.memory_capacity(),
             MemoryMetrics::new(metrics_registry),
@@ -149,31 +146,26 @@ impl Cache {
             config.access_count_half_life(),
         )))
         .with_reclaim_sample_size(config.eviction().sample_size())
-        .with_retention_scorer(memory_scorer);
+        .with_retention_scorer(self.memory_scorer);
         #[cfg(target_os = "linux")]
         let disk = if config.disk_capacity() == 0 {
             None
         } else {
-            Some(
-                DiskCache::open(
-                    config.directory(),
-                    config.disk_capacity(),
-                    DiskCacheOptions {
-                        file_name: config.file_name().to_owned(),
-                        payload_version: config.payload_version(),
-                        io_metrics: IoMetrics::new(metrics_registry),
-                        metrics: DiskMetrics::new(metrics_registry),
-                        access_histories: memory.access_histories().clone(),
-                        reclaim_sample_size: config.eviction().sample_size(),
-                        buffer_pool: memory.buffer_pool(),
-                        io_queues,
-                        retention_scorer: disk_scorer,
-                    },
-                )
-                .await?,
-            )
+            let options = DiskCacheOptions {
+                file_name: config.file_name().to_owned(),
+                payload_version: config.payload_version(),
+                io_metrics: IoMetrics::new(metrics_registry),
+                metrics: DiskMetrics::new(metrics_registry),
+                access_histories: memory.access_histories().clone(),
+                reclaim_sample_size: config.eviction().sample_size(),
+                buffer_pool: memory.buffer_pool(),
+                io_queues: self.io_queues,
+                retention_scorer: self.disk_scorer,
+            };
+            let disk = DiskCache::open(config.directory(), config.disk_capacity(), options).await?;
+            Some(disk)
         };
-        Ok(Self {
+        Ok(Cache {
             inner: Arc::new(CacheInner {
                 config,
                 memory,
@@ -184,6 +176,21 @@ impl Cache {
             }),
             access_trace: None,
         })
+    }
+}
+
+impl Cache {
+    /// Configures a cache with optional metrics, shared I/O queues, and retention scorers.
+    /// Call [`CacheBuilder::open`] to open it.
+    pub fn builder<'a>(config: CacheConfig) -> CacheBuilder<'a> {
+        let scorer = Arc::new(AvoidedRetrievalCostScorer::default());
+        CacheBuilder {
+            config,
+            metrics_registry: None,
+            io_queues: None,
+            memory_scorer: scorer.clone(),
+            disk_scorer: scorer,
+        }
     }
 
     /// Delivers uncompressed binary access-trace packages as [`Bytes`] for this handle and its clones.
@@ -222,7 +229,7 @@ impl Cache {
         self.inner.memory.access_histories().record_access(&object_key);
         let request_id = self.trace_request_start(object_key).await;
         let started = Instant::now();
-        let (outcome, bytes) = self.lookup_cached(object_key, || false).await;
+        let (outcome, bytes) = self.lookup(object_key, || false).await;
         let payload_length = bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
         self.inner.metrics.record(outcome, started.elapsed(), payload_length);
         if let (Some(access_trace), Some(request_id)) = (&self.access_trace, request_id) {
@@ -335,7 +342,7 @@ impl Cache {
         result
     }
 
-    async fn lookup_cached(
+    async fn lookup(
         &self,
         object_key: ObjectKeyHash,
         should_fall_through: impl FnOnce() -> bool,
@@ -369,7 +376,7 @@ impl Cache {
     {
         let mut fell_through = false;
         let (outcome, bytes) = self
-            .lookup_cached(object_key, || {
+            .lookup(object_key, || {
                 fell_through = should_fall_through();
                 fell_through
             })
@@ -478,15 +485,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let scorer = Arc::new(ScoredEntries::default());
         let disk_scorer = Arc::new(ScoredEntries::default());
-        let cache = Cache::open_with_retention_scorers(
-            CacheConfig::new(directory.path(), 4 << 20, 1).unwrap(),
-            None,
-            None,
-            scorer.clone(),
-            disk_scorer.clone(),
-        )
-        .await
-        .unwrap();
+        let cache = Cache::builder(CacheConfig::new(directory.path(), 4 << 20, 1).unwrap())
+            .with_memory_retention_scorer(scorer.clone())
+            .with_disk_retention_scorer(disk_scorer.clone())
+            .open()
+            .await
+            .unwrap();
         // More entries than memory shards force the memory scorer to run.
         for index in 0..65 {
             cache.inner.memory.insert(
@@ -523,13 +527,11 @@ mod tests {
     async fn public_registry_observes_memory_disk_callbacks_and_writes() {
         let directory = tempfile::tempdir().unwrap();
         let (registry, backend) = registry();
-        let cache = Cache::open(
-            CacheConfig::new(directory.path(), 4 << 20, 32).unwrap(),
-            Some(&backend),
-            None,
-        )
-        .await
-        .unwrap();
+        let cache = Cache::builder(CacheConfig::new(directory.path(), 4 << 20, 32).unwrap())
+            .with_metrics(&backend)
+            .open()
+            .await
+            .unwrap();
         let key = "object".to_owned();
         assert!(Arc::ptr_eq(
             cache.inner.memory.access_histories(),
@@ -616,13 +618,10 @@ mod tests {
 
     async fn cache(memory_capacity: u64) -> (TempDir, Cache) {
         let directory = tempfile::tempdir().unwrap();
-        let cache = Cache::open(
-            CacheConfig::new(directory.path(), 4 << 20, memory_capacity).unwrap(),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+        let cache = Cache::builder(CacheConfig::new(directory.path(), 4 << 20, memory_capacity).unwrap())
+            .open()
+            .await
+            .unwrap();
         (directory, cache)
     }
 
@@ -634,7 +633,7 @@ mod tests {
                 .unwrap()
                 .with_idle_buffer_pool_percent(percent)
                 .unwrap();
-            let cache = Cache::open(config, None, None).await.unwrap();
+            let cache = Cache::builder(config).open().await.unwrap();
             let buffers: Vec<_> = (0..2).map(|_| cache.allocate_buffer(size).unwrap()).collect();
             drop(buffers);
             assert_eq!(cache.inner.memory.buffer_pool().idle_bytes(), expected);
@@ -657,30 +656,31 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (metrics_registry, backend) = registry();
         let queues = IoQueues::new().unwrap();
-        let first = Cache::open(
+        let first = Cache::builder(
             CacheConfig::new(directory.path(), 4 << 20, 1 << 20)
                 .unwrap()
                 .with_access_count_half_life(2)
                 .unwrap(),
-            Some(&backend),
-            Some(queues.clone()),
         )
+        .with_metrics(&backend)
+        .with_io_queues(queues.clone())
+        .open()
         .await
         .unwrap();
         // Queue sharing does not require the caches to use the same metrics configuration.
-        let second = Cache::open(
+        let second = Cache::builder(
             CacheConfig::new(directory.path(), 4 << 20, 1 << 20)
                 .unwrap()
                 .with_file_name("objects")
                 .unwrap()
                 .with_access_count_half_life(4)
                 .unwrap(),
-            None,
-            Some(queues),
         )
+        .with_io_queues(queues)
+        .open()
         .await
         .unwrap();
-        assert!(Cache::open(second.config().clone(), None, None).await.is_err());
+        assert!(Cache::builder(second.config().clone()).open().await.is_err());
         assert!(!Arc::ptr_eq(
             &first.inner.memory.buffer_pool(),
             &second.inner.memory.buffer_pool()
@@ -872,10 +872,10 @@ mod tests {
     #[tokio::test]
     async fn opening_validates_disk_capacity_and_exclusive_file_ownership() {
         let (directory, cache) = cache(32).await;
-        assert!(Cache::open(cache.config().clone(), None, None).await.is_err());
+        assert!(Cache::builder(cache.config().clone()).open().await.is_err());
         let invalid = CacheConfig::new(directory.path(), 1024, 32).unwrap();
         assert!(matches!(
-            Cache::open(invalid, None, None).await,
+            Cache::builder(invalid).open().await,
             Err(DiskCacheError::InvalidCapacity)
         ));
     }
@@ -890,7 +890,8 @@ mod tests {
     async fn callback_and_memory_hit_share_the_object_without_creating_disk_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("unused");
-        let cache = Cache::open(CacheConfig::new(&path, 0, 32).unwrap(), None, None)
+        let cache = Cache::builder(CacheConfig::new(&path, 0, 32).unwrap())
+            .open()
             .await
             .unwrap();
         let key = String::from("object");

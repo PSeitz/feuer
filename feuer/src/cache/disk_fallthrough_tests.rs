@@ -7,13 +7,11 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
     for disk_capacity in [0, 4 << 20] {
         let directory = tempdir().unwrap();
         let (registry, backend) = registry();
-        let cache = Cache::open(
-            CacheConfig::new(directory.path(), disk_capacity, 1 << 20).unwrap(),
-            Some(&backend),
-            None,
-        )
-        .await
-        .unwrap();
+        let cache = Cache::builder(CacheConfig::new(directory.path(), disk_capacity, 1 << 20).unwrap())
+            .with_metrics(&backend)
+            .open()
+            .await
+            .unwrap();
         let key = "download".to_owned();
         let hash = ObjectKeyHash::from(key.as_str());
         let source = Bytes::from_static(b"abcd");

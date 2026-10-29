@@ -17,22 +17,23 @@ fn ready<T>(future: impl Future<Output = T>) -> T {
 }
 
 #[test]
-fn memory_only_constructors_and_lookups_need_no_runtime() {
+fn memory_only_builder_and_lookups_need_no_runtime() {
     assert!(Handle::try_current().is_err());
-    for constructor in 0..3 {
+    for scorer_overrides in 0..3 {
         let directory = tempdir().unwrap();
         let unused_directory = directory.path().join("unused");
         let config = CacheConfig::new(&unused_directory, 0, 1 << 20).unwrap();
         let (registry, backend) = registry();
         let scorer = Arc::new(AvoidedRetrievalCostScorer::default());
-        let cache = ready(async {
-            match constructor {
-                0 => Cache::open(config, Some(&backend), None).await,
-                1 => Cache::open_with_retention_scorer(config, Some(&backend), None, scorer).await,
-                _ => Cache::open_with_retention_scorers(config, Some(&backend), None, scorer.clone(), scorer).await,
-            }
-        })
-        .unwrap();
+        let builder = Cache::builder(config).with_metrics(&backend);
+        let builder = match scorer_overrides {
+            0 => builder,
+            1 => builder.with_memory_retention_scorer(scorer),
+            _ => builder
+                .with_memory_retention_scorer(scorer.clone())
+                .with_disk_retention_scorer(scorer),
+        };
+        let cache = ready(builder.open()).unwrap();
         assert_eq!(
             ready(cache.get_or_fetch("failed".into(), || async { Err::<Bytes, _>("source failed") })),
             Err(GetOrFetchError::Callback("source failed"))
@@ -52,7 +53,7 @@ fn memory_only_constructors_and_lookups_need_no_runtime() {
 }
 
 #[test]
-fn memory_only_constructor_preserves_retention_scorer() {
+fn memory_only_builder_preserves_retention_scorer() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
@@ -66,12 +67,12 @@ fn memory_only_constructor_preserves_retention_scorer() {
     }
 
     let scorer = Arc::new(ScoredEntries::default());
-    let cache = ready(Cache::open_with_retention_scorer(
-        CacheConfig::new("unused", 0, 1).unwrap(),
-        None,
-        None,
-        scorer.clone(),
-    ))
+    let cache = ready(
+        Cache::builder(CacheConfig::new("unused", 0, 1).unwrap())
+            .with_memory_retention_scorer(scorer.clone())
+            .with_disk_retention_scorer(scorer.clone())
+            .open(),
+    )
     .unwrap();
     // More entries than memory shards force eviction to consult the supplied scorer.
     for index in 0..65 {
@@ -86,12 +87,8 @@ fn nonzero_disk_capacity_is_rejected_without_runtime_or_files() {
     let directory = tempdir().unwrap();
     let unused_directory = directory.path().join("unused");
     for capacity in [1, 4 << 20] {
-        let error = ready(Cache::open(
-            CacheConfig::new(&unused_directory, capacity, 1 << 20).unwrap(),
-            None,
-            None,
-        ))
-        .unwrap_err();
+        let error =
+            ready(Cache::builder(CacheConfig::new(&unused_directory, capacity, 1 << 20).unwrap()).open()).unwrap_err();
         assert!(matches!(error, DiskCacheError::UnsupportedPlatform));
         assert_eq!(
             error.to_string(),

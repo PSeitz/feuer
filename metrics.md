@@ -1,10 +1,10 @@
 # Metrics
 
-On Linux, use `Cache::open(config, Some(&metrics_registry), None).await`
-with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup,
-memory, disk I/O, disk-cache and disk-write metrics in that registry.
-The last argument independently selects dedicated (`None`) or shared (`Some(io_queues)`)
-I/O queues. Passing `None` for the metrics registry disables metrics.
+Use `Cache::builder(config).with_metrics(&metrics_registry).open().await`
+with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup and
+memory metrics, plus disk I/O, disk-cache and disk-write metrics when disk is enabled.
+On Linux, `.with_io_queues(io_queues)` independently selects shared I/O queues.
+Omitting it gives the cache its own queues. Omitting `.with_metrics(...)` disables metrics.
 The application owns the registry and installs its exporter.
 
 All labels below have fixed values. Object keys, paths and caller-defined cache

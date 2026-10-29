@@ -38,13 +38,18 @@ let scorer = std::sync::Arc::new(feuer::AvoidedRetrievalCostScorer {
     cost_per_request: 256_000.0,
     cost_per_requested_byte: 1.0,
 });
-// Pass scorer to Cache::open_with_retention_scorer.
+let cache = feuer::Cache::builder(config)
+    .with_memory_retention_scorer(scorer.clone())
+    .with_disk_retention_scorer(scorer)
+    .open()
+    .await?;
 ```
 
-`open_with_retention_scorer` shares one scorer between tiers.
-`open_with_retention_scorers` accepts separate memory and disk scorers. Both receive
-the same request history. `CacheConfig` keeps candidate sampling settings in
-`SampledEvictionConfig`, separate from resource settings and scoring parameters.
+The builder accepts separate memory and disk scorers. Clone an `Arc` into both
+setters to share one scorer, as above. Omit either setter to use that tier's default
+scorer. Both scorers receive the same request history. `CacheConfig` keeps candidate
+sampling settings in `SampledEvictionConfig`, separate from resource settings and
+scoring parameters.
 
 ### Tier-specific costs and limitations
 

@@ -320,9 +320,12 @@ mod linux {
                 cost_per_requested_byte: 1.0,
             })
         };
-        let cache =
-            Cache::open_with_retention_scorers(config, Some(&metrics), None, scorer(memory_cost), scorer(disk_cost))
-                .await?;
+        let cache = Cache::builder(config)
+            .with_metrics(&metrics)
+            .with_memory_retention_scorer(scorer(memory_cost))
+            .with_disk_retention_scorer(scorer(disk_cost))
+            .open()
+            .await?;
         writeln!(summary, "open_seconds,{}", opening.elapsed().as_secs_f64())?;
         write_metrics_snapshot(&registry, &mut File::create_new(args.output.join("before.prom"))?)?;
 
@@ -488,7 +491,7 @@ mod linux {
                 .unwrap()
                 .with_idle_buffer_pool_percent(7)
                 .unwrap();
-            let cache = Cache::open(config, Some(&metrics), None).await.unwrap();
+            let cache = Cache::builder(config).with_metrics(&metrics).open().await.unwrap();
             let source = SyntheticDownloads::new(&registry, false).unwrap();
             let request = Request {
                 request_id: 0,
@@ -520,7 +523,8 @@ mod linux {
         #[tokio::test]
         async fn source_callbacks_wait_for_download_permits_then_complete_independently() {
             let directory = tempdir().unwrap();
-            let cache = Cache::open(CacheConfig::new(directory.path(), 0, 4 << 20).unwrap(), None, None)
+            let cache = Cache::builder(CacheConfig::new(directory.path(), 0, 4 << 20).unwrap())
+                .open()
                 .await
                 .unwrap();
             let source = Arc::new(SyntheticDownloads::new(&Registry::new(), true).unwrap());
@@ -675,5 +679,5 @@ fn main() -> Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 fn main() -> Result<()> {
-    Err("replay requires Linux, where Cache::open is available".into())
+    Err("replay requires Linux".into())
 }

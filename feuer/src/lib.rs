@@ -15,7 +15,7 @@ mod metrics;
 #[path = "../../test_support/metrics.rs"]
 mod test_metrics;
 
-pub use cache::{BytesAndMemoryCharge, Cache, GetOrFetchError};
+pub use cache::{BytesAndMemoryCharge, Cache, CacheBuilder, GetOrFetchError};
 pub use config::{CacheConfig, CacheConfigError, SampledEvictionConfig};
 pub use feuer_historian::ObjectAccessHistories;
 pub use feuer_memory::{
@@ -35,7 +35,7 @@ pub enum DiskCacheError {
     UnsupportedPlatform,
 }
 
-/// I/O queues are available only on Linux. Pass `None` to cache constructors on other platforms.
+/// I/O queues are available only on Linux. Omit queue configuration on other platforms.
 #[cfg(not(target_os = "linux"))]
 #[derive(Clone, Debug)]
 pub enum IoQueues {}

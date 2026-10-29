@@ -12,7 +12,9 @@ use tokio::sync::Notify;
 
 async fn cache() -> (Cache, Registry) {
     let (registry, backend) = registry();
-    let cache = Cache::open(CacheConfig::new("unused", 0, 8 << 20).unwrap(), Some(&backend), None)
+    let cache = Cache::builder(CacheConfig::new("unused", 0, 8 << 20).unwrap())
+        .with_metrics(&backend)
+        .open()
         .await
         .unwrap();
     (cache, registry)

@@ -71,7 +71,7 @@ use feuer::{Cache, CacheConfig};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cache directory, disk capacity (1 GiB), memory target (64 MiB). 
     let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?;
-    let cache = Cache::open(config, None, None).await?;
+    let cache = Cache::builder(config).open().await?;
 
     let bytes = cache
         .get_or_fetch("object-v1".to_owned(), || async {
@@ -85,10 +85,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-The `None` arguments disable metrics and give this cache its own I/O queues when disk is enabled.
-Set disk capacity to `0` for memory-only operation. Pass `None` for I/O queues on
-platforms other than Linux. `open`, `open_with_retention_scorer`, and
-`open_with_retention_scorers` have the same signatures on every platform.
+By default, metrics are disabled and the cache creates its own I/O queues when disk is enabled.
+Use `.with_metrics(&registry)` to register metrics or `.with_io_queues(queues)`
+to share I/O queues on Linux. Set disk capacity to `0` for memory-only operation
+on any platform. Configure each tier's scorer with `.with_memory_retention_scorer(scorer)`
+and `.with_disk_retention_scorer(scorer)` before calling `.open().await`.
 
 Memory capacity must be positive. Applications using zero memory capacity to
 disable caching should bypass cache construction and fetch directly from the source.
