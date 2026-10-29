@@ -1,24 +1,28 @@
 use super::*;
 use crate::test_metrics::{registry, value};
+use prometheus::Registry;
 use std::{
-    future::pending,
+    future::{pending, ready},
+    pin::Pin,
+    sync::Barrier,
     task::{Context, Poll, Waker},
+    thread::scope,
 };
 use tokio::sync::Notify;
 
-async fn cache() -> (TieredMemoryDiskCache, prometheus::Registry) {
+async fn cache() -> (Cache, Registry) {
     let (registry, backend) = registry();
-    let cache = TieredMemoryDiskCache::open(CacheConfig::new("unused", 0, 8 << 20).unwrap(), Some(&backend), None)
+    let cache = Cache::open(CacheConfig::new("unused", 0, 8 << 20).unwrap(), Some(&backend), None)
         .await
         .unwrap();
     (cache, registry)
 }
 
-fn assert_pending(future: std::pin::Pin<&mut impl Future>) {
+fn assert_pending(future: Pin<&mut impl Future>) {
     assert!(future.poll(&mut Context::from_waker(Waker::noop())).is_pending());
 }
 
-fn pending_count(cache: &TieredMemoryDiskCache) -> usize {
+fn pending_count(cache: &Cache) -> usize {
     cache.inner.pending_fetches.lock().unwrap().len()
 }
 
@@ -37,9 +41,8 @@ async fn lookup_methods_share_successes_and_errors_but_not_completed_failures() 
                 Err("source failed")
             }
         }));
-        let mut second = Box::pin(cache.get_or_fetch("object".into(), || {
-            std::future::ready(Err::<Bytes, &str>("waiter must not execute"))
-        }));
+        let mut second =
+            Box::pin(cache.get_or_fetch("object".into(), || ready(Err::<Bytes, &str>("waiter must not execute"))));
         assert_pending(first.as_mut());
         assert_pending(second.as_mut());
         assert_eq!(pending_count(&cache), 1);
@@ -147,8 +150,8 @@ fn simultaneous_cancellation_removes_the_last_callers() {
     let pending = PendingFetches::default();
     let first = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"));
     let second = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"));
-    let barrier = std::sync::Barrier::new(2);
-    std::thread::scope(|scope| {
+    let barrier = Barrier::new(2);
+    scope(|scope| {
         scope.spawn(|| {
             barrier.wait();
             drop(first);

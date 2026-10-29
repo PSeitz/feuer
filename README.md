@@ -65,13 +65,13 @@ Create a cache and supply a callback for misses:
 use std::convert::Infallible;
 
 use bytes::Bytes;
-use feuer::{CacheConfig, TieredMemoryDiskCache};
+use feuer::{Cache, CacheConfig};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cache directory, disk capacity (1 GiB), memory target (64 MiB). 
     let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?;
-    let cache = TieredMemoryDiskCache::open(config, None, None).await?;
+    let cache = Cache::open(config, None, None).await?;
 
     let bytes = cache
         .get_or_fetch("object-v1".to_owned(), || async {

@@ -1,16 +1,20 @@
 //! FETR reading and chronological request selection for cache replays.
 
 use std::{
+    error::Error,
     fs::File,
     io::{BufReader, Read},
     path::Path,
+    result,
 };
 
 use feuer_types::ObjectKeyHash;
 use rustc_hash::FxHashMap;
+use tar::Archive;
+use zstd::Decoder;
 
 /// Errors from trace decoding, input files, or replay preparation.
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub type Result<T> = result::Result<T, Box<dyn Error + Send + Sync>>;
 
 /// A recorded request start or lookup outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,14 +61,14 @@ pub fn decode_package(package: &[u8]) -> Result<impl Iterator<Item = Result<Even
 }
 
 /// An object request to replay.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Request {
     /// Identity used to break ties between equal arrival timestamps.
     pub request_id: u64,
     /// Nanoseconds relative to the earliest recorded request start.
     pub time_ns: u64,
-    /// Recorded object hash.
-    pub object_key: ObjectKeyHash,
+    /// Recorded object hash formatted as a string key for cache lookups.
+    pub object_key: String,
     /// Object payload length in bytes.
     pub payload_len: u64,
 }
@@ -148,7 +152,7 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
             Ok(Request {
                 request_id: event.request_id,
                 time_ns: event.time_ns - first_start_ns,
-                object_key: event.object_key,
+                object_key: event.object_key.0.to_string(),
                 payload_len: object_lengths[&event.object_key]
                     .ok_or("object replay requires a successful outcome with its payload length")?,
             })
@@ -175,7 +179,7 @@ fn visit_events(path: &Path, mut visit: impl FnMut(Event) -> Result<()>) -> Resu
     if !path.as_os_str().to_string_lossy().ends_with(".tar.zst") {
         return Err("input must be a .feuer package or a single-session .tar.zst archive".into());
     }
-    let mut archive = tar::Archive::new(zstd::Decoder::new(file)?);
+    let mut archive = Archive::new(Decoder::new(file)?);
     let mut session_directory = None;
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -200,6 +204,12 @@ fn visit_events(path: &Path, mut visit: impl FnMut(Event) -> Result<()>) -> Resu
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tar::{Builder, Header};
+    use tempfile::tempdir;
+    use zstd::Encoder;
+
     use super::*;
 
     fn package(events: &[Event]) -> Vec<u8> {
@@ -225,10 +235,10 @@ mod tests {
     }
 
     fn archive(path: &Path, packages: &[(&str, Vec<u8>)]) {
-        let encoder = zstd::Encoder::new(File::create(path).unwrap(), 1).unwrap();
-        let mut archive = tar::Builder::new(encoder);
+        let encoder = Encoder::new(File::create(path).unwrap(), 1).unwrap();
+        let mut archive = Builder::new(encoder);
         for (name, bytes) in packages {
-            let mut header = tar::Header::new_gnu();
+            let mut header = Header::new_gnu();
             header.set_size(bytes.len() as u64);
             header.set_mode(0o600);
             header.set_cksum();
@@ -266,11 +276,11 @@ mod tests {
 
     #[test]
     fn replays_objects_using_successful_lengths_beyond_the_selected_prefix() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir().unwrap();
         let path = dir.path().join("native.feuer");
         for kind in 1..=3 {
             for payload_len in [0, 17] {
-                std::fs::write(
+                fs::write(
                     &path,
                     object_package(&[
                         (0, 1, 0, 0),
@@ -281,7 +291,7 @@ mod tests {
                 .unwrap();
                 let access_trace = load_requests(&path, Some(1)).unwrap();
                 assert_eq!(access_trace.requests.len(), 1);
-                assert_eq!(access_trace.requests[0].object_key, ObjectKeyHash(123));
+                assert_eq!(access_trace.requests[0].object_key, "123");
                 assert_eq!(access_trace.requests[0].payload_len, payload_len);
                 assert_eq!(access_trace.incomplete, 1);
                 assert_eq!(access_trace.outcomes, [0; 6]);
@@ -290,8 +300,31 @@ mod tests {
     }
 
     #[test]
+    fn replay_keys_preserve_repeated_and_distinct_objects() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trace.feuer");
+        let mut events = Vec::new();
+        for (index, hash) in [0, u128::MAX, 0].into_iter().enumerate() {
+            for kind in [0, 3] {
+                events.push(Event {
+                    object_key: ObjectKeyHash(hash),
+                    ..event(kind, index as u64, (index * 2) as u64 + u64::from(kind == 3))
+                });
+            }
+        }
+        fs::write(&path, package(&events)).unwrap();
+        let trace = load_requests(&path, None).unwrap();
+        let keys: Vec<_> = trace
+            .requests
+            .iter()
+            .map(|request| request.object_key.as_str())
+            .collect();
+        assert_eq!(keys, ["0", "340282366920938463463374607431768211455", "0"]);
+    }
+
+    #[test]
     fn rejects_unknown_or_inconsistent_object_lengths() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir().unwrap();
         let path = dir.path().join("native.feuer");
         for (events, message) in [
             (vec![(0, 1, 0, 0), (4, 1, 1, 0)], "requires a successful outcome"),
@@ -300,7 +333,7 @@ mod tests {
                 "inconsistent payload lengths",
             ),
         ] {
-            std::fs::write(&path, object_package(&events)).unwrap();
+            fs::write(&path, object_package(&events)).unwrap();
             assert!(load_requests(&path, None).err().unwrap().to_string().contains(message));
         }
     }
@@ -324,7 +357,7 @@ mod tests {
 
     #[test]
     fn sorts_starts_and_joins_outcomes_across_packages_and_prefix() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir().unwrap();
         let path = dir.path().join("trace.tar.zst");
         archive(
             &path,
@@ -355,7 +388,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(1, 0), (3, 0), (2, 500)]
         );
-        assert_eq!(access_trace.requests[0].object_key, event(0, 1, 0).object_key);
+        assert_eq!(
+            access_trace.requests[0].object_key,
+            event(0, 1, 0).object_key.0.to_string()
+        );
         assert_eq!(access_trace.requests[0].payload_len, 10);
         assert_eq!(access_trace.outcomes, [0, 1, 0, 1, 0, 0]);
         assert_eq!(access_trace.incomplete, 1);
@@ -375,7 +411,7 @@ mod tests {
 
     #[test]
     fn rejects_mixed_sessions_duplicates_and_inconsistent_outcomes() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir().unwrap();
         let path = dir.path().join("trace.tar.zst");
         archive(
             &path,
@@ -393,21 +429,21 @@ mod tests {
             vec![event(0, 1, 0), event(1, 1, 1), event(1, 1, 2)],
             vec![event(0, 1, 0), mismatched],
         ] {
-            std::fs::write(&path, package(&events)).unwrap();
+            fs::write(&path, package(&events)).unwrap();
             assert!(load_requests(&path, Some(1)).is_err());
         }
         assert!(load_requests(&path, Some(0)).is_err());
         assert!(load_requests(&path, Some(u64::MAX)).is_err());
-        std::fs::write(&path, package(&[event(0, 1, 0)])).unwrap();
+        fs::write(&path, package(&[event(0, 1, 0)])).unwrap();
         assert!(load_requests(&path, Some(1)).is_err());
     }
 
     #[test]
     fn preserves_empty_objects_and_reports_errors_and_misses() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempdir().unwrap();
         let path = dir.path().join("empty.feuer");
         for kind in [4, 5] {
-            std::fs::write(
+            fs::write(
                 &path,
                 object_package(&[(0, 1, 0, 0), (kind, 1, 1, 0), (0, 2, 2, 0), (3, 2, 3, 0)]),
             )

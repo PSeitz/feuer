@@ -2,7 +2,7 @@ mod shard;
 #[cfg(test)]
 mod tests;
 
-use std::{fmt, hash::BuildHasher, sync::Arc};
+use std::{fmt, hash::BuildHasher, sync::Arc, thread::available_parallelism};
 
 use bytes::Bytes;
 use feuer_historian::ObjectAccessHistories;
@@ -11,6 +11,8 @@ use parking_lot::Mutex;
 use rustc_hash::FxBuildHasher;
 
 use self::shard::{InsertResult, MemoryCacheShard};
+#[cfg(feature = "benchmark")]
+use crate::read_idle_buffer_pool_percent;
 use crate::{
     BufferPool, MemoryMetrics,
     buffer::DEFAULT_IDLE_BUFFER_POOL_PERCENT,
@@ -80,7 +82,7 @@ impl MemoryCache {
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
     pub fn with_shards_for_benchmark(capacity: u64, num_shards: usize) -> Self {
-        let percent = crate::read_idle_buffer_pool_percent().unwrap_or_else(|error| panic!("{error}"));
+        let percent = read_idle_buffer_pool_percent().unwrap_or_else(|error| panic!("{error}"));
         let buffer_pool = BufferPool::with_idle_buffer_pool_percent(capacity, MemoryMetrics::noop(), percent);
         Self::with_shard_count(buffer_pool, num_shards)
     }
@@ -202,5 +204,5 @@ fn shard_capacity_for(total_capacity: u64, num_shards: usize, shard_index: usize
 }
 
 fn default_shard_count() -> usize {
-    std::thread::available_parallelism().map_or(4, |cpus| cpus.get().min(MAX_SHARDS / 4) * 4)
+    available_parallelism().map_or(4, |cpus| cpus.get().min(MAX_SHARDS / 4) * 4)
 }

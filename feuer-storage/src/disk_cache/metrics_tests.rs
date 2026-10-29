@@ -1,7 +1,11 @@
 use super::*;
 use crate::test_metrics::{registry, value};
+use prometheus::Registry;
+use std::{fs::OpenOptions, time::Duration};
+use tempfile::TempDir;
+use tokio::time::{sleep, timeout};
 
-fn read_byte_count(registry: &prometheus::Registry) -> f64 {
+fn read_byte_count(registry: &Registry) -> f64 {
     value(registry, "feuer_disk_io_bytes_total", &[("operation", "read")])
 }
 
@@ -9,7 +13,7 @@ fn download(length: usize) -> Bytes {
     Bytes::from(vec![7; length])
 }
 
-async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskCache, prometheus::Registry) {
+async fn measured_cache(capacity: u64) -> (TempDir, DiskCache, Registry) {
     let directory = tempfile::tempdir().unwrap();
     let (registry, backend) = registry();
     let cache = DiskCache::open(
@@ -45,10 +49,10 @@ async fn periodic_writer_combines_updates_into_page_writes() {
     let before = written_bytes();
     let weak = Arc::downgrade(&cache.disk);
     tokio::spawn(DiskCacheInner::write_metadata_periodically(weak.clone()));
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    timeout(Duration::from_secs(5), async {
         // Both removals share one page in an initialized chunk.
         while written_bytes() < before + METADATA_PAGE_BYTES as f64 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            sleep(Duration::from_millis(10)).await;
         }
     })
     .await
@@ -264,7 +268,7 @@ async fn io_errors_preserve_entries() {
     cache.insert_batch(vec![(key, download(4))]).await.unwrap();
     let (payload, _) = tests::entry_disk_ranges(&cache, &key).await;
     // Leave only part of the payload readable so the lookup encounters a partial read.
-    std::fs::OpenOptions::new()
+    OpenOptions::new()
         .write(true)
         .open(directory.path().join("data"))
         .unwrap()

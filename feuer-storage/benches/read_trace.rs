@@ -1,23 +1,32 @@
 //! Replay recorded disk-read arrivals without writes during measurement.
 //! Run: cargo bench -p feuer-storage --bench read_trace -- /mnt/local-ssd reads.csv
 
-use std::time::{Duration, Instant};
+use std::{
+    env,
+    error::Error,
+    fs::read_to_string,
+    hint::black_box,
+    num::ParseIntError,
+    time::{Duration, Instant},
+};
 
 use feuer_memory::AlignedBuffer;
-use feuer_storage::{DataFile, IoMetrics};
-use tokio::task::JoinSet;
+use feuer_storage::{DataFile, DataFileError, IoMetrics};
+use mixtrics::{metrics::BoxedRegistry, registry::noop::NoopMetricsRegistry};
+use tempfile::Builder;
+use tokio::{task::JoinSet, time::sleep_until};
 
 #[tokio::main(worker_threads = 4)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
+async fn main() -> Result<(), Box<dyn Error>> {
+    let mut args = env::args().skip(1);
     let root = args.next().expect("provide a directory on the target filesystem");
-    let trace = std::fs::read_to_string(args.next().expect("provide a read trace CSV"))?;
+    let trace = read_to_string(args.next().expect("provide a read trace CSV"))?;
     let reads: Vec<[u64; 3]> = trace
         .lines()
         .skip(1)
         .map(|line| {
             let mut fields = line.split(',').map(str::parse::<u64>);
-            Ok::<_, std::num::ParseIntError>([
+            Ok::<_, ParseIntError>([
                 fields.next().unwrap()?,
                 fields.next().unwrap()?,
                 fields.next().unwrap()?,
@@ -29,8 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|[_, offset, length]| (offset + length).next_multiple_of(4096))
         .max()
         .unwrap();
-    let temp = tempfile::Builder::new().prefix("feuer-read-trace-").tempdir_in(root)?;
-    let registry: mixtrics::metrics::BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
+    let temp = Builder::new().prefix("feuer-read-trace-").tempdir_in(root)?;
+    let registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
     let file = DataFile::open(temp.path(), capacity, IoMetrics::new(&registry)).await?;
 
     // Initialize only referenced disk ranges, keeping original addresses in a sparse file.
@@ -49,13 +58,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let started = Instant::now();
     for &[time_ns, offset, length] in &reads {
         let arrival = started + Duration::from_nanos(time_ns);
-        tokio::time::sleep_until(arrival.into()).await;
+        sleep_until(arrival.into()).await;
         let file = file.clone();
         tasks.spawn(async move {
             let before = Instant::now();
-            std::hint::black_box(file.read_at(offset, length as usize).await?);
+            black_box(file.read_at(offset, length as usize).await?);
             let finished = Instant::now();
-            Ok::<_, feuer_storage::DataFileError>((
+            Ok::<_, DataFileError>((
                 length,
                 finished.duration_since(before).as_secs_f64() * 1e6,
                 finished.duration_since(arrival).as_secs_f64() * 1e6,

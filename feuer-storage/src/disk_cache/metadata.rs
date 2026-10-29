@@ -4,7 +4,8 @@
 //! Later changes retry failed chunk initializations. Other failed writes wait for their pages to change.
 //! There is no stable-storage sync or shutdown flush. Recovery is best-effort.
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::BTreeSet, mem, time::Duration};
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 use super::{page_format::*, *};
 
@@ -178,8 +179,8 @@ impl DiskCacheInner {
     /// Sole metadata writer. Keeps the cache alive only while a write round is running.
     pub(super) async fn write_metadata_periodically(disk: Weak<Self>) {
         const INTERVAL: Duration = Duration::from_secs(1);
-        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + INTERVAL, INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut interval = interval_at(Instant::now() + INTERVAL, INTERVAL);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             let Some(disk) = disk.upgrade() else { return };
@@ -206,7 +207,7 @@ impl DiskCacheShard {
                     }
                 }
             }
-            std::mem::take(&mut pages.dirty_pages)
+            mem::take(&mut pages.dirty_pages)
                 .into_iter()
                 .rev() // Write later chunks before the links pointing to them.
                 .filter_map(|location| {

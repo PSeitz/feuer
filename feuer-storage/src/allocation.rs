@@ -230,8 +230,8 @@ impl Drop for ReservedChunks {
 mod tests {
     use super::*;
     use crate::test_metrics::{registry, value};
-    use proptest::prelude::*;
-    use std::sync::Barrier;
+    use proptest::{collection, prelude::*};
+    use std::{sync::Barrier, thread};
 
     #[test]
     fn allocator_releases_shared_chunks_after_the_last_payload() {
@@ -274,7 +274,7 @@ mod tests {
         for _ in 0..100 {
             let allocator = DiskChunkAllocator::new(2 * CHUNK_BYTES);
             let barrier = Barrier::new(2);
-            std::thread::scope(|scope| {
+            thread::scope(|scope| {
                 let task = scope.spawn(|| {
                     barrier.wait();
                     allocator.reserve_chunks(2)
@@ -351,7 +351,7 @@ mod tests {
             first in 0u64..1024,
             (capacity, operations) in (1usize..=102).prop_flat_map(|capacity| (
                 Just(capacity),
-                prop::collection::vec((0u8..3, 0usize..=capacity + 1, 0usize..=capacity + 1), 1..200),
+                collection::vec((0u8..3, 0usize..=capacity + 1, 0usize..=capacity + 1), 1..200),
             )),
         ) {
             let disk_range = first * CHUNK_BYTES..(first + capacity as u64) * CHUNK_BYTES;
@@ -433,7 +433,7 @@ mod tests {
     fn concurrent_reservation_and_release_restores_all_free_chunks() {
         let capacity = 16 * CHUNK_BYTES;
         let allocator = DiskChunkAllocator::new(capacity);
-        std::thread::scope(|scope| {
+        thread::scope(|scope| {
             for _ in 0..8 {
                 let allocator = &allocator;
                 scope.spawn(move || {

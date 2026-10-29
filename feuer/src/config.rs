@@ -214,10 +214,14 @@ pub enum CacheConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        env::{current_exe, var},
+        process::Command,
+    };
 
     fn check_environment_overrides(test: &str, name: &str, child: &str, cases: &[(Option<&str>, &str)]) {
         for &(setting, expected) in cases {
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            let mut command = Command::new(current_exe().unwrap());
             command.args(["--exact", test]).env(child, expected).env_remove(name);
             if let Some(setting) = setting {
                 command.env(name, setting);
@@ -251,7 +255,7 @@ mod tests {
 
     #[test]
     fn reclaim_sample_size_environment_override() {
-        if let Ok(expected) = std::env::var("FEUER_TEST_RECLAIM_SAMPLE_CHILD") {
+        if let Ok(expected) = var("FEUER_TEST_RECLAIM_SAMPLE_CHILD") {
             let result = CacheConfig::new("cache", 1, 1).map(|config| config.eviction().sample_size());
             let expected = expected
                 .parse::<usize>()
@@ -284,7 +288,7 @@ mod tests {
     fn access_count_half_life_environment_override() {
         const NAME: &str = "FEUER_ACCESS_COUNT_HALF_LIFE";
         const CHILD: &str = "FEUER_TEST_HALF_LIFE_CHILD";
-        if let Ok(expected) = std::env::var(CHILD) {
+        if let Ok(expected) = var(CHILD) {
             assert_eq!(
                 CacheConfig::new("cache", 1, 1).map(|config| config.access_count_half_life()),
                 expected
@@ -316,7 +320,7 @@ mod tests {
     fn idle_buffer_pool_percent_environment_override() {
         const NAME: &str = "FEUER_IDLE_BUFFER_POOL_PERCENT";
         const CHILD: &str = "FEUER_TEST_IDLE_BUFFER_POOL_PERCENT_CHILD";
-        if let Ok(expected) = std::env::var(CHILD) {
+        if let Ok(expected) = var(CHILD) {
             let result = CacheConfig::new("cache", 1, 1).map(|config| config.idle_buffer_pool_percent());
             let expected = expected
                 .parse::<u64>()

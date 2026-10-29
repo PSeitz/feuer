@@ -1,8 +1,10 @@
 use super::*;
 use crate::disk_cache::tests::{download, entry_disk_ranges, open_test_cache, with_manual_metadata_writes};
+use crate::test_metrics::{registry, value};
 use feuer_memory::BUFFER_ALIGNMENT;
-use proptest::prelude::*;
+use proptest::{collection, prelude::*};
 use std::collections::BTreeSet;
+use tokio::runtime::Builder;
 
 async fn reopen(directory: &Path, cache: DiskCache) -> DiskCache {
     cache.write_dirty_metadata_pages().await;
@@ -45,7 +47,7 @@ fn payload_lengths() -> impl Strategy<Value = Vec<usize>> {
     let chunk = CHUNK_BYTES as usize;
     let alignment = BUFFER_ALIGNMENT;
     let half = chunk / 2;
-    prop::collection::vec(
+    collection::vec(
         prop_oneof![
             0..=2 * alignment,
             half - 2 * alignment..=half + 2 * alignment,
@@ -87,7 +89,7 @@ proptest! {
         lengths in payload_lengths(),
         seed in any::<u64>(),
     ) {
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
             // Even a separate chunk range for every entry fits, so admission must succeed.
             let payload_capacity = lengths.iter()
                 .map(|&length| (length as u64).max(1).div_ceil(CHUNK_BYTES))
@@ -497,7 +499,7 @@ async fn recovery_deduplicates_keys_and_restores_allocator_availability() {
         cache.disk.file.write_at(CHUNK_BYTES, &Bytes::from(page)).await.unwrap();
         let capacity = cache.disk.file.capacity();
         drop(cache);
-        let (registry, backend) = crate::test_metrics::registry();
+        let (registry, backend) = registry();
         let cache = DiskCache::open(
             directory.path(),
             capacity,
@@ -519,9 +521,9 @@ async fn recovery_deduplicates_keys_and_restores_allocator_availability() {
             shard.metadata_pages.lock().unwrap().free_slot_count(),
             ENTRIES_PER_METADATA_CHUNK - 1
         );
-        assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 1.0);
+        assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
         assert_eq!(
-            crate::test_metrics::value(&registry, "feuer_disk_payload_bytes", &[]),
+            value(&registry, "feuer_disk_payload_bytes", &[]),
             retained_length as f64
         );
         assert_eq!(cache.get(&key).await.unwrap(), download(0, retained_length));
@@ -530,12 +532,9 @@ async fn recovery_deduplicates_keys_and_restores_allocator_availability() {
         } else {
             3.0
         };
+        assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), recovered_chunks);
         assert_eq!(
-            crate::test_metrics::value(&registry, "feuer_disk_recovered_chunks", &[]),
-            recovered_chunks
-        );
-        assert_eq!(
-            crate::test_metrics::value(&registry, "feuer_disk_chunks", &[("state", "allocated")]),
+            value(&registry, "feuer_disk_chunks", &[("state", "allocated")]),
             recovered_chunks
         );
         assert!(cache.insert(ObjectKeyHash(3), download(0, 1)).await.unwrap());
@@ -544,15 +543,9 @@ async fn recovery_deduplicates_keys_and_restores_allocator_availability() {
         assert_ne!(location, retained_location);
         assert_eq!(shard.metadata_pages.lock().unwrap().chunks.len(), 1);
         drop(cache);
-        assert_eq!(crate::test_metrics::value(&registry, "feuer_disk_entries", &[]), 0.0);
-        assert_eq!(
-            crate::test_metrics::value(&registry, "feuer_disk_chunks", &[("state", "allocated")]),
-            0.0
-        );
-        assert_eq!(
-            crate::test_metrics::value(&registry, "feuer_disk_recovered_chunks", &[]),
-            0.0
-        );
+        assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
+        assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 0.0);
+        assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), 0.0);
     }
 }
 

@@ -1,6 +1,7 @@
 use std::{
     future::Future,
     io,
+    mem::replace,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -38,7 +39,7 @@ impl AccessTrace {
             while let Some(event_bytes) = event_receiver.recv().await {
                 package.extend_from_slice(&event_bytes);
                 if package.len() >= PACKAGE_TARGET_BYTES {
-                    deliver_package(Bytes::from(std::mem::replace(&mut package, new_package()))).await?;
+                    deliver_package(Bytes::from(replace(&mut package, new_package()))).await?;
                 }
             }
             if package.len() > PACKAGE_HEADER.len() {

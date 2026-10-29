@@ -18,17 +18,18 @@
 use std::{
     fs::File,
     future::poll_fn,
-    io,
+    io, mem,
     ops::Range,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     pin::pin,
+    ptr,
     sync::Arc,
     thread::{self, JoinHandle},
     time::Instant,
 };
 
 use bytes::Bytes;
-use feuer_memory::{AlignedBuffer, BufferPool};
+use feuer_memory::{AlignedBuffer, BUFFER_ALIGNMENT, BufferPool};
 use io_uring::{IoUring, opcode, squeue, types};
 use tokio::sync::{SemaphorePermit, mpsc, oneshot};
 
@@ -39,7 +40,7 @@ use crate::{IoMetrics, IoOperation};
 
 // Buffer addresses, physical offsets, and I/O lengths use this alignment.
 // Opening verifies that the filesystem's direct-I/O requirements divide it.
-pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = feuer_memory::BUFFER_ALIGNMENT;
+pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = BUFFER_ALIGNMENT;
 // Maximum bytes transferred per I/O request, including alignment padding.
 // Short paced-read comparisons favored 1 MiB over whole-read submissions for
 // small/medium-read tail latency. They did not establish an optimal size.
@@ -411,7 +412,7 @@ impl IoBuffers {
         bytes.truncate(aligned_length);
         Ok(Self::Write {
             vectors: [libc::iovec {
-                iov_base: std::ptr::null_mut(),
+                iov_base: ptr::null_mut(),
                 iov_len: 0,
             }; 2],
             bytes: [bytes, tail],
@@ -442,7 +443,7 @@ impl IoBuffers {
                     vector_count += 1;
                 }
                 vectors[vector_count..].fill(libc::iovec {
-                    iov_base: std::ptr::null_mut(),
+                    iov_base: ptr::null_mut(),
                     iov_len: 0,
                 });
                 // XFS checks empty vectors' addresses too, so omit them from the request.
@@ -686,7 +687,7 @@ impl IoQueue {
         // Ring close does not wait for outstanding requests. Leak the active array and its file owners
         // to prevent use-after-free or early reuse.
         tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
-        let requests = Box::leak(std::mem::take(&mut self.active));
+        let requests = Box::leak(mem::take(&mut self.active));
         for request in requests.iter_mut().flatten() {
             let _ = request.reply.take().unwrap().send(Err(queue_stopped_error()));
         }

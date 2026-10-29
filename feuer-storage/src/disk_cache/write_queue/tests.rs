@@ -1,8 +1,11 @@
 use super::*;
 use crate::test_metrics::{registry, value};
+use prometheus::Registry;
 use std::time::Duration;
+use tempfile::TempDir;
+use tokio::{task::yield_now, time};
 
-async fn measured_disk() -> (tempfile::TempDir, DiskCache, prometheus::Registry) {
+async fn measured_disk() -> (TempDir, DiskCache, Registry) {
     let directory = tempfile::tempdir().unwrap();
     let (registry, backend) = registry();
     let disk = DiskCache::open(
@@ -67,7 +70,7 @@ async fn disk_timer_flushes_direct_and_queued_writes() {
     let (_directory, disk, registry) = measured_disk().await;
 
     for (count, queued) in [(0, false), (1, true)] {
-        tokio::time::pause();
+        time::pause();
         let key = ObjectKeyHash(count);
         let bytes = Bytes::from_static(b"abcd");
         if queued {
@@ -75,18 +78,18 @@ async fn disk_timer_flushes_direct_and_queued_writes() {
         } else {
             disk.write(key, bytes, ()).await.unwrap();
         }
-        tokio::task::yield_now().await;
+        yield_now().await;
         while value(&registry, "feuer_disk_write_queued_entries", &[]) != 0.0 {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
-        tokio::time::advance(Duration::from_secs(59)).await;
+        time::advance(Duration::from_secs(59)).await;
         assert_eq!(value(&registry, "feuer_disk_entries", &[]), count as f64);
         assert_eq!(disk.get(&key).await.unwrap(), b"abcd"[..]);
-        tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::time::resume();
-        tokio::time::timeout(Duration::from_secs(10), async {
+        time::advance(Duration::from_secs(1)).await;
+        time::resume();
+        time::timeout(Duration::from_secs(10), async {
             while value(&registry, "feuer_disk_entries", &[]) != (count + 1) as f64 {
-                tokio::task::yield_now().await;
+                yield_now().await;
             }
         })
         .await
@@ -95,9 +98,9 @@ async fn disk_timer_flushes_direct_and_queued_writes() {
     assert_eq!(disk.access_histories().request_count(), 0);
     let weak = Arc::downgrade(&disk.disk);
     drop(disk);
-    tokio::time::timeout(Duration::from_secs(10), async {
+    time::timeout(Duration::from_secs(10), async {
         while weak.upgrade().is_some() {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await

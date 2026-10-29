@@ -1,15 +1,19 @@
 //! Exercise request recording without a disk tier on platforms where storage is unavailable.
 
 use super::*;
-use std::task::Poll;
+use crate::test_metrics::{registry, value};
+use std::{
+    future::{pending, poll_fn},
+    task::Poll,
+};
 
 #[tokio::test]
 async fn records_each_started_request_before_any_result() {
-    let (metrics_registry, registry) = crate::test_metrics::registry();
-    let cache = TieredMemoryDiskCache {
-        inner: Arc::new(TieredMemoryDiskCacheInner {
+    let (metrics_registry, registry) = registry();
+    let cache = Cache {
+        inner: Arc::new(CacheInner {
             config: CacheConfig::new("cache", 4 << 20, 1024).unwrap(),
-            memory: MemoryCache::with_metrics(1024, feuer_memory::MemoryMetrics::new(&registry), 7),
+            memory: MemoryCache::with_metrics(1024, MemoryMetrics::new(&registry), 7),
             metrics: LookupMetrics::new(&registry),
             pending_fetches: PendingFetches::default(),
         }),
@@ -25,17 +29,13 @@ async fn records_each_started_request_before_any_result() {
         .await;
     assert_eq!(result, Err(GetOrFetchError::Callback("source failed")));
 
-    let mut pending = Box::pin(cache.get_or_fetch(key.clone(), std::future::pending::<Result<Bytes, &str>>));
+    let mut pending = Box::pin(cache.get_or_fetch(key.clone(), pending::<Result<Bytes, &str>>));
     assert_eq!(
         history.request_count(),
         1,
         "an unpolled future has not started a request"
     );
-    assert!(
-        std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx)))
-            .await
-            .is_pending()
-    );
+    assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx))).await.is_pending());
     assert_eq!(
         history.request_count(),
         2,
@@ -59,11 +59,11 @@ async fn records_each_started_request_before_any_result() {
         .unwrap();
     assert_eq!(history.request_count(), 4, "success paths do not double-count");
     assert_eq!(
-        crate::test_metrics::value(&metrics_registry, "feuer_lookup_total", &[("outcome", "memory_hit")]),
+        value(&metrics_registry, "feuer_lookup_total", &[("outcome", "memory_hit")]),
         1.0
     );
     assert_eq!(
-        crate::test_metrics::value(&metrics_registry, "feuer_lookup_bytes_total", &[("source", "memory")]),
+        value(&metrics_registry, "feuer_lookup_bytes_total", &[("source", "memory")]),
         1.0
     );
     assert!(history.decayed_request_count(&ObjectKeyHash::from(key)) > 3.0);

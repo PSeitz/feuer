@@ -1,4 +1,22 @@
-use std::{fs::OpenOptions, future::Future, os::unix::fs::OpenOptionsExt, task::Context};
+use crate::{DataFileError, test_metrics::registry};
+use feuer_memory::MemoryCache;
+use std::{
+    cmp::Reverse,
+    error::Error,
+    fs::OpenOptions,
+    future::Future,
+    os::unix::fs::OpenOptionsExt,
+    sync::Mutex,
+    task::{Context, Poll, Waker},
+    time::Duration,
+};
+use tempfile::NamedTempFile;
+use tokio::{
+    sync::{mpsc::error::TrySendError, oneshot::error::TryRecvError},
+    task::yield_now,
+    time::timeout,
+};
+use tracing::subscriber::with_default;
 
 use super::*;
 
@@ -11,10 +29,7 @@ fn ring_creation_error_identifies_io_uring_and_preserves_os_error() {
     assert!(message.contains("failed to create io_uring ring"));
     assert!(message.contains("Operation not permitted (os error 1)"));
     assert!(message.contains("seccomp"));
-    let source = std::error::Error::source(&error)
-        .unwrap()
-        .downcast_ref::<io::Error>()
-        .unwrap();
+    let source = Error::source(&error).unwrap().downcast_ref::<io::Error>().unwrap();
     assert_eq!(source.raw_os_error(), Some(libc::EPERM));
 }
 
@@ -41,7 +56,7 @@ fn request(
 }
 
 fn data_file() -> Arc<DataFileAndLock> {
-    let temporary = tempfile::NamedTempFile::new().unwrap();
+    let temporary = NamedTempFile::new().unwrap();
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -76,7 +91,7 @@ fn queue() -> (IoQueue, mpsc::Sender<IoRequest>, Arc<DataFileAndLock>) {
 }
 
 fn buffer_pool() -> Arc<BufferPool> {
-    feuer_memory::MemoryCache::new(384 * 1024 * 1024).buffer_pool()
+    MemoryCache::new(384 * 1024 * 1024).buffer_pool()
 }
 
 #[test]
@@ -209,7 +224,7 @@ async fn active_request_limit_keeps_channel_full_until_completion() {
     {
         let reserve = sender.reserve();
         tokio::pin!(reserve);
-        let mut context = Context::from_waker(std::task::Waker::noop());
+        let mut context = Context::from_waker(Waker::noop());
         assert!(reserve.as_mut().poll(&mut context).is_pending());
 
         queue.ring.submit_and_wait(MAX_IN_FLIGHT_READS).unwrap();
@@ -237,7 +252,7 @@ async fn active_request_limit_keeps_channel_full_until_completion() {
 async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
     use crate::test_metrics::value;
 
-    let (registry, backend) = crate::test_metrics::registry();
+    let (registry, backend) = registry();
     let queues = IoQueues::new().unwrap();
     let first = queues.read_queue(data_file(), buffer_pool(), IoMetrics::new(&backend));
     let second = queues.read_queue(data_file(), buffer_pool(), IoMetrics::new(&backend));
@@ -260,7 +275,7 @@ async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
         .unwrap();
     let mut admitted = Box::pin(first.reserve_channel_capacity());
     let mut canceled = Box::pin(second.reserve_channel_capacity());
-    let mut context = Context::from_waker(std::task::Waker::noop());
+    let mut context = Context::from_waker(Waker::noop());
     for _ in 0..2 {
         assert!(admitted.as_mut().poll(&mut context).is_pending());
         assert!(canceled.as_mut().poll(&mut context).is_pending());
@@ -330,11 +345,7 @@ async fn shared_queues_use_one_admission_limit_and_independent_buffer_pools() {
     {
         let read = second_read.read(0, DIRECT_IO_ALIGNMENT_BYTES);
         tokio::pin!(read);
-        assert!(
-            read.as_mut()
-                .poll(&mut Context::from_waker(std::task::Waker::noop()))
-                .is_pending()
-        );
+        assert!(read.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
         assert_eq!(second_pool.idle_bytes(), idle_bytes);
     }
     let writes = first_write
@@ -347,7 +358,7 @@ async fn shared_queues_use_one_admission_limit_and_independent_buffer_pools() {
         .unwrap();
     assert!(matches!(
         second_write.handle.sender.as_ref().unwrap().try_reserve(),
-        Err(mpsc::error::TrySendError::Full(_))
+        Err(TrySendError::Full(_))
     ));
     drop(reads);
     drop(writes);
@@ -411,15 +422,12 @@ async fn reads_progress_with_write_channel_full_and_after_write_shutdown() {
         .unwrap();
     assert!(matches!(
         write_queue.handle.sender.as_ref().unwrap().try_reserve(),
-        Err(mpsc::error::TrySendError::Full(_))
+        Err(TrySendError::Full(_))
     ));
-    let (bytes, _) = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        read_queue.read(0, DIRECT_IO_ALIGNMENT_BYTES),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let (bytes, _) = timeout(Duration::from_secs(5), read_queue.read(0, DIRECT_IO_ALIGNMENT_BYTES))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(&bytes[..], &[0x99; DIRECT_IO_ALIGNMENT_BYTES]);
     drop(reservations);
 
@@ -470,7 +478,7 @@ fn queue_failure_retains_write_descriptors_and_files() {
         })
         .unwrap_err();
     assert_eq!(error.raw_os_error(), Some(libc::EIO));
-    assert!(matches!(receive.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+    assert!(matches!(receive.try_recv(), Err(TryRecvError::Empty)));
 
     let retained = queue.retain_active_requests();
     assert!(queue.active.is_empty());
@@ -580,11 +588,7 @@ async fn reads_wait_for_channel_capacity_without_taking_idle_buffers() {
         assert!(idle_bytes > 0);
         let read = handle.read(0, length);
         tokio::pin!(read);
-        assert!(
-            read.as_mut()
-                .poll(&mut Context::from_waker(std::task::Waker::noop()))
-                .is_pending()
-        );
+        assert!(read.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
         assert_eq!(pool.idle_bytes(), idle_bytes);
         // Cancel the admission waiter before releasing capacity.
     }
@@ -618,15 +622,11 @@ async fn queue_exit_releases_admission_waiters_and_queued_requests() {
     }
     let read = handle.read(0, DIRECT_IO_ALIGNMENT_BYTES);
     tokio::pin!(read);
-    assert!(
-        read.as_mut()
-            .poll(&mut Context::from_waker(std::task::Waker::noop()))
-            .is_pending()
-    );
+    assert!(read.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
     drop(queue);
     assert_eq!(read.await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
     for mut reply in replies {
-        assert!(matches!(reply.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
+        assert!(matches!(reply.try_recv(), Err(TryRecvError::Closed)));
     }
     assert_eq!(
         handle.read(0, MAX_IO_REQUEST_BYTES).await.unwrap_err().kind(),
@@ -695,7 +695,7 @@ fn error_completion_releases_the_read_buffer() {
     let mut buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     buffer.as_mut_slice().fill(0x99);
     let address = buffer.as_ref().as_ptr();
-    let temporary = tempfile::NamedTempFile::new().unwrap();
+    let temporary = NamedTempFile::new().unwrap();
     // Reading a write-only file produces -EBADF in the CQE, not a submission error.
     Arc::get_mut(&mut files).unwrap().file = OpenOptions::new()
         .write(true)
@@ -754,7 +754,7 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
     assert!(
         future
             .as_mut()
-            .poll(&mut Context::from_waker(std::task::Waker::noop()))
+            .poll(&mut Context::from_waker(Waker::noop()))
             .is_pending()
     );
     queue.receive_requests();
@@ -764,7 +764,7 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
     }
     queue.ring.submit_and_wait(3).unwrap();
     let mut completions: Vec<_> = queue.ring.completion().collect();
-    completions.sort_unstable_by_key(|c| std::cmp::Reverse(c.user_data()));
+    completions.sort_unstable_by_key(|c| Reverse(c.user_data()));
     for completion in completions {
         assert_eq!(completion.result(), length as i32);
         queue.complete_request(completion.user_data(), completion.result());
@@ -786,7 +786,7 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
         let length = (MAX_IN_FLIGHT_READS + 1) * MAX_IO_REQUEST_BYTES;
         files.file.set_len(length as u64).unwrap();
         let weak_files = Arc::downgrade(&files);
-        let pool = feuer_memory::MemoryCache::new(4 * 1024 * 1024 * 1024).buffer_pool();
+        let pool = MemoryCache::new(4 * 1024 * 1024 * 1024).buffer_pool();
         let read = ReadQueue {
             payload_reads: Arc::new(PayloadReadQueue::new()),
             handle: Arc::new(IoQueueHandle {
@@ -799,10 +799,10 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
             metrics: IoMetrics::noop(),
         };
         let mut future = Box::pin(read.read(0, length));
-        let mut context = Context::from_waker(std::task::Waker::noop());
+        let mut context = Context::from_waker(Waker::noop());
         while queue.receiver.len() < MAX_IN_FLIGHT_READS {
             assert!(future.as_mut().poll(&mut context).is_pending());
-            tokio::task::yield_now().await; // Replenish Tokio's cooperative polling budget.
+            yield_now().await; // Replenish Tokio's cooperative polling budget.
         }
         queue.receive_requests();
         assert_eq!(queue.ring.submission().len(), MAX_IN_FLIGHT_READS);
@@ -819,7 +819,7 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
         if fail {
             let completion = completions.remove(0);
             queue.complete_request(completion.user_data(), -libc::EIO);
-            let std::task::Poll::Ready(Err(error)) = future.as_mut().poll(&mut context) else {
+            let Poll::Ready(Err(error)) = future.as_mut().poll(&mut context) else {
                 panic!("read error was not returned");
             };
             assert_eq!(error.raw_os_error(), Some(libc::EIO));
@@ -937,20 +937,20 @@ fn write_error_logs_path_and_request_details_in_one_line() {
     let subscriber = tracing_subscriber::fmt()
         .without_time()
         .with_ansi(false)
-        .with_writer(std::sync::Mutex::new(log.try_clone().unwrap()))
+        .with_writer(Mutex::new(log.try_clone().unwrap()))
         .finish();
-    tracing::subscriber::with_default(subscriber, || {
+    with_default(subscriber, || {
         let source = write.apply_completion_result(-libc::EINVAL).unwrap_err();
         assert_eq!(source.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(
-            std::error::Error::source(&source)
+            Error::source(&source)
                 .unwrap()
                 .downcast_ref::<io::Error>()
                 .unwrap()
                 .raw_os_error(),
             Some(libc::EINVAL)
         );
-        let error = crate::DataFileError::Io {
+        let error = DataFileError::Io {
             operation: IoOperation::Write,
             path: "/cache/partial-request/data".into(),
             source,
@@ -1005,7 +1005,7 @@ fn completion_state_handles_short_io_and_errors() {
     let error = write.apply_completion_result(-libc::ENOSPC).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::StorageFull);
     assert_eq!(
-        std::error::Error::source(&error)
+        Error::source(&error)
             .unwrap()
             .downcast_ref::<io::Error>()
             .unwrap()

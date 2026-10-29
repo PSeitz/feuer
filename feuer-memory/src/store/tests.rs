@@ -1,4 +1,4 @@
-use std::{sync::Arc, thread};
+use std::{array::from_fn, sync::Arc, thread};
 
 use bytes::Bytes;
 use feuer_historian::ObjectAccessHistories;
@@ -358,7 +358,7 @@ fn configured_target_is_divided_without_losing_remainder_bytes() {
 #[test]
 fn shard_targets_can_collectively_exceed_the_configured_capacity() {
     let cache = MemoryCache::with_shard_count(BufferPool::new(2, MemoryMetrics::noop()), 2);
-    let [first, second] = std::array::from_fn(|shard_index| {
+    let [first, second] = from_fn(|shard_index| {
         (0..100)
             .map(|candidate| ObjectKeyHash::from(format!("object-{candidate}")))
             .find(|key| cache.shard_index(key) == shard_index)

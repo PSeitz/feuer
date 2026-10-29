@@ -1,8 +1,10 @@
 //! Each shard owns an initialized small-entry buffer. Disk space is reserved only when writing.
 
 use super::{writer::WriteEntry, *};
+use crate::IoOperation;
 use feuer_memory::AlignedBuffer;
-use std::time::Duration;
+use std::{mem, time::Duration};
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 // Pack entries below this aligned size so they share a payload chunk.
 const SMALL_ENTRY_BYTES: usize = 512 * 1024;
@@ -34,8 +36,8 @@ impl DiskCache {
 impl DiskCacheInner {
     /// Keeps the disk alive only while flushing. Direct and queued writes share this timer.
     pub(super) async fn flush_payload_periodically(disk: Weak<Self>) {
-        let mut interval = tokio::time::interval_at(tokio::time::Instant::now() + FLUSH_INTERVAL, FLUSH_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut interval = interval_at(Instant::now() + FLUSH_INTERVAL, FLUSH_INTERVAL);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             let Some(disk) = disk.upgrade() else { return };
@@ -102,7 +104,7 @@ impl SmallEntryBuffer {
     pub(super) fn new() -> Result<Self, DataFileError> {
         Ok(Self {
             buffer: AlignedBuffer::allocate_zeroed(CHUNK_BYTES as usize).map_err(|source| DataFileError::Task {
-                operation: crate::IoOperation::Write,
+                operation: IoOperation::Write,
                 source: Box::new(source),
             })?,
             entries: Vec::new(),
@@ -127,7 +129,7 @@ impl SmallEntryBuffer {
             return Ok(0);
         }
         // Flushing entries become visible to lookups after publication.
-        let Self { buffer, entries } = std::mem::replace(self, Self::new()?);
+        let Self { buffer, entries } = mem::replace(self, Self::new()?);
         shard.write_payload(disk, buffer.into_bytes(), entries).await
     }
 }

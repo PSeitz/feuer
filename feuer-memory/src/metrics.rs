@@ -1,7 +1,10 @@
-use std::sync::Arc;
+use std::{array::from_fn, sync::Arc};
 
 use bytesize::ByteSize;
-use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedRegistry};
+use mixtrics::{
+    metrics::{BoxedCounter, BoxedGauge, BoxedRegistry},
+    registry::noop::NoopMetricsRegistry,
+};
 
 use crate::buffer::{BUCKET_COUNT, BUFFER_SIZES};
 
@@ -57,7 +60,7 @@ impl MemoryMetrics {
         );
         let operation_counter = |label: &'static str| operations.counter(&[label.into()]);
         let buffer_gauges = |status: &'static str| {
-            std::array::from_fn(|index| {
+            from_fn(|index| {
                 let bucket = match BUFFER_SIZES.get(index) {
                     Some(&size) => format!("{:.0}", ByteSize(size as u64)),
                     None => format!(">{:.0}", ByteSize(*BUFFER_SIZES.last().unwrap() as u64)),
@@ -80,7 +83,7 @@ impl MemoryMetrics {
     }
 
     pub(crate) fn noop() -> Arc<Self> {
-        let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
+        let registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
         Self::new(&registry)
     }
 }

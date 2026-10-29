@@ -1,11 +1,16 @@
-use std::task::{Context, Poll, Waker};
+use std::{
+    pin::pin,
+    task::{Context, Poll, Waker},
+};
+use tempfile::tempdir;
+use tokio::runtime::Handle;
 
 use super::*;
 use crate::test_metrics::{registry, value};
 
 /// Memory-only operations with immediately ready callbacks complete without an executor.
 fn ready<T>(future: impl Future<Output = T>) -> T {
-    match std::pin::pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
         Poll::Ready(value) => value,
         Poll::Pending => panic!("memory-only operation unexpectedly yielded"),
     }
@@ -13,27 +18,18 @@ fn ready<T>(future: impl Future<Output = T>) -> T {
 
 #[test]
 fn memory_only_constructors_and_lookups_need_no_runtime() {
-    assert!(tokio::runtime::Handle::try_current().is_err());
+    assert!(Handle::try_current().is_err());
     for constructor in 0..3 {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir().unwrap();
         let unused_directory = directory.path().join("unused");
         let config = CacheConfig::new(&unused_directory, 0, 1 << 20).unwrap();
         let (registry, backend) = registry();
         let scorer = Arc::new(AvoidedRetrievalCostScorer::default());
         let cache = ready(async {
             match constructor {
-                0 => TieredMemoryDiskCache::open(config, Some(&backend), None).await,
-                1 => TieredMemoryDiskCache::open_with_retention_scorer(config, Some(&backend), None, scorer).await,
-                _ => {
-                    TieredMemoryDiskCache::open_with_retention_scorers(
-                        config,
-                        Some(&backend),
-                        None,
-                        scorer.clone(),
-                        scorer,
-                    )
-                    .await
-                }
+                0 => Cache::open(config, Some(&backend), None).await,
+                1 => Cache::open_with_retention_scorer(config, Some(&backend), None, scorer).await,
+                _ => Cache::open_with_retention_scorers(config, Some(&backend), None, scorer.clone(), scorer).await,
             }
         })
         .unwrap();
@@ -63,14 +59,14 @@ fn memory_only_constructor_preserves_retention_scorer() {
     struct ScoredEntries(AtomicUsize);
 
     impl RetentionScorer for ScoredEntries {
-        fn score(&self, _: &ObjectKeyHash, _: u64, _: u64, _: &crate::ObjectAccessHistories) -> f64 {
+        fn score(&self, _: &ObjectKeyHash, _: u64, _: u64, _: &ObjectAccessHistories) -> f64 {
             self.0.fetch_add(1, Ordering::Relaxed);
             1.0
         }
     }
 
     let scorer = Arc::new(ScoredEntries::default());
-    let cache = ready(TieredMemoryDiskCache::open_with_retention_scorer(
+    let cache = ready(Cache::open_with_retention_scorer(
         CacheConfig::new("unused", 0, 1).unwrap(),
         None,
         None,
@@ -87,10 +83,10 @@ fn memory_only_constructor_preserves_retention_scorer() {
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn nonzero_disk_capacity_is_rejected_without_runtime_or_files() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempdir().unwrap();
     let unused_directory = directory.path().join("unused");
     for capacity in [1, 4 << 20] {
-        let error = ready(TieredMemoryDiskCache::open(
+        let error = ready(Cache::open(
             CacheConfig::new(&unused_directory, capacity, 1 << 20).unwrap(),
             None,
             None,

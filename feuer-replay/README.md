@@ -66,7 +66,7 @@ conflicting lengths cannot be replayed.
 
 ## Cache settings
 
-All configurations use `TieredMemoryDiskCache`. Set `--disk-bytes 0` for memory-only
+All configurations use `Cache`. Set `--disk-bytes 0` for memory-only
 replay or a positive capacity to enable disk. Both modes use the same request timing,
 concurrency, synthetic downloads, and metrics collection.
 
@@ -106,14 +106,14 @@ misses share cache fetch work.
 ### Download buffers
 
 Each synthetic source callback acquires a buffer through
-`TieredMemoryDiskCache::allocate_buffer` and zero-fills its exposed payload.
+`Cache::allocate_buffer` and zero-fills its exposed payload.
 The callback returns the `AlignedBuffer` directly. The cache charges its backing
 capacity, including unused capacity in the pool's size bucket, then converts it
 to shared `Bytes` without copying.
 
-Identities enter through the hidden `benchmark`-feature API
-`get_or_fetch_buffer_by_hash`, avoiding an additional cache-side hash. It uses
-the same capacity charging as `get_or_fetch_buffer`.
+Replay formats recorded hashes as string keys during loading and uses
+`get_or_fetch_buffer`. Repeated requests retain the same identity. The cache hashes
+these keys normally, so replay shard placement can differ from the recording.
 
 ### Optional S3 delay
 

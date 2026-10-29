@@ -1,6 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedHistogram, BoxedRegistry, Buckets};
+use mixtrics::{
+    metrics::{BoxedCounter, BoxedGauge, BoxedHistogram, BoxedRegistry, Buckets},
+    registry::noop::NoopMetricsRegistry,
+};
 
 #[derive(Clone, Copy)]
 pub(crate) enum DiskLookupOutcome {
@@ -148,7 +151,7 @@ impl DiskMetrics {
 
     /// Creates unregistered disk-cache metrics.
     pub fn noop() -> Arc<Self> {
-        let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
+        let registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
         Self::new(&registry)
     }
 

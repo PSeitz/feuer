@@ -1,22 +1,34 @@
 //! Linux cache replay: one timestamp-paced sender, one task per arrival, tiered cache.
 //! Only request descriptors are queued. Synthetic downloads optionally simulate calibrated S3 delay.
+
+use feuer_replay::Result;
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::{
         fs::{self, File},
         future::Future,
-        io::{BufWriter, Write},
+        io::{self, BufWriter, Write},
         path::PathBuf,
-        sync::{Arc, mpsc},
+        process, result,
+        sync::{
+            Arc,
+            mpsc::{self, RecvTimeoutError},
+        },
         thread,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
+    use async_channel::{Receiver, Sender, unbounded};
     use clap::Parser;
-    use feuer::{AlignedBuffer, AvoidedRetrievalCostScorer, CacheConfig, TieredMemoryDiskCache};
+    use feuer::{AlignedBuffer, AvoidedRetrievalCostScorer, Cache, CacheConfig};
     use feuer_replay::{Request, Result, load_requests};
     use mixtrics::{metrics::BoxedRegistry, registry::prometheus::PrometheusMetricsRegistry};
-    use prometheus::{Encoder, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
+    use prometheus::{
+        Encoder, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder, exponential_buckets,
+        process_collector::ProcessCollector,
+    };
+    use tokio::{runtime::Builder, sync::Semaphore, task::JoinSet, time::sleep};
 
     const S3_CONCURRENT_DOWNLOADS: usize = 48;
     const S3_LATENCY_SECONDS: f64 = 0.108599;
@@ -55,7 +67,7 @@ mod linux {
         simulate_s3: bool,
     }
 
-    fn parse_cost(value: &str) -> std::result::Result<f64, String> {
+    fn parse_cost(value: &str) -> result::Result<f64, String> {
         let cost: f64 = value.parse().map_err(|_| "expected a finite nonnegative cost")?;
         if !cost.is_finite() || cost < 0.0 {
             return Err("expected a finite nonnegative cost".into());
@@ -72,7 +84,7 @@ mod linux {
 
     /// Generates synthetic downloads through the cache's buffer pool, optionally simulating S3 latency.
     struct SyntheticDownloads {
-        download_permits: Option<tokio::sync::Semaphore>,
+        download_permits: Option<Semaphore>,
         gets: IntCounter,
         bytes: IntCounter,
         waiting: IntGauge,
@@ -84,7 +96,7 @@ mod linux {
     impl SyntheticDownloads {
         fn new(registry: &Registry, simulate_s3: bool) -> Result<Self> {
             let source = Self {
-                download_permits: simulate_s3.then(|| tokio::sync::Semaphore::new(S3_CONCURRENT_DOWNLOADS)),
+                download_permits: simulate_s3.then(|| Semaphore::new(S3_CONCURRENT_DOWNLOADS)),
                 gets: IntCounter::new("replay_source_gets_total", "Started synthetic source GETs")?,
                 bytes: IntCounter::new("replay_source_bytes_total", "Downloaded synthetic source bytes")?,
                 waiting: IntGauge::new(
@@ -94,11 +106,11 @@ mod linux {
                 active: IntGauge::new("replay_source_active_requests", "Source GETs in service")?,
                 permit_wait_duration: Histogram::with_opts(
                     HistogramOpts::new("replay_source_queue_seconds", "Source download permit wait duration")
-                        .buckets(prometheus::exponential_buckets(0.001, 2.0, 21)?),
+                        .buckets(exponential_buckets(0.001, 2.0, 21)?),
                 )?,
                 service: Histogram::with_opts(
                     HistogramOpts::new("replay_source_service_seconds", "Source service including allocation")
-                        .buckets(prometheus::exponential_buckets(0.001, 2.0, 21)?),
+                        .buckets(exponential_buckets(0.001, 2.0, 21)?),
                 )?,
             };
             registry.register(Box::new(source.gets.clone()))?;
@@ -110,11 +122,7 @@ mod linux {
             Ok(source)
         }
 
-        async fn download(
-            &self,
-            cache: &TieredMemoryDiskCache,
-            payload_len: u64,
-        ) -> std::result::Result<AlignedBuffer, Arc<std::io::Error>> {
+        async fn download(&self, cache: &Cache, payload_len: u64) -> result::Result<AlignedBuffer, Arc<io::Error>> {
             self.gets.inc();
             self.waiting.inc();
             let queued = Instant::now();
@@ -127,7 +135,7 @@ mod linux {
             self.active.inc();
             let started = Instant::now();
             if self.download_permits.is_some() {
-                tokio::time::sleep(Duration::from_secs_f64(
+                sleep(Duration::from_secs_f64(
                     S3_LATENCY_SECONDS + payload_len as f64 / S3_BYTES_PER_SECOND,
                 ))
                 .await;
@@ -156,7 +164,7 @@ mod linux {
     fn send_arrivals(
         requests: &[Request],
         origin: Instant,
-        sender: async_channel::Sender<(usize, Instant)>,
+        sender: Sender<(usize, Instant)>,
         queued: &IntGauge,
     ) -> Result<()> {
         for (index, request) in requests.iter().enumerate() {
@@ -172,7 +180,7 @@ mod linux {
 
     /// Start a lookup task for every arrival without waiting for earlier lookups to complete.
     async fn run_lookups<F, Fut>(
-        receiver: async_channel::Receiver<(usize, Instant)>,
+        receiver: Receiver<(usize, Instant)>,
         queued: IntGauge,
         active: IntGauge,
         mut lookup: F,
@@ -181,7 +189,7 @@ mod linux {
         F: FnMut(usize, Instant) -> Fut,
         Fut: Future<Output = Result<RequestTimings>> + Send + 'static,
     {
-        let mut lookups = tokio::task::JoinSet::new();
+        let mut lookups = JoinSet::new();
         let mut timings = Vec::new();
         while let Ok((index, sent)) = receiver.recv().await {
             let (queued, active) = (queued.clone(), active.clone());
@@ -247,7 +255,7 @@ mod linux {
         let requests = Arc::new(access_trace.requests);
         fs::create_dir(&args.cache_dir)?;
         fs::create_dir_all(&args.output)?;
-        fs::write(args.output.join("pid.txt"), format!("{}\n", std::process::id()))?;
+        fs::write(args.output.join("pid.txt"), format!("{}\n", process::id()))?;
         let mut summary = BufWriter::new(File::create_new(args.output.join("summary.csv"))?);
         writeln!(
             summary,
@@ -289,7 +297,7 @@ mod linux {
         }
         summary.flush()?;
         let registry = Registry::new();
-        registry.register(Box::new(prometheus::process_collector::ProcessCollector::for_self()))?;
+        registry.register(Box::new(ProcessCollector::for_self()))?;
         let completed = IntCounter::new("replay_completed_total", "Completed fetch events")?;
         let queued = IntGauge::new("replay_queued_requests", "Arrivals whose lookup task has not started")?;
         let active = IntGauge::new("replay_active_requests", "Started lookup tasks not yet completed")?;
@@ -312,18 +320,13 @@ mod linux {
                 cost_per_requested_byte: 1.0,
             })
         };
-        let cache = TieredMemoryDiskCache::open_with_retention_scorers(
-            config,
-            Some(&metrics),
-            None,
-            scorer(memory_cost),
-            scorer(disk_cost),
-        )
-        .await?;
+        let cache =
+            Cache::open_with_retention_scorers(config, Some(&metrics), None, scorer(memory_cost), scorer(disk_cost))
+                .await?;
         writeln!(summary, "open_seconds,{}", opening.elapsed().as_secs_f64())?;
         write_metrics_snapshot(&registry, &mut File::create_new(args.output.join("before.prom"))?)?;
 
-        let (sender, receiver) = async_channel::unbounded::<(usize, Instant)>();
+        let (sender, receiver) = unbounded::<(usize, Instant)>();
         let origin = Instant::now() + Duration::from_millis(100);
         let (stop, stopping) = mpsc::channel();
         let samples = File::create_new(args.output.join("metrics.prom"))?;
@@ -333,7 +336,7 @@ mod linux {
             loop {
                 let stopping = !matches!(
                     stopping.recv_timeout(Duration::from_secs(1)),
-                    Err(mpsc::RecvTimeoutError::Timeout)
+                    Err(RecvTimeoutError::Timeout)
                 );
                 elapsed.set(origin.elapsed().as_secs_f64());
                 write_metrics_snapshot(&sample_registry, &mut samples)?;
@@ -347,12 +350,12 @@ mod linux {
         let sender_queued = queued.clone();
         let sender = thread::spawn(move || send_arrivals(&sender_requests, origin, sender, &sender_queued));
         let mut timings = run_lookups(receiver, queued, active, |index, sent| {
-            let request = requests[index];
+            let request = requests[index].clone();
             let (cache, completed, source) = (cache.clone(), completed.clone(), source.clone());
             async move {
                 let started = Instant::now();
                 let bytes = cache
-                    .get_or_fetch_buffer_by_hash(request.object_key, || source.download(&cache, request.payload_len))
+                    .get_or_fetch_buffer(request.object_key, || source.download(&cache, request.payload_len))
                     .await?;
                 assert_eq!(bytes.len() as u64, request.payload_len);
                 drop(bytes);
@@ -377,7 +380,7 @@ mod linux {
             &mut File::create_new(args.output.join("requests-finished.prom"))?,
         )?;
         // Sample deferred writes for five seconds.
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        sleep(Duration::from_secs(5)).await;
         write_metrics_snapshot(&registry, &mut File::create_new(args.output.join("settled.prom"))?)?;
         phase.set(3);
         stop.send(())?;
@@ -425,7 +428,7 @@ mod linux {
     pub fn main() -> Result<()> {
         let args = Args::parse();
         let workers = thread::available_parallelism()?.get();
-        tokio::runtime::Builder::new_multi_thread()
+        Builder::new_multi_thread()
             .worker_threads(workers)
             .enable_all()
             .build()?
@@ -434,8 +437,10 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
+        use tempfile::tempdir;
+        use tokio::{spawn, sync::Barrier, task::yield_now, time::timeout};
+
         use super::*;
-        use feuer_types::ObjectKeyHash;
 
         #[test]
         fn trace_prefix_is_optional() {
@@ -476,19 +481,19 @@ mod linux {
 
         #[tokio::test]
         async fn source_downloads_charge_buffer_capacity() {
-            let directory = tempfile::tempdir().unwrap();
+            let directory = tempdir().unwrap();
             let registry = Registry::new();
             let metrics: BoxedRegistry = Box::new(PrometheusMetricsRegistry::new(registry.clone()));
             let config = CacheConfig::new(directory.path(), 0, 4 << 20)
                 .unwrap()
                 .with_idle_buffer_pool_percent(7)
                 .unwrap();
-            let cache = TieredMemoryDiskCache::open(config, Some(&metrics), None).await.unwrap();
+            let cache = Cache::open(config, Some(&metrics), None).await.unwrap();
             let source = SyntheticDownloads::new(&registry, false).unwrap();
             let request = Request {
                 request_id: 0,
                 time_ns: 0,
-                object_key: ObjectKeyHash(0),
+                object_key: "0".into(),
                 payload_len: 1024,
             };
             let mut buffer = cache.allocate_buffer(request.payload_len as usize).unwrap();
@@ -498,7 +503,7 @@ mod linux {
             buffer.as_mut_slice().fill(17);
             drop(buffer);
             let bytes = cache
-                .get_or_fetch_buffer_by_hash(request.object_key, || source.download(&cache, request.payload_len))
+                .get_or_fetch_buffer(request.object_key, || source.download(&cache, request.payload_len))
                 .await
                 .unwrap();
             assert_eq!(bytes.len(), request.payload_len as usize);
@@ -514,11 +519,10 @@ mod linux {
 
         #[tokio::test]
         async fn source_callbacks_wait_for_download_permits_then_complete_independently() {
-            let directory = tempfile::tempdir().unwrap();
-            let cache =
-                TieredMemoryDiskCache::open(CacheConfig::new(directory.path(), 0, 4 << 20).unwrap(), None, None)
-                    .await
-                    .unwrap();
+            let directory = tempdir().unwrap();
+            let cache = Cache::open(CacheConfig::new(directory.path(), 0, 4 << 20).unwrap(), None, None)
+                .await
+                .unwrap();
             let source = Arc::new(SyntheticDownloads::new(&Registry::new(), true).unwrap());
             let mut held = source
                 .download_permits
@@ -527,21 +531,21 @@ mod linux {
                 .acquire_many(S3_CONCURRENT_DOWNLOADS as u32)
                 .await
                 .unwrap();
-            let mut tasks = tokio::task::JoinSet::new();
+            let mut tasks = JoinSet::new();
             for _ in 0..2 {
                 let source = source.clone();
                 let cache = cache.clone();
                 tasks.spawn(async move { source.download(&cache, 16).await });
             }
-            tokio::time::timeout(Duration::from_secs(5), async {
+            timeout(Duration::from_secs(5), async {
                 while source.waiting.get() != 2 {
-                    tokio::task::yield_now().await;
+                    yield_now().await;
                 }
                 assert_eq!(source.active.get(), 0);
                 assert_eq!(source.bytes.get(), 0);
                 drop(held.split(1).unwrap());
                 while source.active.get() != 1 {
-                    tokio::task::yield_now().await;
+                    yield_now().await;
                 }
                 assert_eq!(source.waiting.get(), 1);
                 assert_eq!(source.bytes.get(), 0);
@@ -563,15 +567,15 @@ mod linux {
 
         #[tokio::test]
         async fn arrivals_start_while_earlier_lookups_wait_on_one_runtime_thread() {
-            let (sender, receiver) = async_channel::unbounded();
+            let (sender, receiver) = unbounded();
             let queued = IntGauge::new("queued", "Arrivals not started").unwrap();
             let active = IntGauge::new("active", "Started lookups not completed").unwrap();
-            let barrier = Arc::new(tokio::sync::Barrier::new(66));
-            let (started, ready) = async_channel::unbounded();
+            let barrier = Arc::new(Barrier::new(66));
+            let (started, ready) = unbounded();
             let lookup_barrier = barrier.clone();
             let lookup_queued = queued.clone();
             let lookup_active = active.clone();
-            let lookups = tokio::spawn(async move {
+            let lookups = spawn(async move {
                 run_lookups(receiver, lookup_queued, lookup_active, |index, _| {
                     let (barrier, started) = (lookup_barrier.clone(), started.clone());
                     async move {
@@ -594,12 +598,7 @@ mod linux {
                 }
                 let mut indices = Vec::new();
                 for _ in batch.clone() {
-                    indices.push(
-                        tokio::time::timeout(Duration::from_secs(5), ready.recv())
-                            .await
-                            .unwrap()
-                            .unwrap(),
-                    );
+                    indices.push(timeout(Duration::from_secs(5), ready.recv()).await.unwrap().unwrap());
                 }
                 indices.sort_unstable();
                 assert_eq!(indices, batch.clone().collect::<Vec<_>>());
@@ -609,7 +608,7 @@ mod linux {
             }
             drop(sender);
             barrier.wait().await;
-            let mut timings = tokio::time::timeout(Duration::from_secs(5), lookups)
+            let mut timings = timeout(Duration::from_secs(5), lookups)
                 .await
                 .unwrap()
                 .unwrap()
@@ -625,7 +624,7 @@ mod linux {
 
         #[tokio::test]
         async fn lookup_errors_fail_replay() {
-            let (sender, receiver) = async_channel::unbounded();
+            let (sender, receiver) = unbounded();
             let queued = IntGauge::new("queued", "Arrivals not started").unwrap();
             let active = IntGauge::new("active", "Started lookups not completed").unwrap();
             queued.inc();
@@ -649,13 +648,13 @@ mod linux {
                 .map(|time_ns| Request {
                     request_id: time_ns,
                     time_ns,
-                    object_key: ObjectKeyHash(0),
+                    object_key: "0".into(),
                     payload_len: 1,
                 })
                 .collect();
             let deadlines: Vec<_> = requests.iter().map(|r| r.time_ns).collect();
             let origin = Instant::now() + Duration::from_millis(2);
-            let (sender, receiver) = async_channel::unbounded();
+            let (sender, receiver) = unbounded();
             let queued = IntGauge::new("queued", "Arrivals not started").unwrap();
             let producer = thread::spawn(move || send_arrivals(&requests, origin, sender, &queued));
             for (index, time_ns) in deadlines.into_iter().enumerate() {
@@ -670,11 +669,11 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-fn main() -> feuer_replay::Result<()> {
+fn main() -> Result<()> {
     linux::main()
 }
 
 #[cfg(not(target_os = "linux"))]
-fn main() -> feuer_replay::Result<()> {
-    Err("replay requires Linux, where TieredMemoryDiskCache::open is available".into())
+fn main() -> Result<()> {
+    Err("replay requires Linux, where Cache::open is available".into())
 }

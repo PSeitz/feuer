@@ -1,10 +1,11 @@
 use super::*;
 use crate::test_metrics::{registry, value};
+use feuer_memory::MemoryMetrics;
 
 #[test]
 fn memory_operations_exclude_access_hit_miss_and_victim_counters() {
     let (registry, backend) = registry();
-    let _metrics = feuer_memory::MemoryMetrics::new(&backend);
+    let _metrics = MemoryMetrics::new(&backend);
     let family = registry
         .gather()
         .into_iter()

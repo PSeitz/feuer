@@ -3,6 +3,7 @@
 //! Keeps decayed request counts for retrieval costs and retention decisions.
 
 use std::{
+    array::from_fn,
     hash::BuildHasher,
     sync::{
         Mutex,
@@ -46,7 +47,7 @@ impl ObjectAccessHistories {
     pub fn with_half_life(half_life: u64) -> Self {
         assert!(half_life > 0, "access count half-life must be greater than zero");
         Self {
-            shards: std::array::from_fn(|_| Mutex::default()),
+            shards: from_fn(|_| Mutex::default()),
             request_count: AtomicU64::new(0),
             half_life,
         }

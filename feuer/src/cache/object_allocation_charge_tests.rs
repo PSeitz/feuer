@@ -1,15 +1,16 @@
 use super::*;
 use crate::test_metrics::{registry, value};
+use prometheus::Registry;
 
 /// Create a memory cache with metrics and idle-buffer retention disabled.
-fn memory_cache(memory_capacity: u64, metrics_registry: &mixtrics::metrics::BoxedRegistry) -> TieredMemoryDiskCache {
-    TieredMemoryDiskCache {
-        inner: Arc::new(TieredMemoryDiskCacheInner {
+fn memory_cache(memory_capacity: u64, metrics_registry: &BoxedRegistry) -> Cache {
+    Cache {
+        inner: Arc::new(CacheInner {
             config: CacheConfig::new("unused", 0, memory_capacity)
                 .unwrap()
                 .with_idle_buffer_pool_percent(0)
                 .unwrap(),
-            memory: MemoryCache::with_metrics(memory_capacity, feuer_memory::MemoryMetrics::new(metrics_registry), 0),
+            memory: MemoryCache::with_metrics(memory_capacity, MemoryMetrics::new(metrics_registry), 0),
             metrics: LookupMetrics::new(metrics_registry),
             pending_fetches: PendingFetches::default(),
             #[cfg(target_os = "linux")]
@@ -20,7 +21,7 @@ fn memory_cache(memory_capacity: u64, metrics_registry: &mixtrics::metrics::Boxe
 }
 
 /// Read the capacity bytes of buffers checked out from one pool bucket.
-fn checked_out_buffer_capacity(registry: &prometheus::Registry, bucket: &str) -> f64 {
+fn checked_out_buffer_capacity(registry: &Registry, bucket: &str) -> f64 {
     value(
         registry,
         "feuer_io_buffer_pool_bytes",

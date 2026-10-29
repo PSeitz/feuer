@@ -2,10 +2,18 @@
 //! Run: cargo run -p feuer-storage --release --example direct_io -- /mnt/local-ssd [seconds] [write_callers]
 //! Uses and removes a fresh 8-GiB temporary directory under the supplied mount.
 
-use std::time::{Duration, Instant};
+use std::{
+    env,
+    error::Error,
+    mem::MaybeUninit,
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use feuer_storage::{DataFile, IoMetrics};
+use mixtrics::{metrics::BoxedRegistry, registry::noop::NoopMetricsRegistry};
+use tempfile::Builder;
+use tokio::time::sleep_until;
 
 const MIB: usize = 1024 * 1024;
 const CAPACITY: u64 = 8 * 1024 * MIB as u64;
@@ -20,8 +28,8 @@ struct IoMeasurements {
 }
 
 #[tokio::main(worker_threads = 4)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
+async fn main() -> Result<(), Box<dyn Error>> {
+    let mut args = env::args().skip(1);
     let root = args.next().expect("provide a directory on the target filesystem");
     let seconds: u64 = args.next().map(|value| value.parse()).transpose()?.unwrap_or(5);
     assert!(seconds > 0);
@@ -35,10 +43,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .all(|&count| count <= ((CAPACITY - READ_SPACE_BYTES) / MIB as u64) as usize)
     );
-    let temp = tempfile::Builder::new()
-        .prefix("feuer-direct-bench-")
-        .tempdir_in(root)?;
-    let registry: mixtrics::metrics::BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
+    let temp = Builder::new().prefix("feuer-direct-bench-").tempdir_in(root)?;
+    let registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
     let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::new(&registry)).await?;
     eprintln!("Initializing 8 GiB (direct writes), driver QD64, four Tokio workers");
     let payload = Bytes::from(vec![0x5a; MIB]);
@@ -111,7 +117,7 @@ async fn benchmark_concurrent_io(file: &DataFile, read_size: usize, readers: usi
             (is_reader, measurements)
         }));
     }
-    tokio::time::sleep_until(measure_start.into()).await;
+    sleep_until(measure_start.into()).await;
     let cpu_start = process_cpu_seconds();
     let mut read_measurements = IoMeasurements::default();
     let mut write_measurements = IoMeasurements::default();
@@ -150,7 +156,7 @@ async fn benchmark_concurrent_io(file: &DataFile, read_size: usize, readers: usi
 
 /// Returns this process's accumulated user and system CPU time in seconds.
 fn process_cpu_seconds() -> f64 {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    let mut usage = MaybeUninit::<libc::rusage>::zeroed();
     // SAFETY: usage is writable and getrusage initializes it on success.
     assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) }, 0);
     // SAFETY: getrusage succeeded above.

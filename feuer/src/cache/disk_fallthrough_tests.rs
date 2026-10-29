@@ -1,12 +1,13 @@
 use super::*;
 use crate::test_metrics::{registry, value};
+use tempfile::tempdir;
 
 #[tokio::test]
 async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
     for disk_capacity in [0, 4 << 20] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempdir().unwrap();
         let (registry, backend) = registry();
-        let cache = TieredMemoryDiskCache::open(
+        let cache = Cache::open(
             CacheConfig::new(directory.path(), disk_capacity, 1 << 20).unwrap(),
             Some(&backend),
             None,

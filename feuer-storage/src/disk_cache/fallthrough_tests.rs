@@ -1,4 +1,13 @@
-use std::{future::Future, pin::Pin, task::Poll};
+use prometheus::Registry;
+use std::{
+    cell::Cell,
+    future::{Future, poll_fn},
+    pin::Pin,
+    task::Poll,
+    time::Duration,
+};
+use tempfile::TempDir;
+use tokio::{task::yield_now, time::timeout};
 
 use super::*;
 use crate::{
@@ -6,7 +15,7 @@ use crate::{
     test_metrics::{registry, value},
 };
 
-async fn open() -> (tempfile::TempDir, DiskCache, IoQueues, prometheus::Registry) {
+async fn open() -> (TempDir, DiskCache, IoQueues, Registry) {
     let directory = tempfile::tempdir().unwrap();
     let queues = IoQueues::new().unwrap();
     let (registry, backend) = registry();
@@ -26,11 +35,7 @@ async fn open() -> (tempfile::TempDir, DiskCache, IoQueues, prometheus::Registry
 }
 
 async fn assert_pending(mut future: Pin<&mut impl Future>) {
-    assert!(
-        std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx)))
-            .await
-            .is_pending()
-    );
+    assert!(poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await.is_pending());
 }
 
 #[tokio::test]
@@ -44,7 +49,7 @@ async fn reaching_fallthrough_threshold_checks_earlier_reads_without_issuing_io(
         .unwrap();
     let before = value(&registry, "feuer_disk_io_bytes_total", &[("operation", "read")]);
     let read_permits = queues.hold_all_read_permits();
-    let calls = std::cell::Cell::new(0);
+    let calls = Cell::new(0);
     let mut reads: Vec<_> = keys
         .iter()
         .map(|key| {
@@ -117,9 +122,9 @@ async fn absent_buffered_and_uncongested_reads_do_not_consult_fallthrough() {
     );
     let buffered = ObjectKeyHash::from("buffered");
     cache.enqueue_if_space_available(buffered, source.clone());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    timeout(Duration::from_secs(5), async {
         while !cache.contains(&buffered) {
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await

@@ -35,11 +35,15 @@ use feuer_types::ObjectKeyHash;
 #[cfg(test)]
 use page_format::METADATA_PAGE_BYTES;
 use rustc_hash::FxHashMap;
-use tokio::sync::{OnceCell, mpsc};
+use tokio::{
+    runtime::Handle,
+    sync::{Mutex as AsyncMutex, OnceCell, mpsc},
+    task::{JoinError, JoinSet},
+};
 use twox_hash::XxHash64;
 
 use crate::{
-    DataFile, DataFileError, DataFileResult, DiskMetrics, IoMetrics,
+    DataFile, DataFileError, DataFileResult, DiskMetrics, IoMetrics, IoQueues,
     allocation::{CHUNK_BYTES, DiskChunkAllocator, ReservedChunks},
     disk_metrics::{DiskLookupOutcome, DiskWriteAttempt, DiskWriteOutcome},
     file::payload_disk_bytes,
@@ -84,7 +88,7 @@ struct DiskCacheShard {
     allocator: DiskChunkAllocator,
     entry_index: Mutex<DiskEntryIndex>,
     metadata_pages: Mutex<metadata::MetadataChunks>,
-    small_entry_buffer: tokio::sync::Mutex<SmallEntryBuffer>,
+    small_entry_buffer: AsyncMutex<SmallEntryBuffer>,
 }
 
 /// Disk entries indexed by object key, with a list sampled in rotation for eviction.
@@ -126,7 +130,7 @@ pub enum DiskCacheError {
     DataFile(#[from] DataFileError),
     /// The task performing a disk write failed. Submitted I/O may still finish.
     #[error("disk write task failed: {0}")]
-    WriteTaskFailed(#[source] tokio::task::JoinError),
+    WriteTaskFailed(#[source] JoinError),
 }
 
 impl fmt::Debug for DiskCache {
@@ -160,7 +164,7 @@ pub struct DiskCacheOptions {
     /// Aligned buffer pool for reads, normally shared with the memory cache.
     pub buffer_pool: Arc<BufferPool>,
     /// I/O queues shared with other caches. `None` creates dedicated queues.
-    pub io_queues: Option<crate::IoQueues>,
+    pub io_queues: Option<IoQueues>,
     /// Retention scorer, also applied to recovered entries.
     pub retention_scorer: Arc<dyn RetentionScorer>,
 }
@@ -215,7 +219,7 @@ impl DiskCache {
                 Ok(DiskCacheShard {
                     allocator,
                     entry_index: Mutex::new(DiskEntryIndex::new(metrics.clone())),
-                    small_entry_buffer: tokio::sync::Mutex::new(SmallEntryBuffer::new()?),
+                    small_entry_buffer: AsyncMutex::new(SmallEntryBuffer::new()?),
                     metadata_pages: Mutex::new(metadata::MetadataChunks::default()),
                 })
             })
@@ -230,13 +234,12 @@ impl DiskCache {
         });
         let started = Instant::now();
         tracing::info!(target: "feuer::storage", "starting disk cache recovery");
-        let mut recovery_tasks = tokio::task::JoinSet::new();
+        let mut recovery_tasks = JoinSet::new();
         for index in 0..disk.shards.len() {
             let disk = disk.clone();
             // Poll recovery on a blocking thread, including metadata parsing and index rebuilding.
             // Its io_uring reads still use the runtime for asynchronous completion.
-            recovery_tasks
-                .spawn_blocking(move || tokio::runtime::Handle::current().block_on(disk.recover_shard(index)));
+            recovery_tasks.spawn_blocking(move || Handle::current().block_on(disk.recover_shard(index)));
         }
         recovery_tasks.join_all().await;
         tracing::info!(target: "feuer::storage", elapsed_seconds = started.elapsed().as_secs_f64(), "disk cache recovery finished");

@@ -1,4 +1,4 @@
-use std::{fmt, io, path::PathBuf};
+use std::{error::Error, fmt, io, path::PathBuf};
 
 /// The directory or data-file operation being performed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -138,7 +138,7 @@ pub enum DataFileError {
         operation: IoOperation,
         /// The runtime task failure.
         #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source: Box<dyn Error + Send + Sync>,
     },
 }
 
@@ -170,4 +170,4 @@ impl DataFileError {
 }
 
 /// A data-file operation result.
-pub type DataFileResult<T> = std::result::Result<T, DataFileError>;
+pub type DataFileResult<T> = Result<T, DataFileError>;

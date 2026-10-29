@@ -1,6 +1,15 @@
-use std::{future::Future, task::Poll, time::Duration};
+use crate::test_metrics::registry;
+use std::{
+    fs::OpenOptions,
+    future::{Future, poll_fn},
+    ops::Range,
+    task::Poll,
+    time::Duration,
+};
+use tempfile::TempDir;
+use tokio::{sync::Barrier, task::yield_now, time::timeout};
 
-use feuer_memory::{BUFFER_ALIGNMENT, retention::decayed_avoided_retrieval_cost};
+use feuer_memory::{BUFFER_ALIGNMENT, MemoryCache, MemoryMetrics, retention::decayed_avoided_retrieval_cost};
 
 use super::*;
 
@@ -25,7 +34,7 @@ pub(super) fn download(seed: u64, length: usize) -> Bytes {
     )
 }
 
-pub(super) async fn open_test_cache(capacity: u64) -> (tempfile::TempDir, DiskCache) {
+pub(super) async fn open_test_cache(capacity: u64) -> (TempDir, DiskCache) {
     let directory = tempfile::tempdir().unwrap();
     // Keep the requested payload capacity, plus one metadata chunk per shard and the global header.
     let shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
@@ -47,10 +56,7 @@ pub(super) fn with_manual_metadata_writes(cache: DiskCache) -> DiskCache {
     }
 }
 
-pub(super) async fn entry_disk_ranges(
-    cache: &DiskCache,
-    key: &ObjectKeyHash,
-) -> (std::ops::Range<u64>, std::ops::Range<u64>) {
+pub(super) async fn entry_disk_ranges(cache: &DiskCache, key: &ObjectKeyHash) -> (Range<u64>, Range<u64>) {
     let shard = &cache.disk.shards[cache.disk.shard_index_for_key(key)];
     let disk_index = shard.entry_index.lock().unwrap();
     let entry = &disk_index.entries_by_key[key];
@@ -83,7 +89,7 @@ async fn metadata_changes_after_copying_remain_dirty() {
     cache.insert(first, download(0, 1)).await.unwrap();
     let shard = &cache.disk.shards[0];
     let mut writer = Box::pin(shard.write_dirty_metadata_pages(&cache.disk.file));
-    let completion = std::future::poll_fn(|cx| Poll::Ready(writer.as_mut().poll(cx))).await;
+    let completion = poll_fn(|cx| Poll::Ready(writer.as_mut().poll(cx))).await;
     // The copy is taken on the first poll. The mutex is released even if I/O is still pending.
     assert!(shard.metadata_pages.try_lock().unwrap().dirty_pages.is_empty());
     cache.insert(second, download(0, 1)).await.unwrap();
@@ -199,7 +205,7 @@ async fn failed_large_reservation_leaves_buffered_entries_and_metadata_slots_unt
 async fn cancellation_or_lost_metadata_capacity_discards_the_whole_flush() {
     for cancel in [true, false] {
         let directory = tempfile::tempdir().unwrap();
-        let queues = crate::IoQueues::new().unwrap();
+        let queues = IoQueues::new().unwrap();
         let cache = with_manual_metadata_writes(
             DiskCache::open(
                 directory.path(),
@@ -218,11 +224,7 @@ async fn cancellation_or_lost_metadata_capacity_discards_the_whole_flush() {
         // Reserve every channel slot so the payload owns disk chunks but cannot submit I/O.
         let held_writes = queues.hold_write_queue_capacity().await;
         let mut flush = Box::pin(cache.flush());
-        assert!(
-            std::future::poll_fn(|cx| Poll::Ready(flush.as_mut().poll(cx)))
-                .await
-                .is_pending()
-        );
+        assert!(poll_fn(|cx| Poll::Ready(flush.as_mut().poll(cx))).await.is_pending());
         let shard = &cache.disk.shards[0];
         assert_eq!(shard.allocator.available_bytes(), 0);
         assert_eq!(
@@ -451,9 +453,9 @@ async fn eviction_respects_sample_size_and_keeps_first_sampled_on_ties() {
 #[tokio::test]
 async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     let history = Arc::new(ObjectAccessHistories::new());
-    let (_, registry) = crate::test_metrics::registry();
-    let memory = feuer_memory::MemoryCache::with_metrics(4096, feuer_memory::MemoryMetrics::new(&registry), 7)
-        .with_access_histories(history.clone());
+    let (_, registry) = registry();
+    let memory =
+        MemoryCache::with_metrics(4096, MemoryMetrics::new(&registry), 7).with_access_histories(history.clone());
     let directory = tempfile::tempdir().unwrap();
     let cache = DiskCache::open(
         directory.path(),
@@ -535,7 +537,7 @@ async fn concurrent_pressure_and_reads_never_return_reused_bytes() {
         .collect();
     assert_eq!(cache.insert_batch(entries).await.unwrap(), 4);
     let mut tasks = Vec::new();
-    let read_barrier = Arc::new(tokio::sync::Barrier::new(4));
+    let read_barrier = Arc::new(Barrier::new(4));
     for worker in 0..4 {
         let cache = cache.clone();
         let read_barrier = read_barrier.clone();
@@ -579,7 +581,7 @@ async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk() {
     let (payload, _) = entry_disk_ranges(&cache, &key).await;
     assert_eq!(payload.end - payload.start, BUFFER_ALIGNMENT as u64);
     // A read reaching beyond this entry's alignment boundary would now fail with short I/O.
-    std::fs::OpenOptions::new()
+    OpenOptions::new()
         .write(true)
         .open(directory.path().join("data"))
         .unwrap()
@@ -755,7 +757,7 @@ async fn entry_metadata_space_is_charged_and_failed_reservations_roll_back() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn racing_duplicate_writes_revalidate_publication() {
     let (_directory, cache) = open_test_cache(16 * CHUNK_BYTES).await;
-    let start_barrier = Arc::new(tokio::sync::Barrier::new(16));
+    let start_barrier = Arc::new(Barrier::new(16));
     let mut tasks = Vec::new();
     for _ in 0..16 {
         let cache = cache.clone();
@@ -815,19 +817,19 @@ async fn canceled_requester_does_not_abort_the_reservation_owner() {
     let mut requester = Box::pin(cache.insert(ObjectKeyHash::from("object"), download(0, 100)));
     // On the current-thread runtime, one poll spawns the owner without letting it run yet.
     assert!(
-        std::future::poll_fn(|cx| Poll::Ready(requester.as_mut().poll(cx)))
+        poll_fn(|cx| Poll::Ready(requester.as_mut().poll(cx)))
             .await
             .is_pending()
     );
     drop(requester);
     assert_eq!(cache.write_sender.strong_count(), 1);
     assert!(cache.get(&ObjectKeyHash::from("object")).await.is_none());
-    let bytes = tokio::time::timeout(Duration::from_secs(5), async {
+    let bytes = timeout(Duration::from_secs(5), async {
         loop {
             if let Some(bytes) = cache.get(&ObjectKeyHash::from("object")).await {
                 break bytes;
             }
-            tokio::task::yield_now().await;
+            yield_now().await;
         }
     })
     .await

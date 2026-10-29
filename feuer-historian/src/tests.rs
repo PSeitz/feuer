@@ -1,3 +1,5 @@
+use std::{ptr, sync::mpsc, thread, time::Duration};
+
 use super::*;
 
 #[test]
@@ -19,7 +21,7 @@ fn history_needs_no_cached_entry_and_keeps_one_counter_per_key() {
 fn concurrent_recording_counts_every_request() {
     let histories = ObjectAccessHistories::new();
     let key = ObjectKeyHash::from("object");
-    std::thread::scope(|scope| {
+    thread::scope(|scope| {
         for _ in 0..8 {
             scope.spawn(|| {
                 for _ in 0..1000 {
@@ -46,17 +48,17 @@ fn another_history_shard_can_record_and_read_while_one_is_locked() {
     let locked_key = ObjectKeyHash::from("locked");
     let other = (0..1000)
         .map(|index| ObjectKeyHash::from(format!("other-{index}")))
-        .find(|key| !std::ptr::eq(histories.shard(&locked_key), histories.shard(key)))
+        .find(|key| !ptr::eq(histories.shard(&locked_key), histories.shard(key)))
         .unwrap();
-    let (done, received) = std::sync::mpsc::channel();
-    std::thread::scope(|scope| {
+    let (done, received) = mpsc::channel();
+    thread::scope(|scope| {
         let _locked = histories.shard(&locked_key).lock().unwrap();
         scope.spawn(|| {
             histories.record_access(&other);
             assert_eq!(histories.decayed_request_count(&other), 1.0);
             done.send(()).unwrap();
         });
-        received.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(histories.request_count(), 1);
     });
 }
@@ -67,7 +69,7 @@ fn concurrent_keys_share_one_clock() {
     let keys: Vec<_> = (0..32)
         .map(|index| ObjectKeyHash::from(format!("object-{index}")))
         .collect();
-    std::thread::scope(|scope| {
+    thread::scope(|scope| {
         for key in &keys {
             let histories = &histories;
             scope.spawn(move || {

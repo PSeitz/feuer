@@ -1,24 +1,27 @@
 //! Independent caches on one SSD, sharing only low-level I/O queues.
 
 #[cfg(target_os = "linux")]
+use std::error::Error;
+
+#[cfg(target_os = "linux")]
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    use std::{convert::Infallible, path::PathBuf};
+async fn main() -> Result<(), Box<dyn Error>> {
+    use std::{convert::Infallible, env::args, path::PathBuf};
 
     use bytes::Bytes;
-    use feuer::{CacheConfig, IoQueues, TieredMemoryDiskCache};
+    use feuer::{Cache, CacheConfig, IoQueues};
 
-    let directory = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "cache".to_owned()));
+    let directory = PathBuf::from(args().nth(1).unwrap_or_else(|| "cache".to_owned()));
     let io_queues = IoQueues::new()?;
     // Each cache uses a different file in the same directory, with its own capacities,
     // contents, eviction, buffer pool, file lock, and background-write queue.
-    let images = TieredMemoryDiskCache::open(
+    let images = Cache::open(
         CacheConfig::new(&directory, 1 << 30, 64 << 20)?.with_file_name("images")?,
         None,
         Some(io_queues.clone()),
     )
     .await?;
-    let documents = TieredMemoryDiskCache::open(
+    let documents = Cache::open(
         CacheConfig::new(&directory, 2 << 30, 32 << 20)?.with_file_name("documents")?,
         None,
         Some(io_queues),

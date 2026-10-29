@@ -1,6 +1,6 @@
 # Metrics
 
-On Linux, use `TieredMemoryDiskCache::open(config, Some(&metrics_registry), None).await`
+On Linux, use `Cache::open(config, Some(&metrics_registry), None).await`
 with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup,
 memory, disk I/O, disk-cache and disk-write metrics in that registry.
 The last argument independently selects dedicated (`None`) or shared (`Some(io_queues)`)

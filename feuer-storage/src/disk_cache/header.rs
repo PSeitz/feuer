@@ -42,7 +42,7 @@ pub(super) async fn clear_incompatible_metadata(
 mod tests {
     use super::*;
     use crate::{
-        DiskCache, DiskCacheOptions,
+        DiskCache, DiskCacheOptions, IoMetrics,
         disk_cache::{
             page_format::{ENTRIES_PER_METADATA_CHUNK, ENTRIES_PER_METADATA_PAGE},
             tests::{download, entry_disk_ranges, with_manual_metadata_writes},
@@ -148,7 +148,7 @@ mod tests {
             .start;
         assert_eq!(reused_chunk_address, second_chunk_address);
         let short_directory = tempfile::tempdir().unwrap();
-        let short_file = DataFile::open(short_directory.path(), second_chunk_address, crate::IoMetrics::noop())
+        let short_file = DataFile::open(short_directory.path(), second_chunk_address, IoMetrics::noop())
             .await
             .unwrap();
         assert!(shard.write_dirty_metadata_pages(&short_file).await.is_err());

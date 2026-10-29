@@ -1,6 +1,7 @@
 //! Repeated-open recovery benchmark. See feuer-storage/recovery-benchmark.md.
 
-use std::{any::Any, cell::RefCell, os::unix::fs::MetadataExt, rc::Rc};
+use std::{any::Any, cell::RefCell, env, fs, iter::repeat_n, os::unix::fs::MetadataExt, rc::Rc};
+use tokio::runtime::Builder;
 
 use binggan::{
     BenchRunner,
@@ -64,7 +65,7 @@ fn trace_download_sizes() -> Vec<usize> {
         .skip(1)
         .flat_map(|line| {
             let (size, count) = line.split_once(',').unwrap();
-            std::iter::repeat_n(size.parse().unwrap(), count.parse().unwrap())
+            repeat_n(size.parse().unwrap(), count.parse().unwrap())
         })
         .collect();
     // Fixed-seed Fisher-Yates shuffle: sample frequencies without retaining captured event order.
@@ -96,7 +97,7 @@ fn trace_size_sample_is_reproducible() {
 #[test]
 #[ignore = "manual SSD recovery benchmark, see feuer-storage/recovery-benchmark.md"]
 fn benchmark_recovery() {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
         .build()
@@ -105,7 +106,7 @@ fn benchmark_recovery() {
     runner.config().set_num_iter_for_bench(1).set_num_iter_for_group(10);
 
     // Only the opt-in 100-GB case uses recorded source-download size frequencies.
-    let cases = if std::env::var_os("RECOVERY_100_GB").is_some() {
+    let cases = if env::var_os("RECOVERY_100_GB").is_some() {
         vec![(trace_download_sizes(), 256 * 1024, "source download sizes")]
     } else {
         // 50k entries span three metadata chunks on one shard. 100k grow all four chains.
@@ -141,7 +142,7 @@ fn benchmark_recovery() {
                 .sum();
             (cache.disk.shards.len(), metadata_chunks)
         });
-        let disk_bytes = std::fs::metadata(directory.path().join("data")).unwrap().blocks() * 512;
+        let disk_bytes = fs::metadata(directory.path().join("data")).unwrap().blocks() * 512;
         println!(
             "Fixture: {payload_bytes} payload bytes, {metadata_chunks} metadata chunks, {disk_bytes} disk bytes, {capacity} capacity bytes",
         );

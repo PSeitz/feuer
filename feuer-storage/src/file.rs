@@ -3,16 +3,17 @@ use std::{
     fs::{File, OpenOptions, create_dir_all},
     future::Future,
     io,
+    mem::MaybeUninit,
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use bytes::Bytes;
 use feuer_memory::BufferPool;
 use fs4::fs_std::FileExt as LockFileExt;
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, sync::SemaphorePermit};
 use tracing::{Instrument, Span, field};
 
 use crate::{DataFileError, DataFileResult, IoMetrics, IoOperation, uring};
@@ -160,7 +161,7 @@ impl DataFile {
     pub(crate) async fn acquire_payload_read_permit(
         &self,
         should_fall_through: impl FnOnce() -> bool,
-    ) -> Option<tokio::sync::SemaphorePermit<'_>> {
+    ) -> Option<SemaphorePermit<'_>> {
         self.state
             .read_queue
             .acquire_payload_read_permit(should_fall_through)
@@ -348,7 +349,7 @@ fn open_file_state(
 }
 
 fn check_direct_io_alignment(file: &File) -> io::Result<()> {
-    let mut stat = std::mem::MaybeUninit::<libc::statx>::zeroed();
+    let mut stat = MaybeUninit::<libc::statx>::zeroed();
     // SAFETY: the fd is owned, the empty path is NUL-terminated, and stat is writable.
     let result = unsafe {
         libc::statx(
@@ -389,7 +390,7 @@ fn check_range_fits_file(operation: IoOperation, offset: u64, length: u64, capac
     Ok(())
 }
 
-fn record_span_outcome<T>(span: &Span, elapsed: std::time::Duration, result: &DataFileResult<T>) {
+fn record_span_outcome<T>(span: &Span, elapsed: Duration, result: &DataFileResult<T>) {
     span.record("duration_seconds", elapsed.as_secs_f64());
     span.record("outcome", if result.is_ok() { "success" } else { "error" });
     if let Err(error) = result {
@@ -400,8 +401,11 @@ fn record_span_outcome<T>(span: &Span, elapsed: std::time::Duration, result: &Da
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DataFileErrorKind, allocation::CHUNK_BYTES};
+    use crate::{DataFileErrorKind, IoQueues, allocation::CHUNK_BYTES};
+    use feuer_memory::MemoryCache;
+    use std::fs::metadata;
     use tempfile::tempdir;
+    use tokio::{sync::Mutex, task::yield_now};
 
     const CAPACITY: u64 = 4 * uring::MAX_IO_REQUEST_BYTES as u64;
 
@@ -410,7 +414,7 @@ mod tests {
         fn assert_send_sync_static<T: Send + Sync + 'static>() {}
         assert_send_sync_static::<DataFile>();
         assert_send_sync_static::<DataFileError>();
-        assert_send_sync_static::<crate::IoQueues>();
+        assert_send_sync_static::<IoQueues>();
     }
 
     #[tokio::test]
@@ -450,17 +454,14 @@ mod tests {
         page[4093..].copy_from_slice(b"end");
         file.write_at(CAPACITY - 4096, &Bytes::from(page)).await.unwrap();
         assert_eq!(file.read_at(CAPACITY - 3, 3).await.unwrap(), Bytes::from_static(b"end"));
-        assert_eq!(
-            std::fs::metadata(directory.join(DATA_FILE_NAME)).unwrap().len(),
-            CAPACITY
-        );
+        assert_eq!(metadata(directory.join(DATA_FILE_NAME)).unwrap().len(), CAPACITY);
     }
 
     #[tokio::test]
     async fn large_reads_use_retained_buffer_capacity() {
         let temp = tempdir().unwrap();
         let mib = CHUNK_BYTES as usize;
-        let pool = feuer_memory::MemoryCache::new(100 * 96 * CHUNK_BYTES).buffer_pool();
+        let pool = MemoryCache::new(100 * 96 * CHUNK_BYTES).buffer_pool();
         let file = DataFile::open_with_io_queues(
             temp.path(),
             "data",
@@ -560,7 +561,7 @@ mod tests {
     #[tokio::test]
     async fn shared_queues_keep_file_locks_and_contents_independent_in_one_directory() {
         let directory = tempdir().unwrap();
-        let queues = crate::IoQueues::new().unwrap();
+        let queues = IoQueues::new().unwrap();
         let first = DataFile::open_with_io_queues(
             directory.path(),
             DATA_FILE_NAME,
@@ -619,7 +620,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
         let mut tasks = Vec::new();
-        let shared_pages = Arc::new(tokio::sync::Mutex::new(()));
+        let shared_pages = Arc::new(Mutex::new(()));
         // Callers serialize access to shared byte ranges. I/O on disjoint ranges runs concurrently.
         for i in 0..256u64 {
             let file = file.clone();
@@ -661,7 +662,7 @@ mod tests {
         }
         // Stress cancellation across scheduler-dependent request states.
         // Queue-level tests control submission and completion timing.
-        tokio::task::yield_now().await;
+        yield_now().await;
         for task in &tasks {
             task.abort();
         }

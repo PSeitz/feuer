@@ -1,6 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use mixtrics::metrics::{BoxedCounter, BoxedGauge, BoxedHistogram, BoxedRegistry, Buckets};
+use mixtrics::{
+    metrics::{BoxedCounter, BoxedGauge, BoxedHistogram, BoxedRegistry, Buckets},
+    registry::noop::NoopMetricsRegistry,
+};
 
 use crate::IoOperation;
 
@@ -101,7 +104,7 @@ impl IoMetrics {
 
     /// Creates no-op I/O metrics.
     pub fn noop() -> Arc<Self> {
-        let registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
+        let registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
         Self::new(&registry)
     }
 }
@@ -109,10 +112,11 @@ impl IoMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_metrics::{registry, value};
 
     #[test]
     fn read_sizes_and_durations_only_record_successes_but_counters_include_errors() {
-        let (registry, backend) = crate::test_metrics::registry();
+        let (registry, backend) = registry();
         let metrics = IoMetrics::new(&backend);
         let elapsed = Duration::from_micros(2);
 
@@ -145,7 +149,7 @@ mod tests {
                 ("feuer_disk_io_duration_seconds", "success", successes),
             ] {
                 assert_eq!(
-                    crate::test_metrics::value(
+                    value(
                         &registry,
                         metric_name,
                         &[("operation", operation.as_str()), ("outcome", outcome)]

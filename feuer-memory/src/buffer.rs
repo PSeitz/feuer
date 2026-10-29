@@ -4,14 +4,22 @@ use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
     io,
     ptr::NonNull,
+    slice,
     sync::{Arc, Weak},
 };
 
 #[cfg(not(target_os = "linux"))]
 use std::alloc::realloc;
+#[cfg(target_os = "linux")]
+use std::ptr::null_mut;
 
 use bytes::Bytes;
 use feuer_types::config::read_env_number;
+#[cfg(target_os = "linux")]
+use libc::{
+    _SC_PAGESIZE, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MREMAP_MAYMOVE, PROT_READ, PROT_WRITE, mmap, mremap, munmap,
+    sysconf,
+};
 use parking_lot::Mutex;
 
 use crate::MemoryMetrics;
@@ -199,16 +207,16 @@ impl AlignedBuffer {
         if length > MAX_FIXED_BUFFER_BYTES {
             // SAFETY: length is nonzero and valid. Anonymous private pages are initialized to zero.
             let ptr = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
+                mmap(
+                    null_mut(),
                     length,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS,
                     -1,
                     0,
                 )
             };
-            if ptr == libc::MAP_FAILED {
+            if ptr == MAP_FAILED {
                 return Err(io::Error::last_os_error());
             }
             return Ok(Self {
@@ -242,8 +250,8 @@ impl AlignedBuffer {
         #[cfg(target_os = "linux")]
         let ptr = {
             // SAFETY: this buffer owns an anonymous mapping. Both sizes are nonzero and valid.
-            let ptr = unsafe { libc::mremap(self.ptr.as_ptr().cast(), old_capacity, capacity, libc::MREMAP_MAYMOVE) };
-            if ptr == libc::MAP_FAILED {
+            let ptr = unsafe { mremap(self.ptr.as_ptr().cast(), old_capacity, capacity, MREMAP_MAYMOVE) };
+            if ptr == MAP_FAILED {
                 return Err(io::Error::last_os_error());
             }
             let ptr = NonNull::<u8>::new(ptr.cast()).expect("mremap returned a null address");
@@ -251,7 +259,7 @@ impl AlignedBuffer {
                 // New pages are zeroed by the kernel. Only the retained last page can contain
                 // old bytes beyond the previous capacity, after a shrink and subsequent growth.
                 // SAFETY: sysconf queries the process's page size.
-                let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+                let page_size = unsafe { sysconf(_SC_PAGESIZE) } as usize;
                 let end = old_capacity.next_multiple_of(page_size).min(capacity);
                 // SAFETY: these bytes belong to the resized mapping.
                 unsafe { ptr.add(old_capacity).write_bytes(0, end - old_capacity) };
@@ -292,14 +300,14 @@ impl AlignedBuffer {
     /// Exclusively accesses the requested bytes, never spare capacity.
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: this initialized allocation is exclusively owned by self.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.length) }
+        unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.length) }
     }
 }
 
 impl AsRef<[u8]> for AlignedBuffer {
     fn as_ref(&self) -> &[u8] {
         // SAFETY: self owns initialized bytes for the exposed length.
-        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.length) }
+        unsafe { slice::from_raw_parts(self.ptr.as_ptr(), self.length) }
     }
 }
 
@@ -332,7 +340,7 @@ impl Drop for AlignedBuffer {
         #[cfg(target_os = "linux")]
         if self.capacity() > MAX_FIXED_BUFFER_BYTES {
             // SAFETY: this owner holds the anonymous mapping, which the kernel rounds to whole pages.
-            unsafe { libc::munmap(self.ptr.as_ptr().cast(), self.capacity()) };
+            unsafe { munmap(self.ptr.as_ptr().cast(), self.capacity()) };
             return;
         }
         // SAFETY: this owner holds the allocation made with exactly this layout.

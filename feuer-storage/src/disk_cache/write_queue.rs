@@ -5,6 +5,7 @@ mod tests;
 
 use super::*;
 use crate::disk_metrics::DiskWriteQueueOutcome;
+use tokio::sync::mpsc::error::TrySendError;
 
 pub(super) const MAX_QUEUED_ENTRIES: usize = 512;
 
@@ -50,8 +51,8 @@ impl DiskCache {
             Ok(permit) => permit,
             Err(error) => {
                 metrics.record_queue(match error {
-                    mpsc::error::TrySendError::Full(_) => DiskWriteQueueOutcome::Full,
-                    mpsc::error::TrySendError::Closed(_) => DiskWriteQueueOutcome::Closed,
+                    TrySendError::Full(_) => DiskWriteQueueOutcome::Full,
+                    TrySendError::Closed(_) => DiskWriteQueueOutcome::Closed,
                 });
                 return;
             }

@@ -3,8 +3,9 @@
 use std::{fs::File, io, os::fd::AsRawFd, sync::Arc};
 
 use bytes::Bytes;
+use feuer_memory::BufferPool;
 
-use crate::uring;
+use crate::{IoMetrics, uring};
 
 /// The production read queue and its driver thread, without a memory cache or idle retention.
 pub struct ReadQueue(uring::ReadQueue);
@@ -25,7 +26,7 @@ impl ReadQueue {
         }
         // Raw read-only benchmarks need no cache file lock.
         let files = Arc::new(uring::DataFileAndLock { file, _lock_file: None });
-        uring::ReadQueue::new(files, feuer_memory::BufferPool::unpooled(), crate::IoMetrics::noop()).map(Self)
+        uring::ReadQueue::new(files, BufferPool::unpooled(), IoMetrics::noop()).map(Self)
     }
 
     /// Reads through the production admission, allocation, notification, and completion path.

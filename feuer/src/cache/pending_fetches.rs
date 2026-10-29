@@ -1,6 +1,7 @@
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
+    ptr::addr_eq,
     sync::{Arc, Mutex, Weak},
 };
 
@@ -43,7 +44,7 @@ impl<E> PendingFetch<E> {
         let mut entries = self.registry.lock().unwrap();
         if entries
             .get(&self.key)
-            .is_some_and(|entry| std::ptr::addr_eq(entry.as_ptr(), self))
+            .is_some_and(|entry| addr_eq(entry.as_ptr(), self))
         {
             entries.remove(&self.key);
         }

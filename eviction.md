@@ -38,7 +38,7 @@ let scorer = std::sync::Arc::new(feuer::AvoidedRetrievalCostScorer {
     cost_per_request: 256_000.0,
     cost_per_requested_byte: 1.0,
 });
-// Pass scorer to TieredMemoryDiskCache::open_with_retention_scorer.
+// Pass scorer to Cache::open_with_retention_scorer.
 ```
 
 `open_with_retention_scorer` shares one scorer between tiers.

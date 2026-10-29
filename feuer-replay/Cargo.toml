@@ -15,7 +15,7 @@ tar = "0.4"
 zstd = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-feuer = { path = "../feuer", features = ["benchmark"] }
+feuer = { path = "../feuer" }
 async-channel = "2"
 mixtrics = { workspace = true, features = ["prometheus"] }
 prometheus = { workspace = true, features = ["process"] }

@@ -1,7 +1,12 @@
+use std::thread;
+
+use bytesize::ByteSize;
+use prometheus::Registry;
+
 use super::*;
 use crate::test_metrics::{registry, value};
 
-fn buffer_pool_bytes(registry: &prometheus::Registry, bucket: &str, status: &str) -> f64 {
+fn buffer_pool_bytes(registry: &Registry, bucket: &str, status: &str) -> f64 {
     value(
         registry,
         "feuer_io_buffer_pool_bytes",
@@ -71,7 +76,7 @@ fn cache_pressure_frees_larger_idle_buffers_and_updates_bucket_gauges() {
     let capacity = 100 * BUFFER_SIZES[2] as u64;
     let pool = BufferPool::new(capacity, MemoryMetrics::new(&backend));
     let idle = |size: usize| {
-        let bucket = format!("{:.0}", bytesize::ByteSize(size as u64));
+        let bucket = format!("{:.0}", ByteSize(size as u64));
         buffer_pool_bytes(&registry, &bucket, "idle")
     };
     for &size in &BUFFER_SIZES[..3] {
@@ -227,7 +232,7 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         let capacity = (100 * size as u64).div_ceil(7);
         let pool = BufferPool::new(capacity, metrics.clone());
         let gauge = |name| value(&registry, name, &[]);
-        let bucket = format!("{:.0}", bytesize::ByteSize(size as u64));
+        let bucket = format!("{:.0}", ByteSize(size as u64));
         let buffer_bytes = |status| buffer_pool_bytes(&registry, &bucket, status);
         assert_eq!(buffer_bytes("idle"), 0.0);
         assert_eq!(buffer_bytes("used"), 0.0);
@@ -288,12 +293,12 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
 fn concurrent_returns_and_cache_charges_share_one_limit() {
     let capacity = 100 * BUFFER_SIZES[0] as u64;
     let pool = BufferPool::new(capacity, MemoryMetrics::noop());
-    std::thread::scope(|scope| {
+    thread::scope(|scope| {
         for _ in 0..8 {
             scope.spawn(|| {
                 for _ in 0..100 {
                     let buffer = pool.allocate(1).unwrap();
-                    std::thread::yield_now();
+                    thread::yield_now();
                     drop(buffer);
                     assert!(pool.used_bytes() <= capacity);
                 }

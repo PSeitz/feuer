@@ -5,7 +5,8 @@
 
 use std::{collections::BTreeMap, ops::Range, path::Path, time::Duration};
 
-use proptest::prelude::*;
+use proptest::{collection, option, prelude::*};
+use tokio::{runtime::Builder, time::timeout};
 
 use super::{
     metadata::EntryMetadata,
@@ -141,7 +142,7 @@ fn entry_fields() -> impl Strategy<Value = EntryFields> {
         prop_oneof![0..6u128, any::<u128>()],
         payload_length(),
         disk_address(),
-        prop::option::weighted(0.3, any::<u64>()),
+        option::weighted(0.3, any::<u64>()),
     )
         .prop_map(
             |(index_in_page, key, length, payload_address, payload_checksum)| EntryFields {
@@ -170,13 +171,14 @@ fn page_change() -> impl Strategy<Value = PageChange> {
 
 fn disk_image() -> impl Strategy<Value = DiskImage> {
     let page_index = prop_oneof![Just(0usize), Just(1), Just(254), 0..ENTRY_METADATA_PAGES_PER_CHUNK];
-    let page = (page_index, prop::collection::vec(entry_fields(), 0..6), page_change()).prop_map(
-        |(page_index, entries, change)| EntryPageImage {
-            page_index,
-            entries,
-            change,
-        },
-    );
+    let page =
+        (page_index, collection::vec(entry_fields(), 0..6), page_change()).prop_map(|(page_index, entries, change)| {
+            EntryPageImage {
+                page_index,
+                entries,
+                change,
+            }
+        });
     let link_target = prop_oneof![
         2 => (0..6usize).prop_map(LinkTarget::MetadataChunkIndex),
         1 => disk_address().prop_map(LinkTarget::DiskAddress),
@@ -184,15 +186,15 @@ fn disk_image() -> impl Strategy<Value = DiskImage> {
     ];
     let chunk = (
         prop_oneof![chunk_number(), Just(129)],
-        prop::collection::vec(page, 0..4),
-        prop::option::weighted(0.9, (link_target, page_change())),
+        collection::vec(page, 0..4),
+        option::weighted(0.9, (link_target, page_change())),
     )
         .prop_map(|(chunk_number, entry_pages, link)| MetadataChunkImage {
             chunk_number,
             entry_pages,
             link,
         });
-    (capacity_chunks(), prop::collection::vec(chunk, 1..5)).prop_map(|(capacity_chunks, mut metadata_chunks)| {
+    (capacity_chunks(), collection::vec(chunk, 1..5)).prop_map(|(capacity_chunks, mut metadata_chunks)| {
         // Start shard 0's metadata chain at the chunk recovery reads first.
         metadata_chunks[0].chunk_number = 1;
         DiskImage {
@@ -217,7 +219,7 @@ fn cache_changes(include_metadata_payloads: bool) -> impl Strategy<Value = Vec<C
         2 => capacity_chunks().prop_map(|capacity_chunks| CacheChange::Reopen { capacity_chunks }),
         1 => any::<u64>().prop_map(|persisted_page_seed| CacheChange::ReopenAfterPartialMetadataWrite { persisted_page_seed }),
     ];
-    prop::collection::vec(change, 0..16)
+    collection::vec(change, 0..16)
 }
 
 proptest! {
@@ -245,12 +247,9 @@ proptest! {
 
 /// Checks an image before and after each generated cache change. Proptest shrinks assertion failures.
 fn check_disk_image(image: DiskImage, changes: Vec<CacheChange>) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(120), check_cache_changes(image, changes))
+        timeout(Duration::from_secs(120), check_cache_changes(image, changes))
             .await
             .expect("cache I/O timed out");
     });

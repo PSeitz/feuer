@@ -1,13 +1,16 @@
 use super::*;
+use crate::test_metrics::{registry, value};
+use std::future::ready;
+use tokio::sync::mpsc::unbounded_channel;
 
 #[tokio::test]
 async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
-    let (registry, backend) = crate::test_metrics::registry();
-    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let cache = TieredMemoryDiskCache {
-        inner: Arc::new(TieredMemoryDiskCacheInner {
+    let (registry, backend) = registry();
+    let (sender, mut receiver) = unbounded_channel();
+    let cache = Cache {
+        inner: Arc::new(CacheInner {
             config: CacheConfig::new("cache", 0, 8 << 20).unwrap(),
-            memory: MemoryCache::with_metrics(8 << 20, feuer_memory::MemoryMetrics::new(&backend), 7),
+            memory: MemoryCache::with_metrics(8 << 20, MemoryMetrics::new(&backend), 7),
             metrics: LookupMetrics::new(&backend),
             pending_fetches: PendingFetches::default(),
             #[cfg(target_os = "linux")]
@@ -15,7 +18,7 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
         }),
         access_trace: None,
     }
-    .with_trace(move |package| std::future::ready(sender.send(package).map_err(std::io::Error::other)));
+    .with_trace(move |package| ready(sender.send(package).map_err(io::Error::other)));
     // Seed an idle disk-read buffer to verify downloads acquire from that same pool.
     let pool = cache.inner.memory.buffer_pool();
     let idle = pool.allocate(4).unwrap();
@@ -32,10 +35,7 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
     assert_eq!(result.as_ref(), b"abcd");
     assert_eq!(result.as_ptr(), address);
     assert_eq!(pool.used_bytes(), capacity as u64);
-    assert_eq!(
-        crate::test_metrics::value(&registry, "feuer_memory_used_bytes", &[]),
-        capacity as f64
-    );
+    assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), capacity as f64);
     let hit = cache
         .get_or_fetch_buffer("object".to_owned(), || async {
             Err::<AlignedBuffer, _>("memory hit must not download")

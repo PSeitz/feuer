@@ -1,18 +1,19 @@
-use std::{fmt, future::Future, sync::Arc, time::Instant};
+use std::{fmt, future::Future, io, sync::Arc, time::Instant};
 
 use bytes::Bytes;
+use feuer_historian::ObjectAccessHistories;
 use feuer_memory::{
     AlignedBuffer, MemoryCache, MemoryMetrics,
     retention::{AvoidedRetrievalCostScorer, RetentionScorer},
 };
 #[cfg(target_os = "linux")]
-use feuer_storage::{DiskCache, DiskCacheOptions, IoMetrics};
+use feuer_storage::{DiskCache, DiskCacheOptions, DiskMetrics, IoMetrics};
 use feuer_types::ObjectKeyHash;
-use mixtrics::metrics::BoxedRegistry;
+use mixtrics::{metrics::BoxedRegistry, registry::noop::NoopMetricsRegistry};
 use thiserror::Error;
 
 use crate::{
-    CacheConfig, DiskCacheError, IoQueues,
+    CacheConfig, DiskCacheError, IoQueues, ObjectKey,
     access_trace::AccessTrace,
     metrics::{LookupMetrics, LookupOutcome},
 };
@@ -23,7 +24,7 @@ use pending_fetches::{PendingFetch, PendingFetches};
 type FetchResult<E> = (LookupOutcome, Result<Bytes, GetOrFetchError<E>>);
 
 /// Configuration and cache tiers shared by cloned handles.
-struct TieredMemoryDiskCacheInner {
+struct CacheInner {
     config: CacheConfig,
     memory: MemoryCache,
     metrics: LookupMetrics,
@@ -38,21 +39,21 @@ struct TieredMemoryDiskCacheInner {
 /// Disk writes are best-effort. A full 512-entry queue skips new writes. Zero disk capacity disables disk.
 /// Otherwise, opening requires Linux direct I/O and io_uring and waits for metadata recovery.
 #[derive(Clone)]
-pub struct TieredMemoryDiskCache {
-    inner: Arc<TieredMemoryDiskCacheInner>,
+pub struct Cache {
+    inner: Arc<CacheInner>,
     access_trace: Option<AccessTrace>,
 }
 
-impl fmt::Debug for TieredMemoryDiskCache {
+impl fmt::Debug for Cache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TieredMemoryDiskCache")
+        f.debug_struct("Cache")
             .field("memory_capacity", &self.inner.config.memory_capacity())
             .field("disk_capacity", &self.inner.config.disk_capacity())
             .finish_non_exhaustive()
     }
 }
 
-impl TieredMemoryDiskCache {
+impl Cache {
     /// Opens a cache, using only memory when disk capacity is zero.
     /// Memory-only operation works on every platform without a Tokio runtime.
     /// Nonzero disk capacity returns an error on platforms other than Linux.
@@ -111,14 +112,14 @@ impl TieredMemoryDiskCache {
             }
             let _ = (io_queues, disk_scorer);
         }
-        let noop_metrics_registry: BoxedRegistry = Box::new(mixtrics::registry::noop::NoopMetricsRegistry);
+        let noop_metrics_registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
         let metrics_registry = metrics_registry.unwrap_or(&noop_metrics_registry);
         let memory = MemoryCache::with_metrics(
             config.memory_capacity(),
             MemoryMetrics::new(metrics_registry),
             config.idle_buffer_pool_percent(),
         )
-        .with_access_histories(Arc::new(feuer_historian::ObjectAccessHistories::with_half_life(
+        .with_access_histories(Arc::new(ObjectAccessHistories::with_half_life(
             config.access_count_half_life(),
         )))
         .with_reclaim_sample_size(config.eviction().sample_size())
@@ -135,7 +136,7 @@ impl TieredMemoryDiskCache {
                         file_name: config.file_name().to_owned(),
                         payload_version: config.payload_version(),
                         io_metrics: IoMetrics::new(metrics_registry),
-                        metrics: feuer_storage::DiskMetrics::new(metrics_registry),
+                        metrics: DiskMetrics::new(metrics_registry),
                         access_histories: memory.access_histories().clone(),
                         reclaim_sample_size: config.eviction().sample_size(),
                         buffer_pool: memory.buffer_pool(),
@@ -147,7 +148,7 @@ impl TieredMemoryDiskCache {
             )
         };
         Ok(Self {
-            inner: Arc::new(TieredMemoryDiskCacheInner {
+            inner: Arc::new(CacheInner {
                 config,
                 memory,
                 metrics: LookupMetrics::new(metrics_registry),
@@ -164,7 +165,7 @@ impl TieredMemoryDiskCache {
     pub fn with_trace<F, Fut>(mut self, deliver_package: F) -> Self
     where
         F: FnMut(Bytes) -> Fut + Send + 'static,
-        Fut: Future<Output = std::io::Result<()>> + Send + 'static,
+        Fut: Future<Output = io::Result<()>> + Send + 'static,
     {
         self.access_trace = Some(AccessTrace::new(deliver_package));
         self
@@ -179,13 +180,13 @@ impl TieredMemoryDiskCache {
     /// Fill its exposed slice and return it from [`Self::get_or_fetch_buffer`]'s callback
     /// without copying. It returns to the pool after its last owner releases it,
     /// subject to the idle capacity limit.
-    pub fn allocate_buffer(&self, length: usize) -> std::io::Result<feuer_memory::AlignedBuffer> {
+    pub fn allocate_buffer(&self, length: usize) -> io::Result<AlignedBuffer> {
         self.inner.memory.buffer_pool().allocate(length)
     }
 
     /// Returns an object from memory or disk, or `None` on a miss.
     /// Does not invoke or wait for source callbacks. Disk hits are promoted to memory.
-    pub async fn get(&self, object_key: crate::ObjectKey) -> Option<Bytes> {
+    pub async fn get(&self, object_key: ObjectKey) -> Option<Bytes> {
         let object_key = ObjectKeyHash::from(object_key);
         self.inner.memory.access_histories().record_access(&object_key);
         let event_bytes = match &self.access_trace {
@@ -219,11 +220,7 @@ impl TieredMemoryDiskCache {
     /// Failures and cancellation still count. Insertion creates no access event.
     /// Callback results are queued to disk immediately, subject to queue capacity.
     /// Tracing can backpressure lookups but never changes their results.
-    pub async fn get_or_fetch<F, Fut, E>(
-        &self,
-        object_key: crate::ObjectKey,
-        callback: F,
-    ) -> Result<Bytes, GetOrFetchError<E>>
+    pub async fn get_or_fetch<F, Fut, E>(&self, object_key: ObjectKey, callback: F) -> Result<Bytes, GetOrFetchError<E>>
     where
         E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut,
@@ -237,7 +234,7 @@ impl TieredMemoryDiskCache {
     /// [`Self::get_or_fetch_buffer_with_disk_fallthrough`].
     pub async fn get_or_fetch_with_disk_fallthrough<F, Fut, E>(
         &self,
-        object_key: crate::ObjectKey,
+        object_key: ObjectKey,
         should_fall_through: impl FnOnce() -> bool,
         callback: F,
     ) -> Result<Bytes, GetOrFetchError<E>>
@@ -260,7 +257,7 @@ impl TieredMemoryDiskCache {
     /// Concurrent misses share work across both callback types when their error types match.
     pub async fn get_or_fetch_buffer<F, Fut, E>(
         &self,
-        object_key: crate::ObjectKey,
+        object_key: ObjectKey,
         callback: F,
     ) -> Result<Bytes, GetOrFetchError<E>>
     where
@@ -290,7 +287,7 @@ impl TieredMemoryDiskCache {
     /// Each request updates access history before checking either cache tier.
     pub async fn get_or_fetch_buffer_with_disk_fallthrough<F, Fut, E>(
         &self,
-        object_key: crate::ObjectKey,
+        object_key: ObjectKey,
         should_fall_through: impl FnOnce() -> bool,
         callback: F,
     ) -> Result<Bytes, GetOrFetchError<E>>
@@ -305,33 +302,6 @@ impl TieredMemoryDiskCache {
                 (buffer.into_bytes(), capacity)
             })
         })
-        .await
-    }
-
-    /// Replays a recorded object identity without hashing it a second time.
-    /// Otherwise identical to [`Self::get_or_fetch_buffer`].
-    #[cfg(feature = "benchmark")]
-    #[doc(hidden)]
-    pub async fn get_or_fetch_buffer_by_hash<F, Fut, E>(
-        &self,
-        object_key: ObjectKeyHash,
-        callback: F,
-    ) -> Result<Bytes, GetOrFetchError<E>>
-    where
-        E: Clone + Send + Sync + 'static,
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<AlignedBuffer, E>>,
-    {
-        self.lookup_by_hash(
-            object_key,
-            || false,
-            || async {
-                callback().await.map(|buffer| {
-                    let capacity = buffer.capacity();
-                    (buffer.into_bytes(), capacity)
-                })
-            },
-        )
         .await
     }
 
@@ -471,22 +441,26 @@ mod request_history_tests;
 mod tests {
     use std::{
         convert::Infallible,
+        future::pending,
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicU64, Ordering},
         },
+        time::Duration,
     };
 
-    use tokio::sync::Notify;
+    use tempfile::TempDir;
+    use tokio::{
+        sync::Notify,
+        task::yield_now,
+        time::{sleep, timeout},
+    };
 
     use super::*;
     use crate::test_metrics::{registry, value};
 
     #[tokio::test]
     async fn tier_scorers_receive_entry_sizes_and_shared_history() {
-        use crate::ObjectAccessHistories;
-        use std::sync::Mutex;
-
         #[derive(Default)]
         struct ScoredEntries(Mutex<Vec<(ObjectKeyHash, u64, u64, usize)>>);
 
@@ -511,7 +485,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let scorer = Arc::new(ScoredEntries::default());
         let disk_scorer = Arc::new(ScoredEntries::default());
-        let cache = TieredMemoryDiskCache::open_with_retention_scorers(
+        let cache = Cache::open_with_retention_scorers(
             CacheConfig::new(directory.path(), 4 << 20, 1).unwrap(),
             None,
             None,
@@ -556,7 +530,7 @@ mod tests {
     async fn public_registry_observes_memory_disk_callbacks_and_writes() {
         let directory = tempfile::tempdir().unwrap();
         let (registry, backend) = registry();
-        let cache = TieredMemoryDiskCache::open(
+        let cache = Cache::open(
             CacheConfig::new(directory.path(), 4 << 20, 32).unwrap(),
             Some(&backend),
             None,
@@ -603,14 +577,14 @@ mod tests {
         }
         assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", "hit")]), 1.0);
         // Metadata is written periodically, independently of payload publication.
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        timeout(Duration::from_secs(10), async {
             while value(
                 &registry,
                 "feuer_disk_io_total",
                 &[("operation", "write"), ("outcome", "success")],
             ) < 4.0
             {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                sleep(Duration::from_millis(10)).await;
             }
         })
         .await
@@ -634,9 +608,9 @@ mod tests {
         );
         // Closing the cache also releases the detached disk-write worker's gauges.
         drop(cache);
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        timeout(Duration::from_secs(10), async {
             while value(&registry, "feuer_disk_chunks", &[("state", "free")]) != 0.0 {
-                tokio::task::yield_now().await;
+                yield_now().await;
             }
         })
         .await
@@ -647,9 +621,9 @@ mod tests {
         assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
     }
 
-    async fn cache(memory_capacity: u64) -> (tempfile::TempDir, TieredMemoryDiskCache) {
+    async fn cache(memory_capacity: u64) -> (TempDir, Cache) {
         let directory = tempfile::tempdir().unwrap();
-        let cache = TieredMemoryDiskCache::open(
+        let cache = Cache::open(
             CacheConfig::new(directory.path(), 4 << 20, memory_capacity).unwrap(),
             None,
             None,
@@ -667,18 +641,18 @@ mod tests {
                 .unwrap()
                 .with_idle_buffer_pool_percent(percent)
                 .unwrap();
-            let cache = TieredMemoryDiskCache::open(config, None, None).await.unwrap();
+            let cache = Cache::open(config, None, None).await.unwrap();
             let buffers: Vec<_> = (0..2).map(|_| cache.allocate_buffer(size).unwrap()).collect();
             drop(buffers);
             assert_eq!(cache.inner.memory.buffer_pool().idle_bytes(), expected);
         }
     }
 
-    async fn wait_for_buffered(cache: &TieredMemoryDiskCache, key: &str) {
+    async fn wait_for_buffered(cache: &Cache, key: &str) {
         let disk = cache.inner.disk.as_ref().unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        timeout(Duration::from_secs(10), async {
             while !disk.contains(&ObjectKeyHash::from(key)) {
-                tokio::task::yield_now().await;
+                yield_now().await;
             }
         })
         .await
@@ -690,7 +664,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (metrics_registry, backend) = registry();
         let queues = IoQueues::new().unwrap();
-        let first = TieredMemoryDiskCache::open(
+        let first = Cache::open(
             CacheConfig::new(directory.path(), 4 << 20, 1 << 20)
                 .unwrap()
                 .with_access_count_half_life(2)
@@ -701,7 +675,7 @@ mod tests {
         .await
         .unwrap();
         // Queue sharing does not require the caches to use the same metrics configuration.
-        let second = TieredMemoryDiskCache::open(
+        let second = Cache::open(
             CacheConfig::new(directory.path(), 4 << 20, 1 << 20)
                 .unwrap()
                 .with_file_name("objects")
@@ -713,11 +687,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            TieredMemoryDiskCache::open(second.config().clone(), None, None)
-                .await
-                .is_err()
-        );
+        assert!(Cache::open(second.config().clone(), None, None).await.is_err());
         assert!(!Arc::ptr_eq(
             &first.inner.memory.buffer_pool(),
             &second.inner.memory.buffer_pool()
@@ -891,7 +861,7 @@ mod tests {
                 cache
                     .get_or_fetch(key, || async move {
                         entered.notify_one();
-                        std::future::pending::<Result<Bytes, Infallible>>().await
+                        pending::<Result<Bytes, Infallible>>().await
                     })
                     .await
             })
@@ -909,14 +879,10 @@ mod tests {
     #[tokio::test]
     async fn opening_validates_disk_capacity_and_exclusive_file_ownership() {
         let (directory, cache) = cache(32).await;
-        assert!(
-            TieredMemoryDiskCache::open(cache.config().clone(), None, None)
-                .await
-                .is_err()
-        );
+        assert!(Cache::open(cache.config().clone(), None, None).await.is_err());
         let invalid = CacheConfig::new(directory.path(), 1024, 32).unwrap();
         assert!(matches!(
-            TieredMemoryDiskCache::open(invalid, None, None).await,
+            Cache::open(invalid, None, None).await,
             Err(DiskCacheError::InvalidCapacity)
         ));
     }
@@ -924,14 +890,14 @@ mod tests {
     #[test]
     fn cache_handle_is_send_sync_static() {
         fn assert_send_sync_static<T: Send + Sync + 'static>() {}
-        assert_send_sync_static::<TieredMemoryDiskCache>();
+        assert_send_sync_static::<Cache>();
     }
 
     #[tokio::test]
     async fn callback_and_memory_hit_share_the_object_without_creating_disk_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("unused");
-        let cache = TieredMemoryDiskCache::open(CacheConfig::new(&path, 0, 32).unwrap(), None, None)
+        let cache = Cache::open(CacheConfig::new(&path, 0, 32).unwrap(), None, None)
             .await
             .unwrap();
         let key = String::from("object");
