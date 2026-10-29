@@ -112,7 +112,7 @@ capacity, including unused capacity in the pool's size bucket, then converts it
 to shared `Bytes` without copying.
 
 Replay formats recorded hashes as string keys during loading and uses
-`get_or_fetch_buffer`. Repeated requests retain the same identity. The cache hashes
+`get_or_fetch`. Repeated requests retain the same identity. The cache hashes
 these keys normally, so replay shard placement can differ from the recording.
 
 ### Optional S3 delay

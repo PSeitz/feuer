@@ -84,7 +84,7 @@ async fn allocation_capacity_drives_eviction() {
     for index in 0..65 {
         let buffer = cache.allocate_buffer(1024).unwrap();
         cache
-            .get_or_fetch_buffer(format!("object-{index}"), || async { Ok::<_, &str>(buffer) })
+            .get_or_fetch(format!("object-{index}"), || async { Ok::<_, &str>(buffer) })
             .await
             .unwrap();
     }

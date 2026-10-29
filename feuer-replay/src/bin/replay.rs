@@ -355,7 +355,7 @@ mod linux {
             async move {
                 let started = Instant::now();
                 let bytes = cache
-                    .get_or_fetch_buffer(request.object_key, || source.download(&cache, request.payload_len))
+                    .get_or_fetch(request.object_key, || source.download(&cache, request.payload_len))
                     .await?;
                 assert_eq!(bytes.len() as u64, request.payload_len);
                 drop(bytes);
@@ -503,7 +503,7 @@ mod linux {
             buffer.as_mut_slice().fill(17);
             drop(buffer);
             let bytes = cache
-                .get_or_fetch_buffer(request.object_key, || source.download(&cache, request.payload_len))
+                .get_or_fetch(request.object_key, || source.download(&cache, request.payload_len))
                 .await
                 .unwrap();
             assert_eq!(bytes.len(), request.payload_len as usize);

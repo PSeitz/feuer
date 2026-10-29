@@ -59,8 +59,8 @@ disk can also overvalue copies of memory-hot objects.
 
 Disk alignment and memory allocation buckets make costs non-linear. For
 example, a 10-byte payload may require a 4-KiB disk read and occupy a 32-KiB pooled
-memory buffer. `get_or_fetch` charges payload length, while disk
-promotions and `get_or_fetch_buffer` charge backing capacity. A custom
+memory buffer. Callback results of type `Bytes` charge payload length.
+`AlignedBuffer` results and disk promotions charge backing capacity. A custom
 scorer receives this charge as `entry_size_bytes`.
 
 Applications can supply a custom scorer when linear size-based costs are

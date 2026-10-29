@@ -34,7 +34,7 @@ fn memory_only_constructors_and_lookups_need_no_runtime() {
         })
         .unwrap();
         assert_eq!(
-            ready(cache.get_or_fetch("failed".into(), || async { Err("source failed") })),
+            ready(cache.get_or_fetch("failed".into(), || async { Err::<Bytes, _>("source failed") })),
             Err(GetOrFetchError::Callback("source failed"))
         );
         let bytes = ready(cache.get_or_fetch("object".into(), || async {

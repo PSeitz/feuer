@@ -27,11 +27,11 @@ fn pending_count(cache: &Cache) -> usize {
 }
 
 #[tokio::test]
-async fn lookup_methods_share_successes_and_errors_but_not_completed_failures() {
+async fn callback_output_types_share_successes_and_errors_but_not_completed_failures() {
     for success in [true, false] {
         let (cache, registry) = cache().await;
         let release = Notify::new();
-        let mut first = Box::pin(cache.get_or_fetch_buffer("object".into(), || async {
+        let mut first = Box::pin(cache.get_or_fetch("object".into(), || async {
             release.notified().await;
             if success {
                 let mut buffer = cache.allocate_buffer(2).unwrap();
@@ -99,7 +99,7 @@ async fn different_error_types_and_keys_do_not_share() {
 async fn cancellation_allows_takeover_and_cleans_up_in_either_order() {
     for order in 0..3 {
         let (cache, _) = cache().await;
-        let mut first = Box::pin(cache.get_or_fetch_buffer("object".into(), pending::<Result<AlignedBuffer, &str>>));
+        let mut first = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<AlignedBuffer, &str>>));
         let mut second = Box::pin(cache.get_or_fetch("object".into(), || async {
             Ok::<_, &str>(Bytes::from_static(b"replacement"))
         }));
@@ -132,7 +132,7 @@ async fn old_waiter_cannot_remove_a_new_attempt() {
         release.notified().await;
         Err::<Bytes, &str>("old failure")
     }));
-    let mut waiter = Box::pin(cache.get_or_fetch_buffer("object".into(), pending::<Result<AlignedBuffer, &str>>));
+    let mut waiter = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<AlignedBuffer, &str>>));
     assert_pending(first.as_mut());
     assert_pending(waiter.as_mut());
     release.notify_one();

@@ -29,7 +29,7 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
     assert_eq!(buffer.as_ref().as_ptr(), address);
     buffer.as_mut_slice().copy_from_slice(b"abcd");
     let result = cache
-        .get_or_fetch_buffer("object".to_owned(), || async { Ok::<_, &str>(buffer) })
+        .get_or_fetch("object".to_owned(), || async { Ok::<_, &str>(buffer) })
         .await
         .unwrap();
     assert_eq!(result.as_ref(), b"abcd");
@@ -37,7 +37,7 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
     assert_eq!(pool.used_bytes(), capacity as u64);
     assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), capacity as f64);
     let hit = cache
-        .get_or_fetch_buffer("object".to_owned(), || async {
+        .get_or_fetch("object".to_owned(), || async {
             Err::<AlignedBuffer, _>("memory hit must not download")
         })
         .await

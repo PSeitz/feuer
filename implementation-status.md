@@ -17,15 +17,18 @@ callback**. The [contract](tiered-plan.md) describes behavior, and the
 
 ## Lookup and retention
 
-- `get_or_fetch(key, callback)` accepts a callback returning `Result<Bytes, E>`
-  and charges payload length. `get_or_fetch_buffer` accepts `Result<AlignedBuffer, E>`,
-  charges capacity, and converts to shared `Bytes` without copying. `feuer`
-  reexports `AlignedBuffer`. Both APIs have `_with_disk_fallthrough` variants.
-  `get` performs lookup without a source callback.
+- `get_or_fetch` and `get_or_fetch_with_disk_fallthrough` accept callbacks returning
+  `Result<V, E>` where `V: Into<BytesAndMemoryCharge>`. Both accept `Bytes` or
+  `AlignedBuffer` and return `Bytes`. Buffer conversion shares the payload without
+  copying. `feuer` reexports `AlignedBuffer` and exposes `BytesAndMemoryCharge`
+  with private fields and `From` conversions for both payload types. The conversion
+  is normally inferred from the callback result. `get` performs lookup without a
+  source callback.
 - Empty objects are valid. Keys identify immutable content. Both tiers suppress
   duplicate insertions.
 - Matching concurrent misses share one disk-or-callback operation by key and
-  callback error type. Cancellation lets a waiter take over with its own callback.
+  callback error type, including across `Bytes` and `AlignedBuffer` callbacks.
+  Cancellation lets a waiter take over with its own callback.
 - Every started lookup records one object access before checking either tier.
   Failures and cancellation count as demand. Insertion and raw tier reads do not.
 - Both tiers sample objects and evict the lowest retention score. The default
@@ -36,9 +39,9 @@ callback**. The [contract](tiered-plan.md) describes behavior, and the
 
 ## Memory and buffers
 
-Cached allocation charges and idle buffers share the memory target. `get_or_fetch`
-charges payload length. Disk reads and `get_or_fetch_buffer` charge retained buffer
-capacity. Entry targets are split among shards,
+Cached allocation charges and idle buffers share the memory target. Callback
+results of type `Bytes` charge payload length. `AlignedBuffer` results and disk
+reads charge retained buffer capacity. Entry targets are split among shards,
 and an oversized object can exceed its shard's target after evicting its peers.
 
 Each memory cache owns an aligned pool shared with storage readers and downloaders.

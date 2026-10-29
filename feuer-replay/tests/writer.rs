@@ -33,14 +33,14 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
         })
         .await?;
     let hit = cache
-        .get_or_fetch_buffer("object".to_owned(), || async {
+        .get_or_fetch("object".to_owned(), || async {
             Err::<AlignedBuffer, _>(Arc::new(io::Error::other("same key must hit the cached entry")))
         })
         .await?;
     assert_eq!(hit.as_ref(), b"abcd");
     assert!(
         cache
-            .get_or_fetch_buffer("failed".to_owned(), || async {
+            .get_or_fetch("failed".to_owned(), || async {
                 Err::<AlignedBuffer, _>("source error")
             })
             .await
@@ -51,7 +51,7 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
     let canceled_cache = cache.clone();
     let task = spawn(async move {
         canceled_cache
-            .get_or_fetch_buffer("canceled".to_owned(), || async {
+            .get_or_fetch("canceled".to_owned(), || async {
                 started.send(()).unwrap();
                 pending::<result::Result<AlignedBuffer, Infallible>>().await
             })

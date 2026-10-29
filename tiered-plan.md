@@ -25,11 +25,12 @@ checksum collisions.
 
 ## Public lookup boundary
 
-- `get_or_fetch(key, callback)` accepts an asynchronous callback returning
-  `Result<Bytes, E>` and charges payload length in memory.
-- `get_or_fetch_buffer(key, callback)` accepts an asynchronous callback returning
-  `Result<AlignedBuffer, E>`. It charges buffer capacity, then converts the buffer
-  to shared `Bytes` without copying. `AlignedBuffer` is reexported by `feuer`.
+- `get_or_fetch` and `get_or_fetch_with_disk_fallthrough` accept asynchronous
+  callbacks returning `Result<V, E>` where `V: Into<BytesAndMemoryCharge>`.
+  Both accept `Bytes` or `AlignedBuffer` and return `Bytes`. Buffer conversion
+  shares the payload without copying. `feuer` reexports `AlignedBuffer` and exposes
+  `BytesAndMemoryCharge` with private fields and `From` conversions for both payload
+  types. The conversion is normally inferred from the callback result.
 - `get(key)` checks memory and disk without invoking or waiting for a source
   callback. A miss returns `None`.
 
@@ -40,7 +41,8 @@ for disk unless the object is already stored. Duplicate objects are not retained
 or written again within a tier.
 
 Concurrent memory misses with the same key and exact callback error type share
-one disk-or-callback operation. Callbacks for that group must be interchangeable.
+one disk-or-callback operation, including across `Bytes` and `AlignedBuffer`
+callbacks. Callbacks for that group must be interchangeable.
 Errors implement `Clone + Send + Sync + 'static`. Callbacks and futures may borrow
 caller state. Different error types do not share work. If the executing caller is
 canceled, a waiter can take over using its own callback. Completed errors are not
@@ -52,11 +54,10 @@ by callbacks and caller-held results.
 
 ### Disk-pressure fallthrough
 
-The `get_or_fetch_with_disk_fallthrough` and
-`get_or_fetch_buffer_with_disk_fallthrough` variants accept a synchronous decision
-closure. At least 64 waiting payload reads trigger decisions for unchecked waiters.
+`get_or_fetch_with_disk_fallthrough` accepts a synchronous decision closure.
+At least 64 waiting payload reads trigger decisions for unchecked waiters.
 A true result invokes the source callback instead of waiting for a disk-read permit.
-Each decision runs at most once in its caller's task. Ordinary APIs wait for disk.
+Each decision runs at most once in its caller's task. `get_or_fetch` waits for disk.
 
 Fallthrough neither cancels submitted I/O nor removes the disk entry. Shared fetch
 callers follow the executing caller's decision. A takeover after cancellation uses
@@ -90,9 +91,9 @@ An object larger than its shard's target empties that shard and remains cached,
 so aggregate retained charges can exceed the target. Memory pressure never waits
 for disk throughput, and queued writes do not protect entries from eviction.
 
-`get_or_fetch` charges payload length because `Bytes` does not expose capacity.
-`get_or_fetch_buffer` and disk promotions charge their retained buffer's full
-capacity. Shared allocations are conservatively charged once per cached entry.
+Callback results of type `Bytes` charge payload length. `AlignedBuffer` results
+and disk promotions charge retained buffer capacity. Shared allocations are
+conservatively charged once per cached entry.
 
 An aligned buffer pool is shared by reads and downloader-acquired buffers. All
 buckets share an idle ceiling, 7% of the memory target by default. Admission frees

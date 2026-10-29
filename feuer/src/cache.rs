@@ -23,6 +23,32 @@ use pending_fetches::{PendingFetch, PendingFetches};
 
 type FetchResult<E> = (LookupOutcome, Result<Bytes, GetOrFetchError<E>>);
 
+/// Bytes and the amount charged toward the cache's memory usage.
+///
+/// Converting [`Bytes`] charges its length. Converting [`AlignedBuffer`] charges
+/// its capacity and produces [`Bytes`] without copying the payload.
+pub struct BytesAndMemoryCharge {
+    bytes: Bytes,
+    memory_charge: usize,
+}
+
+impl From<Bytes> for BytesAndMemoryCharge {
+    fn from(bytes: Bytes) -> Self {
+        let memory_charge = bytes.len();
+        Self { bytes, memory_charge }
+    }
+}
+
+impl From<AlignedBuffer> for BytesAndMemoryCharge {
+    fn from(buffer: AlignedBuffer) -> Self {
+        let memory_charge = buffer.capacity();
+        Self {
+            bytes: buffer.into_bytes(),
+            memory_charge,
+        }
+    }
+}
+
 /// Configuration and cache tiers shared by cloned handles.
 struct CacheInner {
     config: CacheConfig,
@@ -177,7 +203,7 @@ impl Cache {
     }
 
     /// Acquires an aligned buffer from the same pool used by disk reads.
-    /// Fill its exposed slice and return it from [`Self::get_or_fetch_buffer`]'s callback
+    /// Fill its exposed slice and return it from [`Self::get_or_fetch`]'s callback
     /// without copying. It returns to the pool after its last owner releases it,
     /// subject to the idle capacity limit.
     pub fn allocate_buffer(&self, length: usize) -> io::Result<AlignedBuffer> {
@@ -211,65 +237,31 @@ impl Cache {
     /// Cancellation of the executing caller allows a waiter to take over with its own callback.
     /// Completed failures are not cached for later requests.
     ///
-    /// The callback returns immutable [`Bytes`], including empty objects, without copying.
-    /// Memory is charged by payload length. Retained backing capacity can be larger.
-    /// Use [`Self::get_or_fetch_buffer`] to charge a pool buffer's capacity instead.
-    /// The memory target is soft.
+    /// The callback can return [`Bytes`] or [`AlignedBuffer`], including empty objects.
+    /// The cache charges [`Bytes`] by length and [`AlignedBuffer`] by capacity.
+    /// Both produce [`Bytes`] without copying the payload. Concurrent misses share work
+    /// across both callback types when their error types match. The memory target is soft.
     ///
     /// Every started request records demand exactly once, before checking either tier.
     /// Failures and cancellation still count. Insertion creates no access event.
     /// Callback results are queued to disk immediately, subject to queue capacity.
     /// Tracing can backpressure lookups but never changes their results.
-    pub async fn get_or_fetch<F, Fut, E>(&self, object_key: ObjectKey, callback: F) -> Result<Bytes, GetOrFetchError<E>>
+    pub async fn get_or_fetch<F, Fut, V, E>(
+        &self,
+        object_key: ObjectKey,
+        callback: F,
+    ) -> Result<Bytes, GetOrFetchError<E>>
     where
         E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Bytes, E>>,
+        Fut: Future<Output = Result<V, E>>,
+        V: Into<BytesAndMemoryCharge>,
     {
         self.get_or_fetch_with_disk_fallthrough(object_key, || false, callback)
             .await
     }
 
-    /// Like [`Self::get_or_fetch`], with the per-request disk fallthrough decision described in
-    /// [`Self::get_or_fetch_buffer_with_disk_fallthrough`].
-    pub async fn get_or_fetch_with_disk_fallthrough<F, Fut, E>(
-        &self,
-        object_key: ObjectKey,
-        should_fall_through: impl FnOnce() -> bool,
-        callback: F,
-    ) -> Result<Bytes, GetOrFetchError<E>>
-    where
-        E: Clone + Send + Sync + 'static,
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Bytes, E>>,
-    {
-        self.lookup_by_hash(ObjectKeyHash::from(object_key), should_fall_through, || async {
-            callback().await.map(|bytes| {
-                let charge = bytes.len();
-                (bytes, charge)
-            })
-        })
-        .await
-    }
-
-    /// Like [`Self::get_or_fetch`], but the callback returns an [`AlignedBuffer`].
-    /// Memory is charged by buffer capacity. The buffer becomes shared [`Bytes`] without copying.
-    /// Concurrent misses share work across both callback types when their error types match.
-    pub async fn get_or_fetch_buffer<F, Fut, E>(
-        &self,
-        object_key: ObjectKey,
-        callback: F,
-    ) -> Result<Bytes, GetOrFetchError<E>>
-    where
-        E: Clone + Send + Sync + 'static,
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<AlignedBuffer, E>>,
-    {
-        self.get_or_fetch_buffer_with_disk_fallthrough(object_key, || false, callback)
-            .await
-    }
-
-    /// Like [`Self::get_or_fetch_buffer`], but may fetch from the source instead of a busy disk.
+    /// Like [`Self::get_or_fetch`], but may fetch from the source instead of a busy disk.
     ///
     /// Caches sharing `IoQueues` share 64 payload read permits. At 64 waiting reads,
     /// every unchecked waiter is scheduled to call `should_fall_through` before I/O,
@@ -285,7 +277,7 @@ impl Cache {
     /// memory. Objects already on disk are not queued for another write.
     /// Source failures are returned without retrying disk.
     /// Each request updates access history before checking either cache tier.
-    pub async fn get_or_fetch_buffer_with_disk_fallthrough<F, Fut, E>(
+    pub async fn get_or_fetch_with_disk_fallthrough<F, Fut, V, E>(
         &self,
         object_key: ObjectKey,
         should_fall_through: impl FnOnce() -> bool,
@@ -294,13 +286,11 @@ impl Cache {
     where
         E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<AlignedBuffer, E>>,
+        Fut: Future<Output = Result<V, E>>,
+        V: Into<BytesAndMemoryCharge>,
     {
         self.lookup_by_hash(ObjectKeyHash::from(object_key), should_fall_through, || async {
-            callback().await.map(|buffer| {
-                let capacity = buffer.capacity();
-                (buffer.into_bytes(), capacity)
-            })
+            callback().await.map(Into::into)
         })
         .await
     }
@@ -314,7 +304,7 @@ impl Cache {
     where
         E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(Bytes, usize), E>>,
+        Fut: Future<Output = Result<BytesAndMemoryCharge, E>>,
     {
         self.inner.memory.access_histories().record_access(&object_key);
         let event_bytes = match &self.access_trace {
@@ -372,7 +362,7 @@ impl Cache {
     ) -> FetchResult<E>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(Bytes, usize), E>>,
+        Fut: Future<Output = Result<BytesAndMemoryCharge, E>>,
     {
         let mut fell_through = false;
         let (outcome, bytes) = self
@@ -385,7 +375,7 @@ impl Cache {
             return (outcome, Ok(bytes));
         }
 
-        let (bytes, allocation_charge) = match callback().await {
+        let BytesAndMemoryCharge { bytes, memory_charge } = match callback().await {
             Ok(result) => result,
             Err(error) => {
                 return (LookupOutcome::CallbackError, Err(GetOrFetchError::Callback(error)));
@@ -397,16 +387,16 @@ impl Cache {
             if disk.contains(&object_key) {
                 metrics.disk_write_already_covered.increase(1);
                 if fell_through {
-                    self.inner.memory.insert(object_key, bytes.clone(), allocation_charge);
+                    self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
                 }
-            } else if self.inner.memory.insert(object_key, bytes.clone(), allocation_charge) {
+            } else if self.inner.memory.insert(object_key, bytes.clone(), memory_charge) {
                 disk.enqueue_if_space_available(object_key, bytes.clone());
             } else {
                 metrics.disk_write_redundant.increase(1);
             }
             return (LookupOutcome::Callback, Ok(bytes));
         }
-        self.inner.memory.insert(object_key, bytes.clone(), allocation_charge);
+        self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
         (LookupOutcome::Callback, Ok(bytes))
     }
 }

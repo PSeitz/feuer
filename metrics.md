@@ -169,8 +169,8 @@ Gauge values remain in bytes. Update filters using the former numeric bucket lab
 
 `feuer_memory_used_bytes` replaces `feuer_memory_payload_bytes`; the separate
 `feuer_io_buffer_pool_capacity_bytes` gauge has been removed. Update dashboards.
-Disk promotions and `get_or_fetch_buffer` charge the retained buffer's whole
-capacity, including padding and unused bytes. `get_or_fetch` charges payload length.
+Disk promotions and callback results of type `AlignedBuffer` charge retained buffer
+capacity, including padding and unused bytes. `Bytes` callback results charge payload length.
 Shared allocations are conservatively charged per cached entry. Oversized entries
 can make cached charges exceed the target.
 

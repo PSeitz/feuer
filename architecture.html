@@ -38,22 +38,24 @@
     <div class="flow" aria-label="Lookup order"><span>Object key</span><span>Memory</span><span>Verified disk</span><span>Source callback</span></div>
     <details open>
       <summary>Lookup API</summary>
-      <p><code>get_or_fetch(key, callback)</code> returns the object as <code>Bytes</code>.
-        Its asynchronous callback returns <code>Result&lt;Bytes, E&gt;</code>, charged by payload length.
-        Empty objects are valid.</p>
-      <p><code>get_or_fetch_buffer</code> accepts a callback returning <code>Result&lt;AlignedBuffer, E&gt;</code>,
-        charges buffer capacity, and converts to shared <code>Bytes</code> without copying.
-        <code>AlignedBuffer</code> is reexported by <code>feuer</code>.
-        Both APIs have <code>_with_disk_fallthrough</code> variants.
+      <p><code>get_or_fetch</code> and <code>get_or_fetch_with_disk_fallthrough</code>
+        accept asynchronous callbacks returning <code>Result&lt;V, E&gt;</code> where
+        <code>V: Into&lt;BytesAndMemoryCharge&gt;</code>. Both accept <code>Bytes</code> or
+        <code>AlignedBuffer</code> and return <code>Bytes</code>. Buffer conversion shares the payload
+        without copying. Empty objects are valid.</p>
+      <p><code>feuer</code> reexports <code>AlignedBuffer</code> and exposes
+        <code>BytesAndMemoryCharge</code> with private fields and <code>From</code> conversions
+        for both payload types. The conversion is normally inferred from the callback result.
         <code>get</code> checks memory and disk without invoking or waiting for a source callback.
-        No lookup requires the object's length in advance.</p>
+        Object lengths can be determined during fetching.</p>
       <p>Keys identify immutable content, including across restarts. Feuer stores a seed-zero XXH3-128 hash,
         not the original UTF-8 key. Collisions are not checked, so keys must not be adversarial.</p>
       <a href="feuer/src/cache.rs">Source: tier orchestration</a>
     </details>
     <details>
       <summary>Shared misses and cancellation</summary>
-      <p>Concurrent memory misses with the same key and callback error type share one disk-or-callback operation.
+      <p>Concurrent memory misses with the same key and callback error type share one disk-or-callback operation,
+        including across <code>Bytes</code> and <code>AlignedBuffer</code> callbacks.
         Matching callbacks must be interchangeable. Errors must implement <code>Clone + Send + Sync + 'static</code>,
         but callbacks and futures may borrow caller state.</p>
       <p>Cancellation of the executing caller lets a waiter take over with its own callback.
@@ -76,11 +78,11 @@
       <summary>Allocation accounting and buffer reuse</summary>
       <p>Cached allocation charges and idle buffers share a soft memory target. Entry targets are divided among
         shards. An oversized object empties its shard and remains cached, so retained charges can exceed the target.</p>
-      <p><code>get_or_fetch</code> charges payload length.
-        Disk promotions and <code>get_or_fetch_buffer</code> charge retained buffer capacity.
+      <p>Callback results of type <code>Bytes</code> charge payload length.
+        <code>AlignedBuffer</code> results and disk promotions charge retained buffer capacity.
         Shared allocations are conservatively charged per entry.</p>
       <p><code>cache.allocate_buffer(length)</code> uses the same aligned pool as disk reads.
-        Fill <code>as_mut_slice()</code> and return the buffer from a <code>get_or_fetch_buffer</code> callback.
+        Fill <code>as_mut_slice()</code> and return the buffer from a lookup callback.
         Buffers become reusable only after their last owner releases them.</p>
       <p>All buckets share an idle ceiling of 7% of memory capacity by default. Admission frees idle buffers first.
         Buffer returns never evict entries. Caller-only results, active I/O, metadata, and pending writes are outside the target.</p>

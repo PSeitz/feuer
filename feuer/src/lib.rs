@@ -15,7 +15,7 @@ mod metrics;
 #[path = "../../test_support/metrics.rs"]
 mod test_metrics;
 
-pub use cache::{Cache, GetOrFetchError};
+pub use cache::{BytesAndMemoryCharge, Cache, GetOrFetchError};
 pub use config::{CacheConfig, CacheConfigError, SampledEvictionConfig};
 pub use feuer_historian::ObjectAccessHistories;
 pub use feuer_memory::{
