@@ -36,7 +36,7 @@ Every event refers to an object.
 | 17 | `u128` | Object key hash, seed-zero XXH3-128 |
 | 33 | `u64` | Object payload length for successful kinds 1–3, otherwise zero |
 
-Successful lookups of empty objects have length zero. A `get_object` returning
+Successful lookups of empty objects have length zero. A `get` returning
 `None` emits kind 5. Replay learns object lengths from successful outcomes and
 rejects objects whose length is never observed.
 

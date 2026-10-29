@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     assert_eq!(document.as_ref(), b"document bytes");
 
-    let image = images.get_object("object-v1".to_owned()).await.unwrap();
+    let image = images.get("object-v1".to_owned()).await.unwrap();
     assert_eq!(image.as_ref(), b"image bytes");
     // Callbacks for the same key must return interchangeable objects.
     Ok(())

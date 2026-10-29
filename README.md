@@ -112,7 +112,7 @@ Objects can be empty, and their lengths need not be known before fetching. Callb
 must implement `Clone + Send + Sync + 'static`. Callbacks sharing work must be
 interchangeable. Your application owns source retries and concurrency limits.
 
-Use `get_object(key)` to check the cache without fetching. It returns `None` on a
+Use `get(key)` to check the cache without fetching. It returns `None` on a
 miss and does not wait for an in-progress source callback.
 
 ## Before you use it

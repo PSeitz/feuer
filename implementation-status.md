@@ -21,7 +21,7 @@ callback**. The [contract](tiered-plan.md) describes behavior, and the
   and charges payload length. `get_or_fetch_buffer` accepts `Result<AlignedBuffer, E>`,
   charges capacity, and converts to shared `Bytes` without copying. `feuer`
   reexports `AlignedBuffer`. Both APIs have `_with_disk_fallthrough` variants.
-  `get_object` performs lookup without a source callback.
+  `get` performs lookup without a source callback.
 - Empty objects are valid. Keys identify immutable content. Both tiers suppress
   duplicate insertions.
 - Matching concurrent misses share one disk-or-callback operation by key and

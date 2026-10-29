@@ -185,7 +185,7 @@ impl TieredMemoryDiskCache {
 
     /// Returns an object from memory or disk, or `None` on a miss.
     /// Does not invoke or wait for source callbacks. Disk hits are promoted to memory.
-    pub async fn get_object(&self, object_key: crate::ObjectKey) -> Option<Bytes> {
+    pub async fn get(&self, object_key: crate::ObjectKey) -> Option<Bytes> {
         let object_key = ObjectKeyHash::from(object_key);
         self.inner.memory.access_histories().record_access(&object_key);
         let event_bytes = match &self.access_trace {
@@ -796,7 +796,7 @@ mod tests {
             for lookup_only in [false, true] {
                 assert!(cache.inner.memory.remove(&hash));
                 let bytes = if lookup_only {
-                    cache.get_object(key.clone()).await.unwrap()
+                    cache.get(key.clone()).await.unwrap()
                 } else {
                     cache
                         .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("must hit disk") })

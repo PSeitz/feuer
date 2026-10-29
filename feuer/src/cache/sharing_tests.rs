@@ -167,7 +167,7 @@ async fn lookup_only_checks_cached_bytes_without_waiting_for_a_callback() {
     let mut fetch = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Bytes, &str>>));
     assert_pending(fetch.as_mut());
     assert_eq!(
-        Box::pin(cache.get_object("object".into()))
+        Box::pin(cache.get("object".into()))
             .as_mut()
             .poll(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(None)
@@ -177,7 +177,7 @@ async fn lookup_only_checks_cached_bytes_without_waiting_for_a_callback() {
             .inner
             .memory
             .insert(ObjectKeyHash::from(key), bytes.clone(), bytes.len());
-        assert_eq!(cache.get_object(key.into()).await, Some(bytes));
+        assert_eq!(cache.get(key.into()).await, Some(bytes));
     }
     assert_eq!(cache.inner.memory.access_histories().request_count(), 4);
     assert_eq!(value(&registry, "feuer_lookup_total", &[("outcome", "miss")]), 1.0);

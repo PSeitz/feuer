@@ -24,7 +24,7 @@ histograms record successful disk hits and callbacks only, including time spent
 waiting for a shared fetch. Timing starts after enqueueing the trace-start event
 and before checking memory. Memory hits record no duration, but their outcome and
 served-byte counters still increase.
-A lookup-only `get_object` returning `None` records `miss`, without served bytes
+A lookup-only `get` returning `None` records `miss`, without served bytes
 or duration. Shared disk and callback results count once per completed caller,
 not once per execution. Callback outcomes do not measure source invocation counts.
 

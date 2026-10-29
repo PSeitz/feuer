@@ -30,7 +30,7 @@ checksum collisions.
 - `get_or_fetch_buffer(key, callback)` accepts an asynchronous callback returning
   `Result<AlignedBuffer, E>`. It charges buffer capacity, then converts the buffer
   to shared `Bytes` without copying. `AlignedBuffer` is reexported by `feuer`.
-- `get_object(key)` checks memory and disk without invoking or waiting for a source
+- `get(key)` checks memory and disk without invoking or waiting for a source
   callback. A miss returns `None`.
 
 Lookup checks memory, then disk, then invokes the callback on a miss. Disk hits

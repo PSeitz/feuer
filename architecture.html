@@ -45,7 +45,7 @@
         charges buffer capacity, and converts to shared <code>Bytes</code> without copying.
         <code>AlignedBuffer</code> is reexported by <code>feuer</code>.
         Both APIs have <code>_with_disk_fallthrough</code> variants.
-        <code>get_object</code> checks memory and disk without invoking or waiting for a source callback.
+        <code>get</code> checks memory and disk without invoking or waiting for a source callback.
         No lookup requires the object's length in advance.</p>
       <p>Keys identify immutable content, including across restarts. Feuer stores a seed-zero XXH3-128 hash,
         not the original UTF-8 key. Collisions are not checked, so keys must not be adversarial.</p>

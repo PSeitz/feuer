@@ -116,11 +116,11 @@ async fn decodes_empty_object_from_current_writer() -> Result<()> {
     let cache = TieredMemoryDiskCache::open(CacheConfig::new("unused", 0, 1 << 20)?, None, None)
         .await?
         .with_trace(move |package| std::future::ready(sender.send(package).map_err(std::io::Error::other)));
-    assert!(cache.get_object("empty".to_owned()).await.is_none());
+    assert!(cache.get("empty".to_owned()).await.is_none());
     cache
         .get_or_fetch("empty".to_owned(), || async { Ok::<_, Infallible>(Bytes::new()) })
         .await?;
-    let hit = cache.get_object("empty".to_owned()).await.unwrap();
+    let hit = cache.get("empty".to_owned()).await.unwrap();
     assert!(hit.is_empty());
     drop(cache);
     let package = receiver.recv().await.ok_or("missing tail")?;

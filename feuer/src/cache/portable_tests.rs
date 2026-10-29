@@ -45,8 +45,8 @@ fn memory_only_constructors_and_lookups_need_no_runtime() {
             Ok::<_, &str>(Bytes::from_static(b"payload"))
         }))
         .unwrap();
-        assert_eq!(ready(cache.clone().get_object("object".into())), Some(bytes));
-        assert_eq!(ready(cache.get_object("missing".into())), None);
+        assert_eq!(ready(cache.clone().get("object".into())), Some(bytes));
+        assert_eq!(ready(cache.get("missing".into())), None);
         for outcome in ["callback", "callback_error", "memory_hit", "miss"] {
             assert_eq!(value(&registry, "feuer_lookup_total", &[("outcome", outcome)]), 1.0);
         }
