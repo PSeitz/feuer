@@ -1,5 +1,8 @@
 use super::*;
-use crate::disk_cache::tests::{download, open_test_cache, with_manual_metadata_writes};
+use crate::disk_cache::tests::{download, entry_disk_ranges, open_test_cache, with_manual_metadata_writes};
+use feuer_memory::BUFFER_ALIGNMENT;
+use proptest::prelude::*;
+use std::collections::BTreeSet;
 
 async fn reopen(directory: &Path, cache: DiskCache) -> DiskCache {
     cache.write_dirty_metadata_pages().await;
@@ -38,38 +41,118 @@ async fn metadata_chains_start_at_each_shards_first_chunk_without_a_sidecar() {
     }
 }
 
-#[tokio::test]
-async fn recovers_separate_metadata_and_contiguous_multi_chunk_payloads() {
-    let (directory, cache) = open_test_cache(12 * CHUNK_BYTES).await;
-    let lengths = [
-        0,
-        1,
-        6,
-        4096,
-        4097,
-        700 * 1024,
-        CHUNK_BYTES as usize,
-        2 * CHUNK_BYTES as usize,
-        3 * CHUNK_BYTES as usize + 7,
-    ];
-    let entries = lengths
-        .iter()
-        .enumerate()
-        .map(|(i, &length)| (ObjectKeyHash(i as u128), download(u64::MAX - length as u64, length)))
-        .collect();
-    assert_eq!(cache.insert_batch(entries).await.unwrap(), lengths.len());
-    let cache = reopen(directory.path(), cache).await;
-    for (i, length) in lengths.into_iter().enumerate() {
-        let (bytes, capacity) = cache
-            .get_with_fallthrough(&ObjectKeyHash(i as u128), || false)
-            .await
-            .unwrap();
-        assert_eq!(bytes, download(u64::MAX - length as u64, length));
-        assert!(capacity >= bytes.len());
-        cache.disk.shards[0].remove_entry(&ObjectKeyHash(i as u128));
+fn payload_lengths() -> impl Strategy<Value = Vec<usize>> {
+    let chunk = CHUNK_BYTES as usize;
+    let alignment = BUFFER_ALIGNMENT;
+    let half = chunk / 2;
+    prop::collection::vec(
+        prop_oneof![
+            0..=2 * alignment,
+            half - 2 * alignment..=half + 2 * alignment,
+            chunk - 2 * alignment..=chunk + 2 * alignment,
+            2 * chunk - 2 * alignment..=2 * chunk + 2 * alignment,
+        ],
+        0..8,
+    )
+    .prop_map(move |mut lengths| {
+        // Keep every boundary even when shrinking removes all generated lengths.
+        lengths.extend([
+            0,
+            1,
+            alignment - 1,
+            alignment,
+            alignment + 1,
+            half - alignment,
+            half - alignment + 1,
+            half - 1,
+            half,
+            half + 1,
+            chunk - 1,
+            chunk,
+            chunk + 1,
+            2 * chunk,
+            3 * chunk + 7,
+        ]);
+        lengths
+    })
+    .prop_shuffle()
+}
+
+proptest! {
+    // Every case writes and checks all boundary sizes, including several multi-chunk payloads.
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn payload_packing_and_recovery_preserve_bytes_and_chunk_ownership(
+        lengths in payload_lengths(),
+        seed in any::<u64>(),
+    ) {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            // Even a separate chunk range for every entry fits, so admission must succeed.
+            let payload_capacity = lengths.iter()
+                .map(|&length| (length as u64).max(1).div_ceil(CHUNK_BYTES))
+                .sum::<u64>() * CHUNK_BYTES;
+            let (directory, mut cache) = open_test_cache(payload_capacity).await;
+            let inputs: Vec<_> = lengths.into_iter().enumerate()
+                .map(|(i, length)| (ObjectKeyHash(i as u128), download(seed.wrapping_add(i as u64), length)))
+                .collect();
+            assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
+            for recovered in [false, true] {
+                if recovered {
+                    cache = reopen(directory.path(), cache).await;
+                }
+                let mut entries = Vec::new();
+                for (key, source) in &inputs {
+                    let (payload, metadata) = entry_disk_ranges(&cache, key).await;
+                    entries.push((key, source, payload, metadata));
+                }
+                // Equal-length entries may be ordered either way within the batch.
+                entries.sort_unstable_by_key(|(_, source, payload, _)| (source.len(), payload.start));
+                let mut chunks = BTreeSet::new();
+                let mut shared_end = 0;
+                for (key, source, payload, metadata) in entries {
+                    let disk_bytes = (source.len() as u64).max(1).next_multiple_of(BUFFER_ALIGNMENT as u64);
+                    let small = disk_bytes < 512 * 1024;
+                    let offset = if small && shared_end % CHUNK_BYTES + disk_bytes <= CHUNK_BYTES {
+                        shared_end % CHUNK_BYTES
+                    } else {
+                        0
+                    };
+                    assert_eq!(payload.start % CHUNK_BYTES, offset);
+                    assert_eq!(payload.end - payload.start, disk_bytes);
+                    assert!(payload.start >= 2 * CHUNK_BYTES && payload.end <= cache.disk.file.capacity());
+                    assert_eq!(metadata, CHUNK_BYTES..CHUNK_BYTES + METADATA_PAGE_BYTES as u64);
+                    let first_chunk = payload.start / CHUNK_BYTES;
+                    let end_chunk = payload.end.div_ceil(CHUNK_BYTES);
+                    if offset != 0 {
+                        assert_eq!(payload.start, shared_end);
+                    } else {
+                        for chunk in first_chunk..end_chunk {
+                            assert!(chunks.insert(chunk), "standalone payloads and separate packed groups must not share chunks");
+                        }
+                    }
+                    if small {
+                        assert_eq!(end_chunk - first_chunk, 1);
+                        shared_end = payload.end;
+                    }
+                    assert_eq!(cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[key].chunk_count(), end_chunk - first_chunk);
+                    // Read disk directly so lookup logic cannot hide headers or metadata gaps.
+                    let stored = cache.disk.file.read_at(payload.start, disk_bytes as usize).await.unwrap();
+                    assert_eq!(&stored[..source.len()], source.as_ref());
+                    assert!(stored[source.len()..].iter().all(|&byte| byte == 0));
+                    let (bytes, capacity) = cache.get_with_fallthrough(key, || false).await.unwrap();
+                    assert_eq!(bytes, *source);
+                    assert!(capacity >= bytes.len());
+                }
+                assert_eq!(cache.disk.shards[0].allocator.available_bytes(), payload_capacity - chunks.len() as u64 * CHUNK_BYTES);
+            }
+            for (key, _) in inputs {
+                cache.disk.shards[0].remove_entry(&key);
+            }
+            assert_eq!(cache.disk.shards[0].allocator.available_bytes(), payload_capacity);
+            assert_eq!(cache.disk.shards[0].metadata_pages.lock().unwrap().chunks.len(), 1);
+        });
     }
-    assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 12 * CHUNK_BYTES);
-    assert_eq!(cache.disk.shards[0].metadata_pages.lock().unwrap().chunks.len(), 1);
 }
 
 #[tokio::test]

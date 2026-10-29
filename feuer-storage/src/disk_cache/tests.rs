@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, future::Future, task::Poll, time::Duration};
+use std::{future::Future, task::Poll, time::Duration};
 
 use feuer_memory::{BUFFER_ALIGNMENT, retention::decayed_avoided_retrieval_cost};
 
@@ -101,49 +101,6 @@ async fn metadata_changes_after_copying_remain_dirty() {
 }
 
 #[tokio::test]
-async fn aligned_variable_length_entries_share_a_chunk_without_payload_headers() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
-    // Deliberately unordered input: small entries should be packed ahead of larger ones.
-    let lengths = [4097, 1024, 3 * 4096 + 9, 1, 4096, 4016];
-    assert_eq!(
-        cache
-            .insert_batch(
-                lengths
-                    .into_iter()
-                    .map(|length| (ObjectKeyHash::from(format!("entry-{length}")), download(17, length)))
-                    .collect()
-            )
-            .await
-            .unwrap(),
-        lengths.len()
-    );
-    let mut previous_end = 2 * CHUNK_BYTES;
-    for length in [1, 1024, 4016, 4096, 4097, 3 * 4096 + 9] {
-        let key = ObjectKeyHash::from(format!("entry-{length}"));
-        let source = download(17, length);
-        let (payload, entry_metadata) = entry_disk_ranges(&cache, &key).await;
-        assert_eq!(payload.start, previous_end);
-        assert!(payload.start.is_multiple_of(BUFFER_ALIGNMENT as u64));
-        assert!(payload.end <= 3 * CHUNK_BYTES);
-        assert_eq!(
-            payload.end - payload.start,
-            (length as u64).next_multiple_of(BUFFER_ALIGNMENT as u64)
-        );
-        let stored = cache
-            .disk
-            .file
-            .read_at(payload.start, (payload.end - payload.start) as usize)
-            .await
-            .unwrap();
-        assert_eq!(&stored[..length], source.as_ref());
-        assert!(stored[length..].iter().all(|&byte| byte == 0));
-        assert_eq!(cache.get(&key).await.unwrap(), source);
-        assert_eq!(entry_metadata, CHUNK_BYTES..CHUNK_BYTES + METADATA_PAGE_BYTES as u64);
-        previous_end = payload.end;
-    }
-}
-
-#[tokio::test]
 async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
     let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
     assert_eq!(cache.insert_batch(Vec::new()).await.unwrap(), 0);
@@ -165,46 +122,6 @@ async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
         cache.get(&ObjectKeyHash::from("large")).await.unwrap(),
         download(0, CHUNK_BYTES as usize)
     );
-}
-
-#[tokio::test]
-async fn shared_chunks_contain_complete_entries_and_multi_chunk_entries_have_no_neighbors() {
-    let (_directory, cache) = open_test_cache(8 * CHUNK_BYTES).await;
-    let inputs: Vec<_> = [
-        600_000,
-        600_000,
-        CHUNK_BYTES as usize,
-        0,
-        CHUNK_BYTES as usize + 1,
-        1,
-        512 * 1024 - BUFFER_ALIGNMENT,
-        512 * 1024 - 1,
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(i, length)| (ObjectKeyHash(i as u128), download(0, length)))
-    .collect();
-    assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
-    let disk_index = cache.disk.shards[0].entry_index.lock().unwrap();
-    let mut owners = BTreeMap::<u64, Vec<&DiskEntry>>::new();
-    for entry in disk_index.entries_by_key.values() {
-        let first_chunk = entry.payload_address / CHUNK_BYTES;
-        let end_chunk = (entry.payload_address + payload_disk_bytes(entry.payload_len)).div_ceil(CHUNK_BYTES);
-        assert_eq!(entry.chunk_count(), end_chunk - first_chunk);
-        for chunk in first_chunk..end_chunk {
-            owners.entry(chunk).or_default().push(entry);
-        }
-    }
-    for entries in owners.values() {
-        if entries.len() > 1 {
-            assert!(
-                entries
-                    .iter()
-                    .all(|entry| entry.chunk_count() == 1 && payload_disk_bytes(entry.payload_len) < 512 * 1024)
-            );
-        }
-    }
-    assert_eq!(owners.len(), 7);
 }
 
 #[tokio::test]
@@ -731,23 +648,6 @@ async fn removing_one_shared_payload_does_not_free_its_neighbors_chunks() {
     assert!(cache.insert(first, download(100, 1024)).await.unwrap());
     assert!(cache.get(&neighbor).await.is_none());
     assert_eq!(cache.get(&first).await.unwrap(), download(100, 1024));
-}
-
-#[tokio::test]
-async fn multi_chunk_payload_has_no_metadata_gaps() {
-    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
-    let key = ObjectKeyHash::from("contiguous");
-    let source = download(100, 2 * CHUNK_BYTES as usize + 17);
-    assert!(cache.insert(key, source.clone()).await.unwrap());
-    let (payload, metadata) = entry_disk_ranges(&cache, &key).await;
-    assert!(metadata.end <= payload.start);
-    assert!(payload.start.is_multiple_of(CHUNK_BYTES));
-    // Read the contiguous payload bytes across chunk boundaries.
-    assert_eq!(
-        cache.disk.file.read_at(payload.start, source.len()).await.unwrap(),
-        source
-    );
-    assert_eq!(cache.get(&key).await.unwrap(), source);
 }
 
 #[tokio::test]
