@@ -24,42 +24,21 @@ pub(super) struct DiskChunkAllocator {
 #[derive(Debug)]
 struct FreeChunks {
     /// Consecutive free chunks: first chunk number -> count. Adjacent runs are merged.
-    free_chunk_count_by_start: BTreeMap<u64, u64>,
+    chunk_count_by_start: BTreeMap<u64, u64>,
     metrics: Arc<DiskMetrics>,
 }
 
 impl FreeChunks {
-    /// Removes the specified chunks from the free-chunk map and updates metrics.
-    /// If any are unavailable, leaves both unchanged.
-    fn remove_free_chunks(&mut self, chunks: &Range<u64>) -> Option<()> {
-        let (&start, count) = self.free_chunk_count_by_start.range_mut(..=chunks.start).next_back()?;
-        let end = start + *count;
-        if chunks.start >= chunks.end || chunks.end > end {
-            return None;
-        }
-        *count = chunks.start - start;
-        if *count == 0 {
-            self.free_chunk_count_by_start.remove(&start);
-        }
-        if chunks.end < end {
-            self.free_chunk_count_by_start.insert(chunks.end, end - chunks.end);
-        }
-        let count = chunks.end - chunks.start;
-        self.metrics.free_chunks.decrease(count);
-        self.metrics.allocated_chunks.increase(count);
-        Some(())
-    }
-
     /// Returns this allocator's reserved chunks to the free map, merging adjacent runs.
     fn release(&mut self, chunks: &Range<u64>) {
         let released_chunk_count = chunks.end - chunks.start;
-        let merged_chunk_count = released_chunk_count + self.free_chunk_count_by_start.remove(&chunks.end).unwrap_or(0);
-        if let Some((&previous, length)) = self.free_chunk_count_by_start.range_mut(..chunks.start).next_back()
+        let merged_chunk_count = released_chunk_count + self.chunk_count_by_start.remove(&chunks.end).unwrap_or(0);
+        if let Some((&previous, length)) = self.chunk_count_by_start.range_mut(..chunks.start).next_back()
             && previous + *length == chunks.start
         {
             *length += merged_chunk_count;
         } else {
-            self.free_chunk_count_by_start.insert(chunks.start, merged_chunk_count);
+            self.chunk_count_by_start.insert(chunks.start, merged_chunk_count);
         }
         self.metrics.free_chunks.increase(released_chunk_count);
         self.metrics.allocated_chunks.decrease(released_chunk_count);
@@ -68,7 +47,7 @@ impl FreeChunks {
 
 impl Drop for FreeChunks {
     fn drop(&mut self) {
-        let free_chunk_count = self.free_chunk_count_by_start.values().sum();
+        let free_chunk_count = self.chunk_count_by_start.values().sum();
         self.metrics.free_chunks.decrease(free_chunk_count);
     }
 }
@@ -82,7 +61,7 @@ impl DiskChunkAllocator {
     #[cfg(test)]
     pub(super) fn available_bytes(&self) -> u64 {
         let free = self.free.lock().unwrap();
-        free.free_chunk_count_by_start.values().sum::<u64>() * CHUNK_BYTES
+        free.chunk_count_by_start.values().sum::<u64>() * CHUNK_BYTES
     }
 
     /// Chunk-number ranges with `None` for free chunks or `Some(payload_count)` for payload chunks.
@@ -91,7 +70,7 @@ impl DiskChunkAllocator {
         let payload_chunks = self.payload_chunks.lock().unwrap();
         let free = self.free.lock().unwrap();
         let free_runs = free
-            .free_chunk_count_by_start
+            .chunk_count_by_start
             .iter()
             .map(|(&start, &count)| (start..start + count, None));
         let payload_runs = payload_chunks
@@ -114,7 +93,7 @@ impl DiskChunkAllocator {
             chunk_capacity,
             payload_chunks: Mutex::default(),
             free: Arc::new(Mutex::new(FreeChunks {
-                free_chunk_count_by_start: BTreeMap::from([(disk_range.start / CHUNK_BYTES, chunk_capacity)]),
+                chunk_count_by_start: BTreeMap::from([(disk_range.start / CHUNK_BYTES, chunk_capacity)]),
                 metrics,
             })),
         }
@@ -152,10 +131,7 @@ impl DiskChunkAllocator {
     /// Reserves a contiguous run of whole chunks. Failure consumes no space.
     pub(super) fn reserve_chunks(&self, count: u64) -> Option<ReservedChunks> {
         let mut free = self.free.lock().unwrap();
-        let (&start, _) = free
-            .free_chunk_count_by_start
-            .iter()
-            .find(|(_, length)| **length >= count)?;
+        let (&start, _) = free.chunk_count_by_start.iter().find(|(_, length)| **length >= count)?;
         let chunk_numbers = start..start + count;
         self.reserve_chunk_numbers(&mut free, chunk_numbers)
     }
@@ -181,8 +157,27 @@ impl DiskChunkAllocator {
     }
 
     /// Reserves the specified chunk numbers while the caller holds the free-chunk lock.
+    /// If any are unavailable, leaves the free map and metrics unchanged.
     fn reserve_chunk_numbers(&self, free: &mut FreeChunks, chunk_numbers: Range<u64>) -> Option<ReservedChunks> {
-        free.remove_free_chunks(&chunk_numbers)?;
+        let (&start, count) = free
+            .chunk_count_by_start
+            .range_mut(..=chunk_numbers.start)
+            .next_back()?;
+        let end = start + *count;
+        if chunk_numbers.start >= chunk_numbers.end || chunk_numbers.end > end {
+            return None;
+        }
+        *count = chunk_numbers.start - start;
+        if *count == 0 {
+            free.chunk_count_by_start.remove(&start);
+        }
+        if chunk_numbers.end < end {
+            free.chunk_count_by_start
+                .insert(chunk_numbers.end, end - chunk_numbers.end);
+        }
+        let count = chunk_numbers.end - chunk_numbers.start;
+        free.metrics.free_chunks.decrease(count);
+        free.metrics.allocated_chunks.increase(count);
         Some(ReservedChunks {
             free: self.free.clone(),
             chunk_numbers,
@@ -336,10 +331,7 @@ mod tests {
 
     fn assert_all_chunks_free(allocator: &DiskChunkAllocator, capacity: u64) {
         let free = allocator.free.lock().unwrap();
-        assert_eq!(
-            free.free_chunk_count_by_start,
-            BTreeMap::from([(0, capacity / CHUNK_BYTES)])
-        );
+        assert_eq!(free.chunk_count_by_start, BTreeMap::from([(0, capacity / CHUNK_BYTES)]));
     }
 
     #[test]
@@ -362,12 +354,12 @@ mod tests {
         assert_eq!(reserved_chunks.disk_byte_range(), 9 * CHUNK_BYTES..11 * CHUNK_BYTES);
         assert!(allocator.reserve_chunks_at(8, 2).is_none());
         assert_eq!(
-            allocator.free.lock().unwrap().free_chunk_count_by_start,
+            allocator.free.lock().unwrap().chunk_count_by_start,
             BTreeMap::from([(7, 2), (11, 1)])
         );
         drop(reserved_chunks);
         assert_eq!(
-            allocator.free.lock().unwrap().free_chunk_count_by_start,
+            allocator.free.lock().unwrap().chunk_count_by_start,
             BTreeMap::from([(7, 5)])
         );
     }
@@ -392,7 +384,7 @@ mod tests {
         let capacity = 40 * (1u64 << 40);
         let allocator = DiskChunkAllocator::new(capacity);
         let large = allocator.reserve_chunks(100).unwrap();
-        assert_eq!(allocator.free.lock().unwrap().free_chunk_count_by_start.len(), 1);
+        assert_eq!(allocator.free.lock().unwrap().chunk_count_by_start.len(), 1);
         drop(large);
         assert_all_chunks_free(&allocator, capacity);
     }

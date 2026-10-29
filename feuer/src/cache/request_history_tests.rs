@@ -20,12 +20,12 @@ async fn records_each_started_request_before_any_result() {
     let result = cache
         .get_or_fetch(key.clone(), || async {
             assert_eq!(history.request_count(), 1);
-            Err::<Download, _>("source failed")
+            Err::<Bytes, _>("source failed")
         })
         .await;
     assert_eq!(result, Err(GetOrFetchError::Callback("source failed")));
 
-    let mut pending = Box::pin(cache.get_or_fetch(key.clone(), std::future::pending::<Result<Download, &str>>));
+    let mut pending = Box::pin(cache.get_or_fetch(key.clone(), std::future::pending::<Result<Bytes, &str>>));
     assert_eq!(
         history.request_count(),
         1,
@@ -47,13 +47,13 @@ async fn records_each_started_request_before_any_result() {
     cache
         .get_or_fetch(key.clone(), || async {
             assert_eq!(history.request_count(), 3);
-            Ok::<_, &str>(Download::new(Bytes::from_static(b"x")))
+            Ok::<_, &str>(Bytes::from_static(b"x"))
         })
         .await
         .unwrap();
     cache
         .get_or_fetch(key.clone(), || async {
-            Err::<Download, &str>("memory hit must not fetch")
+            Err::<Bytes, &str>("memory hit must not fetch")
         })
         .await
         .unwrap();

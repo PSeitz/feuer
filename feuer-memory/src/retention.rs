@@ -83,14 +83,14 @@ pub const RECLAIM_SAMPLE_SIZE: usize = 64;
 
 /// Chooses up to `sample_size` candidates, advancing through the list and wrapping at its end.
 pub fn sample_candidates<'a, T>(
-    next_candidate: &mut usize,
+    next_sample_start: &mut usize,
     candidates: &'a [T],
     sample_size: usize,
 ) -> impl Iterator<Item = &'a T> {
     let candidate_count = candidates.len();
-    let sample_start = *next_candidate % candidate_count.max(1);
+    let sample_start = *next_sample_start % candidate_count.max(1);
     if candidate_count > 0 {
-        *next_candidate = (sample_start + candidate_count.min(sample_size)) % candidate_count;
+        *next_sample_start = (sample_start + candidate_count.min(sample_size)) % candidate_count;
     }
     let (before_start, from_start) = candidates.split_at(sample_start);
     from_start.iter().chain(before_start).take(sample_size)

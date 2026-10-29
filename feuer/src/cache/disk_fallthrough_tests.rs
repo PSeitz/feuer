@@ -15,22 +15,26 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
         .unwrap();
         let key = "download".to_owned();
         let hash = ObjectKeyHash::from(key.as_str());
-        let source = Download::new(Bytes::from_static(b"abcd"));
+        let source = Bytes::from_static(b"abcd");
         let bytes = cache
-            .get_or_fetch_with_disk_fallthrough(
+            .get_or_fetch_buffer_with_disk_fallthrough(
                 key.clone(),
                 || panic!("disk miss"),
-                || async { Ok::<_, &str>(source.clone()) },
+                || async {
+                    let mut buffer = cache.allocate_buffer(source.len()).unwrap();
+                    buffer.as_mut_slice().copy_from_slice(&source);
+                    Ok::<_, &str>(buffer)
+                },
             )
             .await
             .unwrap();
         assert_eq!(bytes, "abcd");
         assert_eq!(
             cache
-                .get_or_fetch_with_disk_fallthrough(
+                .get_or_fetch_buffer_with_disk_fallthrough(
                     key.clone(),
                     || panic!("memory hit"),
-                    || async { Err::<Download, _>("must not fetch") },
+                    || async { Err::<AlignedBuffer, _>("must not fetch") },
                 )
                 .await
                 .unwrap(),
@@ -42,10 +46,10 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
             disk.insert_batch(vec![(hash, source.clone())]).await.unwrap();
             assert_eq!(
                 cache
-                    .get_or_fetch_with_disk_fallthrough(
+                    .get_or_fetch_buffer_with_disk_fallthrough(
                         key,
                         || panic!("queue has room"),
-                        || async { Err::<Download, _>("must not fetch") },
+                        || async { Err::<AlignedBuffer, _>("must not fetch") },
                     )
                     .await
                     .unwrap(),
@@ -63,7 +67,7 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
         let bytes = Bytes::from_static(b"object");
         assert_eq!(
             cache
-                .get_or_fetch_object_with_disk_fallthrough(
+                .get_or_fetch_with_disk_fallthrough(
                     object.clone(),
                     || panic!("disk miss"),
                     || async { Ok::<_, &str>(bytes.clone()) },
@@ -74,7 +78,7 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
         );
         assert_eq!(
             cache
-                .get_or_fetch_object_with_disk_fallthrough(
+                .get_or_fetch_with_disk_fallthrough(
                     object,
                     || panic!("memory hit"),
                     || async { Err::<Bytes, _>("must not fetch") },

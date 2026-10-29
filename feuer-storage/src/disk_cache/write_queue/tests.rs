@@ -19,7 +19,7 @@ async fn measured_disk() -> (tempfile::TempDir, DiskCache, prometheus::Registry)
 }
 
 fn enqueue(disk: &DiskCache, key: &str) {
-    disk.enqueue_if_space_available(ObjectKeyHash::from(key), Download::new(Bytes::from_static(b"abcd")));
+    disk.enqueue_if_space_available(ObjectKeyHash::from(key), Bytes::from_static(b"abcd"));
 }
 
 #[tokio::test]
@@ -69,11 +69,11 @@ async fn disk_timer_flushes_direct_and_queued_writes() {
     for (count, queued) in [(0, false), (1, true)] {
         tokio::time::pause();
         let key = ObjectKeyHash(count);
-        let download = Download::new(Bytes::from_static(b"abcd"));
+        let bytes = Bytes::from_static(b"abcd");
         if queued {
-            disk.enqueue_if_space_available(key, download);
+            disk.enqueue_if_space_available(key, bytes);
         } else {
-            disk.write(key, download, ()).await.unwrap();
+            disk.write(key, bytes, ()).await.unwrap();
         }
         tokio::task::yield_now().await;
         while value(&registry, "feuer_disk_write_queued_entries", &[]) != 0.0 {
@@ -81,7 +81,7 @@ async fn disk_timer_flushes_direct_and_queued_writes() {
         }
         tokio::time::advance(Duration::from_secs(59)).await;
         assert_eq!(value(&registry, "feuer_disk_entries", &[]), count as f64);
-        assert_eq!(disk.get(&key).await.unwrap().into_bytes(), b"abcd"[..]);
+        assert_eq!(disk.get(&key).await.unwrap(), b"abcd"[..]);
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::time::resume();
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -110,10 +110,7 @@ async fn closing_disk_drains_writes_and_discards_partial_chunks() {
     let (_directory, mut disk, registry) = measured_disk().await;
     let (sender, receiver) = mpsc::channel(2);
     disk.write_sender = sender;
-    disk.enqueue_if_space_available(
-        ObjectKeyHash::from("large"),
-        Download::new(Bytes::from(vec![7; 512 * 1024])),
-    );
+    disk.enqueue_if_space_available(ObjectKeyHash::from("large"), Bytes::from(vec![7; 512 * 1024]));
     enqueue(&disk, "small");
     let weak = Arc::downgrade(&disk.disk);
     drop(disk);

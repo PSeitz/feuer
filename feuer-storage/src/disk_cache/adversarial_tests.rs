@@ -264,7 +264,7 @@ async fn check_cache_changes(image: DiskImage, capacity_chunks: u64, changes: Ve
             }
             CacheChange::InsertPayloadWithMetadata { key, next_chunk_number } => {
                 let bytes = payload_with_metadata(next_chunk_number);
-                insert_and_check_bytes(&cache, ObjectKeyHash(key), Download::new(bytes)).await;
+                insert_and_check_bytes(&cache, ObjectKeyHash(key), bytes).await;
             }
             CacheChange::Remove { entry_index } => {
                 let mut entries = entry_lengths(&cache);
@@ -309,14 +309,9 @@ async fn open_with_manual_metadata_writes(directory: &Path, capacity_chunks: u64
     with_manual_metadata_writes(cache)
 }
 
-async fn insert_and_check_bytes(cache: &DiskCache, key: ObjectKeyHash, download: Download) {
-    let bytes = download.bytes().clone();
-    if cache.insert(key, download).await.unwrap() {
-        assert_eq!(
-            cache.get(&key).await.map(Download::into_bytes),
-            Some(bytes),
-            "published entry did not read back"
-        );
+async fn insert_and_check_bytes(cache: &DiskCache, key: ObjectKeyHash, bytes: Bytes) {
+    if cache.insert(key, bytes.clone()).await.unwrap() {
+        assert_eq!(cache.get(&key).await, Some(bytes), "published entry did not read back");
     }
 }
 
@@ -454,7 +449,7 @@ async fn check_cache(cache: &DiskCache) {
     check_entries_and_chunks(cache);
     // Checksum misses remove entries, so check ownership both before and after reading.
     for (key, length) in entry_lengths(cache) {
-        if let Some(bytes) = cache.get(&key).await.map(Download::into_bytes) {
+        if let Some(bytes) = cache.get(&key).await {
             assert_eq!(bytes.len() as u64, length);
         }
     }

@@ -55,8 +55,8 @@ each session. Archives with multiple session directories are rejected.
 Every selected start is replayed, including requests that originally failed or
 never completed. On a replay miss, the synthetic source successfully downloads the
 whole object. Recorded outcome counts and starts without matching outcomes are
-reported separately. A start without a matching outcome has an unknown outcome.
-Missing events or packages can still leave the remaining input parseable.
+reported separately. Missing events or packages can still leave the remaining input
+parseable.
 
 ### Object identities and lengths
 
@@ -92,9 +92,11 @@ cache environment variables.
 
 ## Scheduling and source behavior
 
-One sender follows the original arrival times and starts a lookup task for each
-request. Earlier lookups may still be running. Tokio uses one runtime thread per
-available CPU, and each thread can run multiple outstanding lookups.
+A sender thread follows the original arrival times and queues each request's index
+and send time. A receiving loop starts a lookup task for each arrival while earlier
+lookups may still be running. Each task keeps a copy of its request descriptor.
+Tokio uses one runtime thread per available CPU, and each thread can run multiple
+outstanding lookups.
 
 Recorded starts reflect the original application's admission decisions. Replay
 admits every arrival immediately, with backpressure provided by Feuer's I/O queues.
@@ -105,13 +107,13 @@ misses share cache fetch work.
 
 Each synthetic source callback acquires a buffer through
 `TieredMemoryDiskCache::allocate_buffer` and zero-fills its exposed payload.
-`into_download` preserves the charge for the buffer's backing capacity, including
-unused capacity in the pool's size bucket. This matches the adapter's buffer
-allocation and charging.
+The callback returns the `AlignedBuffer` directly. The cache charges its backing
+capacity, including unused capacity in the pool's size bucket, then converts it
+to shared `Bytes` without copying.
 
-Identities enter through the cache's `benchmark`-feature API, avoiding an additional
-cache-side hash. This API passes the same allocation charge as
-`get_or_fetch_object_with_allocation_charge`.
+Identities enter through the hidden `benchmark`-feature API
+`get_or_fetch_buffer_by_hash`, avoiding an additional cache-side hash. It uses
+the same capacity charging as `get_or_fetch_buffer`.
 
 ### Optional S3 delay
 

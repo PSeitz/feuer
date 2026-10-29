@@ -21,9 +21,9 @@ counters and gauges. Use separate registries if they must be distinguished.
 
 Lookup outcomes count only completed operations. Duration
 histograms record successful disk hits and callbacks only, including time spent
-waiting for a shared fetch. Timing starts after trace-start delivery and before
-checking memory. Memory hits record no duration, but their outcome and served-byte
-counters still increase.
+waiting for a shared fetch. Timing starts after enqueueing the trace-start event
+and before checking memory. Memory hits record no duration, but their outcome and
+served-byte counters still increase.
 A lookup-only `get_object` returning `None` records `miss`, without served bytes
 or duration. Shared disk and callback results count once per completed caller,
 not once per execution. Callback outcomes do not measure source invocation counts.
@@ -83,15 +83,16 @@ entry is removed; reuse by a new write does not count as recovered.
 
 Recovery validates metadata; payload checksums are verified on read. A positive
 value shows that recovery restored chunks still reserved by metadata or payload entries.
-Zero can mean recovery has not yet restored anything, or that all recovered chunks have since been released.
+Zero means no recovered chunks remain reserved. Recovery may still be in progress,
+may have restored no chunks, or may have released them all.
 
 ### Recovery logs
 
 Enable `feuer::storage=info` in the application's tracing filter:
 
 - `starting disk cache recovery`: recovery has begun.
-- `disk cache recovery finished`: scan completed, with elapsed seconds. This
-  does not guarantee any chunks were restored.
+- `disk cache recovery finished`: scan completed, with elapsed seconds. Use
+  `feuer_disk_recovered_chunks` to see how many recovered chunks remain reserved.
 
 Recovery follows each shard's metadata-chunk links without scanning payload chunks.
 Invalid or unsupported pages are discarded without a global reset or generation change.
@@ -131,8 +132,8 @@ when there are no attempts in the window.
 `feuer_disk_read_size_bytes` is a histogram with no labels, recording the requested
 byte length of each successful DataFile read. It excludes alignment padding,
 failed reads and canceled futures, and records once per DataFile call rather
-than per kernel submission. These are not necessarily caller-requested lookup
-sizes: disk lookups also read metadata and cached entries.
+than per kernel submission. The histogram includes payload reads and metadata
+reads during opening and recovery.
 
 Buckets double from 1 KiB through 1 GiB. For the p95 read size in bytes:
 
@@ -168,9 +169,8 @@ Gauge values remain in bytes. Update filters using the former numeric bucket lab
 
 `feuer_memory_used_bytes` replaces `feuer_memory_payload_bytes`; the separate
 `feuer_io_buffer_pool_capacity_bytes` gauge has been removed. Update dashboards.
-Disk promotions charge the retained allocation's whole capacity, including padding
-and unused bytes.
-Callback downloads without capacity metadata use their payload length.
+Disk promotions and `get_or_fetch_buffer` charge the retained buffer's whole
+capacity, including padding and unused bytes. `get_or_fetch` charges payload length.
 Shared allocations are conservatively charged per cached entry. Oversized entries
 can make cached charges exceed the target.
 
@@ -233,18 +233,18 @@ flushing retains the detached buffer through I/O as well. This gauge measures lo
 | `feuer_disk_read_queue_waiters` | Gauge | Read-piece requests with a pending reservation for I/O channel capacity |
 | `feuer_disk_read_queue_wait_duration_seconds` | Histogram | Time from the first pending reservation poll until admission, cancellation, or queue closure |
 
-These measure waits **before entering** the read channel, not requests already in
-its 64 slots or the 64 active io_uring slots. They exclude buffer allocation and
-I/O completion waits. Durations include task rescheduling and Tokio cooperative
-yields. Immediately ready reservations produce no histogram observation.
+These measure waits **before entering** the read channel. The channel holds up to
+64 read pieces, and the worker runs up to 64 pieces concurrently. These metrics
+exclude admitted pieces, buffer allocation, and I/O completion waits. Durations
+include task rescheduling and Tokio cooperative yields. Immediately ready reservations produce no histogram observation.
 Cancellation removes the waiter and records its elapsed wait.
 
 Each piece is at most 1 MiB. A larger data-file read can wait separately for each
 piece, so histogram counts are not payload-read or cache-lookup counts. Metadata
 reads and the opening probe are included. Metrics use the requesting data file's
-registry, including when multiple files share an I/O queue. Sum cache labels to
-see their combined waits on a shared queue. Periodic gauge samples can miss short
-spikes. These metrics do not measure the proposed payload-read admission queue.
+registry, including when multiple files share an I/O queue. Aggregate the registries
+for those files to see their combined waits. Periodic gauge samples can miss short
+spikes. Waiting for a payload-read permit happens separately and has no queue-wait metric.
 
 ## Other metrics
 

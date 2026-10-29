@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         });
     cache
-        .get_or_fetch_object("object-v1".to_owned(), || async {
+        .get_or_fetch("object-v1".to_owned(), || async {
             Ok::<_, std::convert::Infallible>(Bytes::from_static(b"data"))
         })
         .await?;

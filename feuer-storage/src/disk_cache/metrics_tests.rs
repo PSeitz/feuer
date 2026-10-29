@@ -5,8 +5,8 @@ fn read_byte_count(registry: &prometheus::Registry) -> f64 {
     value(registry, "feuer_disk_io_bytes_total", &[("operation", "read")])
 }
 
-fn download(length: usize) -> Download {
-    Download::new(Bytes::from(vec![7; length]))
+fn download(length: usize) -> Bytes {
+    Bytes::from(vec![7; length])
 }
 
 async fn measured_cache(capacity: u64) -> (tempfile::TempDir, DiskCache, prometheus::Registry) {
@@ -169,7 +169,7 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     .unwrap();
     assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), written_chunks);
     for (key, source) in inputs {
-        assert_eq!(cache.get(&key).await.unwrap().into_bytes(), source.bytes());
+        assert_eq!(cache.get(&key).await.unwrap(), source);
     }
     assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), written_chunks);
     drop(cache);
@@ -329,7 +329,7 @@ async fn buffered_entries_only_attempt_disk_admission_when_flushed() {
     assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 0.0);
     cache.write(key, download(1), ()).await.unwrap();
     assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 0.0);
-    assert_eq!(cache.get(&key).await.unwrap().into_bytes(), download(1).bytes());
+    assert_eq!(cache.get(&key).await.unwrap(), download(1));
     assert_eq!(cache.flush().await.unwrap(), 0); // Only metadata fits on disk.
     assert!(!cache.contains(&key));
     assert_eq!(

@@ -426,7 +426,6 @@ dependencies = [
 name = "feuer-types"
 version = "0.23.0-dev"
 dependencies = [
- "bytes",
  "bytesize",
  "xxhash-rust",
 ]

@@ -29,14 +29,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Replace these callbacks with downloads from the respective sources.
     // The same key can identify different content in independent caches.
     let image = images
-        .get_or_fetch_object("object-v1".to_owned(), || async {
+        .get_or_fetch("object-v1".to_owned(), || async {
             Ok::<_, Infallible>(Bytes::from_static(b"image bytes"))
         })
         .await?;
     assert_eq!(image.as_ref(), b"image bytes");
 
     let document = documents
-        .get_or_fetch_object("object-v1".to_owned(), || async {
+        .get_or_fetch("object-v1".to_owned(), || async {
             Ok::<_, Infallible>(Bytes::from_static(b"document bytes"))
         })
         .await?;

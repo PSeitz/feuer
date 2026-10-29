@@ -2,14 +2,15 @@
 
 use super::*;
 
-/// An entry's identity, checksum, offset in the write buffer, and completion accounting.
-pub(super) struct BufferedEntry {
+/// Metadata and guards for an entry awaiting a payload write and publication.
+pub(super) struct WriteEntry {
     pub(super) key: ObjectKeyHash,
     pub(super) payload_len: u64,
     pub(super) payload_checksum: u64,
-    pub(super) offset: usize,
+    pub(super) buffer_offset: usize,
     pub(super) attempt: DiskWriteAttempt,
-    pub(super) _completion: Box<dyn Send>,
+    /// Dropped when the entry is published or discarded.
+    pub(super) _completion_guard: Box<dyn Send>,
 }
 
 impl DiskCacheShard {
@@ -17,7 +18,7 @@ impl DiskCacheShard {
         &self,
         disk: &DiskCacheInner,
         bytes: Bytes,
-        mut entries: Vec<BufferedEntry>,
+        mut entries: Vec<WriteEntry>,
     ) -> Result<usize, DiskCacheError> {
         let result = async {
             let required_chunks = (bytes.len() as u64).div_ceil(CHUNK_BYTES);
@@ -76,7 +77,7 @@ impl DiskCacheShard {
                 let entry_metadata = metadata::EntryMetadata {
                     key: buffered.key,
                     payload_len: buffered.payload_len,
-                    payload_address: range.start + buffered.offset as u64,
+                    payload_address: range.start + buffered.buffer_offset as u64,
                     payload_checksum: buffered.payload_checksum,
                 };
                 let entry = DiskEntry::new(&entry_metadata, pages.store_entry_metadata(entry_metadata));

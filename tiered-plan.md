@@ -25,11 +25,11 @@ checksum collisions.
 
 ## Public lookup boundary
 
-- `get_or_fetch(key, callback)` accepts an asynchronous `Result<Download, E>`.
-  `Download::new(Bytes)` is infallible.
-- `get_or_fetch_object(key, callback)` accepts an asynchronous `Result<Bytes, E>`.
-- `get_or_fetch_object_with_allocation_charge` accepts a callback returning
-  `(Bytes, allocation_charge)` inside its result.
+- `get_or_fetch(key, callback)` accepts an asynchronous callback returning
+  `Result<Bytes, E>` and charges payload length in memory.
+- `get_or_fetch_buffer(key, callback)` accepts an asynchronous callback returning
+  `Result<AlignedBuffer, E>`. It charges buffer capacity, then converts the buffer
+  to shared `Bytes` without copying. `AlignedBuffer` is reexported by `feuer`.
 - `get_object(key)` checks memory and disk without invoking or waiting for a source
   callback. A miss returns `None`.
 
@@ -53,7 +53,7 @@ by callbacks and caller-held results.
 ### Disk-pressure fallthrough
 
 The `get_or_fetch_with_disk_fallthrough` and
-`get_or_fetch_object_with_disk_fallthrough` variants accept a synchronous decision
+`get_or_fetch_buffer_with_disk_fallthrough` variants accept a synchronous decision
 closure. At least 64 waiting payload reads trigger decisions for unchecked waiters.
 A true result invokes the source callback instead of waiting for a disk-read permit.
 Each decision runs at most once in its caller's task. Ordinary APIs wait for disk.
@@ -90,10 +90,9 @@ An object larger than its shard's target empties that shard and remains cached,
 so aggregate retained charges can exceed the target. Memory pressure never waits
 for disk throughput, and queued writes do not protect entries from eviction.
 
-Downloads default to payload-length charges because `Bytes` does not expose
-capacity. A known backing charge can be supplied explicitly. Disk promotions and
-pooled downloads charge their retained buffer's full capacity. Shared allocations
-are conservatively charged once per cached entry.
+`get_or_fetch` charges payload length because `Bytes` does not expose capacity.
+`get_or_fetch_buffer` and disk promotions charge their retained buffer's full
+capacity. Shared allocations are conservatively charged once per cached entry.
 
 An aligned buffer pool is shared by reads and downloader-acquired buffers. All
 buckets share an idle ceiling, 7% of the memory target by default. Admission frees
@@ -105,21 +104,23 @@ results are outside the memory target. It is not a hard process-RSS limit.
 
 ## Disk writes and layout
 
+Disk APIs accept and return payloads as `Bytes`.
+
 The disk tier requires Linux direct I/O and io_uring, with no silent fallback.
 Zero disk capacity disables it. Opening waits for all metadata recovery to finish.
 Nonzero capacity includes the global header, metadata, payloads, and alignment
 overhead, and must be at least 2 MiB. Capacity is fixed while open.
 
-The best-effort write queue holds 512 entries. Queue pressure skips writes without
-failing a successful lookup. Queued and active payload bytes have no byte limit.
+The best-effort write queue holds 512 entries. A full or closed queue skips writes
+without failing a successful lookup. Queued and active payload bytes have no byte limit.
 Writes can publish after memory eviction or caller cancellation. Publication
 rechecks whether the object is already indexed, not whether memory retains it.
 Failed payload writes do not publish entries. The tiered API exposes no flush.
 
-Entries below 512 KiB aligned size share per-shard 1-MiB payload chunks. Full/no-fit
-chunks flush immediately, partial chunks every 60 seconds. Buffering reserves no
-disk space. Busy/flushing buffers can miss until publication. Closing discards
-partial chunks. Larger entries write independently.
+Entries below 512 KiB aligned size share per-shard 1-MiB payload chunks. A chunk
+flushes when full or when the next small entry will not fit. Partial chunks flush
+every 60 seconds. Buffering reserves no disk space. Busy/flushing buffers can miss
+until publication. Closing discards partial chunks. Larger entries write independently.
 
 Each payload occupies a contiguous disk byte range with no metadata gaps.
 Addresses and storage lengths are aligned to 4 KiB. Multi-chunk objects reserve
@@ -176,12 +177,12 @@ Metrics use fixed operation, outcome, source, and buffer-bucket labels, never
 object identities. See [metrics](metrics.md). Optional [access traces](access-trace.md)
 record requests and completed outcomes without payloads.
 
-A shared callback result counts as one completed lookup per caller, not one
-source request. Actual source invocations, retries, and transferred bytes must be
-measured by the application or replay harness.
+A shared callback result counts as one completed lookup per caller. Source
+invocations, retries, and transferred bytes must be measured by the application
+or replay harness.
 
 Comparisons must hold workload, capacities, concurrency, cold-cache state, and
-source model constant. Report actual retained memory, source requests and bytes,
+source model constant. Report retained memory, source requests and bytes,
 request and byte hit rates, throughput, tail latency, disk utilization, metadata,
 and read/write amplification. Historical experiment results are not evidence for
 a changed implementation. No superiority claim follows from the design alone.

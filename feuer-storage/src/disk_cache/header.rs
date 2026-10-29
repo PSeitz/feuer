@@ -9,7 +9,7 @@ use crate::{DataFile, DataFileResult, allocation::CHUNK_BYTES};
 const HEADER_BYTES: usize = 4096;
 const FORMAT_TAG: &[u8; 8] = b"FEUHDR15";
 
-/// Clears incompatible metadata chains before writing the requested payload version.
+/// Clears shard metadata chains when the file header is incompatible, then writes a replacement.
 /// A matching format, payload version, capacity, and header checksum leave the file unchanged.
 pub(super) async fn clear_incompatible_metadata(
     file: &DataFile,
@@ -132,7 +132,7 @@ mod tests {
 
         let cache = open_cache(directory.path(), 255, 1).await;
         let file = &cache.disk.file;
-        assert_eq!(file.read_at(payload.start, 2).await.unwrap(), download(0, 2).bytes());
+        assert_eq!(file.read_at(payload.start, 2).await.unwrap(), download(0, 2));
         assert_eq!(
             file.read_at(second_chunk_address, CHUNK_BYTES as usize).await.unwrap(),
             old_metadata

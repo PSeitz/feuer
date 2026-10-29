@@ -34,10 +34,7 @@ async fn metadata_chains_start_at_each_shards_first_chunk_without_a_sidecar() {
     assert!(!directory.path().join("recovery-heads").exists());
     let cache = reopen(directory.path(), cache).await;
     for index in 0..cache.disk.shards.len() {
-        assert_eq!(
-            cache.get(&ObjectKeyHash(index as u128)).await.unwrap().into_bytes(),
-            download(0, 1).bytes()
-        );
+        assert_eq!(cache.get(&ObjectKeyHash(index as u128)).await.unwrap(), download(0, 1));
     }
 }
 
@@ -54,8 +51,8 @@ async fn recovers_separate_metadata_and_contiguous_multi_chunk_payloads() {
     let cache = reopen(directory.path(), cache).await;
     for (i, length) in lengths.into_iter().enumerate() {
         assert_eq!(
-            cache.get(&ObjectKeyHash(i as u128)).await.unwrap().into_bytes(),
-            download(u64::MAX - length as u64, length).bytes()
+            cache.get(&ObjectKeyHash(i as u128)).await.unwrap(),
+            download(u64::MAX - length as u64, length)
         );
         cache.disk.shards[0].remove_entry(&ObjectKeyHash(i as u128));
     }
@@ -84,10 +81,7 @@ async fn concurrent_batches_grow_metadata_chain_and_recover_every_entry() {
     }
     let cache = reopen(directory.path(), cache).await;
     for i in 0..entries {
-        assert_eq!(
-            cache.get(&ObjectKeyHash(i as u128)).await.unwrap().into_bytes(),
-            download(0, 1).bytes()
-        );
+        assert_eq!(cache.get(&ObjectKeyHash(i as u128)).await.unwrap(), download(0, 1));
     }
 }
 
@@ -151,7 +145,7 @@ async fn eviction_does_not_recover_old_metadata_for_reused_payload_chunks() {
     assert!(cache.insert(new, download(100, 4096)).await.unwrap());
     let cache = reopen(directory.path(), cache).await;
     assert!(cache.get(&old).await.is_none());
-    assert_eq!(cache.get(&new).await.unwrap().into_bytes(), download(100, 4096).bytes());
+    assert_eq!(cache.get(&new).await.unwrap(), download(100, 4096));
 }
 
 #[tokio::test]
@@ -184,10 +178,7 @@ async fn metadata_reuse_preserves_multi_chunk_recovery() {
             assert!(cache.insert(large, download(0, length)).await.unwrap());
             let cache = reopen(directory.path(), cache).await;
             assert!(cache.contains(&large));
-            assert_eq!(
-                cache.get(&large).await.unwrap().into_bytes(),
-                download(0, length).bytes()
-            );
+            assert_eq!(cache.get(&large).await.unwrap(), download(0, length));
         }
     }
 }
@@ -315,10 +306,7 @@ async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
     assert!(shard.write_dirty_metadata_pages(&short_file).await.is_err());
     assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
     shard.write_dirty_metadata_pages(&short_file).await.unwrap();
-    assert_eq!(
-        cache.get(&ObjectKeyHash(0)).await.unwrap().into_bytes(),
-        download(0, 1).bytes()
-    );
+    assert_eq!(cache.get(&ObjectKeyHash(0)).await.unwrap(), download(0, 1));
     for i in 0..entries {
         shard.remove_entry(&ObjectKeyHash(i as u128));
     }
@@ -347,7 +335,7 @@ async fn a_write_after_open_preserves_recovered_entries() {
     let cache = reopen(directory.path(), cache).await;
     assert!(!cache.insert(key, download(0, 100)).await.unwrap());
     let cache = reopen(directory.path(), cache).await;
-    assert_eq!(cache.get(&key).await.unwrap().into_bytes(), download(10, 10).bytes());
+    assert_eq!(cache.get(&key).await.unwrap(), download(10, 10));
     assert_eq!(cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key.len(), 1);
 }
 
@@ -441,10 +429,7 @@ async fn recovery_deduplicates_keys_and_restores_allocator_availability() {
             crate::test_metrics::value(&registry, "feuer_disk_payload_bytes", &[]),
             retained_length as f64
         );
-        assert_eq!(
-            cache.get(&key).await.unwrap().into_bytes(),
-            download(0, retained_length).bytes()
-        );
+        assert_eq!(cache.get(&key).await.unwrap(), download(0, retained_length));
         let recovered_chunks = if retained_length <= CHUNK_BYTES as usize {
             2.0
         } else {

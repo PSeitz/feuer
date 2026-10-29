@@ -33,7 +33,7 @@ pub(super) struct EntryMetadata {
     pub(super) payload_checksum: u64,
 }
 
-/// Metadata chunks with counts of unused entries and dirty-page tracking.
+/// Metadata chunks with free-slot counts and dirty-page tracking.
 #[derive(Default)]
 pub(super) struct MetadataChunks {
     pub(super) chunks: Vec<MetadataChunk>,
@@ -80,7 +80,7 @@ impl MetadataChunk {
 impl MetadataChunks {
     /// Stores an entry's metadata in the first free slot and marks its page for writing.
     /// Earliest reuse lets live metadata claim reused payload chunks before stale metadata.
-    /// Panics without a free slot. Callers reserve slots with `ensure_free_slots`.
+    /// Requires a free slot. Callers provide space with `ensure_free_slots`.
     pub(super) fn store_entry_metadata(&mut self, entry: EntryMetadata) -> EntryMetadataLocation {
         let mut start = self.free_slot_search_start;
         let location = loop {
@@ -103,11 +103,11 @@ impl MetadataChunks {
         location
     }
 
-    /// Frees an entry's slot and marks its page for rewriting.
+    /// Clears an entry's metadata and marks its page for rewriting.
     pub(super) fn free_entry_metadata(&mut self, location: EntryMetadataLocation) {
         assert!(
             self.entry_metadata_mut(location).take().is_some(),
-            "metadata slot freed twice"
+            "entry metadata freed twice"
         );
         self.free_slot_search_start = self.free_slot_search_start.min(location);
         self.free_slot_count += 1;
@@ -137,7 +137,7 @@ impl MetadataChunks {
         Some(())
     }
 
-    /// Recounts free slots after recovery and searches for them from the first slot.
+    /// Counts free metadata slots after recovery and resets where the search starts.
     pub(super) fn reset_free_slots(&mut self) {
         self.free_slot_search_start = EntryMetadataLocation::default();
         self.free_slot_count = self
@@ -206,16 +206,16 @@ impl DiskCacheShard {
                     }
                 }
             }
-            let mut previous_chunk_index = None;
             std::mem::take(&mut pages.dirty_pages)
                 .into_iter()
                 .rev() // Write later chunks before the links pointing to them.
                 .filter_map(|location| {
                     let chunk = &pages.chunks[location.chunk_index as usize];
-                    if chunk.needs_full_write && previous_chunk_index == Some(location.chunk_index) {
+                    // Each new chunk's last page stores the next metadata chunk's address.
+                    // That page is marked for writing above. Use it to write the whole chunk once.
+                    if chunk.needs_full_write && location.page_index as usize != ENTRY_METADATA_PAGES_PER_CHUNK {
                         return None;
                     }
-                    previous_chunk_index = Some(location.chunk_index);
                     let (first_page, page_count) = if chunk.needs_full_write {
                         (0, ENTRY_METADATA_PAGES_PER_CHUNK + 1)
                     } else {

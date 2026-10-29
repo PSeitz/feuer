@@ -92,7 +92,7 @@ async fn declining_fallthrough_reads_disk() {
         })
         .await
         .unwrap();
-    assert_eq!(bytes, *source.bytes());
+    assert_eq!(bytes, source);
 }
 
 #[tokio::test]
@@ -105,7 +105,7 @@ async fn absent_buffered_and_uncongested_reads_do_not_consult_fallthrough() {
         .get_with_fallthrough(&key, || panic!("queue has room"))
         .await
         .unwrap();
-    assert_eq!(bytes, *source.bytes());
+    assert_eq!(bytes, source);
 
     let held_reads = queues.hold_queued_reads();
     let missing = ObjectKeyHash::from("missing");
@@ -128,7 +128,7 @@ async fn absent_buffered_and_uncongested_reads_do_not_consult_fallthrough() {
         .get_with_fallthrough(&buffered, || panic!("buffered hit"))
         .await
         .unwrap();
-    assert_eq!(bytes, *source.bytes());
+    assert_eq!(bytes, source);
     drop(held_reads);
 }
 
@@ -145,8 +145,8 @@ async fn shared_read_waiter_does_not_consult_fallthrough() {
     assert_pending(waiter.as_mut()).await;
     drop(held_reads);
     let (first, second) = tokio::join!(initializer, waiter);
-    assert_eq!(first.unwrap().0, *source.bytes());
-    assert_eq!(second.unwrap().0, *source.bytes());
+    assert_eq!(first.unwrap().0, source);
+    assert_eq!(second.unwrap().0, source);
 }
 
 #[tokio::test]
@@ -168,5 +168,5 @@ async fn canceled_initializer_allows_independent_waiter_decisions() {
     drop(initializer);
     assert!(fallthrough.await.is_none());
     // Fallthrough must not become a shared miss for the caller that chooses disk.
-    assert_eq!(reader.await.unwrap().0, *source.bytes());
+    assert_eq!(reader.await.unwrap().0, source);
 }

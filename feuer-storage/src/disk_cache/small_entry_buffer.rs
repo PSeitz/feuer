@@ -1,6 +1,6 @@
 //! Each shard owns an initialized small-entry buffer. Disk space is reserved only when writing.
 
-use super::{writer::BufferedEntry, *};
+use super::{writer::WriteEntry, *};
 use feuer_memory::AlignedBuffer;
 use std::time::Duration;
 
@@ -13,8 +13,8 @@ const FLUSH_INTERVAL: Duration = Duration::from_secs(60);
 pub(super) struct SmallEntryBuffer {
     /// Aligned 1-MiB payload storage for packed writes and pre-flush reads.
     buffer: AlignedBuffer,
-    /// Entry descriptions and completion state for buffered lookups, publication, and discard.
-    entries: Vec<BufferedEntry>,
+    /// Entry metadata and guards retained until publication or discard.
+    entries: Vec<WriteEntry>,
 }
 
 impl DiskCache {
@@ -56,11 +56,10 @@ impl DiskCacheInner {
     pub(super) async fn write(
         &self,
         key: ObjectKeyHash,
-        download: Download,
+        bytes: Bytes,
         completion: impl Send + 'static,
     ) -> Result<usize, DiskCacheError> {
         let shard = &self.shards[self.shard_index_for_key(&key)];
-        let bytes = download.into_bytes();
         let payload_len = bytes.len() as u64;
         let aligned_payload_len = payload_disk_bytes(payload_len) as usize;
         let mut attempt = DiskWriteAttempt::new(self.metrics.clone());
@@ -68,28 +67,27 @@ impl DiskCacheInner {
             attempt.outcome = DiskWriteOutcome::AlreadyCovered;
             return Ok(0);
         }
-        let mut entry = BufferedEntry {
+        let mut entry = WriteEntry {
             key,
             payload_len,
             payload_checksum: XxHash64::oneshot(0, &bytes),
-            offset: 0,
+            buffer_offset: 0,
             attempt,
-            _completion: Box::new(completion),
+            _completion_guard: Box::new(completion),
         };
         if aligned_payload_len >= SMALL_ENTRY_BYTES {
             return shard.write_payload(self, bytes, vec![entry]).await;
         }
         let mut buffer = shard.small_entry_buffer.lock().await;
         let mut published = 0;
-        let mut offset = buffer
-            .entries
-            .last()
-            .map_or(0, |entry| entry.offset + payload_disk_bytes(entry.payload_len) as usize);
+        let mut offset = buffer.entries.last().map_or(0, |entry| {
+            entry.buffer_offset + payload_disk_bytes(entry.payload_len) as usize
+        });
         if offset + aligned_payload_len > CHUNK_BYTES as usize {
             published += buffer.flush(shard, self).await?;
             offset = 0;
         }
-        entry.offset = offset;
+        entry.buffer_offset = offset;
         buffer.buffer.as_mut_slice()[offset..offset + bytes.len()].copy_from_slice(&bytes);
         drop(bytes);
         buffer.entries.push(entry);
@@ -111,8 +109,8 @@ impl SmallEntryBuffer {
         })
     }
 
-    /// Finds the newest buffered entry without copying its payload.
-    pub(super) fn entry(&self, key: &ObjectKeyHash) -> Option<&BufferedEntry> {
+    /// Borrows the newest buffered entry's metadata and guards.
+    pub(super) fn entry(&self, key: &ObjectKeyHash) -> Option<&WriteEntry> {
         self.entries.iter().rev().find(|entry| &entry.key == key)
     }
 
@@ -120,7 +118,7 @@ impl SmallEntryBuffer {
     pub(super) fn get(&self, key: &ObjectKeyHash) -> Option<Bytes> {
         let entry = self.entry(key)?;
         Some(Bytes::copy_from_slice(
-            &self.buffer.as_ref()[entry.offset..entry.offset + entry.payload_len as usize],
+            &self.buffer.as_ref()[entry.buffer_offset..entry.buffer_offset + entry.payload_len as usize],
         ))
     }
 

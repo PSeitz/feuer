@@ -10,6 +10,21 @@ fn buffer_pool_bytes(registry: &prometheus::Registry, bucket: &str, status: &str
 }
 
 #[test]
+fn scratch_buffers_keep_requested_capacity_and_alignment() {
+    for length in [1, BUFFER_ALIGNMENT - 1, BUFFER_ALIGNMENT, BUFFER_ALIGNMENT + 1] {
+        let mut buffer = AlignedBuffer::allocate_zeroed(length).unwrap();
+        assert_eq!(buffer.capacity(), length);
+        assert_eq!(buffer.as_ref().len(), length);
+        assert_eq!(buffer.as_ref().as_ptr() as usize % BUFFER_ALIGNMENT, 0);
+        assert!(buffer.as_ref().iter().all(|&byte| byte == 0));
+        assert!(buffer.pool.is_none());
+        buffer.as_mut_slice().fill(0x99);
+        let bytes = buffer.into_bytes();
+        assert!(bytes.iter().all(|&byte| byte == 0x99));
+    }
+}
+
+#[test]
 fn size_boundaries_round_up_without_exposing_spare_capacity() {
     let pool = BufferPool::new(100 * *BUFFER_SIZES.last().unwrap() as u64, MemoryMetrics::noop());
     let mut lower_bound = 0;
@@ -30,18 +45,18 @@ fn size_boundaries_round_up_without_exposing_spare_capacity() {
 }
 
 #[test]
-fn download_preserves_capacity_and_returns_only_after_the_last_owner() {
+fn bytes_preserve_allocation_and_return_only_after_the_last_owner() {
     let pool = BufferPool::new(100 * BUFFER_SIZES[0] as u64, MemoryMetrics::noop());
     let mut buffer = pool.allocate(4).unwrap();
     buffer.as_mut_slice().copy_from_slice(b"abcd");
     let address = buffer.as_ref().as_ptr();
-    let download = buffer.into_download();
-    assert_eq!(download.allocation_charge(), BUFFER_SIZES[0]);
-    assert_eq!(download.bytes().as_ptr(), address);
-    assert_eq!(download.bytes().as_ref(), b"abcd");
-    let queued = download.clone();
-    let caller = download.bytes().clone();
-    drop(download);
+    assert_eq!(buffer.capacity(), BUFFER_SIZES[0]);
+    let bytes = buffer.into_bytes();
+    assert_eq!(bytes.as_ptr(), address);
+    assert_eq!(bytes.as_ref(), b"abcd");
+    let queued = bytes.clone();
+    let caller = bytes.clone();
+    drop(bytes);
     drop(queued);
     assert_eq!(pool.idle_bytes(), 0);
     assert_eq!(caller.as_ref(), b"abcd");
@@ -172,9 +187,11 @@ fn large_buffers_shrink_only_when_capacity_is_at_least_ten_percent_larger() {
     assert_eq!(buffer.as_ref().len(), length);
     assert_eq!(buffer.capacity(), capacity);
     assert_eq!((large("idle"), large("used")), (0.0, capacity as f64));
-    let download = buffer.into_download();
-    assert_eq!(download.allocation_charge(), capacity);
-    drop(download);
+    let bytes = buffer.into_bytes();
+    assert_eq!(bytes.as_ptr(), address);
+    assert_eq!(bytes.len(), length);
+    assert_eq!((large("idle"), large("used")), (0.0, capacity as f64));
+    drop(bytes);
     assert_eq!(pool.idle_bytes(), capacity as u64);
     assert_eq!((large("idle"), large("used")), (capacity as f64, 0.0));
 

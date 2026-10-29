@@ -1,18 +1,15 @@
 //! Shared contracts for Feuer's immutable-object cache tiers.
 //!
-//! Memory and disk exchange hashed object identities and downloads.
+//! Memory and disk exchange hashed object identities.
 
 #[doc(hidden)]
 pub mod config;
 
-mod download;
-
-pub use download::Download;
-
 /// An immutable object's identity, represented by its XXH3-128 hash with seed zero.
 ///
-/// Only the public cache boundary hashes strings. Internal tiers retain no original keys
-/// and accept the probabilistic identity of the hash (keys must not be adversarial).
+/// Cache lookups hash UTF-8 keys before passing them to the memory and disk tiers.
+/// Those tiers store only hashes and treat colliding keys as the same object.
+/// Keys must be non-adversarial.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObjectKeyHash(pub u128);
 

@@ -128,7 +128,7 @@ fn benchmark_recovery() {
             for start in (0..entries).step_by(4096) {
                 let end = (start + 4096).min(entries);
                 let batch: Vec<_> = (start..end)
-                    .map(|i| (ObjectKeyHash(i as u128), Download::new(source.slice(..entry_sizes[i]))))
+                    .map(|i| (ObjectKeyHash(i as u128), source.slice(..entry_sizes[i])))
                     .collect();
                 assert_eq!(cache.insert_batch(batch).await.unwrap(), end - start);
             }

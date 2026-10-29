@@ -6,7 +6,7 @@ use std::{fmt, hash::BuildHasher, sync::Arc};
 
 use bytes::Bytes;
 use feuer_historian::ObjectAccessHistories;
-use feuer_types::{Download, ObjectKeyHash};
+use feuer_types::ObjectKeyHash;
 use parking_lot::Mutex;
 use rustc_hash::FxBuildHasher;
 
@@ -146,23 +146,28 @@ impl MemoryCache {
     }
 
     /// Caches an object without creating an access, using its allocation charge.
-    /// An existing entry for the key is retained and the supplied download is discarded.
-    /// Returns whether the download was inserted.
-    pub fn insert(&self, object_key: ObjectKeyHash, download: Download) -> bool {
+    /// An existing entry for the key is retained and the supplied bytes are discarded.
+    /// Returns whether the object was inserted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `allocation_charge` is smaller than the payload length.
+    pub fn insert(&self, object_key: ObjectKeyHash, bytes: Bytes, allocation_charge: usize) -> bool {
+        assert!(allocation_charge >= bytes.len());
         let shard = &self.shards[self.shard_index(&object_key)];
         let mut evicted_any_entry = false;
-        loop {
-            let insert_result = shard.lock().try_insert(&object_key, &download, self);
+        let inserted = loop {
+            let insert_result = shard.lock().try_insert(&object_key, &bytes, allocation_charge, self);
             match insert_result {
-                InsertResult::Inserted | InsertResult::AlreadyPresent => {
-                    if evicted_any_entry {
-                        self.buffer_pool.metrics.eviction_triggering_insertions.increase(1);
-                    }
-                    return matches!(insert_result, InsertResult::Inserted);
-                }
+                InsertResult::Inserted => break true,
+                InsertResult::AlreadyPresent => break false,
                 InsertResult::Evicted => evicted_any_entry = true,
             }
+        };
+        if evicted_any_entry {
+            self.buffer_pool.metrics.eviction_triggering_insertions.increase(1);
         }
+        inserted
     }
 
     /// Checks whether an object is cached without retaining bytes or recording an access.

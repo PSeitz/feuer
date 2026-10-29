@@ -8,15 +8,16 @@ use crate::disk_metrics::DiskWriteQueueOutcome;
 
 pub(super) const MAX_QUEUED_ENTRIES: usize = 512;
 
-/// A queued download, retaining the disk internals until its write finishes.
+/// Payload bytes that retain the disk while queued and until the writer returns.
 pub(super) struct PendingDiskWrite {
     disk: Arc<DiskCacheInner>,
     key: ObjectKeyHash,
-    download: Download,
+    bytes: Bytes,
     entry_metrics: QueuedWriteMetrics,
 }
 
-/// Measures queue wait and keeps payload bytes counted as pending until publication or discard.
+/// Measures queue wait and counts pending payload bytes until publication or discard.
+/// Buffered entries retain this guard. Holding the disk here would create an ownership cycle.
 struct QueuedWriteMetrics {
     payload_bytes: u64,
     queued_at: Option<Instant>,
@@ -43,7 +44,7 @@ impl Drop for QueuedWriteMetrics {
 
 impl DiskCache {
     /// Queues a background write without waiting. A full or closed queue skips the write.
-    pub fn enqueue_if_space_available(&self, key: ObjectKeyHash, download: Download) {
+    pub fn enqueue_if_space_available(&self, key: ObjectKeyHash, bytes: Bytes) {
         let metrics = &self.disk.metrics;
         let permit = match self.write_sender.try_reserve() {
             Ok(permit) => permit,
@@ -55,7 +56,7 @@ impl DiskCache {
                 return;
             }
         };
-        let payload_bytes = download.bytes().len() as u64;
+        let payload_bytes = bytes.len() as u64;
         metrics.record_queue(DiskWriteQueueOutcome::Queued);
         metrics.queued_entries.increase(1);
         metrics.pending_bytes.increase(payload_bytes);
@@ -67,7 +68,7 @@ impl DiskCache {
         permit.send(PendingDiskWrite {
             disk: self.disk.clone(),
             key,
-            download,
+            bytes,
             entry_metrics,
         });
     }
@@ -78,12 +79,12 @@ impl DiskCache {
         while let Some(PendingDiskWrite {
             disk,
             key,
-            download,
+            bytes,
             mut entry_metrics,
         }) = receiver.recv().await
         {
             entry_metrics.finish_queue_wait();
-            if let Err(error) = disk.write(key, download, entry_metrics).await {
+            if let Err(error) = disk.write(key, bytes, entry_metrics).await {
                 tracing::error!(target: "feuer::storage", %error, "disk write failed");
             }
         }

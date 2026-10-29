@@ -12,7 +12,7 @@ use clap::Parser;
 use feuer_historian::{DEFAULT_ACCESS_COUNT_HALF_LIFE, ObjectAccessHistories};
 use feuer_memory::{MemoryCache, retention::AvoidedRetrievalCostScorer};
 use feuer_types::{
-    Download, ObjectKeyHash,
+    ObjectKeyHash,
     config::{parse_config_number, read_env_number},
 };
 use foyer_memory::{Cache as FoyerCache, CacheBuilder, CostAwareConfig, S3FifoConfig};
@@ -120,7 +120,8 @@ impl ReplayCache for FeuerReplayCache {
     }
 
     fn insert(&mut self, request: &TraceRequest, payload: Bytes) {
-        self.cache.insert(request.object_key, Download::new(payload));
+        let charge = payload.len();
+        self.cache.insert(request.object_key, payload, charge);
     }
 
     fn used_payload_bytes(&self) -> u64 {

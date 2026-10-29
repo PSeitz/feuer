@@ -85,7 +85,7 @@ pub struct TraceRequests {
 /// Scans twice so memory usage follows selected starts rather than the full event history.
 /// Object lengths come from successful outcomes, including outcomes outside the selected prefix.
 pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests> {
-    let duration = seconds
+    let prefix_ns = seconds
         .map(|seconds| {
             seconds
                 .checked_mul(1_000_000_000)
@@ -98,13 +98,13 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
     visit_events(path, |event| {
         if event.kind == 0 {
             first_start_ns = first_start_ns.min(event.time_ns);
-            if duration.is_none_or(|duration| event.time_ns - first_start_ns < duration) {
+            if prefix_ns.is_none_or(|prefix_ns| event.time_ns - first_start_ns < prefix_ns) {
                 requests.push(event);
             }
         }
         Ok(())
     })?;
-    requests.retain(|request| duration.is_none_or(|duration| request.time_ns - first_start_ns < duration));
+    requests.retain(|request| prefix_ns.is_none_or(|prefix_ns| request.time_ns - first_start_ns < prefix_ns));
     if requests.is_empty() {
         return Err("selected trace has no request starts".into());
     }
@@ -129,19 +129,19 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
             }
             *length = Some(observed);
         }
-        if let Some((request, completed)) = starts_by_id.get_mut(&event.request_id) {
-            if *completed {
+        if let Some((request, has_outcome)) = starts_by_id.get_mut(&event.request_id) {
+            if *has_outcome {
                 return Err("duplicate request outcome ID".into());
             }
             if event.object_key != request.object_key || event.time_ns < request.time_ns {
                 return Err("request outcome disagrees with its start".into());
             }
-            *completed = true;
+            *has_outcome = true;
             outcomes[event.kind as usize] += 1;
         }
         Ok(())
     })?;
-    let incomplete = starts_by_id.values().filter(|(_, completed)| !completed).count();
+    let incomplete = starts_by_id.len() - outcomes.iter().sum::<usize>();
     let mut requests: Vec<_> = starts_by_id
         .into_values()
         .map(|(event, _)| {
@@ -176,7 +176,7 @@ fn visit_events(path: &Path, mut visit: impl FnMut(Event) -> Result<()>) -> Resu
         return Err("input must be a .feuer package or a single-session .tar.zst archive".into());
     }
     let mut archive = tar::Archive::new(zstd::Decoder::new(file)?);
-    let mut session = None;
+    let mut session_directory = None;
     for entry in archive.entries()? {
         let mut entry = entry?;
         let name = entry.path()?.into_owned();
@@ -185,14 +185,14 @@ fn visit_events(path: &Path, mut visit: impl FnMut(Event) -> Result<()>) -> Resu
                 return Err("trace package must be a regular archive member".into());
             }
             let parent = name.parent().unwrap().to_owned();
-            if session.as_ref().is_some_and(|session| session != &parent) {
+            if session_directory.as_ref().is_some_and(|directory| directory != &parent) {
                 return Err("archive contains multiple trace sessions with independent request IDs".into());
             }
-            session = Some(parent);
+            session_directory = Some(parent);
             read_package(&mut entry)?;
         }
     }
-    if session.is_none() {
+    if session_directory.is_none() {
         return Err("archive contains no .feuer packages".into());
     }
     Ok(())

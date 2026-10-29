@@ -272,7 +272,7 @@ async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
             waits
         );
     };
-    drop(first.reserve_request().await.unwrap());
+    drop(first.reserve_channel_capacity().await.unwrap());
     assert_metrics(0.0, 0.0);
     let reservations = first
         .handle
@@ -282,8 +282,8 @@ async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
         .reserve_many(MAX_IN_FLIGHT_READS)
         .await
         .unwrap();
-    let mut admitted = Box::pin(first.reserve_request());
-    let mut canceled = Box::pin(second.reserve_request());
+    let mut admitted = Box::pin(first.reserve_channel_capacity());
+    let mut canceled = Box::pin(second.reserve_channel_capacity());
     let mut context = Context::from_waker(std::task::Waker::noop());
     for _ in 0..2 {
         assert!(admitted.as_mut().poll(&mut context).is_pending());
@@ -316,14 +316,14 @@ async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
         .reserve_many(MAX_IN_FLIGHT_READS)
         .await
         .unwrap();
-    let mut closed = Box::pin(read.reserve_request());
+    let mut closed = Box::pin(read.reserve_channel_capacity());
     assert!(closed.as_mut().poll(&mut context).is_pending());
     assert_metrics(1.0, 2.0);
     drop(queue);
     assert_eq!(closed.await.err().unwrap().kind(), io::ErrorKind::BrokenPipe);
     assert_metrics(0.0, 3.0);
     drop(reservations);
-    drop(read.reserve_request().await.err().unwrap());
+    drop(read.reserve_channel_capacity().await.err().unwrap());
     assert_metrics(0.0, 3.0);
 }
 

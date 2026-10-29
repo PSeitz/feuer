@@ -329,17 +329,11 @@ fn open_file_state(
         file,
         _lock_file: Some(lock_file),
     });
-    let (read_queue, write_queue) = match io_queues {
-        Some(queues) => (
-            queues.read_queue(files.clone(), buffer_pool, metrics.clone()),
-            queues.write_queue(files.clone()),
-        ),
-        None => (
-            uring::ReadQueue::new(files.clone(), buffer_pool, metrics.clone())
-                .map_err(|source| error(IoOperation::OpenDataFile, source))?,
-            uring::WriteQueue::new(files.clone()).map_err(|source| error(IoOperation::OpenDataFile, source))?,
-        ),
-    };
+    let queues = io_queues
+        .map_or_else(uring::IoQueues::new, Ok)
+        .map_err(|source| error(IoOperation::OpenDataFile, source))?;
+    let read_queue = queues.read_queue(files.clone(), buffer_pool, metrics.clone());
+    let write_queue = queues.write_queue(files.clone());
     files
         .file
         .set_len(capacity)

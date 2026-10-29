@@ -42,13 +42,14 @@
           <tr><td>Read pieces</td><td>64 waiting/preparing + 64 active</td><td>Read queue and worker</td></tr>
           <tr><td>Write pieces</td><td>8 waiting/preparing + 8 active</td><td>Write queue and worker</td></tr>
           <tr><td>Physical I/O piece</td><td>At most 1 MiB</td><td>File layer</td></tr>
-          <tr><td>Background downloads</td><td>512 queued objects</td><td>Each disk cache</td></tr>
+          <tr><td>Queued disk writes</td><td>512 queued objects</td><td>Each disk cache</td></tr>
           <tr><td>Trace events</td><td>65,536 queued events</td><td>Each trace</td></tr>
         </tbody>
       </table>
     </div>
-    <p class="note">These are request-count limits, not a total byte budget. Active reads, callback payloads,
-      queued writes, caller-held results, and trace packages can retain memory outside the cache target.</p>
+    <p class="note">Queue limits count requests, while the physical I/O limit caps each transfer's size.
+      Active reads, callback payloads, queued writes, caller-held results, and trace packages can retain
+      memory outside the cache target.</p>
   </section>
 
   <section id="reads">
@@ -68,7 +69,7 @@
         The file layer reserves channel capacity before preparing each I/O request. Large reads submit
         pieces of at most 1 MiB, with fresh reservations for subsequent pieces.</p>
       <p>Recovery also reserves low-level queue capacity before allocating metadata-read buffers.
-        Queue slot counts do not limit the combined capacity of live object buffers.</p>
+        Admitted reads can retain buffers of different sizes, so queue capacity does not limit their combined memory use.</p>
       <a href="feuer-storage/src/file.rs">Source: file I/O</a>
     </details>
     <details>
@@ -106,7 +107,8 @@
     <details>
       <summary>Small-entry buffering and chunk reservation</summary>
       <p>Objects below 512 KiB aligned size are copied into a per-shard 1-MiB buffer, releasing incoming buffers.
-        Full/no-fit chunks flush immediately, partial chunks every 60 seconds. Larger objects write separately.
+        A chunk flushes when full or when the next small entry will not fit. Partial chunks flush every
+        60 seconds. Larger objects write separately.
         Closing discards partial chunks.</p>
       <p>Buffering reserves no disk capacity. Flushing reserves payload chunks, evicting sampled objects if needed.
         A multi-chunk payload requires consecutive whole chunks. Fragmentation or exhausted eviction budgets can skip admission.</p>

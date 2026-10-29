@@ -172,7 +172,7 @@ impl IoQueueHandle {
     }
 
     /// Reserves channel capacity before preparing I/O buffers.
-    async fn reserve_request(&self) -> io::Result<mpsc::Permit<'_, IoRequest>> {
+    async fn reserve_channel_capacity(&self) -> io::Result<mpsc::Permit<'_, IoRequest>> {
         self.sender
             .as_ref()
             .unwrap()
@@ -215,7 +215,7 @@ pub(crate) struct ReadQueue {
     metrics: Arc<IoMetrics>,
 }
 
-/// Measures read-piece requests waiting for channel capacity and their wait durations, including cancellation.
+/// Measures a read request's wait for channel capacity, including cancellation.
 struct ReadQueueWaitMetrics<'a> {
     metrics: &'a IoMetrics,
     started: Instant,
@@ -231,6 +231,7 @@ impl Drop for ReadQueueWaitMetrics<'_> {
 }
 
 impl ReadQueue {
+    #[cfg(any(test, feature = "io-bench"))]
     pub(crate) fn new(
         files: Arc<DataFileAndLock>,
         buffer_pool: Arc<BufferPool>,
@@ -245,9 +246,9 @@ impl ReadQueue {
         })
     }
 
-    async fn reserve_request(&self) -> io::Result<mpsc::Permit<'_, IoRequest>> {
+    async fn reserve_channel_capacity(&self) -> io::Result<mpsc::Permit<'_, IoRequest>> {
         let mut wait = None;
-        let mut reserve = pin!(self.handle.reserve_request());
+        let mut reserve = pin!(self.handle.reserve_channel_capacity());
         poll_fn(|cx| {
             let result = reserve.as_mut().poll(cx);
             if result.is_pending() && wait.is_none() {
@@ -271,13 +272,13 @@ impl ReadQueue {
 
     /// Queues disjoint 1-MiB pieces into one allocation before waiting for their completions.
     pub(crate) async fn read(&self, offset: u64, length: usize) -> io::Result<(Bytes, usize)> {
-        let mut permit = Some(self.reserve_request().await?);
+        let mut permit = Some(self.reserve_channel_capacity().await?);
         let buffer = ReadBuffer::new(self.buffer_pool.allocate(length)?);
         let mut replies = Vec::with_capacity(length.div_ceil(MAX_IO_REQUEST_BYTES));
         for start in (0..length).step_by(MAX_IO_REQUEST_BYTES) {
             let permit = match permit.take() {
                 Some(permit) => permit,
-                None => self.reserve_request().await?,
+                None => self.reserve_channel_capacity().await?,
             };
             let end = (start + MAX_IO_REQUEST_BYTES).min(length);
             replies.push(self.handle.submit_request(
@@ -304,6 +305,7 @@ pub(crate) struct WriteQueue {
 }
 
 impl WriteQueue {
+    #[cfg(test)]
     pub(crate) fn new(files: Arc<DataFileAndLock>) -> io::Result<Self> {
         Ok(Self {
             handle: Arc::new(IoQueueHandle::new(IoOperation::Write)?),
@@ -317,7 +319,7 @@ impl WriteQueue {
         for start in (0..length).step_by(MAX_IO_REQUEST_BYTES) {
             let request_length = (length - start).min(MAX_IO_REQUEST_BYTES);
             let end = (start + request_length).min(bytes.len());
-            let permit = self.handle.reserve_request().await?;
+            let permit = self.handle.reserve_channel_capacity().await?;
             let buffers = IoBuffers::from_write_bytes(request_length, bytes.slice(start.min(end)..end))?;
             self.handle
                 .submit_request(
@@ -369,7 +371,7 @@ unsafe impl Sync for ReadBuffer {}
 enum IoBuffers {
     Read(Arc<ReadBuffer>),
     Write {
-        // Borrow the aligned payload prefix and copy only the remainder into a padded,
+        // Retain the aligned payload prefix and copy only the remainder into a padded,
         // aligned buffer. Either buffer may be empty. Only nonempty buffers are submitted.
         bytes: [Bytes; 2],
         vectors: [libc::iovec; 2],
@@ -393,12 +395,13 @@ impl IoBuffers {
         } else {
             Bytes::new()
         };
+        bytes.truncate(aligned_length);
         Ok(Self::Write {
             vectors: [libc::iovec {
                 iov_base: std::ptr::null_mut(),
                 iov_len: 0,
             }; 2],
-            bytes: [bytes.split_to(aligned_length), tail],
+            bytes: [bytes, tail],
         })
     }
 

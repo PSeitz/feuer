@@ -2,9 +2,9 @@
 
 Scared of burning your S3 budget? Feuer will take care of that.
 
-Feuer is a hybrid in-memory/disk cache that is designed for S3 and other sources.
+Feuer caches immutable objects in memory and on disk, with application callbacks for S3 and other sources.
 
-## Why is Feuer so great?
+## Design
 
 ### Cost-aware eviction
 
@@ -17,21 +17,22 @@ It supports a custom cost model for each cache layer. The model can account for:
 
 Each layer uses its model to assign retention scores, then evicts the lowest-scoring object among sampled candidates.
 
-### Designed around hardware fundamentals
+### SSD I/O and buffer reuse
 
-It is designed to maximize throughput and minimize latency. All design decisions are made based on SSD benchmarks on an AWS instance.
-It is built around Linux `io_uring` and direct I/O for superb high SSD throughput. 
-Direct I/O avoids the kernel page cache, because I don't want to compete with the kernel for memory. With the access patterns, we can do better than the kernel page cache.
+Disk storage uses Linux `io_uring` for asynchronous I/O and direct I/O to bypass
+the kernel page cache. [SSD experiments](experiments/README.md) guide queue sizing
+and payload packing.
 
-It has:
-
-- Aligned buffer reuse. Downloads can use the disk-read buffer pool to reduce
-  allocation and copying. Fill the buffer and hand it to the cache without copying its payload. So you get your copies with ZERO-COPY! Sounds like a dream, right? Well your reaction should be: Sounds like nonsense.
-- Disk Layout: A payload chunk is always 1MiB. Small entries share 1-MiB payload chunks. Larger entries occupy full chunks. It does not emit many small writes for small entries. 
-- Separate read and write queues. Reads and writes have separate `io_uring` rings and worker threads. `io_uring` is a Linux kernel interface for asynchronous I/O. It's the hot new thing.
-When your block sizes are right, your can read and write at the same time, at almost full speed.
-- Source fallthrough under disk pressure. You can choose on the application side to fetch from the source when disk reads are backed up. If your network is faster than your disk, you can avoid disk reads and get the object from the source.
-- In-flight fetch deduplication. Concurrent misses for the same key and share disk reads and source work.
+- Aligned buffer reuse. Downloads can use the disk-read buffer pool. Fill a buffer
+  and hand it to the cache without copying its payload.
+- Payload packing. Small entries share 1-MiB payload chunks. Larger entries occupy
+  consecutive whole chunks. Each payload is contiguous, with metadata in separate chunks.
+- Separate read and write queues. Reads and writes have separate `io_uring` rings
+  and worker threads, so they can progress concurrently.
+- Source fallthrough under disk pressure. Applications can choose to fetch from
+  the source when disk reads are backed up.
+- In-flight fetch sharing. Concurrent misses for the same key and callback error
+  type share disk reads and source work.
 
 The tiered cache API supports memory-only operation on every platform. Disk caching requires Linux.
 
@@ -74,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache = TieredMemoryDiskCache::open(config, None, None).await?;
 
     let bytes = cache
-        .get_or_fetch_object("object-v1".to_owned(), || async {
+        .get_or_fetch("object-v1".to_owned(), || async {
             // Replace this with your download or computation.
             Ok::<_, Infallible>(Bytes::from_static(b"hello world"))
         })
@@ -100,8 +101,15 @@ disable caching should bypass cache construction and fetch directly from the sou
 2. Disk hit: read and checksum-verify the object, then promote it to memory.
 3. Miss: run your callback, cache the result in memory, and queue a disk write.
 
-`get_or_fetch_object` accepts a callback returning `Result<Bytes, E>`. Objects can
-be empty, and their lengths need not be known before fetching. Callback errors
+`get_or_fetch` accepts a callback returning `Result<Bytes, E>` and charges payload
+length in memory. `get_or_fetch_buffer` accepts `Result<AlignedBuffer, E>`, charges
+the buffer's capacity, and converts it to shared `Bytes` without copying. Use
+`cache.allocate_buffer(length)` to acquire a pooled buffer and fill its
+`as_mut_slice()` before returning it. `AlignedBuffer` is reexported by `feuer`.
+Both APIs have `_with_disk_fallthrough` variants for source fallback under disk
+pressure.
+
+Objects can be empty, and their lengths need not be known before fetching. Callback errors
 must implement `Clone + Send + Sync + 'static`. Callbacks sharing work must be
 interchangeable. Your application owns source retries and concurrency limits.
 
@@ -116,7 +124,6 @@ miss and does not wait for an in-progress source callback.
 - Disk caching and recovery are best-effort. Opening waits for metadata recovery.
 - Changing capacity, disk format, or application payload version invalidates disk entries. Use
   `config.with_payload_version(n)` when changing your payload encoding.
-- Guarantee between versions is that is works, if I change the format it will ignore all disk entries.
 - Give each cache its own backing file. The file is exclusively locked while
   open. Use separate directories or `config.with_file_name("images")`.
 
@@ -163,7 +170,7 @@ cargo test -p feuer -p feuer-memory -p feuer-historian -p feuer-types
 ```
 
 For internals, see the [architecture](architecture.html), [I/O queues](queues.html),
-[disk format](format.md), and [implementation status](implementation-status.md). It may even keep it up to date.
+[disk format](format.md), and [implementation status](implementation-status.md).
 [Experiments](experiments/README.md) record historical configurations and results.
 
 ## License

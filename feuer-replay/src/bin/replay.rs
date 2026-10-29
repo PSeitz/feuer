@@ -13,9 +13,8 @@ mod linux {
     };
 
     use clap::Parser;
-    use feuer::{AvoidedRetrievalCostScorer, CacheConfig, TieredMemoryDiskCache};
+    use feuer::{AlignedBuffer, AvoidedRetrievalCostScorer, CacheConfig, TieredMemoryDiskCache};
     use feuer_replay::{Request, Result, load_requests};
-    use feuer_types::Download;
     use mixtrics::{metrics::BoxedRegistry, registry::prometheus::PrometheusMetricsRegistry};
     use prometheus::{Encoder, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
 
@@ -115,7 +114,7 @@ mod linux {
             &self,
             cache: &TieredMemoryDiskCache,
             payload_len: u64,
-        ) -> std::result::Result<Download, Arc<std::io::Error>> {
+        ) -> std::result::Result<AlignedBuffer, Arc<std::io::Error>> {
             self.gets.inc();
             self.waiting.inc();
             let queued = Instant::now();
@@ -135,7 +134,7 @@ mod linux {
             }
             let download = cache.allocate_buffer(payload_len as usize).map(|mut buffer| {
                 buffer.as_mut_slice().fill(0);
-                buffer.into_download()
+                buffer
             });
             if download.is_ok() {
                 self.bytes.inc_by(payload_len);
@@ -153,8 +152,8 @@ mod linux {
         service_ns: u64,
     }
 
-    /// Preserve arrival timing even under overload. The finite trace can accumulate as descriptors.
-    fn emit(
+    /// Send request indices at their arrival times, even while earlier lookups are waiting.
+    fn send_arrivals(
         requests: &[Request],
         origin: Instant,
         sender: async_channel::Sender<(usize, Instant)>,
@@ -204,8 +203,8 @@ mod linux {
         Ok(timings)
     }
 
-    /// Each frame contains every registered metric, with wall-clock timestamps on its samples.
-    fn snapshot(registry: &Registry, out: &mut impl Write) -> Result<()> {
+    /// Write every registered metric with a wall-clock timestamp on each sample.
+    fn write_metrics_snapshot(registry: &Registry, out: &mut impl Write) -> Result<()> {
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
         let mut families = registry.gather();
         for family in &mut families {
@@ -322,7 +321,7 @@ mod linux {
         )
         .await?;
         writeln!(summary, "open_seconds,{}", opening.elapsed().as_secs_f64())?;
-        snapshot(&registry, &mut File::create_new(args.output.join("before.prom"))?)?;
+        write_metrics_snapshot(&registry, &mut File::create_new(args.output.join("before.prom"))?)?;
 
         let (sender, receiver) = async_channel::unbounded::<(usize, Instant)>();
         let origin = Instant::now() + Duration::from_millis(100);
@@ -337,7 +336,7 @@ mod linux {
                     Err(mpsc::RecvTimeoutError::Timeout)
                 );
                 elapsed.set(origin.elapsed().as_secs_f64());
-                snapshot(&sample_registry, &mut samples)?;
+                write_metrics_snapshot(&sample_registry, &mut samples)?;
                 if stopping {
                     return Ok(());
                 }
@@ -346,15 +345,14 @@ mod linux {
         phase.set(1);
         let sender_requests = requests.clone();
         let sender_queued = queued.clone();
-        let sender = thread::spawn(move || emit(&sender_requests, origin, sender, &sender_queued));
+        let sender = thread::spawn(move || send_arrivals(&sender_requests, origin, sender, &sender_queued));
         let mut timings = run_lookups(receiver, queued, active, |index, sent| {
-            let (requests, cache, completed) = (requests.clone(), cache.clone(), completed.clone());
-            let source = source.clone();
+            let request = requests[index];
+            let (cache, completed, source) = (cache.clone(), completed.clone(), source.clone());
             async move {
-                let request = &requests[index];
                 let started = Instant::now();
                 let bytes = cache
-                    .get_or_fetch_by_hash(request.object_key, || source.download(&cache, request.payload_len))
+                    .get_or_fetch_buffer_by_hash(request.object_key, || source.download(&cache, request.payload_len))
                     .await?;
                 assert_eq!(bytes.len() as u64, request.payload_len);
                 drop(bytes);
@@ -374,13 +372,13 @@ mod linux {
         sender.join().expect("sender panicked")?;
         let finished = origin.elapsed();
         phase.set(2);
-        snapshot(
+        write_metrics_snapshot(
             &registry,
             &mut File::create_new(args.output.join("requests-finished.prom"))?,
         )?;
         // Sample deferred writes for five seconds.
         tokio::time::sleep(Duration::from_secs(5)).await;
-        snapshot(&registry, &mut File::create_new(args.output.join("settled.prom"))?)?;
+        write_metrics_snapshot(&registry, &mut File::create_new(args.output.join("settled.prom"))?)?;
         phase.set(3);
         stop.send(())?;
         sampler.join().expect("sampler panicked")?;
@@ -500,7 +498,7 @@ mod linux {
             buffer.as_mut_slice().fill(17);
             drop(buffer);
             let bytes = cache
-                .get_or_fetch_by_hash(request.object_key, || source.download(&cache, request.payload_len))
+                .get_or_fetch_buffer_by_hash(request.object_key, || source.download(&cache, request.payload_len))
                 .await
                 .unwrap();
             assert_eq!(bytes.len(), request.payload_len as usize);
@@ -551,7 +549,7 @@ mod linux {
                 while let Some(result) = tasks.join_next().await {
                     downloads.push(result.unwrap().unwrap());
                 }
-                assert_ne!(downloads[0].bytes().as_ptr(), downloads[1].bytes().as_ptr());
+                assert_ne!(downloads[0].as_ref().as_ptr(), downloads[1].as_ref().as_ptr());
             })
             .await
             .unwrap();
@@ -659,7 +657,7 @@ mod linux {
             let origin = Instant::now() + Duration::from_millis(2);
             let (sender, receiver) = async_channel::unbounded();
             let queued = IntGauge::new("queued", "Arrivals not started").unwrap();
-            let producer = thread::spawn(move || emit(&requests, origin, sender, &queued));
+            let producer = thread::spawn(move || send_arrivals(&requests, origin, sender, &queued));
             for (index, time_ns) in deadlines.into_iter().enumerate() {
                 let (received, sent) = receiver.recv_blocking().unwrap();
                 assert_eq!(received, index);

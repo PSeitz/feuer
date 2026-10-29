@@ -2,12 +2,12 @@ use std::{fmt, future::Future, sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use feuer_memory::{
-    MemoryCache, MemoryMetrics,
+    AlignedBuffer, MemoryCache, MemoryMetrics,
     retention::{AvoidedRetrievalCostScorer, RetentionScorer},
 };
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskCache, DiskCacheOptions, IoMetrics};
-use feuer_types::{Download, ObjectKeyHash};
+use feuer_types::ObjectKeyHash;
 use mixtrics::metrics::BoxedRegistry;
 use thiserror::Error;
 
@@ -176,9 +176,9 @@ impl TieredMemoryDiskCache {
     }
 
     /// Acquires an aligned buffer from the same pool used by disk reads.
-    /// Fill its exposed slice, then call [`feuer_memory::AlignedBuffer::into_download`]
-    /// to hand it to [`Self::get_or_fetch`] without copying. It returns to the pool
-    /// after its last owner releases it, subject to the idle capacity limit.
+    /// Fill its exposed slice and return it from [`Self::get_or_fetch_buffer`]'s callback
+    /// without copying. It returns to the pool after its last owner releases it,
+    /// subject to the idle capacity limit.
     pub fn allocate_buffer(&self, length: usize) -> std::io::Result<feuer_memory::AlignedBuffer> {
         self.inner.memory.buffer_pool().allocate(length)
     }
@@ -203,13 +203,23 @@ impl TieredMemoryDiskCache {
     }
 
     /// Returns the object from memory, disk, or a shared callback.
-    /// Concurrent misses share disk and callback work when their error types match.
-    /// See [`Self::get_or_fetch`] for sharing and cancellation behavior.
     ///
-    /// The callback returns the immutable object as [`Bytes`], including empty objects.
-    /// Callback results are charged the payload length. Use [`Self::get_or_fetch_object_with_allocation_charge`]
-    /// when the bytes retain a larger backing allocation of known capacity.
-    pub async fn get_or_fetch_object<F, Fut, E>(
+    /// Disk hits promote the object to memory. Concurrent memory misses with
+    /// the same key and exact error type share one disk-or-callback operation, including errors.
+    /// Callbacks for matching requests must be interchangeable. Each callback runs at most once.
+    /// Cancellation of the executing caller allows a waiter to take over with its own callback.
+    /// Completed failures are not cached for later requests.
+    ///
+    /// The callback returns immutable [`Bytes`], including empty objects, without copying.
+    /// Memory is charged by payload length. Retained backing capacity can be larger.
+    /// Use [`Self::get_or_fetch_buffer`] to charge a pool buffer's capacity instead.
+    /// The memory target is soft.
+    ///
+    /// Every started request records demand exactly once, before checking either tier.
+    /// Failures and cancellation still count. Insertion creates no access event.
+    /// Callback results are queued to disk immediately, subject to queue capacity.
+    /// Tracing can backpressure lookups but never changes their results.
+    pub async fn get_or_fetch<F, Fut, E>(
         &self,
         object_key: crate::ObjectKey,
         callback: F,
@@ -219,13 +229,13 @@ impl TieredMemoryDiskCache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<Bytes, E>>,
     {
-        self.get_or_fetch_object_with_disk_fallthrough(object_key, || false, callback)
+        self.get_or_fetch_with_disk_fallthrough(object_key, || false, callback)
             .await
     }
 
-    /// Like [`Self::get_or_fetch_object`], with the per-request disk fallthrough decision described in
-    /// [`Self::get_or_fetch_with_disk_fallthrough`].
-    pub async fn get_or_fetch_object_with_disk_fallthrough<F, Fut, E>(
+    /// Like [`Self::get_or_fetch`], with the per-request disk fallthrough decision described in
+    /// [`Self::get_or_fetch_buffer_with_disk_fallthrough`].
+    pub async fn get_or_fetch_with_disk_fallthrough<F, Fut, E>(
         &self,
         object_key: crate::ObjectKey,
         should_fall_through: impl FnOnce() -> bool,
@@ -237,22 +247,18 @@ impl TieredMemoryDiskCache {
         Fut: Future<Output = Result<Bytes, E>>,
     {
         self.lookup_by_hash(ObjectKeyHash::from(object_key), should_fall_through, || async {
-            callback().await.map(Download::new)
+            callback().await.map(|bytes| {
+                let charge = bytes.len();
+                (bytes, charge)
+            })
         })
         .await
     }
 
-    /// Returns an object and charges memory for the callback's backing allocation.
-    ///
-    /// Like [`Self::get_or_fetch_object`], but the callback returns `(bytes, allocation_charge)`.
-    /// Supply the known backing capacity, including bytes outside a shared slice.
-    /// Each entry charges the full capacity, even when entries share an allocation.
-    /// Callback bytes are not copied. The memory target remains soft.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the callback's allocation charge is smaller than the payload length.
-    pub async fn get_or_fetch_object_with_allocation_charge<F, Fut, E>(
+    /// Like [`Self::get_or_fetch`], but the callback returns an [`AlignedBuffer`].
+    /// Memory is charged by buffer capacity. The buffer becomes shared [`Bytes`] without copying.
+    /// Concurrent misses share work across both callback types when their error types match.
+    pub async fn get_or_fetch_buffer<F, Fut, E>(
         &self,
         object_key: crate::ObjectKey,
         callback: F,
@@ -260,50 +266,13 @@ impl TieredMemoryDiskCache {
     where
         E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(Bytes, usize), E>>,
+        Fut: Future<Output = Result<AlignedBuffer, E>>,
     {
-        self.lookup_by_hash(
-            ObjectKeyHash::from(object_key),
-            || false,
-            || async {
-                callback()
-                    .await
-                    .map(|(bytes, allocation_charge)| Download::new(bytes).with_allocation_charge(allocation_charge))
-            },
-        )
-        .await
-    }
-
-    /// Returns the object from memory, disk, or a shared callback.
-    ///
-    /// Disk hits promote the object to memory. Concurrent memory misses with
-    /// the same key and exact error type share one disk-or-callback operation, including errors.
-    /// Callbacks for matching requests must be interchangeable. Each callback runs at most once.
-    /// Cancellation of the executing caller allows a waiter to take over with its own callback.
-    /// Completed failures are not cached for later requests. A successful callback returns
-    /// the immutable object, including empty objects. The memory target is soft.
-    ///
-    /// Every started request records demand exactly once, before checking either tier.
-    /// Failures and cancellation still count. Insertion creates no access event.
-    /// Downloads are queued to disk immediately, subject to queue capacity.
-    /// Returned bytes may share the download's allocation.
-    ///
-    /// Tracing can backpressure lookups but never changes their results.
-    pub async fn get_or_fetch<F, Fut, E>(
-        &self,
-        object_key: crate::ObjectKey,
-        callback: F,
-    ) -> Result<Bytes, GetOrFetchError<E>>
-    where
-        E: Clone + Send + Sync + 'static,
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Download, E>>,
-    {
-        self.get_or_fetch_with_disk_fallthrough(object_key, || false, callback)
+        self.get_or_fetch_buffer_with_disk_fallthrough(object_key, || false, callback)
             .await
     }
 
-    /// Like [`Self::get_or_fetch`], but may fetch from the source instead of a busy disk.
+    /// Like [`Self::get_or_fetch_buffer`], but may fetch from the source instead of a busy disk.
     ///
     /// Caches sharing `IoQueues` share 64 payload read permits. At 64 waiting reads,
     /// every unchecked waiter is scheduled to call `should_fall_through` before I/O,
@@ -319,7 +288,7 @@ impl TieredMemoryDiskCache {
     /// memory. Objects already on disk are not queued for another write.
     /// Source failures are returned without retrying disk.
     /// Each request updates access history before checking either cache tier.
-    pub async fn get_or_fetch_with_disk_fallthrough<F, Fut, E>(
+    pub async fn get_or_fetch_buffer_with_disk_fallthrough<F, Fut, E>(
         &self,
         object_key: crate::ObjectKey,
         should_fall_through: impl FnOnce() -> bool,
@@ -328,17 +297,22 @@ impl TieredMemoryDiskCache {
     where
         E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Download, E>>,
+        Fut: Future<Output = Result<AlignedBuffer, E>>,
     {
-        self.lookup_by_hash(ObjectKeyHash::from(object_key), should_fall_through, callback)
-            .await
+        self.lookup_by_hash(ObjectKeyHash::from(object_key), should_fall_through, || async {
+            callback().await.map(|buffer| {
+                let capacity = buffer.capacity();
+                (buffer.into_bytes(), capacity)
+            })
+        })
+        .await
     }
 
     /// Replays a recorded object identity without hashing it a second time.
-    /// Otherwise identical to [`Self::get_or_fetch`].
+    /// Otherwise identical to [`Self::get_or_fetch_buffer`].
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
-    pub async fn get_or_fetch_by_hash<F, Fut, E>(
+    pub async fn get_or_fetch_buffer_by_hash<F, Fut, E>(
         &self,
         object_key: ObjectKeyHash,
         callback: F,
@@ -346,9 +320,19 @@ impl TieredMemoryDiskCache {
     where
         E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Download, E>>,
+        Fut: Future<Output = Result<AlignedBuffer, E>>,
     {
-        self.lookup_by_hash(object_key, || false, callback).await
+        self.lookup_by_hash(
+            object_key,
+            || false,
+            || async {
+                callback().await.map(|buffer| {
+                    let capacity = buffer.capacity();
+                    (buffer.into_bytes(), capacity)
+                })
+            },
+        )
+        .await
     }
 
     async fn lookup_by_hash<F, Fut, E>(
@@ -360,7 +344,7 @@ impl TieredMemoryDiskCache {
     where
         E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Download, E>>,
+        Fut: Future<Output = Result<(Bytes, usize), E>>,
     {
         self.inner.memory.access_histories().record_access(&object_key);
         let event_bytes = match &self.access_trace {
@@ -377,7 +361,7 @@ impl TieredMemoryDiskCache {
                 .get_or_init(|| self.fetch(object_key, should_fall_through, callback))
                 .await
                 .clone();
-            fetch.remove();
+            fetch.remove_from_registry();
             result
         };
         let payload_length = result.as_ref().map_or(0, |bytes| bytes.len() as u64);
@@ -402,16 +386,14 @@ impl TieredMemoryDiskCache {
         if let Some(disk) = &self.inner.disk
             && let Some((bytes, buffer_capacity)) = disk.get_with_fallthrough(&object_key, should_fall_through).await
         {
-            let download = Download::new(bytes.clone());
-            self.inner
-                .memory
-                .insert(object_key, download.with_allocation_charge(buffer_capacity));
+            self.inner.memory.insert(object_key, bytes.clone(), buffer_capacity);
             return (LookupOutcome::DiskHit, Some(bytes));
         }
         (LookupOutcome::Miss, None)
     }
 
-    /// Returns the lookup outcome and object bytes.
+    /// Rechecks memory before fetching from disk or the callback.
+    /// Another fetch may have populated memory before this caller joined the registry.
     async fn fetch<F, Fut, E>(
         &self,
         object_key: ObjectKeyHash,
@@ -420,7 +402,7 @@ impl TieredMemoryDiskCache {
     ) -> FetchResult<E>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<Download, E>>,
+        Fut: Future<Output = Result<(Bytes, usize), E>>,
     {
         let mut fell_through = false;
         let (outcome, bytes) = self
@@ -433,29 +415,28 @@ impl TieredMemoryDiskCache {
             return (outcome, Ok(bytes));
         }
 
-        let download = match callback().await {
-            Ok(download) => download,
+        let (bytes, allocation_charge) = match callback().await {
+            Ok(result) => result,
             Err(error) => {
                 return (LookupOutcome::CallbackError, Err(GetOrFetchError::Callback(error)));
             }
         };
-        let bytes = download.bytes().clone();
         #[cfg(target_os = "linux")]
         if let Some(disk) = &self.inner.disk {
             let metrics = &self.inner.metrics;
             if disk.contains(&object_key) {
                 metrics.disk_write_already_covered.increase(1);
                 if fell_through {
-                    self.inner.memory.insert(object_key, download);
+                    self.inner.memory.insert(object_key, bytes.clone(), allocation_charge);
                 }
-            } else if self.inner.memory.insert(object_key, download.clone()) {
-                disk.enqueue_if_space_available(object_key, download);
+            } else if self.inner.memory.insert(object_key, bytes.clone(), allocation_charge) {
+                disk.enqueue_if_space_available(object_key, bytes.clone());
             } else {
                 metrics.disk_write_redundant.increase(1);
             }
             return (LookupOutcome::Callback, Ok(bytes));
         }
-        self.inner.memory.insert(object_key, download);
+        self.inner.memory.insert(object_key, bytes.clone(), allocation_charge);
         (LookupOutcome::Callback, Ok(bytes))
     }
 }
@@ -543,14 +524,15 @@ mod tests {
         for index in 0..65 {
             cache.inner.memory.insert(
                 ObjectKeyHash::from(format!("memory-{index}")),
-                Download::new(Bytes::from_static(b"x")).with_allocation_charge(100),
+                Bytes::from_static(b"x"),
+                100,
             );
         }
         let disk = cache.inner.disk.as_ref().unwrap();
         for index in 0..3 {
             disk.insert_batch(vec![(
                 ObjectKeyHash::from(format!("disk-{index}")),
-                Download::new(Bytes::from(vec![0; 1 << 20])).with_allocation_charge(2 << 20),
+                Bytes::from(vec![0; 1 << 20]),
             )])
             .await
             .unwrap();
@@ -588,27 +570,23 @@ mod tests {
         ));
         assert!(
             cache
-                .get_or_fetch(key.clone(), || async { Err::<Download, _>("failed") })
+                .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("failed") })
                 .await
                 .is_err()
         );
         cache
-            .get_or_fetch(key.clone(), || async {
-                Ok::<_, Infallible>(Download::new(Bytes::from_static(b"bc")))
-            })
+            .get_or_fetch(key.clone(), || async { Ok::<_, Infallible>(Bytes::from_static(b"bc")) })
             .await
             .unwrap();
         wait_for_buffered(&cache, &key).await;
         cache.inner.disk.as_ref().unwrap().flush().await.unwrap();
         cache
-            .get_or_fetch(key.clone(), || async {
-                Err::<Download, _>("memory hit must not fetch")
-            })
+            .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("memory hit must not fetch") })
             .await
             .unwrap();
         assert!(cache.inner.memory.remove(&ObjectKeyHash::from(key.as_str())));
         cache
-            .get_or_fetch(key.clone(), || async { Err::<Download, _>("disk hit must not fetch") })
+            .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("disk hit must not fetch") })
             .await
             .unwrap();
         for outcome in ["memory_hit", "disk_hit", "callback", "callback_error"] {
@@ -760,8 +738,8 @@ mod tests {
         let first_bytes = Bytes::from_static(b"first object");
         let second_bytes = Bytes::from_static(b"second object");
         let (first_result, second_result) = tokio::join!(
-            first.get_or_fetch_object(key.to_owned(), || async { Ok::<_, Infallible>(first_bytes.clone()) }),
-            second.get_or_fetch_object(key.to_owned(), || async { Ok::<_, Infallible>(second_bytes.clone()) }),
+            first.get_or_fetch(key.to_owned(), || async { Ok::<_, Infallible>(first_bytes.clone()) }),
+            second.get_or_fetch(key.to_owned(), || async { Ok::<_, Infallible>(second_bytes.clone()) }),
         );
         assert_eq!(first_result.unwrap(), first_bytes);
         assert_eq!(second_result.unwrap(), second_bytes);
@@ -780,8 +758,8 @@ mod tests {
         assert!(first.inner.memory.remove(&hash));
         assert!(second.inner.memory.remove(&hash));
         let (first_result, second_result) = tokio::join!(
-            first.get_or_fetch_object(key.to_owned(), || async { Err::<Bytes, _>("must hit first disk") }),
-            second.get_or_fetch_object(key.to_owned(), || async { Err::<Bytes, _>("must hit second disk") }),
+            first.get_or_fetch(key.to_owned(), || async { Err::<Bytes, _>("must hit first disk") }),
+            second.get_or_fetch(key.to_owned(), || async { Err::<Bytes, _>("must hit second disk") }),
         );
         assert_eq!(first_result.unwrap(), first_bytes);
         assert_eq!(second_result.unwrap(), second_bytes);
@@ -793,7 +771,7 @@ mod tests {
         assert!(second.inner.memory.remove(&hash));
         assert_eq!(
             second
-                .get_or_fetch_object(key.to_owned(), || async { Err::<Bytes, _>("must hit surviving disk") })
+                .get_or_fetch(key.to_owned(), || async { Err::<Bytes, _>("must hit surviving disk") })
                 .await
                 .unwrap(),
             second_bytes,
@@ -807,7 +785,7 @@ mod tests {
         let hash = ObjectKeyHash::from(key.as_str());
         let payload = Bytes::from_static(b"abcdef");
         cache
-            .get_or_fetch_object(key.clone(), || async { Ok::<_, &str>(payload.clone()) })
+            .get_or_fetch(key.clone(), || async { Ok::<_, &str>(payload.clone()) })
             .await
             .unwrap();
         wait_for_buffered(&cache, &key).await;
@@ -821,7 +799,7 @@ mod tests {
                     cache.get_object(key.clone()).await.unwrap()
                 } else {
                     cache
-                        .get_or_fetch_object(key.clone(), || async { Err::<Bytes, _>("must hit disk") })
+                        .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("must hit disk") })
                         .await
                         .unwrap()
                 };
@@ -837,11 +815,11 @@ mod tests {
         let key = "large-entry".to_owned();
         let hash = ObjectKeyHash::from(key.as_str());
         let disk = cache.inner.disk.as_ref().unwrap();
-        disk.insert_batch(vec![(hash, Download::new(Bytes::from(vec![0x77; 40 * 1024])))])
+        disk.insert_batch(vec![(hash, Bytes::from(vec![0x77; 40 * 1024]))])
             .await
             .unwrap();
         let bytes = cache
-            .get_or_fetch(key.clone(), || async { Err::<Download, _>("disk hit must not fetch") })
+            .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("disk hit must not fetch") })
             .await
             .unwrap();
         assert_eq!(&bytes[..], &[0x77; 40 * 1024]);
@@ -860,13 +838,11 @@ mod tests {
         let hash = ObjectKeyHash::from(key.as_str());
         let payload = Bytes::from(vec![0x77; 40 * 1024]);
         let disk = cache.inner.disk.as_ref().unwrap();
-        disk.insert_batch(vec![(hash, Download::new(payload.clone()))])
-            .await
-            .unwrap();
+        disk.insert_batch(vec![(hash, payload.clone())]).await.unwrap();
         disk.flush().await.unwrap();
         let (first, second) = tokio::join!(
-            cache.get_or_fetch(key.clone(), || async { Err::<Download, _>("disk hit must not fetch") }),
-            cache.get_or_fetch(key, || async { Err::<Download, _>("disk hit must not fetch") }),
+            cache.get_or_fetch(key.clone(), || async { Err::<Bytes, _>("disk hit must not fetch") }),
+            cache.get_or_fetch(key, || async { Err::<Bytes, _>("disk hit must not fetch") }),
         );
         let first = first.unwrap();
         let second = second.unwrap();
@@ -889,13 +865,10 @@ mod tests {
             .get_or_fetch(key.clone(), || async {
                 // Simulate another disk write finishing while this callback is pending.
                 let disk = cache.inner.disk.as_ref().unwrap();
-                disk.insert_batch(vec![(
-                    ObjectKeyHash::from(key.as_str()),
-                    Download::new(Bytes::from_static(b"cd")),
-                )])
-                .await
-                .unwrap();
-                Ok::<_, Infallible>(Download::new(Bytes::from_static(b"cd")))
+                disk.insert_batch(vec![(ObjectKeyHash::from(key.as_str()), Bytes::from_static(b"cd"))])
+                    .await
+                    .unwrap();
+                Ok::<_, Infallible>(Bytes::from_static(b"cd"))
             })
             .await
             .unwrap();
@@ -918,7 +891,7 @@ mod tests {
                 cache
                     .get_or_fetch(key, || async move {
                         entered.notify_one();
-                        std::future::pending::<Result<Download, Infallible>>().await
+                        std::future::pending::<Result<Bytes, Infallible>>().await
                     })
                     .await
             })
@@ -964,16 +937,14 @@ mod tests {
         let key = String::from("object");
         let payload = Bytes::from_static(b"abcdefghij");
         let result = cache
-            .get_or_fetch(key.clone(), || async {
-                Ok::<_, Infallible>(Download::new(payload.clone()))
-            })
+            .get_or_fetch(key.clone(), || async { Ok::<_, Infallible>(payload.clone()) })
             .await
             .unwrap();
         assert_eq!(result, payload);
         assert_eq!(result.as_ptr(), payload.as_ptr());
 
         let result = cache
-            .get_or_fetch(key, || async { Err::<Download, _>("memory hit must not fetch") })
+            .get_or_fetch(key, || async { Err::<Bytes, _>("memory hit must not fetch") })
             .await
             .unwrap();
         assert_eq!(result, payload);
@@ -993,7 +964,7 @@ mod tests {
             let error = cache
                 .get_or_fetch(key.clone(), move || async move {
                     invocation_count.fetch_add(1, Ordering::Relaxed);
-                    Err::<Download, _>("source unavailable")
+                    Err::<Bytes, _>("source unavailable")
                 })
                 .await
                 .unwrap_err();
@@ -1009,14 +980,14 @@ mod tests {
         let key = String::from("object");
         let result = cache
             .get_or_fetch(key.clone(), || async {
-                Ok::<_, Infallible>(Download::new(Bytes::from_static(b"abcde")))
+                Ok::<_, Infallible>(Bytes::from_static(b"abcde"))
             })
             .await
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"abcde"));
         assert_eq!(cache.inner.memory.used_bytes(), 5);
         let hit = cache
-            .get_or_fetch(key, || async { Err::<Download, _>("memory hit must not fetch") })
+            .get_or_fetch(key, || async { Err::<Bytes, _>("memory hit must not fetch") })
             .await
             .unwrap();
         assert_eq!(hit, result);
@@ -1040,7 +1011,7 @@ mod tests {
                     .get_or_fetch(key, move || async move {
                         callback_entered.notify_one();
                         release_callback.notified().await;
-                        Ok::<_, Infallible>(Download::new(Bytes::from(vec![b'x'; 6])))
+                        Ok::<_, Infallible>(Bytes::from(vec![b'x'; 6]))
                     })
                     .await
                     .unwrap()
@@ -1052,13 +1023,13 @@ mod tests {
         cache
             .inner
             .memory
-            .insert(ObjectKeyHash::from(key.as_str()), Download::new(payload.clone()));
+            .insert(ObjectKeyHash::from(key.as_str()), payload.clone(), payload.len());
         release_callback.notify_one();
 
         let returned = pending.await.unwrap();
         assert_eq!(returned, payload);
         let cached = cache
-            .get_or_fetch(key, || async { Err::<Download, _>("memory hit must not fetch") })
+            .get_or_fetch(key, || async { Err::<Bytes, _>("memory hit must not fetch") })
             .await
             .unwrap();
         assert_eq!(cached, payload);

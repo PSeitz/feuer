@@ -18,8 +18,9 @@ Read and replay FETR packages with [the replay tools](feuer-replay/README.md).
 - Each lookup emits a request-start event and a lookup-outcome event. Cancellation
   can leave an unmatched start. Callers sharing a disk read or source fetch each
   emit their own outcome on completion. Source-fetch retries and coalescing happen
-  within those lookups and have no separate events. Object keys are hashed. Hashing
-  does not guarantee anonymity. Events contain payload lengths rather than payload bytes.
+  within those lookups and have no separate events. Events contain key hashes and
+  payload lengths rather than payload bytes. Key hashes can still identify objects,
+  so treat traces as sensitive.
 
 ## FETR v1
 
@@ -36,8 +37,8 @@ Every event refers to an object.
 | 33 | `u64` | Object payload length for successful kinds 1–3, otherwise zero |
 
 Successful lookups of empty objects have length zero. A `get_object` returning
-`None` emits kind 5. Replay learns object
-lengths from successful outcomes and rejects objects whose length is never observed.
+`None` emits kind 5. Replay learns object lengths from successful outcomes and
+rejects objects whose length is never observed.
 
 Timestamps are captured before enqueue, so queue order can differ from timestamp
 order. Join start/outcome by request ID. Python layout: `<B5Q`, with the hash split

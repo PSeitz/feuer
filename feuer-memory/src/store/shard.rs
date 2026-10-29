@@ -1,21 +1,22 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use feuer_types::{Download, ObjectKeyHash};
+use feuer_types::ObjectKeyHash;
 use rustc_hash::FxHashMap;
 
 use super::MemoryCache;
 use crate::{BufferPool, retention::sample_candidates};
 
-/// An entry's download and position in the eviction candidates.
+/// An entry's bytes, allocation charge, and position in the eviction candidates.
 struct MemoryEntry {
-    /// Payload and allocation charge. Lookup results share this allocation.
-    download: Download,
+    /// Payload shared with lookup results.
+    bytes: Bytes,
+    allocation_charge: usize,
     /// Position in the list sampled for eviction.
-    eviction_index: usize,
+    candidate_index: usize,
 }
 
-/// Result of trying to insert a download, releasing the lock after each eviction.
+/// Whether an insertion attempt inserted the object, found its key, or evicted an entry.
 pub(super) enum InsertResult {
     Inserted,
     AlreadyPresent,
@@ -51,7 +52,7 @@ impl MemoryCacheShard {
     }
 
     pub(super) fn get(&self, object_key: &ObjectKeyHash) -> Option<Bytes> {
-        Some(self.entries_by_key.get(object_key)?.download.bytes().clone())
+        Some(self.entries_by_key.get(object_key)?.bytes.clone())
     }
 
     /// Tries to insert the object, sampling entries for eviction if space is needed.
@@ -59,16 +60,17 @@ impl MemoryCacheShard {
     pub(super) fn try_insert(
         &mut self,
         object_key: &ObjectKeyHash,
-        download: &Download,
+        bytes: &Bytes,
+        allocation_charge: usize,
         cache: &MemoryCache,
     ) -> InsertResult {
         if self.entries_by_key.contains_key(object_key) {
             self.buffer_pool.metrics.redundant_insertions.increase(1);
             return InsertResult::AlreadyPresent;
         }
-        let max_existing_bytes = self.capacity.saturating_sub(download.allocation_charge() as u64);
+        let max_existing_bytes = self.capacity.saturating_sub(allocation_charge as u64);
         if self.used_bytes <= max_existing_bytes {
-            self.add_entry(*object_key, download.clone());
+            self.add_entry(*object_key, bytes.clone(), allocation_charge);
             self.buffer_pool.metrics.insertions.increase(1);
             return InsertResult::Inserted;
         }
@@ -82,8 +84,8 @@ impl MemoryCacheShard {
             let entry = &self.entries_by_key[key];
             let score = cache.retention_scorer.score(
                 key,
-                entry.download.bytes().len() as u64,
-                entry.download.allocation_charge() as u64,
+                entry.bytes.len() as u64,
+                entry.allocation_charge as u64,
                 &cache.access_histories,
             );
             (score, *key)
@@ -95,18 +97,18 @@ impl MemoryCacheShard {
     }
 
     /// Adds an object known not to be indexed.
-    fn add_entry(&mut self, object_key: ObjectKeyHash, download: Download) {
-        let allocation_charge = download.allocation_charge() as u64;
-        self.used_bytes += allocation_charge;
-        self.buffer_pool.add_entry_bytes(allocation_charge);
+    fn add_entry(&mut self, object_key: ObjectKeyHash, bytes: Bytes, allocation_charge: usize) {
+        self.used_bytes += allocation_charge as u64;
+        self.buffer_pool.add_entry_bytes(allocation_charge as u64);
         self.buffer_pool.metrics.entries.increase(1);
-        let eviction_index = self.eviction_candidates.len();
+        let candidate_index = self.eviction_candidates.len();
         self.eviction_candidates.push(object_key);
         self.entries_by_key.insert(
             object_key,
             MemoryEntry {
-                download,
-                eviction_index,
+                bytes,
+                allocation_charge,
+                candidate_index,
             },
         );
     }
@@ -128,11 +130,11 @@ impl MemoryCacheShard {
         let Some(removed_entry) = self.entries_by_key.remove(object_key) else {
             return false;
         };
-        self.eviction_candidates.swap_remove(removed_entry.eviction_index);
-        if let Some(key) = self.eviction_candidates.get(removed_entry.eviction_index) {
-            self.entries_by_key.get_mut(key).unwrap().eviction_index = removed_entry.eviction_index;
+        self.eviction_candidates.swap_remove(removed_entry.candidate_index);
+        if let Some(key) = self.eviction_candidates.get(removed_entry.candidate_index) {
+            self.entries_by_key.get_mut(key).unwrap().candidate_index = removed_entry.candidate_index;
         }
-        let removed_bytes = removed_entry.download.allocation_charge() as u64;
+        let removed_bytes = removed_entry.allocation_charge as u64;
         self.used_bytes -= removed_bytes;
         self.buffer_pool.remove_entry_bytes(removed_bytes);
         self.buffer_pool.metrics.entries.decrease(1);

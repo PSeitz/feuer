@@ -32,6 +32,7 @@ pub struct CacheConfig {
 impl CacheConfig {
     /// Creates a cache configuration with no implicit capacity defaults.
     ///
+    /// Requires positive memory capacity. Disk capacity is checked when opening the cache.
     /// Uses [`SampledEvictionConfig::new`] for eviction settings.
     /// Reads `FEUER_ACCESS_COUNT_HALF_LIFE`, defaulting to 262,144 requests.
     /// The half-life must be positive and applies to both tiers of this cache.

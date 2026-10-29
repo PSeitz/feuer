@@ -4,7 +4,7 @@
 use std::{convert::Infallible, future::pending};
 
 use bytes::Bytes;
-use feuer::{CacheConfig, Download, ObjectKeyHash, TieredMemoryDiskCache};
+use feuer::{AlignedBuffer, CacheConfig, ObjectKeyHash, TieredMemoryDiskCache};
 use feuer_replay::{Result, decode_package, load_requests};
 
 #[tokio::test]
@@ -16,12 +16,12 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
     let key = ObjectKeyHash::from("object");
     cache
         .get_or_fetch("object".to_owned(), || async {
-            Ok::<_, Infallible>(Download::new(Bytes::from_static(b"abcd")))
+            Ok::<_, Infallible>(Bytes::from_static(b"abcd"))
         })
         .await?;
     let hit = cache
-        .get_or_fetch_by_hash(key, || async {
-            Err::<Download, _>(std::sync::Arc::new(std::io::Error::other(
+        .get_or_fetch_buffer_by_hash(key, || async {
+            Err::<AlignedBuffer, _>(std::sync::Arc::new(std::io::Error::other(
                 "recorded hash must hit the string-key entry",
             )))
         })
@@ -29,7 +29,7 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
     assert_eq!(hit.as_ref(), b"abcd");
     assert!(
         cache
-            .get_or_fetch_by_hash(ObjectKeyHash(123), || async { Err::<Download, _>("source error") })
+            .get_or_fetch_buffer_by_hash(ObjectKeyHash(123), || async { Err::<AlignedBuffer, _>("source error") })
             .await
             .is_err()
     );
@@ -38,9 +38,9 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
     let canceled_cache = cache.clone();
     let task = tokio::spawn(async move {
         canceled_cache
-            .get_or_fetch_by_hash(ObjectKeyHash(125), || async {
+            .get_or_fetch_buffer_by_hash(ObjectKeyHash(125), || async {
                 started.send(()).unwrap();
-                pending::<std::result::Result<Download, Infallible>>().await
+                pending::<std::result::Result<AlignedBuffer, Infallible>>().await
             })
             .await
     });
@@ -118,7 +118,7 @@ async fn decodes_empty_object_from_current_writer() -> Result<()> {
         .with_trace(move |package| std::future::ready(sender.send(package).map_err(std::io::Error::other)));
     assert!(cache.get_object("empty".to_owned()).await.is_none());
     cache
-        .get_or_fetch_object("empty".to_owned(), || async { Ok::<_, Infallible>(Bytes::new()) })
+        .get_or_fetch("empty".to_owned(), || async { Ok::<_, Infallible>(Bytes::new()) })
         .await?;
     let hit = cache.get_object("empty".to_owned()).await.unwrap();
     assert!(hit.is_empty());

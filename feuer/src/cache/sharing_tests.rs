@@ -6,19 +6,11 @@ use std::{
 };
 use tokio::sync::Notify;
 
-fn cache() -> (TieredMemoryDiskCache, prometheus::Registry) {
+async fn cache() -> (TieredMemoryDiskCache, prometheus::Registry) {
     let (registry, backend) = registry();
-    let cache = TieredMemoryDiskCache {
-        inner: Arc::new(TieredMemoryDiskCacheInner {
-            config: CacheConfig::new("unused", 0, 8 << 20).unwrap(),
-            memory: MemoryCache::with_metrics(8 << 20, feuer_memory::MemoryMetrics::new(&backend), 7),
-            metrics: LookupMetrics::new(&backend),
-            pending_fetches: PendingFetches::default(),
-            #[cfg(target_os = "linux")]
-            disk: None,
-        }),
-        access_trace: None,
-    };
+    let cache = TieredMemoryDiskCache::open(CacheConfig::new("unused", 0, 8 << 20).unwrap(), Some(&backend), None)
+        .await
+        .unwrap();
     (cache, registry)
 }
 
@@ -32,14 +24,20 @@ fn pending_count(cache: &TieredMemoryDiskCache) -> usize {
 
 #[tokio::test]
 async fn lookup_methods_share_successes_and_errors_but_not_completed_failures() {
-    for download in [Ok(Download::new(Bytes::from_static(b"ok"))), Err("source failed")] {
-        let (cache, registry) = cache();
+    for success in [true, false] {
+        let (cache, registry) = cache().await;
         let release = Notify::new();
-        let mut first = Box::pin(cache.get_or_fetch("object".into(), || async {
+        let mut first = Box::pin(cache.get_or_fetch_buffer("object".into(), || async {
             release.notified().await;
-            download.clone()
+            if success {
+                let mut buffer = cache.allocate_buffer(2).unwrap();
+                buffer.as_mut_slice().copy_from_slice(b"ok");
+                Ok(buffer)
+            } else {
+                Err("source failed")
+            }
         }));
-        let mut second = Box::pin(cache.get_or_fetch_object("object".into(), || {
+        let mut second = Box::pin(cache.get_or_fetch("object".into(), || {
             std::future::ready(Err::<Bytes, &str>("waiter must not execute"))
         }));
         assert_pending(first.as_mut());
@@ -72,7 +70,7 @@ async fn lookup_methods_share_successes_and_errors_but_not_completed_failures() 
         if first.is_err() {
             assert_eq!(
                 cache
-                    .get_or_fetch("object".into(), || async { Err::<Download, &str>("new attempt") })
+                    .get_or_fetch("object".into(), || async { Err::<Bytes, &str>("new attempt") })
                     .await,
                 Err(GetOrFetchError::Callback("new attempt"))
             );
@@ -82,10 +80,10 @@ async fn lookup_methods_share_successes_and_errors_but_not_completed_failures() 
 
 #[tokio::test]
 async fn different_error_types_and_keys_do_not_share() {
-    let (cache, _) = cache();
-    let mut first = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Download, &str>>));
-    let mut different_error = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Download, String>>));
-    let mut different_key = Box::pin(cache.get_or_fetch("other".into(), pending::<Result<Download, &str>>));
+    let (cache, _) = cache().await;
+    let mut first = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Bytes, &str>>));
+    let mut different_error = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Bytes, String>>));
+    let mut different_key = Box::pin(cache.get_or_fetch("other".into(), pending::<Result<Bytes, &str>>));
     assert_pending(first.as_mut());
     assert_pending(different_error.as_mut());
     assert_pending(different_key.as_mut());
@@ -97,9 +95,9 @@ async fn different_error_types_and_keys_do_not_share() {
 #[tokio::test]
 async fn cancellation_allows_takeover_and_cleans_up_in_either_order() {
     for order in 0..3 {
-        let (cache, _) = cache();
-        let mut first = Box::pin(cache.get_or_fetch_object("object".into(), pending::<Result<Bytes, &str>>));
-        let mut second = Box::pin(cache.get_or_fetch_object("object".into(), || async {
+        let (cache, _) = cache().await;
+        let mut first = Box::pin(cache.get_or_fetch_buffer("object".into(), pending::<Result<AlignedBuffer, &str>>));
+        let mut second = Box::pin(cache.get_or_fetch("object".into(), || async {
             Ok::<_, &str>(Bytes::from_static(b"replacement"))
         }));
         assert_pending(first.as_mut());
@@ -125,18 +123,18 @@ async fn cancellation_allows_takeover_and_cleans_up_in_either_order() {
 
 #[tokio::test]
 async fn old_waiter_cannot_remove_a_new_attempt() {
-    let (cache, _) = cache();
+    let (cache, _) = cache().await;
     let release = Notify::new();
-    let mut first = Box::pin(cache.get_or_fetch_object("object".into(), || async {
+    let mut first = Box::pin(cache.get_or_fetch("object".into(), || async {
         release.notified().await;
         Err::<Bytes, &str>("old failure")
     }));
-    let mut waiter = Box::pin(cache.get_or_fetch_object("object".into(), pending::<Result<Bytes, &str>>));
+    let mut waiter = Box::pin(cache.get_or_fetch_buffer("object".into(), pending::<Result<AlignedBuffer, &str>>));
     assert_pending(first.as_mut());
     assert_pending(waiter.as_mut());
     release.notify_one();
     assert_eq!(first.await, Err(GetOrFetchError::Callback("old failure")));
-    let mut replacement = Box::pin(cache.get_or_fetch_object("object".into(), pending::<Result<Bytes, &str>>));
+    let mut replacement = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Bytes, &str>>));
     assert_pending(replacement.as_mut());
     assert_eq!(waiter.await, Err(GetOrFetchError::Callback("old failure")));
     assert_eq!(pending_count(&cache), 1);
@@ -165,8 +163,8 @@ fn simultaneous_cancellation_removes_the_last_callers() {
 
 #[tokio::test]
 async fn lookup_only_checks_cached_bytes_without_waiting_for_a_callback() {
-    let (cache, registry) = cache();
-    let mut fetch = Box::pin(cache.get_or_fetch_object("object".into(), pending::<Result<Bytes, &str>>));
+    let (cache, registry) = cache().await;
+    let mut fetch = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Bytes, &str>>));
     assert_pending(fetch.as_mut());
     assert_eq!(
         Box::pin(cache.get_object("object".into()))
@@ -178,7 +176,7 @@ async fn lookup_only_checks_cached_bytes_without_waiting_for_a_callback() {
         cache
             .inner
             .memory
-            .insert(ObjectKeyHash::from(key), Download::new(bytes.clone()));
+            .insert(ObjectKeyHash::from(key), bytes.clone(), bytes.len());
         assert_eq!(cache.get_object(key.into()).await, Some(bytes));
     }
     assert_eq!(cache.inner.memory.access_histories().request_count(), 4);

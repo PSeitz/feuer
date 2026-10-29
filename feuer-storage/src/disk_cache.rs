@@ -31,7 +31,7 @@ use feuer_memory::{
     BufferPool,
     retention::{AvoidedRetrievalCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer, sample_candidates},
 };
-use feuer_types::{Download, ObjectKeyHash};
+use feuer_types::ObjectKeyHash;
 #[cfg(test)]
 use page_format::METADATA_PAGE_BYTES;
 use rustc_hash::FxHashMap;
@@ -54,7 +54,7 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 /// Background writes use a nonblocking 512-entry queue. Partial small-entry buffers flush every 60 seconds.
 /// Closing finishes queued writes and discards remaining partial chunks.
 /// Small entries share immutable 1-MiB payload chunks. Separate mutable metadata chunks
-/// hold entry records and links between metadata chunks. Each shard's chain starts at its first chunk.
+/// hold entry metadata and links between metadata chunks. Each shard's chain starts at its first chunk.
 /// Entries have plain payload bytes, 4-KiB-aligned storage, and a checksum in their entry metadata.
 /// Payload reuse requires a wholly free chunk.
 /// The key hash selects an independently allocated shard. Admission may fail despite space elsewhere.
@@ -249,13 +249,13 @@ impl DiskCache {
 
     /// Inserts a batch and flushes shared buffers. Counts entries published by this call, including neighbors.
     /// Earlier publication survives later failure. Dropping this future does not abort its detached writer.
-    pub async fn insert_batch(&self, mut downloads: Vec<(ObjectKeyHash, Download)>) -> Result<usize, DiskCacheError> {
+    pub async fn insert_batch(&self, mut entries: Vec<(ObjectKeyHash, Bytes)>) -> Result<usize, DiskCacheError> {
         let disk = self.disk.clone();
-        downloads.sort_unstable_by_key(|(_, download)| download.bytes().len());
+        entries.sort_unstable_by_key(|(_, bytes)| bytes.len());
         tokio::spawn(async move {
             let mut published = 0;
-            for (key, download) in downloads {
-                published += disk.write(key, download, ()).await?;
+            for (key, bytes) in entries {
+                published += disk.write(key, bytes, ()).await?;
             }
             Ok(published + disk.flush().await?)
         })
@@ -269,10 +269,10 @@ impl DiskCache {
     pub async fn write(
         &self,
         key: ObjectKeyHash,
-        download: Download,
+        bytes: Bytes,
         completion: impl Send + 'static,
     ) -> Result<usize, DiskCacheError> {
-        self.disk.write(key, download, completion).await
+        self.disk.write(key, bytes, completion).await
     }
 
     /// Shared history for recording requests once, before lookup and outside raw storage operations.
@@ -287,10 +287,8 @@ impl DiskCache {
 
     /// Returns the object, or a miss on I/O/integrity uncertainty.
     /// Concurrent callers share reads. Results retain no disk ownership.
-    pub async fn get(&self, key: &ObjectKeyHash) -> Option<Download> {
-        self.get_with_fallthrough(key, || false)
-            .await
-            .map(|(bytes, capacity)| Download::new(bytes).with_allocation_charge(capacity))
+    pub async fn get(&self, key: &ObjectKeyHash) -> Option<Bytes> {
+        self.get_with_fallthrough(key, || false).await.map(|(bytes, _)| bytes)
     }
 
     /// Like [`Self::get`], but returns bytes and backing capacity and allows waiting reads to fall through.
@@ -336,10 +334,11 @@ impl DiskCache {
                 let result = read.read_and_verify_payload(&self.disk.file).await;
                 if matches!(result, Err(DiskLookupOutcome::ChecksumFailed)) {
                     let mut disk_index = shard.entry_index.lock().unwrap();
+                    // Compare read identity so a late checksum failure cannot remove a replacement entry.
                     if disk_index
                         .entries_by_key
                         .get(key)
-                        .is_some_and(|entry| entry.references_read(&read))
+                        .is_some_and(|entry| entry.shared_read.ptr_eq(&Arc::downgrade(&read)))
                     {
                         shard.remove_entry_from_index(&mut disk_index, key);
                     }
@@ -381,9 +380,9 @@ impl DiskCacheShard {
         &self,
         disk: &DiskCacheInner,
         remaining_eviction_attempts: &mut usize,
-        remaining_eviction_chunk_budget: &mut usize,
+        remaining_eviction_chunks: &mut usize,
     ) -> bool {
-        if *remaining_eviction_attempts == 0 || *remaining_eviction_chunk_budget == 0 {
+        if *remaining_eviction_attempts == 0 || *remaining_eviction_chunks == 0 {
             return false;
         }
         let mut disk_index = self.entry_index.lock().unwrap();
@@ -400,7 +399,7 @@ impl DiskCacheShard {
         .filter_map(|key| {
             let entry = &disk_index.entries_by_key[key];
             let chunk_count = entry.chunk_count() as usize;
-            (chunk_count <= *remaining_eviction_chunk_budget).then(|| {
+            (chunk_count <= *remaining_eviction_chunks).then(|| {
                 let score =
                     disk.retention_scorer
                         .score(key, entry.payload_len, entry.payload_len, &disk.access_histories);
@@ -409,7 +408,7 @@ impl DiskCacheShard {
         })
         .min_by(|(_, left_score, _), (_, right_score, _)| left_score.total_cmp(right_score));
         if let Some((&key, _, chunk_count)) = selected_candidate {
-            *remaining_eviction_chunk_budget -= chunk_count;
+            *remaining_eviction_chunks -= chunk_count;
             self.remove_entry_from_index(disk_index, &key);
         }
         true
@@ -441,12 +440,6 @@ impl DiskEntry {
             self.shared_read = Arc::downgrade(&read);
             read
         })
-    }
-
-    /// Checks whether this entry references the given read, so late completions cannot change a replacement.
-    fn references_read(&self, read: &Arc<PayloadRead>) -> bool {
-        let weak = Arc::downgrade(read);
-        self.shared_read.ptr_eq(&weak)
     }
 
     fn chunk_count(&self) -> u64 {

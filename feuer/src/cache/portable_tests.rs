@@ -38,10 +38,10 @@ fn memory_only_constructors_and_lookups_need_no_runtime() {
         })
         .unwrap();
         assert_eq!(
-            ready(cache.get_or_fetch_object("failed".into(), || async { Err("source failed") })),
+            ready(cache.get_or_fetch("failed".into(), || async { Err("source failed") })),
             Err(GetOrFetchError::Callback("source failed"))
         );
-        let bytes = ready(cache.get_or_fetch_object("object".into(), || async {
+        let bytes = ready(cache.get_or_fetch("object".into(), || async {
             Ok::<_, &str>(Bytes::from_static(b"payload"))
         }))
         .unwrap();
@@ -79,8 +79,7 @@ fn memory_only_constructor_preserves_retention_scorer() {
     .unwrap();
     // More entries than memory shards force eviction to consult the supplied scorer.
     for index in 0..65 {
-        ready(cache.get_or_fetch_object(index.to_string(), || async { Ok::<_, &str>(Bytes::from_static(b"x")) }))
-            .unwrap();
+        ready(cache.get_or_fetch(index.to_string(), || async { Ok::<_, &str>(Bytes::from_static(b"x")) })).unwrap();
     }
     assert!(scorer.0.load(Ordering::Relaxed) > 0);
 }

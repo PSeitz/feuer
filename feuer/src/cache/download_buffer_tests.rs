@@ -25,9 +25,8 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
     let mut buffer = cache.allocate_buffer(4).unwrap();
     assert_eq!(buffer.as_ref().as_ptr(), address);
     buffer.as_mut_slice().copy_from_slice(b"abcd");
-    let download = buffer.into_download();
     let result = cache
-        .get_or_fetch("object".to_owned(), || async { Ok::<_, &str>(download) })
+        .get_or_fetch_buffer("object".to_owned(), || async { Ok::<_, &str>(buffer) })
         .await
         .unwrap();
     assert_eq!(result.as_ref(), b"abcd");
@@ -38,8 +37,8 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
         capacity as f64
     );
     let hit = cache
-        .get_or_fetch("object".to_owned(), || async {
-            Err::<Download, _>("memory hit must not download")
+        .get_or_fetch_buffer("object".to_owned(), || async {
+            Err::<AlignedBuffer, _>("memory hit must not download")
         })
         .await
         .unwrap();
@@ -48,12 +47,12 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
     for payload in [Bytes::new(), Bytes::from_static(b"abcdef")] {
         let key = format!("whole-object-{}", payload.len());
         let bytes = cache
-            .get_or_fetch_object(key.clone(), || async { Ok::<_, &str>(payload.clone()) })
+            .get_or_fetch(key.clone(), || async { Ok::<_, &str>(payload.clone()) })
             .await
             .unwrap();
         assert_eq!(bytes, payload);
         let hit = cache
-            .get_or_fetch_object(key.clone(), || async { Err::<Bytes, _>("must hit memory") })
+            .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("must hit memory") })
             .await
             .unwrap();
         assert_eq!(hit, payload);

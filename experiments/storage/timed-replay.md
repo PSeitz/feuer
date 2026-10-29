@@ -25,8 +25,9 @@ and derived inputs, which are not the FETR format.
 - **Replay the first 10 minutes by default.** Do not launch additional repetitions
   without an explicit request. The historical 180-second four-case matrix took
   about 16 minutes. Full-trace duration depends on backlog.
-- Real `TieredMemoryDiskCache::get_or_fetch`: memory cache, SSD reads/writes,
-  write-queue admission, packing, eviction, and the revision's metadata writer.
+- Real tiered lookups through `get_or_fetch_buffer_by_hash` in current FETR replay:
+  memory cache, SSD reads/writes, write-queue admission, packing, eviction, and
+  the revision's metadata writer.
 - Current FETR replay: one paced sender and one lookup task per arrival, with one
   runtime thread per CPU. Do not cap outstanding lookups at the thread count or
   reapply Pomsky's split warmup permits to already-recorded starts. Preserve original
@@ -34,9 +35,9 @@ and derived inputs, which are not the FETR format.
   tasks allocate payloads. Do not throttle arrivals, drop requests, or hide backlog.
   Historical pinned harnesses below used one serial consumer per CPU.
 - Each source miss independently acquires a buffer through the cache's existing
-  `allocate_buffer` pool, zero-fills the requested bytes, and preserves backing
-  capacity with `into_download`. There are no shared source downloads or expanded
-  ranges. Downloads are immediate unless the experiment explicitly selects
+  `allocate_buffer` pool, zero-fills the requested bytes, and returns the
+  `AlignedBuffer`. The cache charges backing capacity and converts it to shared
+  `Bytes` without copying. There are no shared source downloads or expanded ranges. Downloads are immediate unless the experiment explicitly selects
   `--simulate-s3`. Historical pinned replays used exact-length `Vec` allocations
   and must not be relabeled as using the buffer pool.
 - Match allocators between binaries. The historical comparison used system jemalloc:

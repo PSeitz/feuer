@@ -39,6 +39,9 @@ impl ObjectAccessHistories {
     }
 
     /// Creates empty history with a fixed decay half-life in requests across all keys.
+    ///
+    /// # Panics
+    ///
     /// Panics if the half-life is zero.
     pub fn with_half_life(half_life: u64) -> Self {
         assert!(half_life > 0, "access count half-life must be greater than zero");
@@ -49,7 +52,7 @@ impl ObjectAccessHistories {
         }
     }
 
-    /// Returns the decay half-life used when recording and evaluating request counts.
+    /// Returns the decay half-life in requests across all keys.
     pub fn half_life(&self) -> u64 {
         self.half_life
     }

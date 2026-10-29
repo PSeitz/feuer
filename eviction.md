@@ -13,7 +13,7 @@ consistent unit. Source cost is the work needed to obtain a missing result.
 
 ## Current scoring
 
-Both tiers sample eligible entries and evict the lowest retention score.
+Both tiers sample eligible entries and evict the entry with the lowest retention score.
 `AvoidedRetrievalCostScorer` computes:
 
 ```text
@@ -59,9 +59,9 @@ disk can also overvalue copies of memory-hot objects.
 
 Disk alignment and memory allocation buckets make costs non-linear. For
 example, a 10-byte payload may require a 4-KiB disk read and occupy a 32-KiB pooled
-memory buffer. `Download::new` defaults to payload-length charges, while disk
-promotions and `AlignedBuffer::into_download` charge backing capacity. Use the
-entry charge.
+memory buffer. `get_or_fetch` charges payload length, while disk
+promotions and `get_or_fetch_buffer` charge backing capacity. A custom
+scorer receives this charge as `entry_size_bytes`.
 
 Applications can supply a custom scorer when linear size-based costs are
 insufficient. Eviction accounts for size, demand, and avoided fixed costs.
@@ -87,8 +87,8 @@ entry size, and request history. It can own per-object computation costs keyed b
 byte normalization belongs to the scorer.
 
 Scoring runs concurrently under shard locks. Avoid I/O, cache re-entry, and lock
-ordering that could deadlock with cache operations. Application-owned metadata is
-neither persisted nor removed by the cache, including on eviction. Separate tier
+ordering that could deadlock with cache operations. Applications own the persistence
+and cleanup of their scoring metadata, including after eviction. Separate tier
 scorers identify the tier without adding a tier argument to the scoring contract.
 
 See [environment variables](README.md#environment-variables) for tuning settings.

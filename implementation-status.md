@@ -9,7 +9,7 @@ callback**. The [contract](tiered-plan.md) describes behavior, and the
 | Crate | Responsibility |
 | --- | --- |
 | `feuer` | Cloneable tiered handle, lookup, shared in-flight work, optional disk-pressure fallthrough, metrics, and access tracing |
-| `feuer-types` | XXH3-128 object identity and infallible `Download::new(Bytes)` with optional allocation charge |
+| `feuer-types` | XXH3-128 object identity |
 | `feuer-historian` | One decayed request counter per object, shared by both tiers and independent of cache residency |
 | `feuer-memory` | Sharded object index, sampled eviction, cached allocation accounting, and aligned buffer pool |
 | `feuer-storage` | Linux direct I/O and io_uring, object index, payload checksums, chunk packing, background writes, metadata persistence, and recovery |
@@ -17,9 +17,11 @@ callback**. The [contract](tiered-plan.md) describes behavior, and the
 
 ## Lookup and retention
 
-- `get_or_fetch(key, callback)` accepts a `Download`. The object convenience
-  APIs accept `Bytes`, optionally with a backing allocation charge. `get_object`
-  performs lookup without a source callback.
+- `get_or_fetch(key, callback)` accepts a callback returning `Result<Bytes, E>`
+  and charges payload length. `get_or_fetch_buffer` accepts `Result<AlignedBuffer, E>`,
+  charges capacity, and converts to shared `Bytes` without copying. `feuer`
+  reexports `AlignedBuffer`. Both APIs have `_with_disk_fallthrough` variants.
+  `get_object` performs lookup without a source callback.
 - Empty objects are valid. Keys identify immutable content. Both tiers suppress
   duplicate insertions.
 - Matching concurrent misses share one disk-or-callback operation by key and
@@ -34,9 +36,9 @@ callback**. The [contract](tiered-plan.md) describes behavior, and the
 
 ## Memory and buffers
 
-Cached allocation charges and idle buffers share the memory target. Downloads
-with unknown backing capacity charge payload length. Disk reads and pooled
-downloads charge retained buffer capacity. Entry targets are split among shards,
+Cached allocation charges and idle buffers share the memory target. `get_or_fetch`
+charges payload length. Disk reads and `get_or_fetch_buffer` charge retained buffer
+capacity. Entry targets are split among shards,
 and an oversized object can exceed its shard's target after evicting its peers.
 
 Each memory cache owns an aligned pool shared with storage readers and downloaders.
@@ -46,11 +48,13 @@ the target. The target is not an RSS limit.
 
 ## Disk and I/O
 
+- Disk APIs accept and return payloads as `Bytes`.
 - Zero disk capacity disables storage. Otherwise Linux direct I/O and io_uring are
   required, and opening waits for every shard's metadata recovery.
 - A 512-entry queue schedules best-effort writes independently of memory retention.
-  Queue pressure skips writes. Payload bytes have no separate queue byte limit.
-- Small entries share 1-MiB payload chunks, flushed on full/no-fit or every minute.
+  A full or closed queue skips writes. Payload bytes have no separate queue byte limit.
+- Small entries share 1-MiB payload chunks. A chunk flushes when full, when the next
+  small entry will not fit, or every minute.
   Entries at least 512 KiB after alignment reserve consecutive chunks independently.
   Each payload is contiguous, with metadata in separate chunks.
 - Readers copy buffered objects or read and verify persisted objects.
@@ -71,12 +75,12 @@ Portable tests cover types, history, memory, configuration, and tier orchestrati
 Storage execution requires Linux with direct I/O and io_uring. Use the repository's
 [SSD testing instructions](experiments/storage/timed-replay.md) for real-device
 validation. Test results and historical measurements live under [experiments](experiments/README.md).
-Older reports describe the implementation tested at that time, not current APIs.
+Older reports describe the implementation tested at that time.
 
 Remaining evaluation includes crash and power-loss recovery testing, target-scale
 metadata and fragmentation measurements, contention and tail-latency analysis,
 and controlled comparisons with matched object workloads and source costs.
 The current linear scorer does not inspect disk residency or queue state. Its
 policy quality and allocator behavior require workload-specific measurements.
-Buffered I/O, hard process-memory limits, and stable disk-format compatibility are
-not implemented guarantees.
+Feuer requires direct I/O for disk storage, uses a soft memory target, and discards
+entries from incompatible disk formats.

@@ -1,6 +1,6 @@
 # Disk cache format v15
 
-Experimental, best-effort cache format; no durability or compatibility guarantee.
+Experimental, best-effort cache format with no durability or compatibility guarantee.
 
 ## Overview
 
@@ -12,8 +12,8 @@ The first 1-MiB chunk is reserved for a global header. The remaining file is div
 - **Payload chunks** hold the cached bytes. Each entry's payload is a contiguous
   byte range, separate from metadata, and may span consecutive chunks.
 
-Example: A and B share a payload chunk; C spans consecutive payload chunks.
-Arrows are stored references, not physical disk order.
+Example: A and B share a payload chunk. C spans consecutive payload chunks.
+Arrows show stored references.
 
 ```mermaid
 flowchart TB
@@ -54,7 +54,7 @@ of the payload checksum.
   A configured filename uses `.feuer.<filename>.lock`; different files may share a directory.
 - Integers are unsigned little-endian; addresses are absolute byte offsets in the backing file.
 - The first chunk stores global metadata, separate from shard metadata and payload chunks.
-- No persistent free-space map; ownership is reconstructed on open.
+- Chunk ownership and free space are reconstructed on open.
 
 ## Global header
 
@@ -103,7 +103,7 @@ Every page begins with this 32-byte header:
 | --- | --- | --- |
 | 0 | 8 | Seed-zero XXHash64 of page bytes `[8, 4096)` |
 | 8 | 8 | Reserved; zero |
-| 16 | 8 | Slot count: 101 for records, 1 for next-chunk address |
+| 16 | 8 | Count: 101 entry records or 1 next-chunk address |
 | 24 | 8 | ASCII tag: `FEUDES15` for records, `FEUNXT15` for next-chunk address |
 
 A record page holds 101 consecutive 40-byte records after the header, then 24 zero
@@ -131,14 +131,15 @@ also 4-KiB-aligned. There are no metadata gaps within a payload.
 Entries with 4-KiB-aligned storage length below 512 KiB share unfinished chunks.
 Larger entries start at a chunk boundary and occupy consecutive whole chunks
 exclusively. Written chunks are not appended to; individual payload holes are not reused.
-The background writer flushes full/no-fit chunks immediately and partial chunks every
-60 seconds. Larger writes do not flush pending small entries. Closing discards partial chunks.
+The background writer flushes a chunk when full or when the next small entry will
+not fit. It flushes partial chunks every 60 seconds. Larger writes do not flush
+pending small entries. Closing discards partial chunks.
 
 ## Write ordering and reuse
 
-1. Reserve payload chunks at flush time, not while buffering. Grow metadata chunks as needed, but take entry
+1. Reserve payload chunks at flush time. Grow metadata chunks as needed, but take entry
    positions only after successful payload I/O. Publication holds the index lock and requires metadata capacity
-   for the whole flush; otherwise discard the written payload. Publication takes the earliest free
+   for the whole flush. If capacity is insufficient, discard the written payload. Publication takes the earliest free
    position in recovery scan order, so live records claim reused payload chunks before remaining
    stale records. Metadata updates mark their pages dirty.
 2. One metadata writer runs every second after recovery. It encodes dirty pages under the
@@ -165,7 +166,7 @@ links outside the current shard, links not aligned to a chunk boundary, cycles, 
 Corrupt record pages are discarded independently.
 
 A page's checksum and type/version tag establish the writer's format contract.
-Readers use fixed-size pages and records and do not recheck reserved fields, slot
+Readers use fixed-size pages and records and do not recheck reserved fields, entry
 counts, padding, or payload address alignment. Payload packing places each object's
 aligned storage inside reserved consecutive chunks, and metadata links use reserved
 chunk addresses.

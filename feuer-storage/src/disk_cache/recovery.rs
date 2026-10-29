@@ -1,4 +1,4 @@
-//! Recover entries by following metadata chunks, never by scanning payload chunks.
+//! Recover entries by following the metadata chunk chain.
 
 use std::ops::Range;
 

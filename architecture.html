@@ -39,9 +39,12 @@
     <details open>
       <summary>Lookup API</summary>
       <p><code>get_or_fetch(key, callback)</code> returns the object as <code>Bytes</code>.
-        Its asynchronous callback returns <code>Result&lt;Download, E&gt;</code>.
-        <code>Download::new(bytes)</code> is infallible. Empty objects are valid.</p>
-      <p><code>get_or_fetch_object</code> accepts a <code>Bytes</code> callback instead.
+        Its asynchronous callback returns <code>Result&lt;Bytes, E&gt;</code>, charged by payload length.
+        Empty objects are valid.</p>
+      <p><code>get_or_fetch_buffer</code> accepts a callback returning <code>Result&lt;AlignedBuffer, E&gt;</code>,
+        charges buffer capacity, and converts to shared <code>Bytes</code> without copying.
+        <code>AlignedBuffer</code> is reexported by <code>feuer</code>.
+        Both APIs have <code>_with_disk_fallthrough</code> variants.
         <code>get_object</code> checks memory and disk without invoking or waiting for a source callback.
         No lookup requires the object's length in advance.</p>
       <p>Keys identify immutable content, including across restarts. Feuer stores a seed-zero XXH3-128 hash,
@@ -73,11 +76,11 @@
       <summary>Allocation accounting and buffer reuse</summary>
       <p>Cached allocation charges and idle buffers share a soft memory target. Entry targets are divided among
         shards. An oversized object empties its shard and remains cached, so retained charges can exceed the target.</p>
-      <p>Downloads default to payload-length charges. <code>Download::with_allocation_charge</code> supplies known
-        backing capacity. Disk promotions and <code>AlignedBuffer::into_download()</code> charge retained capacity.
+      <p><code>get_or_fetch</code> charges payload length.
+        Disk promotions and <code>get_or_fetch_buffer</code> charge retained buffer capacity.
         Shared allocations are conservatively charged per entry.</p>
       <p><code>cache.allocate_buffer(length)</code> uses the same aligned pool as disk reads.
-        Fill <code>as_mut_slice()</code> and convert with <code>into_download()</code> without copying.
+        Fill <code>as_mut_slice()</code> and return the buffer from a <code>get_or_fetch_buffer</code> callback.
         Buffers become reusable only after their last owner releases them.</p>
       <p>All buckets share an idle ceiling of 7% of memory capacity by default. Admission frees idle buffers first.
         Buffer returns never evict entries. Caller-only results, active I/O, metadata, and pending writes are outside the target.</p>
@@ -88,12 +91,13 @@
     <h2>Disk</h2>
     <details open>
       <summary>Reads and integrity</summary>
+      <p>Disk APIs accept and return payloads as <code>Bytes</code>.</p>
       <p>A disk index maps each object hash to its payload address, length, checksum, and metadata position.
         Lookups copy buffered objects or read and verify the persisted payload.
         They do not read neighboring objects or metadata on the lookup path.</p>
       <p>Concurrent readers can share a read. Readers hold an address and expected checksum, not a disk reservation.
         Eviction may release chunks while reads are outstanding. Read errors and checksum mismatches become misses.
-        Checksum-failure invalidation checks read identity so it cannot remove a racing replacement.</p>
+        Checksum failures remove an entry only if the index still points to the entry that was read.</p>
       <p>A disk hit promotes the object to memory without another write. Buffered or flushing data can miss before publication.</p>
       <a href="feuer-storage/src/disk_cache.rs">Source: disk cache</a>
     </details>
@@ -102,7 +106,7 @@
       <p>The first 1-MiB chunk holds a global header. Remaining chunks hold payload bytes or metadata.
         Each payload is a contiguous disk byte range, with 4-KiB-aligned address and storage length.
         Empty objects still reserve at least 4 KiB.</p>
-      <p>Entries below 512 KiB aligned size share immutable 1-MiB chunks. Larger objects reserve consecutive chunks
+      <p>Entries below 512 KiB aligned size share 1-MiB chunks. Larger objects reserve consecutive chunks
         exclusively. Written chunks cannot be appended to. A chunk becomes reusable after its last entry is removed.</p>
       <p>Format v15 uses 40-byte records: key hash, payload length, address, and payload checksum.
         A metadata chunk contains 255 record pages and one next-chunk page. Pages are 4 KiB and independently checksummed.</p>
@@ -110,8 +114,9 @@
     </details>
     <details>
       <summary>Best-effort writes and recovery</summary>
-      <p>A 512-entry queue schedules downloads after memory admission. Queue pressure skips writes without failing
-        lookups. Small-entry chunks flush on full/no-fit or every 60 seconds. Larger entries write independently.
+      <p>A 512-entry queue schedules disk writes after memory admission. A full or closed queue skips writes without
+        failing lookups. Small-entry chunks flush when full, when the next small entry will not fit, or every
+        60 seconds. Larger entries write independently.
         Closing discards partial chunks. Memory eviction does not cancel queued writes.</p>
       <p>Payload completion precedes publication. A separate periodic writer persists dirty metadata pages.
         Opening follows linked metadata chunks without scanning payloads and waits for all shards to recover.</p>
@@ -145,7 +150,7 @@
         The default half-life is 262,144 requests across all keys. Counters have no capacity limit and are not persisted.</p>
       <p>The default scorer weights avoided fixed and per-byte retrieval costs by decayed demand, then divides by
         memory allocation charge or disk payload length. Separate tier scorers can share the same history.</p>
-      <p>Custom scorers receive the key, payload length, tier-specific size, and history. Scores must be finite.
+      <p>Custom scorers receive the key hash, payload length, tier-specific size, and history. Scores must be finite.
         Scoring runs under shard locks, so avoid I/O and cache re-entry.</p>
       <a href="eviction.md">Eviction formula and scorer contract</a>
     </details>

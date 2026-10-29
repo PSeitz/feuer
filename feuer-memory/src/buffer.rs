@@ -182,8 +182,6 @@ impl Drop for BufferPool {
 /// After conversion to `Bytes`, it returns to its pool only when the last owner drops it.
 /// On Linux, capacities above 64 MiB use anonymous mappings. Resizing stays in that
 /// bucket, so capacity also determines how the allocation is released.
-///
-/// This buffer is strongly aligned with my values (performance)
 pub struct AlignedBuffer {
     ptr: NonNull<u8>,
     layout: Layout,
@@ -276,8 +274,8 @@ impl AlignedBuffer {
         Ok(self)
     }
 
-    fn layout(length: usize) -> io::Result<Layout> {
-        Layout::from_size_align(length, BUFFER_ALIGNMENT)
+    fn layout(capacity: usize) -> io::Result<Layout> {
+        Layout::from_size_align(capacity, BUFFER_ALIGNMENT)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "buffer length exceeds allocation limit"))
     }
 
@@ -289,12 +287,6 @@ impl AlignedBuffer {
     /// Transfers this allocation to reference-counted bytes without copying.
     pub fn into_bytes(self) -> Bytes {
         Bytes::from_owner(self)
-    }
-
-    /// Transfers this allocation into a download without copying, preserving its capacity charge.
-    pub fn into_download(self) -> feuer_types::Download {
-        let capacity = self.capacity();
-        feuer_types::Download::new(self.into_bytes()).with_allocation_charge(capacity)
     }
 
     /// Exclusively accesses the requested bytes, never spare capacity.
