@@ -25,20 +25,21 @@ fn repeat_request(cache: &MemoryCache, key: ObjectKeyHash, count: u64) {
 }
 
 #[test]
-fn idle_buffer_pool_percent_is_independent_per_cache() {
+fn idle_buffers_use_all_remaining_cache_capacity() {
     let size = 32 * 1024;
     let capacity = 4 * size as u64;
-    let caches: Vec<_> = [0, 25, 100]
-        .into_iter()
-        .map(|percent| MemoryCache::with_metrics(capacity, MemoryMetrics::noop(), percent))
-        .collect();
-    for (cache, expected_buffers) in caches.iter().zip([0, 1, 4]) {
-        let pool = cache.buffer_pool();
-        let buffers: Vec<_> = (0..5).map(|_| pool.allocate(size).unwrap()).collect();
-        drop(buffers);
-        assert_eq!(pool.idle_bytes(), expected_buffers * size as u64);
-        assert_eq!(cache.used_bytes(), expected_buffers * size as u64);
-    }
+    let cache = MemoryCache::with_metrics(capacity, MemoryMetrics::noop());
+    cache.insert("cached".into(), Bytes::from_static(b"x"), size);
+    let pool = cache.buffer_pool();
+    let buffers: Vec<_> = (0..5).map(|_| pool.allocate(size).unwrap()).collect();
+    drop(buffers);
+    assert_eq!(pool.idle_bytes(), 3 * size as u64);
+    assert_eq!(cache.used_bytes(), capacity);
+    cache.remove(&"cached".into());
+    let buffers: Vec<_> = (0..4).map(|_| pool.allocate(size).unwrap()).collect();
+    drop(buffers);
+    assert_eq!(pool.idle_bytes(), capacity);
+    assert_eq!(cache.used_bytes(), capacity);
 }
 
 #[test]
@@ -86,20 +87,21 @@ fn cached_capacity_drives_eviction_not_payload_length() {
     assert_eq!(cache.used_bytes(), 32 * 1024);
     assert_eq!(cache.buffer_pool().idle_bytes(), 0);
     cache.remove(&"second".into());
-    assert_eq!(cache.used_bytes(), 0);
+    assert_eq!(cache.used_bytes(), 32 * 1024);
+    assert_eq!(cache.buffer_pool().idle_bytes(), 32 * 1024);
 }
 
 #[test]
 fn cached_entries_displace_idle_buffers_and_released_bursts_cannot_displace_entries() {
     let buffer_capacity = 256 * 1024;
-    let capacity = 100 * buffer_capacity;
+    let capacity = 7 * buffer_capacity;
     let cache = cache(capacity as u64);
     let pool = cache.buffer_pool();
     let burst: Vec<_> = (0..8).map(|_| pool.allocate(buffer_capacity).unwrap()).collect();
     drop(burst);
-    assert_eq!(pool.idle_bytes(), capacity as u64 * 7 / 100);
+    assert_eq!(pool.idle_bytes(), capacity as u64);
     drop(pool.allocate(1).unwrap());
-    assert_eq!(pool.idle_bytes(), capacity as u64 * 7 / 100);
+    assert_eq!(pool.idle_bytes(), capacity as u64);
     let waiting = pool.allocate(buffer_capacity).unwrap();
     cache.insert("full".into(), Bytes::from(vec![0; capacity]), capacity);
     assert_eq!(pool.idle_bytes(), 0);

@@ -11,11 +11,8 @@ use parking_lot::Mutex;
 use rustc_hash::FxBuildHasher;
 
 use self::shard::{InsertResult, MemoryCacheShard};
-#[cfg(feature = "benchmark")]
-use crate::read_idle_buffer_pool_percent;
 use crate::{
     BufferPool, MemoryMetrics,
-    buffer::DEFAULT_IDLE_BUFFER_POOL_PERCENT,
     retention::{AvoidedRetrievalCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer},
 };
 
@@ -58,16 +55,12 @@ impl fmt::Debug for MemoryCache {
 impl MemoryCache {
     /// Creates a cache with a shared allocation-byte target, empty history, and no-op metrics.
     pub fn new(capacity: u64) -> Self {
-        Self::with_metrics(capacity, MemoryMetrics::noop(), DEFAULT_IDLE_BUFFER_POOL_PERCENT)
+        Self::with_metrics(capacity, MemoryMetrics::noop())
     }
 
-    /// Creates a cache with registered metrics and an idle buffer ceiling (0–100) of its capacity.
-    /// Zero disables idle retention. Panics if the percentage exceeds 100.
-    pub fn with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>, idle_buffer_pool_percent: u64) -> Self {
-        Self::with_shard_count(
-            BufferPool::with_idle_buffer_pool_percent(capacity, metrics, idle_buffer_pool_percent),
-            default_shard_count(),
-        )
+    /// Creates a cache with registered metrics. Idle buffers use capacity left by cached entries.
+    pub fn with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self {
+        Self::with_shard_count(BufferPool::new(capacity, metrics), default_shard_count())
     }
 
     /// Consults the supplied request history for retention decisions.
@@ -78,12 +71,10 @@ impl MemoryCache {
     }
 
     /// Creates a cache with an explicit shard count for controlled benchmarks.
-    /// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT`. Panics if it is invalid.
     #[cfg(feature = "benchmark")]
     #[doc(hidden)]
     pub fn with_shards_for_benchmark(capacity: u64, num_shards: usize) -> Self {
-        let percent = read_idle_buffer_pool_percent().unwrap_or_else(|error| panic!("{error}"));
-        let buffer_pool = BufferPool::with_idle_buffer_pool_percent(capacity, MemoryMetrics::noop(), percent);
+        let buffer_pool = BufferPool::new(capacity, MemoryMetrics::noop());
         Self::with_shard_count(buffer_pool, num_shards)
     }
 

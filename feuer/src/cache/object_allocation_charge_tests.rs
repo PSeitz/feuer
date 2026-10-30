@@ -2,15 +2,12 @@ use super::*;
 use crate::test_metrics::{registry, value};
 use prometheus::Registry;
 
-/// Create a memory cache with metrics and idle-buffer retention disabled.
+/// Create a memory cache with metrics.
 fn memory_cache(memory_capacity: u64, metrics_registry: &BoxedRegistry) -> Cache {
     Cache {
         inner: Arc::new(CacheInner {
-            config: CacheConfig::new("unused", 0, memory_capacity)
-                .unwrap()
-                .with_idle_buffer_pool_percent(0)
-                .unwrap(),
-            memory: MemoryCache::with_metrics(memory_capacity, MemoryMetrics::new(metrics_registry), 0),
+            config: CacheConfig::new("unused", 0, memory_capacity).unwrap(),
+            memory: MemoryCache::with_metrics(memory_capacity, MemoryMetrics::new(metrics_registry)),
             metrics: LookupMetrics::new(metrics_registry),
             pending_fetches: PendingFetches::default(),
             #[cfg(target_os = "linux")]
@@ -70,7 +67,14 @@ async fn shared_bytes_slices_charge_payload_length() {
         allocation_capacity as f64
     );
     assert!(cache.inner.memory.remove(&ObjectKeyHash::from(object_keys[1])));
-    assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 0.0);
+    assert_eq!(
+        value(&registry, "feuer_memory_used_bytes", &[]),
+        allocation_capacity as f64
+    );
+    assert_eq!(
+        cache.inner.memory.buffer_pool().idle_bytes(),
+        allocation_capacity as u64
+    );
     assert_eq!(checked_out_buffer_capacity(&registry, "2 MiB"), 0.0);
 }
 
@@ -91,7 +95,11 @@ async fn allocation_capacity_drives_eviction() {
     let entry_count = value(&registry, "feuer_memory_entries", &[]);
     let charged_bytes = value(&registry, "feuer_memory_used_bytes", &[]);
     assert!(entry_count > 0.0 && entry_count < 65.0);
-    assert_eq!(charged_bytes, entry_count * (32 * 1024) as f64);
+    let cached_bytes = entry_count * (32 * 1024) as f64;
+    assert_eq!(
+        charged_bytes,
+        cached_bytes + cache.inner.memory.buffer_pool().idle_bytes() as f64
+    );
     assert!(charged_bytes <= memory_capacity as f64);
-    assert_eq!(checked_out_buffer_capacity(&registry, "32 KiB"), charged_bytes);
+    assert_eq!(checked_out_buffer_capacity(&registry, "32 KiB"), cached_bytes);
 }

@@ -45,7 +45,7 @@ reads charge retained buffer capacity. Entry targets are split among shards,
 and an oversized object can exceed its shard's target after evicting its peers.
 
 Each memory cache owns an aligned pool shared with storage readers and downloaders.
-All buckets share an idle ceiling of 7% of memory capacity by default. Caller-held
+Idle buffers share all capacity left by cached entries. Caller-held
 results, active I/O, metadata, history, and pending writes can retain memory outside
 the target. The target is not an RSS limit.
 

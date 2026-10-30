@@ -148,9 +148,8 @@ Use `0.50` or `0.99` for p50 or p99. Percentiles are estimated from the buckets.
 Each memory-cache instance owns one pool with fixed allocation sizes of 32 KiB,
 256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB, 8 MiB, 16 MiB, 32 MiB, and 64 MiB.
 Cached allocation charges and idle buffers share the configured memory capacity.
-The idle pool is capped at 7% of that capacity by default. All buckets share this
-ceiling, without per-bucket caps or reservations.
-`FEUER_IDLE_BUFFER_POOL_PERCENT` sets this percentage (0–100); zero disables idle retention.
+Idle buffers can use all capacity left by cached entries. All buckets share this
+budget, without per-bucket caps or reservations. Admission frees idle buffers when needed.
 Larger allocations share one idle bucket; reuse grows to fit and shrinks only when capacity
 is at least 10% larger than the requested length. Accounting includes any retained spare capacity.
 On Linux, these buffers use `mmap`/`mremap`/`munmap`. Writes use aligned input slices or unpooled scratch.

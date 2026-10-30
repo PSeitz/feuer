@@ -5,11 +5,13 @@
 use std::{
     array::from_fn,
     hash::BuildHasher,
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    thread,
+    time::Duration,
 };
 
 use feuer_types::ObjectKeyHash;
@@ -18,12 +20,13 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 /// Independent of the number of memory or disk cache shards.
 const ACCESS_HISTORY_SHARDS: usize = 64;
 
-/// Request history shared by both cache tiers, independent of their shards and entries.
+/// Request history shared by both cache tiers.
 /// Object keys select one of 64 independently locked history maps. The request clock remains global.
-/// Each key's counter lasts for the history's lifetime, including after cache eviction.
-/// A restart begins with empty history.
+/// Counters survive cache eviction. Once per second, one background worker checks the entry limit
+/// and removes the least recently requested keys, targeting 90% of the limit.
+/// The limit is a soft threshold. A restart begins with empty history.
 pub struct ObjectAccessHistories {
-    shards: [Mutex<FxHashMap<ObjectKeyHash, DecayedRequestCount>>; ACCESS_HISTORY_SHARDS],
+    shards: Arc<[Mutex<FxHashMap<ObjectKeyHash, DecayedRequestCount>>; ACCESS_HISTORY_SHARDS]>,
     request_count: AtomicU64,
     half_life: NonZeroU64,
 }
@@ -42,10 +45,44 @@ impl ObjectAccessHistories {
 
     /// Creates empty history with a fixed decay half-life in requests across all keys.
     pub fn with_half_life(half_life: NonZeroU64) -> Self {
+        Self::with_half_life_and_entry_limit(half_life, DEFAULT_HISTORY_ENTRY_LIMIT)
+    }
+
+    /// Creates empty history with a fixed decay half-life and an entry-count cleanup threshold.
+    /// Cleanup needs no async runtime and locks only one history shard at a time.
+    pub fn with_half_life_and_entry_limit(half_life: NonZeroU64, entry_limit: NonZeroUsize) -> Self {
+        let shards = Arc::new(from_fn(|_| Mutex::default()));
+        let weak = Arc::downgrade(&shards);
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(1));
+                let Some(shards) = weak.upgrade() else { break };
+                Self::remove_oldest(&*shards, entry_limit.get());
+            }
+        });
         Self {
-            shards: from_fn(|_| Mutex::default()),
+            shards,
             request_count: AtomicU64::new(0),
             half_life,
+        }
+    }
+
+    fn remove_oldest(shards: &[Mutex<FxHashMap<ObjectKeyHash, DecayedRequestCount>>], limit: usize) {
+        let count: usize = shards.iter().map(|shard| shard.lock().unwrap().len()).sum();
+        if count <= limit {
+            return;
+        }
+        let mut clocks = Vec::with_capacity(count);
+        for shard in shards {
+            clocks.extend(shard.lock().unwrap().values().map(|count| count.last_update_clock));
+        }
+        let cutoff_index = clocks.len() - (limit - limit / 10) - 1;
+        let cutoff = *clocks.select_nth_unstable(cutoff_index).1;
+        for shard in shards {
+            let mut histories = shard.lock().unwrap();
+            // Requests since the snapshot have newer clocks and keep their history.
+            histories.retain(|_, count| count.last_update_clock > cutoff);
+            histories.shrink_to_fit();
         }
     }
 
@@ -92,6 +129,9 @@ impl ObjectAccessHistories {
 
 /// Default half-life of access counts, in requests across all keys.
 pub const DEFAULT_ACCESS_COUNT_HALF_LIFE: NonZeroU64 = NonZeroU64::new(262_144).unwrap();
+
+/// Default entry count above which background cleanup removes old history.
+pub const DEFAULT_HISTORY_ENTRY_LIMIT: NonZeroUsize = NonZeroUsize::new(2_000_000).unwrap();
 
 /// A request count that decays as requests accumulate across all object keys.
 #[derive(Default)]
@@ -164,5 +204,7 @@ impl DecayedRequestCount {
     }
 }
 
+#[cfg(test)]
+mod cleanup_tests;
 #[cfg(test)]
 mod tests;

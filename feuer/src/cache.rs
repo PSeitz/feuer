@@ -137,16 +137,13 @@ impl<'a> CacheBuilder<'a> {
         }
         let noop_metrics_registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
         let metrics_registry = self.metrics_registry.unwrap_or(&noop_metrics_registry);
-        let memory = MemoryCache::with_metrics(
-            config.memory_capacity(),
-            MemoryMetrics::new(metrics_registry),
-            config.idle_buffer_pool_percent(),
-        )
-        .with_access_histories(Arc::new(ObjectAccessHistories::with_half_life(
-            config.access_count_half_life(),
-        )))
-        .with_reclaim_sample_size(config.eviction().sample_size())
-        .with_retention_scorer(self.memory_scorer);
+        let memory = MemoryCache::with_metrics(config.memory_capacity(), MemoryMetrics::new(metrics_registry))
+            .with_access_histories(Arc::new(ObjectAccessHistories::with_half_life_and_entry_limit(
+                config.access_count_half_life(),
+                config.history_entry_limit(),
+            )))
+            .with_reclaim_sample_size(config.eviction().sample_size())
+            .with_retention_scorer(self.memory_scorer);
         #[cfg(target_os = "linux")]
         let disk = if config.disk_capacity() == 0 {
             None
@@ -623,21 +620,6 @@ mod tests {
             .await
             .unwrap();
         (directory, cache)
-    }
-
-    #[tokio::test]
-    async fn configured_idle_buffer_pool_percent_controls_retention() {
-        let size = 32 * 1024;
-        for (percent, expected) in [(0, 0), (25, size as u64)] {
-            let config = CacheConfig::new("unused", 0, 4 * size as u64)
-                .unwrap()
-                .with_idle_buffer_pool_percent(percent)
-                .unwrap();
-            let cache = Cache::builder(config).open().await.unwrap();
-            let buffers: Vec<_> = (0..2).map(|_| cache.allocate_buffer(size).unwrap()).collect();
-            drop(buffers);
-            assert_eq!(cache.inner.memory.buffer_pool().idle_bytes(), expected);
-        }
     }
 
     async fn wait_for_buffered(cache: &Cache, key: &str) {

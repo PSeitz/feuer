@@ -81,8 +81,14 @@ reads, insertions, and evictions do not record accesses or delete history.
 History hashes keys into 64 independently locked maps, separate from cache
 shards. One atomic request clock supplies request-age decay across all keys.
 The default half-life is 262,144 requests. Each object's counter survives cache
-eviction for the history object's lifetime. Counter metadata has no capacity
-limit and is not persisted across restarts.
+eviction until history cleanup removes it. History defaults to a soft limit of
+2,000,000 entries per cache, configurable through `FEUER_HISTORY_ENTRY_LIMIT` or
+`CacheConfig::with_history_entry_limit`.
+
+One background thread checks the limit each second and removes the least recently
+requested keys, targeting 90% of the limit. It locks one shard at a time and exits
+after the history is dropped. Removing history resets demand without removing
+cached payloads. History is not persisted across restarts.
 
 ## Custom retention scores
 

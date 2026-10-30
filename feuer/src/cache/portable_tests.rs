@@ -53,6 +53,28 @@ fn memory_only_builder_and_lookups_need_no_runtime() {
 }
 
 #[test]
+fn memory_only_history_cleanup_preserves_cached_payloads_without_a_runtime() {
+    assert!(Handle::try_current().is_err());
+    let config = CacheConfig::new("unused", 0, 1 << 20)
+        .unwrap()
+        .with_history_entry_limit(1)
+        .unwrap();
+    let cache = ready(Cache::builder(config).open()).unwrap();
+    let histories = cache.inner.memory.access_histories();
+    for key in ["old", "new"] {
+        ready(cache.get_or_fetch(key.into(), || async { Ok::<_, &str>(Bytes::from_static(b"payload")) })).unwrap();
+    }
+    let old = ObjectKeyHash::from("old");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while histories.decayed_request_count(&old) != 0.0 {
+        assert!(std::time::Instant::now() < deadline, "history cleanup did not finish");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(histories.decayed_request_count(&ObjectKeyHash::from("new")), 1.0);
+    assert_eq!(cache.inner.memory.get(&old), Some(Bytes::from_static(b"payload")));
+}
+
+#[test]
 fn memory_only_builder_preserves_retention_scorer() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 

@@ -151,11 +151,14 @@ See [eviction](eviction.md) for the formula, configuration examples, and trade-o
 | --- | --- | --- |
 | `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Candidates per eviction. Must be positive. |
 | `FEUER_ACCESS_COUNT_HALF_LIFE` | `262144` | Requests across keys before demand weight halves. Must be positive. |
-| `FEUER_IDLE_BUFFER_POOL_PERCENT` | `7` | Idle-buffer ceiling as a percentage of the memory target. Range 0–100. |
+| `FEUER_HISTORY_ENTRY_LIMIT` | `2000000` | History entry-count cleanup threshold per cache. Must be positive. |
 
 Values accept integers and size suffixes such as `8KiB` or `1.5 GiB`.
 Binary suffixes use powers of 1024, decimal suffixes powers of 1000.
 Invalid values cause `CacheConfig::new` to fail.
+
+`config.with_history_entry_limit(n)` overrides the soft history limit per cache.
+One background worker checks it each second and prunes the oldest requests to 90% of the limit.
 
 ## Development
 

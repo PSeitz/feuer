@@ -487,10 +487,7 @@ mod linux {
             let directory = tempdir().unwrap();
             let registry = Registry::new();
             let metrics: BoxedRegistry = Box::new(PrometheusMetricsRegistry::new(registry.clone()));
-            let config = CacheConfig::new(directory.path(), 0, 4 << 20)
-                .unwrap()
-                .with_idle_buffer_pool_percent(7)
-                .unwrap();
+            let config = CacheConfig::new(directory.path(), 0, 4 << 20).unwrap();
             let cache = Cache::builder(config).with_metrics(&metrics).open().await.unwrap();
             let source = SyntheticDownloads::new(&registry, false).unwrap();
             let request = Request {

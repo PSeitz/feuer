@@ -1,11 +1,11 @@
 use std::{
     ffi::OsStr,
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
 };
 
-use feuer_historian::DEFAULT_ACCESS_COUNT_HALF_LIFE;
-use feuer_memory::{read_idle_buffer_pool_percent, retention::RECLAIM_SAMPLE_SIZE};
+use feuer_historian::{DEFAULT_ACCESS_COUNT_HALF_LIFE, DEFAULT_HISTORY_ENTRY_LIMIT};
+use feuer_memory::retention::RECLAIM_SAMPLE_SIZE;
 use feuer_types::config::read_env_number;
 use thiserror::Error;
 
@@ -25,8 +25,8 @@ pub struct CacheConfig {
     payload_version: u64,
     disk_capacity: u64,
     memory_capacity: u64,
-    idle_buffer_pool_percent: u64,
     access_count_half_life: NonZeroU64,
+    history_entry_limit: NonZeroUsize,
     eviction: SampledEvictionConfig,
 }
 
@@ -37,8 +37,7 @@ impl CacheConfig {
     /// Uses [`SampledEvictionConfig::new`] for eviction settings.
     /// Reads `FEUER_ACCESS_COUNT_HALF_LIFE`, defaulting to 262,144 requests.
     /// The half-life must be positive and applies to both tiers of this cache.
-    /// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT` for the idle buffer ceiling, defaulting
-    /// to 7 when unset. The percentage must be between 0 and 100.
+    /// Reads `FEUER_HISTORY_ENTRY_LIMIT`, defaulting to 2,000,000 entries. Must be positive.
     pub fn new(
         directory: impl Into<PathBuf>,
         disk_capacity: u64,
@@ -57,8 +56,9 @@ impl CacheConfig {
             eviction: SampledEvictionConfig::new()?,
             access_count_half_life: read_env_number("FEUER_ACCESS_COUNT_HALF_LIFE", DEFAULT_ACCESS_COUNT_HALF_LIFE, 1)
                 .map_err(|_| CacheConfigError::InvalidAccessCountHalfLife)?,
-            idle_buffer_pool_percent: read_idle_buffer_pool_percent()
-                .map_err(|_| CacheConfigError::InvalidIdleBufferPoolPercent)?,
+            history_entry_limit: read_env_number("FEUER_HISTORY_ENTRY_LIMIT", DEFAULT_HISTORY_ENTRY_LIMIT.get(), 1)
+                .map(|limit| NonZeroUsize::new(limit).unwrap())
+                .map_err(|_| CacheConfigError::InvalidHistoryEntryLimit)?,
         })
     }
 
@@ -113,19 +113,17 @@ impl CacheConfig {
         self.access_count_half_life
     }
 
-    /// Sets the maximum bytes retained in idle buffers as a percentage of memory capacity (0–100).
-    /// Zero disables idle retention. Overrides `FEUER_IDLE_BUFFER_POOL_PERCENT` for this cache.
-    pub fn with_idle_buffer_pool_percent(mut self, percent: u64) -> Result<Self, CacheConfigError> {
-        if percent > 100 {
-            return Err(CacheConfigError::InvalidIdleBufferPoolPercent);
-        }
-        self.idle_buffer_pool_percent = percent;
+    /// Sets the history entry count above which cleanup removes the least recently requested keys.
+    /// Cleanup targets 90% of the limit. Concurrent requests can temporarily exceed it.
+    /// Overrides `FEUER_HISTORY_ENTRY_LIMIT` for this cache. Must be positive.
+    pub fn with_history_entry_limit(mut self, entry_limit: usize) -> Result<Self, CacheConfigError> {
+        self.history_entry_limit = NonZeroUsize::new(entry_limit).ok_or(CacheConfigError::InvalidHistoryEntryLimit)?;
         Ok(self)
     }
 
-    /// Returns the maximum bytes retained in idle buffers as a percentage of memory capacity.
-    pub const fn idle_buffer_pool_percent(&self) -> u64 {
-        self.idle_buffer_pool_percent
+    /// Returns the entry-count cleanup threshold for the history shared by both cache tiers.
+    pub const fn history_entry_limit(&self) -> NonZeroUsize {
+        self.history_entry_limit
     }
 
     /// Returns the directory containing the cache's exclusively locked backing file.
@@ -202,11 +200,11 @@ pub enum CacheConfigError {
         "access count half-life must be greater than zero; check FEUER_ACCESS_COUNT_HALF_LIFE or the explicit setting"
     )]
     InvalidAccessCountHalfLife,
-    /// The idle buffer ceiling must be a percentage between 0 and 100.
+    /// The history entry limit must be a positive integer that fits in `usize`.
     #[error(
-        "idle buffer pool percent must be between 0 and 100; check FEUER_IDLE_BUFFER_POOL_PERCENT or the explicit setting"
+        "history entry limit must be a positive number fitting usize; check FEUER_HISTORY_ENTRY_LIMIT or the explicit setting"
     )]
-    InvalidIdleBufferPoolPercent,
+    InvalidHistoryEntryLimit,
 }
 
 #[cfg(test)]
@@ -315,53 +313,39 @@ mod tests {
     }
 
     #[test]
-    fn idle_buffer_pool_percent_environment_override() {
-        const NAME: &str = "FEUER_IDLE_BUFFER_POOL_PERCENT";
-        const CHILD: &str = "FEUER_TEST_IDLE_BUFFER_POOL_PERCENT_CHILD";
-        if let Ok(expected) = var(CHILD) {
-            let result = CacheConfig::new("cache", 1, 1).map(|config| config.idle_buffer_pool_percent());
-            let expected = expected
-                .parse::<u64>()
-                .map_err(|_| CacheConfigError::InvalidIdleBufferPoolPercent);
-            assert_eq!(result, expected);
+    fn history_entry_limit_environment_override() {
+        if let Ok(expected) = var("FEUER_TEST_HISTORY_ENTRY_LIMIT_CHILD") {
+            assert_eq!(
+                CacheConfig::new("cache", 0, 1).map(|config| config.history_entry_limit().get()),
+                expected
+                    .parse::<usize>()
+                    .map_err(|_| CacheConfigError::InvalidHistoryEntryLimit)
+            );
+            if let Ok(config) = CacheConfig::new("cache", 0, 1) {
+                assert_eq!(
+                    config.with_history_entry_limit(32).unwrap().history_entry_limit().get(),
+                    32
+                );
+            }
             return;
         }
         check_environment_overrides(
-            "config::tests::idle_buffer_pool_percent_environment_override",
-            NAME,
-            CHILD,
+            "config::tests::history_entry_limit_environment_override",
+            "FEUER_HISTORY_ENTRY_LIMIT",
+            "FEUER_TEST_HISTORY_ENTRY_LIMIT_CHILD",
             &[
-                (None, "7"),
-                (Some("0"), "0"),
-                (Some("10"), "10"),
-                (Some("100"), "100"),
-                (Some("101"), "error"),
-                (Some("-1"), "error"),
-                (Some("1.5"), "error"),
+                (None, "2000000"),
+                (Some("1"), "1"),
+                (Some("1KiB"), "1024"),
+                (Some("0"), "error"),
                 (Some("bad"), "error"),
+                (Some("18446744073709551616"), "error"),
             ],
         );
-    }
-
-    #[test]
-    fn explicit_idle_buffer_pool_percent_overrides_configuration() {
-        let config = CacheConfig::new("cache", 1, 1).unwrap();
-        for percent in [0, 10, 100] {
-            assert_eq!(
-                config
-                    .clone()
-                    .with_idle_buffer_pool_percent(percent)
-                    .unwrap()
-                    .idle_buffer_pool_percent(),
-                percent
-            );
-        }
-        for percent in [101, u64::MAX] {
-            assert_eq!(
-                config.clone().with_idle_buffer_pool_percent(percent),
-                Err(CacheConfigError::InvalidIdleBufferPoolPercent)
-            );
-        }
+        assert_eq!(
+            CacheConfig::new("cache", 0, 1).unwrap().with_history_entry_limit(0),
+            Err(CacheConfigError::InvalidHistoryEntryLimit)
+        );
     }
 
     #[test]

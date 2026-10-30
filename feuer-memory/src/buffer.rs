@@ -14,7 +14,6 @@ use std::alloc::realloc;
 use std::ptr::null_mut;
 
 use bytes::Bytes;
-use feuer_types::config::read_env_number;
 #[cfg(target_os = "linux")]
 use libc::{
     _SC_PAGESIZE, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MREMAP_MAYMOVE, PROT_READ, PROT_WRITE, mmap, mremap, munmap,
@@ -51,24 +50,10 @@ pub(crate) fn bucket_index(length: usize) -> usize {
     BUFFER_SIZES.partition_point(|&size| size < length)
 }
 
-/// Default maximum share of memory capacity occupied by idle buffers across all buckets.
-pub(crate) const DEFAULT_IDLE_BUFFER_POOL_PERCENT: u64 = 7;
-
-/// Reads `FEUER_IDLE_BUFFER_POOL_PERCENT`, defaulting to 7 when unset. It must be between 0 and 100.
-pub fn read_idle_buffer_pool_percent() -> Result<u64, String> {
-    let name = "FEUER_IDLE_BUFFER_POOL_PERCENT";
-    let percent = read_env_number(name, DEFAULT_IDLE_BUFFER_POOL_PERCENT, 0)?;
-    if percent > 100 {
-        return Err(format!("{name} must be between 0 and 100"));
-    }
-    Ok(percent)
-}
-
 /// Idle aligned buffers and entry allocation charges sharing one cache's budget.
 /// Checked-out buffers are charged when admitted to the cache.
 pub struct BufferPool {
     pub(crate) capacity: u64,
-    idle_limit: u64,
     state: Mutex<CachedBytesAndIdleBuffers>,
     pub(crate) metrics: Arc<MemoryMetrics>,
 }
@@ -83,16 +68,9 @@ struct CachedBytesAndIdleBuffers {
 
 impl BufferPool {
     pub(crate) fn new(capacity: u64, metrics: Arc<MemoryMetrics>) -> Arc<Self> {
-        Self::with_idle_buffer_pool_percent(capacity, metrics, DEFAULT_IDLE_BUFFER_POOL_PERCENT)
-    }
-
-    pub(crate) fn with_idle_buffer_pool_percent(capacity: u64, metrics: Arc<MemoryMetrics>, percent: u64) -> Arc<Self> {
-        assert!(percent <= 100, "idle buffer pool percent must be between 0 and 100");
-        let idle_limit = (u128::from(capacity) * u128::from(percent) / 100) as u64;
         metrics.capacity_bytes.increase(capacity);
         Arc::new(Self {
             capacity,
-            idle_limit,
             state: Mutex::default(),
             metrics,
         })
@@ -322,7 +300,7 @@ impl Drop for AlignedBuffer {
             metrics.used_buffer_bytes[index].decrease(capacity);
             if let Some(pool) = pool.upgrade() {
                 let mut state = pool.state.lock();
-                let idle_limit = pool.idle_limit.min(pool.capacity.saturating_sub(state.entry_bytes));
+                let idle_limit = pool.capacity.saturating_sub(state.entry_bytes);
                 if state.idle_bytes + capacity <= idle_limit {
                     state.idle_buffers[index].push(Self {
                         ptr: self.ptr,

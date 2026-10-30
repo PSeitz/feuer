@@ -12,6 +12,6 @@ mod store;
 #[path = "../../test_support/metrics.rs"]
 mod test_metrics;
 
-pub use buffer::{AlignedBuffer, BUFFER_ALIGNMENT, BufferPool, read_idle_buffer_pool_percent};
+pub use buffer::{AlignedBuffer, BUFFER_ALIGNMENT, BufferPool};
 pub use metrics::MemoryMetrics;
 pub use store::MemoryCache;

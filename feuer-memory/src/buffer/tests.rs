@@ -46,7 +46,7 @@ fn size_boundaries_round_up_without_exposing_spare_capacity() {
         lower_bound = size;
     }
     assert_eq!(pool.idle_bytes(), BUFFER_SIZES.iter().sum::<usize>() as u64);
-    assert!(pool.idle_bytes() <= pool.capacity * 7 / 100);
+    assert!(pool.idle_bytes() <= pool.capacity);
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn cache_pressure_frees_larger_idle_buffers_and_updates_bucket_gauges() {
 
 #[test]
 fn small_and_zero_budgets_do_not_retain_buffers() {
-    for capacity in [0, 1, (100 * BUFFER_SIZES[0] as u64).div_ceil(7) - 1] {
+    for capacity in [0, 1, BUFFER_SIZES[0] as u64 - 1] {
         let pool = BufferPool::new(capacity, MemoryMetrics::noop());
         drop(pool.allocate(1).unwrap());
         assert_eq!(pool.used_bytes(), 0);
@@ -229,7 +229,7 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
     for (index, size) in BUFFER_SIZES.into_iter().enumerate() {
         let (registry, backend) = registry();
         let metrics = MemoryMetrics::new(&backend);
-        let capacity = (100 * size as u64).div_ceil(7);
+        let capacity = size as u64;
         let pool = BufferPool::new(capacity, metrics.clone());
         let gauge = |name| value(&registry, name, &[]);
         let bucket = format!("{:.0}", ByteSize(size as u64));
@@ -255,7 +255,7 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         assert_eq!(buffer_bytes("idle"), size as f64);
         drop(other);
         assert_eq!(pool.used_bytes(), size as u64);
-        assert_eq!(pool.idle_bytes(), pool.idle_limit);
+        assert_eq!(pool.idle_bytes(), pool.capacity);
         assert_eq!(pool.state.lock().idle_buffers[index].len(), 1);
         assert_eq!(buffer_bytes("idle"), size as f64);
         assert_eq!(buffer_bytes("used"), 0.0);
@@ -313,17 +313,17 @@ fn concurrent_returns_and_cache_charges_share_one_limit() {
             }
         });
     });
-    assert!(pool.idle_bytes() <= capacity * 7 / 100);
+    assert!(pool.idle_bytes() <= capacity);
 }
 
 #[test]
 fn buckets_compete_for_the_same_idle_limit() {
     let size = BUFFER_SIZES[1];
-    let pool = BufferPool::new(100 * size as u64, MemoryMetrics::noop());
+    let pool = BufferPool::new(7 * size as u64, MemoryMetrics::noop());
     let buffers: Vec<_> = (0..7).map(|_| pool.allocate(size).unwrap()).collect();
     drop(buffers);
     drop(pool.allocate(1).unwrap());
-    assert_eq!(pool.idle_bytes(), pool.idle_limit);
+    assert_eq!(pool.idle_bytes(), pool.capacity);
     assert!(pool.state.lock().idle_buffers[0].is_empty());
 
     let buffer = pool.allocate(size).unwrap();

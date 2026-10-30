@@ -454,8 +454,7 @@ async fn eviction_respects_sample_size_and_keeps_first_sampled_on_ties() {
 async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     let history = Arc::new(ObjectAccessHistories::new());
     let (_, registry) = registry();
-    let memory =
-        MemoryCache::with_metrics(4096, MemoryMetrics::new(&registry), 7).with_access_histories(history.clone());
+    let memory = MemoryCache::with_metrics(4096, MemoryMetrics::new(&registry)).with_access_histories(history.clone());
     let directory = tempfile::tempdir().unwrap();
     let cache = DiskCache::open(
         directory.path(),

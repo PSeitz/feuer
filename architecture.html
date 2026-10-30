@@ -84,7 +84,7 @@
       <p><code>cache.allocate_buffer(length)</code> uses the same aligned pool as disk reads.
         Fill <code>as_mut_slice()</code> and return the buffer from a lookup callback.
         Buffers become reusable only after their last owner releases them.</p>
-      <p>All buckets share an idle ceiling of 7% of memory capacity by default. Admission frees idle buffers first.
+      <p>Idle buffers share all capacity left by cached entries. Admission frees idle buffers first.
         Buffer returns never evict entries. Caller-only results, active I/O, metadata, and pending writes are outside the target.</p>
     </details>
   </section>

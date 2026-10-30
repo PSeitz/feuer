@@ -71,8 +71,10 @@ once per caller. Raw tier reads, insertion, and eviction do not record accesses.
 
 `ObjectAccessHistories` holds one decayed counter per object in independently
 locked maps, separate from the cache shards. One request clock advances across
-all keys. The default half-life is 262,144 requests. Counters survive eviction for
-the history object's lifetime, have no capacity limit, and are not persisted.
+all keys. The default half-life is 262,144 requests. Counters survive cache eviction
+until history cleanup removes them. The configurable history entry limit defaults
+to 2,000,000. Above it, one background worker removes the least recently requested
+keys, targeting 90% of the limit. History is not persisted.
 
 Both tiers evict the lowest-scoring object from a rotating sample, 64 candidates
 by default. The [default scorer](eviction.md) weights avoided retrieval cost
@@ -96,7 +98,7 @@ and disk promotions charge retained buffer capacity. Shared allocations are
 conservatively charged once per cached entry.
 
 An aligned buffer pool is shared by reads and downloader-acquired buffers. All
-buckets share an idle ceiling, 7% of the memory target by default. Admission frees
+buckets share all capacity left by cached entries. Admission frees
 idle buffers first. Buffer returns never evict entries. A buffer becomes reusable
 only after its last owner releases it.
 
