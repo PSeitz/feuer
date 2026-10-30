@@ -185,6 +185,8 @@ impl TieredMemoryDiskCache {
 
     /// Returns an object from memory or disk, or `None` on a miss.
     /// Does not invoke or wait for source callbacks. Disk hits are promoted to memory.
+    // countrary to the get_or_fetch path, miss in memory but hit in disk can cause multiple disk reads i think?
+    // a bit outside of scope for this round, but the code is in here and not -storage, so pointing it out
     pub async fn get_object(&self, object_key: crate::ObjectKey) -> Option<Bytes> {
         let object_key = ObjectKeyHash::from(object_key);
         self.inner.memory.access_histories().record_access(&object_key);
@@ -361,6 +363,9 @@ impl TieredMemoryDiskCache {
             let result = fetch
                 .result
                 .get_or_init(|| self.fetch(object_key, should_fall_through, callback))
+                // iiuc, if the current task running initialization gets stalled (but not dropped),
+                // it prevents everyone from making progress. a sync once calling self.fetch (but not pooling it), and wrapping it into a future::Shared
+                // might be more resilient, or might be overengineered
                 .await
                 .clone();
             fetch.remove_from_registry();
@@ -877,6 +882,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(bytes, Bytes::from_static(b"cd"));
+        // this is strange, i would expect somewhat expect this to still insert to memory, or is the assumption that when not manually inserting into the disk,
+        // memory will have been filed at the same time?
         assert_eq!(cache.inner.memory.used_bytes(), 0);
         assert_eq!(history.request_count(), 1);
     }
