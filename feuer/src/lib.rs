@@ -42,4 +42,7 @@ pub enum IoQueues {}
 
 /// The UTF-8 identity supplied at the public cache boundary.
 /// Internally only its XXH3-128 hash is stored. Colliding keys identify the same object.
+// i think this could be a &str and not much code would change, it's hashed before any usage anyway
+// also, might be worth an emphasis that the hash used is not strong against adversarial inputs,
+// and repeating that in a the main cache page, where it's more likely to be seen
 pub type ObjectKey = String;

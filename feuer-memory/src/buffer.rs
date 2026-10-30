@@ -321,6 +321,9 @@ impl Drop for AlignedBuffer {
     fn drop(&mut self) {
         if let Some((pool, metrics)) = self.pool.take() {
             let index = bucket_index(self.capacity());
+            // one slightly surprising thing: if we get an AlignedBuffer with an inner pool which isn't sized
+            // exactly like a bucket, that bucket ends up with a smaller-than-expected allocation
+            // it's fine though, afaict that doesn't happen, and resize_for_reuse will reallocate as required anyway
             let capacity = self.capacity() as u64;
             metrics.used_buffer_bytes[index].decrease(capacity);
             if let Some(pool) = pool.upgrade() {

@@ -238,6 +238,8 @@ impl TieredMemoryDiskCache {
     pub async fn get_or_fetch_with_disk_fallthrough<F, Fut, E>(
         &self,
         object_key: crate::ObjectKey,
+        // why is this a closure? it it expected that some should_fall_through are expensive to compute, and 
+        // making it lazy is an improvement then?
         should_fall_through: impl FnOnce() -> bool,
         callback: F,
     ) -> Result<Bytes, GetOrFetchError<E>>
@@ -384,6 +386,7 @@ impl TieredMemoryDiskCache {
         let _ = should_fall_through;
         #[cfg(target_os = "linux")]
         if let Some(disk) = &self.inner.disk
+            // TODO check if disk.get_with_fallthrough uses AlignedBuffer
             && let Some((bytes, buffer_capacity)) = disk.get_with_fallthrough(&object_key, should_fall_through).await
         {
             self.inner.memory.insert(object_key, bytes.clone(), buffer_capacity);
@@ -405,6 +408,7 @@ impl TieredMemoryDiskCache {
         Fut: Future<Output = Result<(Bytes, usize), E>>,
     {
         let mut fell_through = false;
+        // this read from memory (expected by doc comment), AND from the fisk
         let (outcome, bytes) = self
             .lookup_cached(object_key, || {
                 fell_through = should_fall_through();
