@@ -68,8 +68,8 @@ impl MemoryCacheShard {
             self.buffer_pool.metrics.redundant_insertions.increase(1);
             return InsertResult::AlreadyPresent;
         }
-        let max_existing_bytes = self.capacity.saturating_sub(allocation_charge as u64);
-        if self.used_bytes <= max_existing_bytes {
+        let remaining_capacity = self.capacity.saturating_sub(allocation_charge as u64);
+        if self.used_bytes <= remaining_capacity {
             self.add_entry(*object_key, bytes.clone(), allocation_charge);
             self.buffer_pool.metrics.insertions.increase(1);
             return InsertResult::Inserted;
