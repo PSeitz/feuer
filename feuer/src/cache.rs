@@ -230,7 +230,7 @@ impl Cache {
         let request_id = self.trace_request_start(object_key).await;
         let started = Instant::now();
         let (outcome, bytes) = self.lookup(object_key, || false).await;
-        let payload_length = bytes.as_ref().map_or(0, |bytes| bytes.len() as u64);
+        let payload_length = bytes.as_ref().map(|bytes| bytes.len() as u64).unwrap_or(0);
         self.inner.metrics.record(outcome, started.elapsed(), payload_length);
         if let (Some(access_trace), Some(request_id)) = (&self.access_trace, request_id) {
             access_trace
@@ -332,7 +332,7 @@ impl Cache {
             fetch.remove_from_registry();
             result
         };
-        let payload_length = result.as_ref().map_or(0, |bytes| bytes.len() as u64);
+        let payload_length = result.as_ref().map(|bytes| bytes.len() as u64).unwrap_or(0);
         self.inner.metrics.record(outcome, started.elapsed(), payload_length);
         if let (Some(access_trace), Some(request_id)) = (&self.access_trace, request_id) {
             access_trace
@@ -690,9 +690,9 @@ mod tests {
             second.inner.memory.access_histories()
         ));
         for (cache, half_life) in [(&first, 2), (&second, 4)] {
-            assert_eq!(cache.inner.memory.access_histories().half_life(), half_life);
+            assert_eq!(cache.inner.memory.access_histories().half_life().get(), half_life);
             assert_eq!(
-                cache.inner.disk.as_ref().unwrap().access_histories().half_life(),
+                cache.inner.disk.as_ref().unwrap().access_histories().half_life().get(),
                 half_life
             );
         }

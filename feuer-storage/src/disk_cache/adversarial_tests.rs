@@ -522,7 +522,9 @@ fn check_entries_and_chunks(cache: &DiskCache) {
         }
         for (index, chunk) in metadata.chunks.iter().enumerate() {
             let next = metadata.chunks.get(index + 1);
-            let expected = next.map_or(NO_CHUNK, |next| next.reserved_chunk.disk_byte_range().start);
+            let expected = next
+                .map(|next| next.reserved_chunk.disk_byte_range().start)
+                .unwrap_or(NO_CHUNK);
             assert_eq!(
                 chunk.next_chunk_address, expected,
                 "metadata chunk {} links to an address other than the next reserved metadata chunk",

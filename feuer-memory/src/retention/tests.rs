@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use super::*;
 use proptest::prelude::*;
 
@@ -10,7 +12,7 @@ proptest! {
         byte_cost in -16i32..=16,
         requests in 0i32..8,
     ) {
-        let histories = ObjectAccessHistories::with_half_life(1);
+        let histories = ObjectAccessHistories::with_half_life(NonZeroU64::MIN);
         let key = ObjectKeyHash::from("object");
         for _ in 0..requests {
             histories.record_request(&key);
@@ -49,7 +51,7 @@ fn samples_at_most_64_candidates() {
 
 #[test]
 fn scores_follow_decayed_object_demand() {
-    let histories = ObjectAccessHistories::with_half_life(2);
+    let histories = ObjectAccessHistories::with_half_life(NonZeroU64::new(2).unwrap());
     let key = ObjectKeyHash::from("object");
     histories.record_request(&key);
     let scorer = AvoidedRetrievalCostScorer::default();

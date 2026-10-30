@@ -1,5 +1,6 @@
 use std::{
     ffi::OsStr,
+    num::NonZeroU64,
     path::{Path, PathBuf},
 };
 
@@ -25,7 +26,7 @@ pub struct CacheConfig {
     disk_capacity: u64,
     memory_capacity: u64,
     idle_buffer_pool_percent: u64,
-    access_count_half_life: u64,
+    access_count_half_life: NonZeroU64,
     eviction: SampledEvictionConfig,
 }
 
@@ -103,15 +104,12 @@ impl CacheConfig {
     /// Sets the access count half-life in requests across all keys of this cache.
     /// Applies to both tiers. Overrides `FEUER_ACCESS_COUNT_HALF_LIFE` for this cache.
     pub fn with_access_count_half_life(mut self, half_life: u64) -> Result<Self, CacheConfigError> {
-        if half_life == 0 {
-            return Err(CacheConfigError::InvalidAccessCountHalfLife);
-        }
-        self.access_count_half_life = half_life;
+        self.access_count_half_life = NonZeroU64::new(half_life).ok_or(CacheConfigError::InvalidAccessCountHalfLife)?;
         Ok(self)
     }
 
     /// Returns the access count half-life in requests across all keys of this cache.
-    pub const fn access_count_half_life(&self) -> u64 {
+    pub const fn access_count_half_life(&self) -> NonZeroU64 {
         self.access_count_half_life
     }
 
@@ -290,7 +288,7 @@ mod tests {
         const CHILD: &str = "FEUER_TEST_HALF_LIFE_CHILD";
         if let Ok(expected) = var(CHILD) {
             assert_eq!(
-                CacheConfig::new("cache", 1, 1).map(|config| config.access_count_half_life()),
+                CacheConfig::new("cache", 1, 1).map(|config| config.access_count_half_life().get()),
                 expected
                     .parse::<u64>()
                     .map_err(|_| CacheConfigError::InvalidAccessCountHalfLife)

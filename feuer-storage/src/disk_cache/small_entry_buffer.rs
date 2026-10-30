@@ -82,9 +82,11 @@ impl DiskCacheInner {
         }
         let mut buffer = shard.small_entry_buffer.lock().await;
         let mut published = 0;
-        let mut offset = buffer.entries.last().map_or(0, |entry| {
-            entry.buffer_offset + payload_disk_bytes(entry.payload_len) as usize
-        });
+        let mut offset = buffer
+            .entries
+            .last()
+            .map(|entry| entry.buffer_offset + payload_disk_bytes(entry.payload_len) as usize)
+            .unwrap_or(0);
         if offset + aligned_payload_len > CHUNK_BYTES as usize {
             published += buffer.flush(shard, self).await?;
             offset = 0;

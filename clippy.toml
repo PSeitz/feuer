@@ -1,0 +1,4 @@
+disallowed-methods = [
+    { path = "std::option::Option::map_or", reason = "Use map(...).unwrap_or(...) or match for readability." },
+    { path = "std::result::Result::map_or", reason = "Use map(...).unwrap_or(...) or match for readability." },
+]

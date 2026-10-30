@@ -90,8 +90,8 @@ fn concurrent_keys_share_one_clock() {
 fn counts_decay_and_new_accesses_add_one() {
     let key = ObjectKeyHash::from("object");
     let other = ObjectKeyHash::from("other");
-    for half_life in [2, 4, DEFAULT_ACCESS_COUNT_HALF_LIFE] {
-        let histories = ObjectAccessHistories::with_half_life(half_life);
+    for half_life in [2, 4, DEFAULT_ACCESS_COUNT_HALF_LIFE.get()] {
+        let histories = ObjectAccessHistories::with_half_life(NonZeroU64::new(half_life).unwrap());
         histories.record_request(&key);
         for _ in 1..half_life {
             histories.record_request(&other);
@@ -107,7 +107,7 @@ fn counts_decay_and_new_accesses_add_one() {
 
 #[test]
 fn counters_remain_after_their_demand_decays_to_zero() {
-    let histories = ObjectAccessHistories::with_half_life(1);
+    let histories = ObjectAccessHistories::with_half_life(NonZeroU64::MIN);
     let key = ObjectKeyHash::from("old");
     histories.record_request(&key);
     for _ in 0..126 {
@@ -120,12 +120,6 @@ fn counters_remain_after_their_demand_decays_to_zero() {
 }
 
 #[test]
-#[should_panic(expected = "access count half-life must be greater than zero")]
-fn zero_half_life_is_rejected() {
-    ObjectAccessHistories::with_half_life(0);
-}
-
-#[test]
 fn decayed_count_never_increases_and_relative_error_is_at_most_6_15_percent() {
     let request_count = DecayedRequestCount {
         count: 1.0,
@@ -134,16 +128,19 @@ fn decayed_count_never_increases_and_relative_error_is_at_most_6_15_percent() {
     assert_eq!(request_count.decayed_count(0, DEFAULT_ACCESS_COUNT_HALF_LIFE), 1.0);
     let mut previous = 1.0;
     for sample in 0..=256 {
-        let requests_since_update = DEFAULT_ACCESS_COUNT_HALF_LIFE * sample / 64;
+        let requests_since_update = DEFAULT_ACCESS_COUNT_HALF_LIFE.get() * sample / 64;
         let actual = request_count.decayed_count(1 + requests_since_update, DEFAULT_ACCESS_COUNT_HALF_LIFE);
-        let exact = (-(requests_since_update as f64) / DEFAULT_ACCESS_COUNT_HALF_LIFE as f64).exp2();
+        let exact = (-(requests_since_update as f64) / DEFAULT_ACCESS_COUNT_HALF_LIFE.get() as f64).exp2();
         assert!(actual <= previous);
         assert!(actual >= exact * (1.0 - 1e-7));
         assert!(actual <= exact * 1.0615);
         previous = actual;
     }
     assert_eq!(
-        request_count.decayed_count(1 + DEFAULT_ACCESS_COUNT_HALF_LIFE * 126, DEFAULT_ACCESS_COUNT_HALF_LIFE),
+        request_count.decayed_count(
+            1 + DEFAULT_ACCESS_COUNT_HALF_LIFE.get() * 126,
+            DEFAULT_ACCESS_COUNT_HALF_LIFE
+        ),
         0.0
     );
     assert_eq!(
@@ -154,7 +151,7 @@ fn decayed_count_never_increases_and_relative_error_is_at_most_6_15_percent() {
 
 #[test]
 fn repeated_updates_compound_decay_error() {
-    for half_life in [2, 4, DEFAULT_ACCESS_COUNT_HALF_LIFE] {
+    for half_life in [2, 4, DEFAULT_ACCESS_COUNT_HALF_LIFE.get()] {
         let mut count = DecayedRequestCount::default();
         let clocks = [
             1,
@@ -164,14 +161,14 @@ fn repeated_updates_compound_decay_error() {
             1 + 6 * half_life,
         ];
         for clock in clocks {
-            count.add_request(clock, half_life);
+            count.add_request(clock, NonZeroU64::new(half_life).unwrap());
         }
         let now = 1 + 7 * half_life;
         let expected: f64 = clocks
             .into_iter()
             .map(|clock| (-((now - clock) as f64) / half_life as f64).exp2())
             .sum();
-        let actual = count.decayed_count(now, half_life);
+        let actual = count.decayed_count(now, NonZeroU64::new(half_life).unwrap());
         // Each event undergoes at most one decay per recorded access, including the final read.
         let max_decay_steps = clocks.len() as i32;
         assert!(actual >= expected * (1.0_f64 - 1e-7).powi(max_decay_steps));

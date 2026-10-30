@@ -204,5 +204,7 @@ fn shard_capacity_for(total_capacity: u64, num_shards: usize, shard_index: usize
 }
 
 fn default_shard_count() -> usize {
-    available_parallelism().map_or(4, |cpus| cpus.get().min(MAX_SHARDS / 4) * 4)
+    available_parallelism()
+        .map(|cpus| cpus.get().min(MAX_SHARDS / 4) * 4)
+        .unwrap_or(4)
 }

@@ -303,7 +303,9 @@ fn evicts_entry_with_lower_retrieval_value() {
 
 #[test]
 fn stale_frequency_decays_below_recent_accesses() {
-    let cache = cache(3).with_access_histories(Arc::new(ObjectAccessHistories::with_half_life(16)));
+    let cache = cache(3).with_access_histories(Arc::new(ObjectAccessHistories::with_half_life(
+        std::num::NonZeroU64::new(16).unwrap(),
+    )));
     let stale = ObjectKeyHash::from("stale");
     let fresh = ObjectKeyHash::from("fresh");
     let clock = ObjectKeyHash::from("clock");
@@ -312,7 +314,7 @@ fn stale_frequency_decays_below_recent_accesses() {
         cache.insert(key, payload.clone(), 1);
     }
     repeat_request(&cache, stale, 8);
-    repeat_request(&cache, clock, cache.access_histories.half_life() * 4);
+    repeat_request(&cache, clock, cache.access_histories.half_life().get() * 4);
     cache.access_histories.record_request(&fresh);
     cache.insert("incoming".into(), payload, 1);
     assert!(cache.get(&stale).is_none());

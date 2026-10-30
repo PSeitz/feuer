@@ -42,6 +42,7 @@ missing_docs = "warn"
 
 [workspace.lints.clippy]
 allow_attributes = "warn"
+disallowed_methods = "deny"
 
 [profile.release]
 debug = "full"

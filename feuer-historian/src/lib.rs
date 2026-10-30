@@ -5,6 +5,7 @@
 use std::{
     array::from_fn,
     hash::BuildHasher,
+    num::NonZeroU64,
     sync::{
         Mutex,
         atomic::{AtomicU64, Ordering},
@@ -24,7 +25,7 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 pub struct ObjectAccessHistories {
     shards: [Mutex<FxHashMap<ObjectKeyHash, DecayedRequestCount>>; ACCESS_HISTORY_SHARDS],
     request_count: AtomicU64,
-    half_life: u64,
+    half_life: NonZeroU64,
 }
 
 impl Default for ObjectAccessHistories {
@@ -40,12 +41,7 @@ impl ObjectAccessHistories {
     }
 
     /// Creates empty history with a fixed decay half-life in requests across all keys.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the half-life is zero.
-    pub fn with_half_life(half_life: u64) -> Self {
-        assert!(half_life > 0, "access count half-life must be greater than zero");
+    pub fn with_half_life(half_life: NonZeroU64) -> Self {
         Self {
             shards: from_fn(|_| Mutex::default()),
             request_count: AtomicU64::new(0),
@@ -54,7 +50,7 @@ impl ObjectAccessHistories {
     }
 
     /// Returns the decay half-life in requests across all keys.
-    pub fn half_life(&self) -> u64 {
+    pub fn half_life(&self) -> NonZeroU64 {
         self.half_life
     }
 
@@ -85,7 +81,8 @@ impl ObjectAccessHistories {
         let histories = self.shard(key).lock().unwrap();
         histories
             .get(key)
-            .map_or(0.0, |count| count.decayed_count(self.request_count(), self.half_life))
+            .map(|count| count.decayed_count(self.request_count(), self.half_life))
+            .unwrap_or(0.0)
     }
 
     fn shard(&self, key: &ObjectKeyHash) -> &Mutex<FxHashMap<ObjectKeyHash, DecayedRequestCount>> {
@@ -94,7 +91,7 @@ impl ObjectAccessHistories {
 }
 
 /// Default half-life of access counts, in requests across all keys.
-pub const DEFAULT_ACCESS_COUNT_HALF_LIFE: u64 = 262_144;
+pub const DEFAULT_ACCESS_COUNT_HALF_LIFE: NonZeroU64 = NonZeroU64::new(262_144).unwrap();
 
 /// A request count that decays as requests accumulate across all object keys.
 #[derive(Default)]
@@ -104,13 +101,13 @@ pub struct DecayedRequestCount {
 }
 
 impl DecayedRequestCount {
-    fn add_request(&mut self, request_clock: u64, half_life: u64) {
+    fn add_request(&mut self, request_clock: u64, half_life: NonZeroU64) {
         self.count = self.decayed_count(request_clock, half_life) + 1.0;
         self.last_update_clock = request_clock;
     }
 
     /// Evaluates the count at the supplied request clock, without modifying it.
-    /// `half_life` must be positive and match the half-life used to record this count.
+    /// `half_life` must match the half-life used to record this count.
     /// The result is between zero and the count stored at the last update, inclusive.
     /// Each matching request decays the stored count and adds one,
     /// so repeated requests can make it exceed one.
@@ -149,9 +146,9 @@ impl DecayedRequestCount {
     /// Between matching requests, a count near 4 decays toward 3 before the next update adds one.
     /// At 128,000 requests apart, the corresponding limits are 4.096 after adding one and 3.096 before.
     #[inline]
-    pub fn decayed_count(&self, request_clock: u64, half_life: u64) -> f64 {
+    pub fn decayed_count(&self, request_clock: u64, half_life: NonZeroU64) -> f64 {
         let requests_since_update = request_clock.saturating_sub(self.last_update_clock);
-        let half_lives_elapsed = requests_since_update as f64 / half_life as f64;
+        let half_lives_elapsed = requests_since_update as f64 / half_life.get() as f64;
 
         if half_lives_elapsed >= 126.0 {
             return 0.0; // Discard negligible counts rather than constructing subnormal floats.

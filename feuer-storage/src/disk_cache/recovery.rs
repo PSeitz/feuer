@@ -87,9 +87,9 @@ impl DiskCacheShard {
                 .iter()
                 .flat_map(|page| {
                     // An invalid page holds no entries and can stay on disk until an insertion rewrites it.
-                    validate_page(page, ENTRY_METADATA_PAGE_TAG).map_or(UNUSED_ENTRY_METADATA, |contents| {
-                        contents[..PAGE_CONTENT_BYTES].as_chunks::<ENTRY_METADATA_BYTES>().0
-                    })
+                    validate_page(page, ENTRY_METADATA_PAGE_TAG)
+                        .map(|contents| contents[..PAGE_CONTENT_BYTES].as_chunks::<ENTRY_METADATA_BYTES>().0)
+                        .unwrap_or(UNUSED_ENTRY_METADATA)
                 })
                 .map(decode_entry_metadata)
                 .collect();
