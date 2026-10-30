@@ -79,8 +79,8 @@ pub struct TraceRequests {
     pub requests: Vec<Request>,
     /// Counts of recorded outcomes for selected starts, indexed by FETR kind.
     pub outcomes: [usize; 6],
-    /// Selected starts whose outcomes are unknown.
-    pub incomplete: usize,
+    /// Selected starts without matching recorded outcomes.
+    pub unmatched_starts: usize,
 }
 
 /// Reads a single `.feuer` package or a `.tar.zst` archive containing one trace session.
@@ -145,7 +145,7 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
         }
         Ok(())
     })?;
-    let incomplete = starts_by_id.len() - outcomes.iter().sum::<usize>();
+    let unmatched_starts = starts_by_id.len() - outcomes.iter().sum::<usize>();
     let mut requests: Vec<_> = starts_by_id
         .into_values()
         .map(|(event, _)| {
@@ -162,7 +162,7 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
     Ok(TraceRequests {
         requests,
         outcomes,
-        incomplete,
+        unmatched_starts,
     })
 }
 
@@ -293,7 +293,7 @@ mod tests {
                 assert_eq!(access_trace.requests.len(), 1);
                 assert_eq!(access_trace.requests[0].object_key, "123");
                 assert_eq!(access_trace.requests[0].payload_len, payload_len);
-                assert_eq!(access_trace.incomplete, 1);
+                assert_eq!(access_trace.unmatched_starts, 1);
                 assert_eq!(access_trace.outcomes, [0; 6]);
             }
         }
@@ -394,7 +394,7 @@ mod tests {
         );
         assert_eq!(access_trace.requests[0].payload_len, 10);
         assert_eq!(access_trace.outcomes, [0, 1, 0, 1, 0, 0]);
-        assert_eq!(access_trace.incomplete, 1);
+        assert_eq!(access_trace.unmatched_starts, 1);
 
         let access_trace = load_requests(&path, None).unwrap();
         assert_eq!(
@@ -406,7 +406,7 @@ mod tests {
             [(1, 0), (3, 0), (2, 500), (4, 1_000_000_000), (5, 181_000_000_000)]
         );
         assert_eq!(access_trace.outcomes, [0, 2, 0, 1, 1, 0]);
-        assert_eq!(access_trace.incomplete, 1);
+        assert_eq!(access_trace.unmatched_starts, 1);
     }
 
     #[test]
@@ -452,7 +452,7 @@ mod tests {
             assert!(access_trace.requests.iter().all(|request| request.payload_len == 0));
             assert_eq!(access_trace.outcomes[kind as usize], 1);
             assert_eq!(access_trace.outcomes[3], 1);
-            assert_eq!(access_trace.incomplete, 0);
+            assert_eq!(access_trace.unmatched_starts, 0);
         }
     }
 }

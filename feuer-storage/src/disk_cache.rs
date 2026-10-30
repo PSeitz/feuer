@@ -156,7 +156,7 @@ pub struct DiskCacheOptions {
     /// Disk-cache lookup, write, and capacity metrics.
     pub metrics: Arc<DiskMetrics>,
     /// Request history consulted for retention.
-    /// Insertion and `get` do not record accesses.
+    /// Insertion and `get` do not record requests.
     /// Public request handling records once before lookup.
     pub access_histories: Arc<ObjectAccessHistories>,
     /// Maximum candidates inspected per eviction decision. Must be positive.
@@ -283,7 +283,7 @@ impl DiskCache {
         self.disk.access_histories.clone()
     }
 
-    /// Checks for a buffered or disk entry, without disk I/O or recording an access.
+    /// Checks for a buffered or disk entry, without disk I/O or recording a request.
     pub fn contains(&self, key: &ObjectKeyHash) -> bool {
         self.disk.shards[self.disk.shard_index_for_key(key)].contains(key)
     }

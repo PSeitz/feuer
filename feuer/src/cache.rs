@@ -226,7 +226,7 @@ impl Cache {
     /// Does not invoke or wait for source callbacks. Disk hits are promoted to memory.
     pub async fn get(&self, object_key: ObjectKey) -> Option<Bytes> {
         let object_key = ObjectKeyHash::from(object_key);
-        self.inner.memory.access_histories().record_access(&object_key);
+        self.inner.memory.access_histories().record_request(&object_key);
         let request_id = self.trace_request_start(object_key).await;
         let started = Instant::now();
         let (outcome, bytes) = self.lookup(object_key, || false).await;
@@ -254,7 +254,7 @@ impl Cache {
     /// across both callback types when their error types match. The memory target is soft.
     ///
     /// Every started request records demand exactly once, before checking either tier.
-    /// Failures and cancellation still count. Insertion creates no access event.
+    /// Failures and cancellation still count. Insertion records no request.
     /// Callback results are queued to disk immediately, subject to queue capacity.
     /// Tracing can backpressure lookups but never changes their results.
     pub async fn get_or_fetch<F, Fut, V, E>(
@@ -300,13 +300,13 @@ impl Cache {
         Fut: Future<Output = Result<V, E>>,
         V: Into<BytesAndMemoryCharge>,
     {
-        self.lookup_by_hash(ObjectKeyHash::from(object_key), should_fall_through, || async {
+        self.get_or_fetch_by_hash(ObjectKeyHash::from(object_key), should_fall_through, || async {
             callback().await.map(Into::into)
         })
         .await
     }
 
-    async fn lookup_by_hash<F, Fut, E>(
+    async fn get_or_fetch_by_hash<F, Fut, E>(
         &self,
         object_key: ObjectKeyHash,
         should_fall_through: impl FnOnce() -> bool,
@@ -317,7 +317,7 @@ impl Cache {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<BytesAndMemoryCharge, E>>,
     {
-        self.inner.memory.access_histories().record_access(&object_key);
+        self.inner.memory.access_histories().record_request(&object_key);
         let request_id = self.trace_request_start(object_key).await;
         let started = Instant::now();
         let (outcome, result) = if let Some(bytes) = self.inner.memory.get(&object_key) {

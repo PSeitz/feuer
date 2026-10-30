@@ -22,7 +22,7 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 /// Each key's counter lasts for the history's lifetime, including after cache eviction.
 /// A restart begins with empty history.
 pub struct ObjectAccessHistories {
-    shards: [Mutex<FxHashMap<ObjectKeyHash, DecayedAccessCount>>; ACCESS_HISTORY_SHARDS],
+    shards: [Mutex<FxHashMap<ObjectKeyHash, DecayedRequestCount>>; ACCESS_HISTORY_SHARDS],
     request_count: AtomicU64,
     half_life: u64,
 }
@@ -62,7 +62,7 @@ impl ObjectAccessHistories {
     /// Failed and canceled requests contribute to demand just like successful requests.
     /// Repeated requests update the same counter.
     /// Cache insertion and eviction do not record or remove history.
-    pub fn record_access(&self, key: &ObjectKeyHash) {
+    pub fn record_request(&self, key: &ObjectKeyHash) {
         let mut histories = self.shard(key).lock().unwrap();
         // Assign the clock under the shard lock so this key's updates cannot arrive out of order.
         // The atomic only measures request age. The shard mutex protects the history itself.
@@ -88,7 +88,7 @@ impl ObjectAccessHistories {
             .map_or(0.0, |count| count.decayed_count(self.request_count(), self.half_life))
     }
 
-    fn shard(&self, key: &ObjectKeyHash) -> &Mutex<FxHashMap<ObjectKeyHash, DecayedAccessCount>> {
+    fn shard(&self, key: &ObjectKeyHash) -> &Mutex<FxHashMap<ObjectKeyHash, DecayedRequestCount>> {
         &self.shards[FxBuildHasher.hash_one(key) as usize % self.shards.len()]
     }
 }
@@ -98,12 +98,12 @@ pub const DEFAULT_ACCESS_COUNT_HALF_LIFE: u64 = 262_144;
 
 /// A request count that decays as requests accumulate across all object keys.
 #[derive(Default)]
-pub struct DecayedAccessCount {
+pub struct DecayedRequestCount {
     count: f64,
     last_update_clock: u64,
 }
 
-impl DecayedAccessCount {
+impl DecayedRequestCount {
     fn add_request(&mut self, request_clock: u64, half_life: u64) {
         self.count = self.decayed_count(request_clock, half_life) + 1.0;
         self.last_update_clock = request_clock;

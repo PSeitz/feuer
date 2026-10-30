@@ -9,9 +9,9 @@ fn history_needs_no_cached_entry_and_keeps_one_counter_per_key() {
     assert_eq!(histories.decayed_request_count(&key), 0.0);
     assert_eq!(histories.request_count(), 0);
     assert!(histories.shards.iter().all(|shard| shard.lock().unwrap().is_empty()));
-    histories.record_access(&key);
+    histories.record_request(&key);
     assert_eq!(histories.decayed_request_count(&key), 1.0);
-    histories.record_access(&key);
+    histories.record_request(&key);
     assert!(histories.decayed_request_count(&key) > 1.0);
     assert_eq!(histories.request_count(), 2);
     assert_eq!(histories.shard(&key).lock().unwrap().len(), 1);
@@ -25,14 +25,14 @@ fn concurrent_recording_counts_every_request() {
         for _ in 0..8 {
             scope.spawn(|| {
                 for _ in 0..1000 {
-                    histories.record_access(&key);
+                    histories.record_request(&key);
                 }
             });
         }
     });
     assert_eq!(histories.request_count(), 8000);
     assert_eq!(histories.shard(&key).lock().unwrap().len(), 1);
-    let mut expected = DecayedAccessCount::default();
+    let mut expected = DecayedRequestCount::default();
     for clock in 1..=8000 {
         expected.add_request(clock, histories.half_life());
     }
@@ -54,7 +54,7 @@ fn another_history_shard_can_record_and_read_while_one_is_locked() {
     thread::scope(|scope| {
         let _locked = histories.shard(&locked_key).lock().unwrap();
         scope.spawn(|| {
-            histories.record_access(&other);
+            histories.record_request(&other);
             assert_eq!(histories.decayed_request_count(&other), 1.0);
             done.send(()).unwrap();
         });
@@ -74,7 +74,7 @@ fn concurrent_keys_share_one_clock() {
             let histories = &histories;
             scope.spawn(move || {
                 for _ in 0..200 {
-                    histories.record_access(key);
+                    histories.record_request(key);
                 }
             });
         }
@@ -92,14 +92,14 @@ fn counts_decay_and_new_accesses_add_one() {
     let other = ObjectKeyHash::from("other");
     for half_life in [2, 4, DEFAULT_ACCESS_COUNT_HALF_LIFE] {
         let histories = ObjectAccessHistories::with_half_life(half_life);
-        histories.record_access(&key);
+        histories.record_request(&key);
         for _ in 1..half_life {
-            histories.record_access(&other);
+            histories.record_request(&other);
         }
-        histories.record_access(&key);
+        histories.record_request(&key);
         assert_eq!(histories.decayed_request_count(&key), 1.5);
         for _ in 0..half_life {
-            histories.record_access(&other);
+            histories.record_request(&other);
         }
         assert_eq!(histories.decayed_request_count(&key), 0.75);
     }
@@ -109,13 +109,13 @@ fn counts_decay_and_new_accesses_add_one() {
 fn counters_remain_after_their_demand_decays_to_zero() {
     let histories = ObjectAccessHistories::with_half_life(1);
     let key = ObjectKeyHash::from("old");
-    histories.record_access(&key);
+    histories.record_request(&key);
     for _ in 0..126 {
-        histories.record_access(&ObjectKeyHash::from("other"));
+        histories.record_request(&ObjectKeyHash::from("other"));
     }
     assert_eq!(histories.decayed_request_count(&key), 0.0);
     assert!(histories.shard(&key).lock().unwrap().contains_key(&key));
-    histories.record_access(&key);
+    histories.record_request(&key);
     assert_eq!(histories.decayed_request_count(&key), 1.0);
 }
 
@@ -127,7 +127,7 @@ fn zero_half_life_is_rejected() {
 
 #[test]
 fn decayed_count_never_increases_and_relative_error_is_at_most_6_15_percent() {
-    let request_count = DecayedAccessCount {
+    let request_count = DecayedRequestCount {
         count: 1.0,
         last_update_clock: 1,
     };
@@ -155,7 +155,7 @@ fn decayed_count_never_increases_and_relative_error_is_at_most_6_15_percent() {
 #[test]
 fn repeated_updates_compound_decay_error() {
     for half_life in [2, 4, DEFAULT_ACCESS_COUNT_HALF_LIFE] {
-        let mut count = DecayedAccessCount::default();
+        let mut count = DecayedRequestCount::default();
         let clocks = [
             1,
             1 + half_life / 2,

@@ -91,7 +91,7 @@ fn replays_objects_with_and_without_disk() -> Result<()> {
     fs::write(&path, package)?;
     let access_trace = load_requests(&path, None)?;
     assert_eq!(access_trace.requests.len(), 2);
-    assert_eq!(access_trace.incomplete, 1);
+    assert_eq!(access_trace.unmatched_starts, 1);
     assert_eq!(access_trace.outcomes, [0, 0, 0, 1, 0, 0]);
     assert_eq!(access_trace.requests[0].object_key, access_trace.requests[1].object_key);
     assert_eq!(access_trace.requests[0].object_key, key.0.to_string());
@@ -112,7 +112,7 @@ fn replays_objects_with_and_without_disk() -> Result<()> {
         let summary = fs::read_to_string(output.join("summary.csv"))?;
         assert!(summary.lines().any(|line| line == "requests,2"));
         assert!(summary.lines().any(|line| line == "scheduling,task_per_arrival"));
-        assert!(summary.lines().any(|line| line == "recorded_incomplete,1"));
+        assert!(summary.lines().any(|line| line == "recorded_unmatched_starts,1"));
         assert!(summary.lines().any(|line| line == format!("disk_bytes,{disk_bytes}")));
         let metrics = fs::read_to_string(output.join("settled.prom"))?;
         assert!(metrics.contains("replay_completed_total 2"));
@@ -156,7 +156,7 @@ async fn decodes_empty_object_from_current_writer() -> Result<()> {
     assert!(access_trace.requests.iter().all(|request| {
         request.object_key == ObjectKeyHash::from("empty").0.to_string() && request.payload_len == 0
     }));
-    assert_eq!(access_trace.incomplete, 0);
+    assert_eq!(access_trace.unmatched_starts, 0);
     assert_eq!(access_trace.outcomes, [0, 1, 0, 1, 0, 1]);
     for event in events {
         assert_eq!(event.object_key, ObjectKeyHash::from("empty"));

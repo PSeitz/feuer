@@ -27,7 +27,7 @@ const MAX_SHARDS: usize = 64;
 /// Each [`ObjectKeyHash`] identifies an immutable object. Lookups return its
 /// payload, sharing the entry's allocation without holding an entry guard.
 /// Request history is supplied separately. Cache operations consult it for
-/// retention decisions but never record accesses or remove history.
+/// retention decisions but never record requests or remove history.
 ///
 /// Cached allocation charges and idle read buffers share the configured capacity.
 /// Each shard evicts locally against its share before insertion. Admission also
@@ -141,13 +141,13 @@ impl MemoryCache {
         self.buffer_pool.clone()
     }
 
-    /// Looks up an object without recording an access.
+    /// Looks up an object without recording a request.
     pub fn get(&self, object_key: &ObjectKeyHash) -> Option<Bytes> {
         let shard_index = self.shard_index(object_key);
         self.shards[shard_index].lock().get(object_key)
     }
 
-    /// Caches an object without creating an access, using its allocation charge.
+    /// Caches an object without recording a request, using its allocation charge.
     /// An existing entry for the key is retained and the supplied bytes are discarded.
     /// Returns whether the object was inserted.
     ///
@@ -172,7 +172,7 @@ impl MemoryCache {
         inserted
     }
 
-    /// Checks whether an object is cached without retaining bytes or recording an access.
+    /// Checks whether an object is cached without retaining bytes or recording a request.
     pub fn contains_entry(&self, object_key: &ObjectKeyHash) -> bool {
         self.shards[self.shard_index(object_key)]
             .lock()

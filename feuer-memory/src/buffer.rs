@@ -141,10 +141,10 @@ impl BufferPool {
         let mut state = self.state.lock();
         state.entry_bytes += bytes;
         self.metrics.used_bytes.increase(bytes);
-        let idle_limit = self.capacity.saturating_sub(state.entry_bytes);
+        let remaining_capacity = self.capacity.saturating_sub(state.entry_bytes);
         // Cache entries take precedence over idle buffers. Free larger buffers first.
         for index in (0..BUCKET_COUNT).rev() {
-            while state.idle_bytes > idle_limit
+            while state.idle_bytes > remaining_capacity
                 && let Some(buffer) = self.take_idle_buffer(&mut state, index)
             {
                 // Idle buffers have no pool reference. Dropping them frees their allocations.

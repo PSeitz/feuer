@@ -13,7 +13,7 @@ proptest! {
         let histories = ObjectAccessHistories::with_half_life(1);
         let key = ObjectKeyHash::from("object");
         for _ in 0..requests {
-            histories.record_access(&key);
+            histories.record_request(&key);
         }
         // One half-life between requests makes this geometric sum exact.
         let demand = 2.0 - 2.0_f64.powi(1 - requests);
@@ -51,13 +51,13 @@ fn samples_at_most_64_candidates() {
 fn scores_follow_decayed_object_demand() {
     let histories = ObjectAccessHistories::with_half_life(2);
     let key = ObjectKeyHash::from("object");
-    histories.record_access(&key);
+    histories.record_request(&key);
     let scorer = AvoidedRetrievalCostScorer::default();
     assert_eq!(scorer.cost_per_request, 0.0);
     assert_eq!(scorer.cost_per_requested_byte, 1.0);
     assert_eq!(scorer.score(&key, 10, 10, &histories), 1.0);
     for _ in 0..2 {
-        histories.record_access(&ObjectKeyHash::from("other"));
+        histories.record_request(&ObjectKeyHash::from("other"));
     }
     assert_eq!(scorer.score(&key, 10, 10, &histories), 0.5);
     assert_eq!(scorer.score(&key, 10, 20, &histories), 0.25);

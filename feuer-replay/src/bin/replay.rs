@@ -247,10 +247,10 @@ mod linux {
         }
         let access_trace = load_requests(&args.input, args.trace_seconds)?;
         eprintln!(
-            "Recorded starts={}, outcomes={:?}, incomplete={}. Replaying every start with successful synthetic whole-object downloads.",
+            "Recorded starts={}, outcomes={:?}, unmatched_starts={}. Replaying every start with successful synthetic whole-object downloads.",
             access_trace.requests.len(),
             access_trace.outcomes,
-            access_trace.incomplete,
+            access_trace.unmatched_starts,
         );
         let requests = Arc::new(access_trace.requests);
         fs::create_dir(&args.cache_dir)?;
@@ -283,22 +283,22 @@ mod linux {
         if args.simulate_s3 {
             writeln!(
                 summary,
-                "source_slots,{S3_CONCURRENT_DOWNLOADS}\nsource_latency_seconds,{S3_LATENCY_SECONDS}\nsource_bytes_per_second,{S3_BYTES_PER_SECOND}"
+                "source_concurrency_limit,{S3_CONCURRENT_DOWNLOADS}\nsource_latency_seconds,{S3_LATENCY_SECONDS}\nsource_bytes_per_second,{S3_BYTES_PER_SECOND}"
             )?;
         } else {
             writeln!(
                 summary,
-                "source_slots,unlimited\nsource_latency_seconds,0\nsource_bytes_per_second,unlimited"
+                "source_concurrency_limit,unlimited\nsource_latency_seconds,0\nsource_bytes_per_second,unlimited"
             )?;
         }
-        writeln!(summary, "recorded_incomplete,{}", access_trace.incomplete)?;
+        writeln!(summary, "recorded_unmatched_starts,{}", access_trace.unmatched_starts)?;
         for (kind, count) in access_trace.outcomes.iter().enumerate().skip(1) {
             writeln!(summary, "recorded_outcome_{kind},{count}")?;
         }
         summary.flush()?;
         let registry = Registry::new();
         registry.register(Box::new(ProcessCollector::for_self()))?;
-        let completed = IntCounter::new("replay_completed_total", "Completed fetch events")?;
+        let completed = IntCounter::new("replay_completed_total", "Successfully completed replay lookups")?;
         let queued = IntGauge::new("replay_queued_requests", "Arrivals whose lookup task has not started")?;
         let active = IntGauge::new("replay_active_requests", "Started lookup tasks not yet completed")?;
         let elapsed = Gauge::new("replay_elapsed_seconds", "Monotonic seconds since replay origin")?;

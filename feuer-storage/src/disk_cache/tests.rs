@@ -374,10 +374,10 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
     cache.insert(other, download(0, 100)).await.unwrap();
     let histories = cache.access_histories();
     for _ in 0..3 {
-        histories.record_access(&hot);
+        histories.record_request(&hot);
     }
-    histories.record_access(&cold);
-    histories.record_access(&other);
+    histories.record_request(&cold);
+    histories.record_request(&other);
     // Corrupt entry metadata: entry-wise eviction must not read it at all.
     cache
         .disk
@@ -418,8 +418,8 @@ async fn disk_value_uses_payload_length_rather_than_padding_or_chunk_size() {
     // Both entries occupy one payload chunk, with different payload lengths.
     cache.insert(small, download(0, 1)).await.unwrap();
     cache.insert(large, download(0, 3000)).await.unwrap();
-    cache.access_histories().record_access(&small);
-    cache.access_histories().record_access(&large);
+    cache.access_histories().record_request(&small);
+    cache.access_histories().record_request(&large);
     assert!(cache.insert(ObjectKeyHash::from("new"), download(0, 1)).await.unwrap());
     assert!(cache.get(&small).await.is_some());
     assert!(cache.get(&large).await.is_none());
@@ -435,7 +435,7 @@ async fn eviction_respects_sample_size_and_keeps_first_sampled_on_ties() {
         cache.insert(older, download(0, 100)).await.unwrap();
         cache.insert(newer, download(0, 100)).await.unwrap();
         if sample_size == 1 {
-            cache.access_histories().record_access(&newer);
+            cache.access_histories().record_request(&newer);
         }
         // Sample the newer entry first. A one-entry sample must not consider the cheaper older entry.
         cache.disk.shards[0].entry_index.lock().unwrap().next_sample_start = usize::MAX;
@@ -470,13 +470,13 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     let hot = ObjectKeyHash::from("hot");
     let cold = ObjectKeyHash::from("cold");
     memory.insert(hot, download(0, 100), 100);
-    history.record_access(&hot);
+    history.record_request(&hot);
     cache.insert(hot, download(0, 100)).await.unwrap();
     cache.insert(cold, download(0, 100)).await.unwrap();
-    history.record_access(&cold); // A disk-only key.
+    history.record_request(&cold); // A disk-only key.
     for _ in 0..3 {
         assert!(memory.get(&hot).is_some());
-        history.record_access(&hot);
+        history.record_request(&hot);
     }
     assert_eq!(history.request_count(), 5);
     assert!(
@@ -490,7 +490,7 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     assert!(memory.get(&hot).is_none());
     assert!(cache.get(&hot).await.is_some());
     assert_eq!(history.request_count(), 5); // Raw storage reads do not record a second event.
-    history.record_access(&hot);
+    history.record_request(&hot);
     assert_eq!(history.request_count(), 6);
     let shard = &cache.disk.shards[0];
     shard.remove_entry(&hot);
@@ -509,7 +509,7 @@ async fn admission_eviction_limit_does_not_force_out_a_shared_chunks_last_entry(
         .collect();
     inputs.push((hot, download(0, 1)));
     cache.insert_batch(inputs).await.unwrap();
-    cache.access_histories().record_access(&hot);
+    cache.access_histories().record_request(&hot);
     // Removing 64 individually chosen cold entries still cannot release the chunk with its hot neighbor.
     assert!(
         !cache

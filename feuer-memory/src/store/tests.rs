@@ -20,7 +20,7 @@ fn cache_with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>) -> MemoryCache
 
 fn repeat_request(cache: &MemoryCache, key: ObjectKeyHash, count: u64) {
     for _ in 0..count {
-        cache.access_histories.record_access(&key);
+        cache.access_histories.record_request(&key);
     }
 }
 
@@ -293,7 +293,7 @@ fn evicts_entry_with_lower_retrieval_value() {
     let payload = Bytes::from_static(b"x");
     cache.insert(hot, payload.clone(), 1);
     cache.insert(cold, payload.clone(), 1);
-    cache.access_histories.record_access(&cold);
+    cache.access_histories.record_request(&cold);
     repeat_request(&cache, hot, 2);
     cache.insert("incoming".into(), payload, 1);
     assert!(cache.get(&hot).is_some());
@@ -313,7 +313,7 @@ fn stale_frequency_decays_below_recent_accesses() {
     }
     repeat_request(&cache, stale, 8);
     repeat_request(&cache, clock, cache.access_histories.half_life() * 4);
-    cache.access_histories.record_access(&fresh);
+    cache.access_histories.record_request(&fresh);
     cache.insert("incoming".into(), payload, 1);
     assert!(cache.get(&stale).is_none());
     assert!(cache.get(&fresh).is_some());
@@ -328,14 +328,14 @@ fn access_history_is_independent_of_cache_operations_and_lifetime() {
     cache.insert(key, payload.clone(), 1);
     assert!(cache.get(&key).is_some());
     assert_eq!(history.request_count(), 0);
-    history.record_access(&key);
+    history.record_request(&key);
     assert!(cache.remove(&key));
     assert_eq!(history.decayed_request_count(&key), 1.0);
     cache.insert(key, payload.clone(), 1);
     cache.insert("incoming".into(), payload.clone(), 1);
     assert!(!cache.contains_entry(&key));
     assert_eq!(history.decayed_request_count(&key), 1.0);
-    history.record_access(&key);
+    history.record_request(&key);
     cache.insert(key, payload, 1);
     assert_eq!(history.request_count(), 2);
     let demand = history.decayed_request_count(&key);
@@ -356,7 +356,7 @@ fn configured_target_is_divided_without_losing_remainder_bytes() {
 }
 
 #[test]
-fn shard_targets_can_collectively_exceed_the_configured_capacity() {
+fn oversized_objects_in_separate_shards_exceed_cache_capacity() {
     let cache = MemoryCache::with_shard_count(BufferPool::new(2, MemoryMetrics::noop()), 2);
     let [first, second] = from_fn(|shard_index| {
         (0..100)

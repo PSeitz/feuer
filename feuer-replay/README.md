@@ -52,9 +52,9 @@ outcomes, including outcomes recorded after the selected time window. An archive
 must contain a single session because request IDs and clock origins are local to
 each session. Archives with multiple session directories are rejected.
 
-Every selected start is replayed, including requests that originally failed or
-never completed. On a replay miss, the synthetic source successfully downloads the
-whole object. Recorded outcome counts and starts without matching outcomes are
+Every selected start is replayed, including requests that originally failed and
+starts without matching recorded outcomes. On a replay miss, the synthetic source
+successfully downloads the whole object. Recorded outcome counts and unmatched starts are
 reported separately. Missing events or packages can still leave the remaining input
 parseable.
 
@@ -180,7 +180,7 @@ by the cache and are separate from lookup queue and service metrics.
 | Metric | Meaning |
 | --- | --- |
 | `replay_source_gets_total` | Source callbacks started |
-| `replay_source_bytes_total` | Bytes allocated after service |
+| `replay_source_bytes_total` | Payload bytes produced by successful synthetic downloads |
 | `replay_source_queue_seconds` | Time spent acquiring a download permit |
 | `replay_source_service_seconds` | Service time, including delay and allocation |
 | `replay_source_waiting_requests` | Callbacks waiting for a permit |
@@ -195,7 +195,7 @@ The histograms use buckets from 0.001 to 1048.576 seconds, doubling at each step
 - `scheduling,task_per_arrival` and `workers` (the number of runtime threads).
 - Effective `memory_cost_per_request`, `disk_cost_per_request`, both
   `*_cost_per_requested_byte` coefficients, and `access_count_half_life`.
-- `simulate_s3`, `source_slots`, `source_latency_seconds`, and
+- `simulate_s3`, `source_concurrency_limit`, `source_latency_seconds`, and
   `source_bytes_per_second`.
 - `source_buffer_pool,1`, identifying cache-pool allocation in both source modes.
 
@@ -221,5 +221,5 @@ On Linux, tests cover:
 
 The replay binary's Linux-only tests do not run on macOS. Decoder tests cover
 malformed packages, all event kinds, time prefixes and full captures, cross-package
-outcome joins, incomplete requests, mixed sessions, and duplicate or inconsistent
+outcome joins, unmatched starts, mixed sessions, and duplicate or inconsistent
 events.

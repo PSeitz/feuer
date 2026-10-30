@@ -17,7 +17,7 @@ Both tiers sample eligible entries and evict the entry with the lowest retention
 `AvoidedRetrievalCostScorer` computes:
 
 ```text
-decayed_object_count × max(cost_per_request + payload_len × cost_per_requested_byte, 0)
+decayed_request_count × max(cost_per_request + payload_len × cost_per_requested_byte, 0)
 ────────────────────────────────────────────────────────────────────────────────────
                               max(entry_size_bytes, 1)
 ```
