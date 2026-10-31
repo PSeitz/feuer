@@ -1,5 +1,7 @@
 # Feuer
 
+![Feuer — cost-aware tiered cache, with a flaming horse logo](full_logo.svg)
+
 Scared of burning your S3 budget? Feuer will take care of that.
 
 Feuer caches immutable objects in memory and on disk, with application callbacks for S3 and other sources.
