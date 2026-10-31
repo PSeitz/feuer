@@ -75,7 +75,8 @@ Configured capacity includes this header chunk and must be at least 2 MiB.
 application's payload format version independently of Feuer's disk format. On open,
 an unequal payload version or file capacity, missing header, unsupported disk-format tag,
 or invalid header checksum causes the first metadata chunk of every shard to be zeroed before
-writing a new header and recovering shards. This breaks the old chains without truncating
+syncing the file, writing a new header, and syncing again before recovering shards.
+A sync failure aborts opening. This breaks the old chains without truncating
 the file to zero. A version change with unchanged capacity leaves payload bytes untouched.
 Clearing writes 1 MiB per shard plus the 4-KiB header.
 Both upgrades and downgrades discard old entries. Headerless formats are discarded,
@@ -155,8 +156,10 @@ pending small entries. Closing discards partial chunks.
    Readers validate owned buffers against the expected checksum after I/O; late writes to reused
    payloads can cause checksum misses.
 
-No `fsync`, `fdatasync`, or shutdown metadata flush is issued. Write completion does not
-guarantee durability or persistence ordering after power loss; recovery is best-effort.
+Incompatible-header initialization issues `fsync` before and after writing the replacement
+header. Normal cache writes issue no `fsync`, `fdatasync`, or shutdown metadata flush.
+Their completion does not guarantee durability or persistence ordering after power loss.
+Recovery of these entries is best-effort.
 
 ## Recovery
 

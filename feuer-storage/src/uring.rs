@@ -319,6 +319,11 @@ pub(crate) struct WriteQueue {
 }
 
 impl WriteQueue {
+    /// Syncs completed writes and file metadata on the calling thread.
+    pub(crate) fn sync_all(&self) -> io::Result<()> {
+        self.files.file.sync_all()
+    }
+
     #[cfg(test)]
     pub(crate) fn new(files: Arc<DataFileAndLock>) -> io::Result<Self> {
         Ok(Self {

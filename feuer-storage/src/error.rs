@@ -15,6 +15,8 @@ pub enum IoOperation {
     InspectDataFile,
     /// Set the data file to its configured capacity.
     ResizeDataFile,
+    /// Sync data-file contents and metadata to disk.
+    SyncDataFile,
     /// Read file bytes at an offset.
     Read,
     /// Write file bytes at an offset.
@@ -31,6 +33,7 @@ impl IoOperation {
             Self::OpenDataFile => "open_data_file",
             Self::InspectDataFile => "inspect_data_file",
             Self::ResizeDataFile => "resize_data_file",
+            Self::SyncDataFile => "sync_data_file",
             Self::Read => "read",
             Self::Write => "write",
         }

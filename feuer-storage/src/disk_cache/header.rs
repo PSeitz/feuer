@@ -29,13 +29,17 @@ pub(super) async fn clear_incompatible_metadata(
         let start = shard_disk_range(file.capacity(), num_shards, shard_index).start;
         file.write_at(start, &empty_chunk).await?;
     }
+    // Persist every cleared chain before publishing the new payload version.
+    file.sync_all().await?;
     let mut header = vec![0; HEADER_BYTES];
     header[8..16].copy_from_slice(FORMAT_TAG);
     header[16..24].copy_from_slice(&payload_version.to_le_bytes());
     header[24..32].copy_from_slice(&file.capacity().to_le_bytes());
     let checksum = XxHash64::oneshot(0, &header[8..]);
     header[..8].copy_from_slice(&checksum.to_le_bytes());
-    file.write_at(0, &Bytes::from(header)).await
+    file.write_at(0, &Bytes::from(header)).await?;
+    // Persist the new header before allowing entries in the new payload format.
+    file.sync_all().await
 }
 
 #[cfg(test)]

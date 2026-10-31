@@ -205,6 +205,18 @@ impl DataFile {
         .await
     }
 
+    /// Syncs completed writes and file metadata. Callers must await writes first.
+    pub(crate) async fn sync_all(&self) -> DataFileResult<()> {
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || state.write_queue.sync_all())
+            .await
+            .map_err(|source| DataFileError::Task {
+                operation: IoOperation::SyncDataFile,
+                source: Box::new(source),
+            })?
+            .map_err(|source| self.io_error(IoOperation::SyncDataFile, source))
+    }
+
     fn io_error(&self, operation: IoOperation, source: io::Error) -> DataFileError {
         DataFileError::Io {
             operation,
