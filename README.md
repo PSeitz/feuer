@@ -1,6 +1,6 @@
 # Feuer
 
-![Feuer — cost-aware tiered cache, with a flaming horse logo](full_logo.svg)
+![Feuer — cost-aware tiered cache, with a flaming horse logo](full_logo.svg?v=cfeda6a)
 
 Scared of burning your S3 budget? Feuer will take care of that.
 
