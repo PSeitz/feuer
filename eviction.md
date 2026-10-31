@@ -38,7 +38,9 @@ let scorer = std::sync::Arc::new(feuer::AvoidedRetrievalCostScorer {
     cost_per_request: 256_000.0,
     cost_per_requested_byte: 1.0,
 });
-let cache = feuer::Cache::builder(config)
+let cache = feuer::Cache::builder()
+    .memory_capacity(64 << 20)
+    .disk_capacity(1 << 30)
     .with_memory_retention_scorer(scorer.clone())
     .with_disk_retention_scorer(scorer)
     .open()
@@ -47,9 +49,8 @@ let cache = feuer::Cache::builder(config)
 
 The builder accepts separate memory and disk scorers. Clone an `Arc` into both
 setters to share one scorer, as above. Omit either setter to use that tier's default
-scorer. Both scorers receive the same request history. `CacheConfig` keeps candidate
-sampling settings in `SampledEvictionConfig`, separate from resource settings and
-scoring parameters.
+scorer. Both scorers receive the same request history. Set the candidate sample
+size for both tiers with `.reclaim_sample_size(n)`.
 
 ### Tier-specific costs and limitations
 
@@ -83,7 +84,7 @@ shards. One atomic request clock supplies request-age decay across all keys.
 The default half-life is 262,144 requests. Each object's counter survives cache
 eviction until history cleanup removes it. History defaults to a soft limit of
 2,000,000 entries per cache, configurable through `FEUER_HISTORY_ENTRY_LIMIT` or
-`CacheConfig::with_history_entry_limit`.
+the builder's `.history_entry_limit(n)`.
 
 One background thread checks the limit each second and removes the least recently
 requested keys, targeting 90% of the limit. It locks one shard at a time and exits

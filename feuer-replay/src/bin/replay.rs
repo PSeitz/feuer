@@ -21,7 +21,7 @@ mod linux {
 
     use async_channel::{Receiver, Sender, unbounded};
     use clap::Parser;
-    use feuer::{AlignedBuffer, AvoidedRetrievalCostScorer, Cache, CacheConfig};
+    use feuer::{AlignedBuffer, AvoidedRetrievalCostScorer, Cache};
     use feuer_replay::{Request, Result, load_requests};
     use mixtrics::{metrics::BoxedRegistry, registry::prometheus::PrometheusMetricsRegistry};
     use prometheus::{
@@ -241,9 +241,12 @@ mod linux {
 
     async fn replay(args: Args, workers: usize) -> Result<()> {
         let [memory_cost, disk_cost] = args.request_costs();
-        let mut config = CacheConfig::new(&args.cache_dir, args.disk_bytes, args.memory_bytes)?;
+        let mut builder = Cache::builder()
+            .directory(&args.cache_dir)
+            .disk_capacity(args.disk_bytes)
+            .memory_capacity(args.memory_bytes);
         if let Some(half_life) = args.access_count_half_life {
-            config = config.with_access_count_half_life(half_life)?;
+            builder = builder.access_count_half_life(half_life);
         }
         let access_trace = load_requests(&args.input, args.trace_seconds)?;
         eprintln!(
@@ -272,8 +275,7 @@ mod linux {
         )?;
         writeln!(
             summary,
-            "memory_cost_per_request,{memory_cost}\ndisk_cost_per_request,{disk_cost}\nmemory_cost_per_requested_byte,1\ndisk_cost_per_requested_byte,1\naccess_count_half_life,{}",
-            config.access_count_half_life(),
+            "memory_cost_per_request,{memory_cost}\ndisk_cost_per_request,{disk_cost}\nmemory_cost_per_requested_byte,1\ndisk_cost_per_requested_byte,1",
         )?;
         writeln!(
             summary,
@@ -320,13 +322,18 @@ mod linux {
                 cost_per_requested_byte: 1.0,
             })
         };
-        let cache = Cache::builder(config)
+        let cache = builder
             .with_metrics(&metrics)
             .with_memory_retention_scorer(scorer(memory_cost))
             .with_disk_retention_scorer(scorer(disk_cost))
             .open()
             .await?;
         writeln!(summary, "open_seconds,{}", opening.elapsed().as_secs_f64())?;
+        writeln!(
+            summary,
+            "access_count_half_life,{}",
+            cache.config().access_count_half_life(),
+        )?;
         write_metrics_snapshot(&registry, &mut File::create_new(args.output.join("before.prom"))?)?;
 
         let (sender, receiver) = unbounded::<(usize, Instant)>();
@@ -440,7 +447,6 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
-        use tempfile::tempdir;
         use tokio::{spawn, sync::Barrier, task::yield_now, time::timeout};
 
         use super::*;
@@ -484,11 +490,14 @@ mod linux {
 
         #[tokio::test]
         async fn source_downloads_charge_buffer_capacity() {
-            let directory = tempdir().unwrap();
             let registry = Registry::new();
             let metrics: BoxedRegistry = Box::new(PrometheusMetricsRegistry::new(registry.clone()));
-            let config = CacheConfig::new(directory.path(), 0, 4 << 20).unwrap();
-            let cache = Cache::builder(config).with_metrics(&metrics).open().await.unwrap();
+            let cache = Cache::builder()
+                .memory_capacity(4 << 20)
+                .with_metrics(&metrics)
+                .open()
+                .await
+                .unwrap();
             let source = SyntheticDownloads::new(&registry, false).unwrap();
             let request = Request {
                 request_id: 0,
@@ -519,11 +528,7 @@ mod linux {
 
         #[tokio::test]
         async fn source_callbacks_wait_for_download_permits_then_complete_independently() {
-            let directory = tempdir().unwrap();
-            let cache = Cache::builder(CacheConfig::new(directory.path(), 0, 4 << 20).unwrap())
-                .open()
-                .await
-                .unwrap();
+            let cache = Cache::builder().memory_capacity(4 << 20).open().await.unwrap();
             let source = Arc::new(SyntheticDownloads::new(&Registry::new(), true).unwrap());
             let mut held = source
                 .download_permits

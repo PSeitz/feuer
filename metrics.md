@@ -1,6 +1,6 @@
 # Metrics
 
-Use `Cache::builder(config).with_metrics(&metrics_registry).open().await`
+Use `Cache::builder().memory_capacity(bytes).with_metrics(&metrics_registry).open().await`
 with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup and
 memory metrics, plus disk I/O, disk-cache and disk-write metrics when disk is enabled.
 On Linux, `.with_io_queues(io_queues)` independently selects shared I/O queues.

@@ -1,15 +1,12 @@
 use std::{
-    ffi::OsStr,
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
 };
 
-use feuer_historian::{DEFAULT_ACCESS_COUNT_HALF_LIFE, DEFAULT_HISTORY_ENTRY_LIMIT};
-use feuer_memory::retention::RECLAIM_SAMPLE_SIZE;
-use feuer_types::config::read_env_number;
 use thiserror::Error;
 
-/// Capacities and location for a Feuer cache.
+/// Resolved settings for an open cache, available through [`crate::Cache::config`].
+/// Configure a cache through [`crate::CacheBuilder`].
 ///
 /// `disk_capacity` includes the 1-MiB header chunk, shard metadata, and alignment overhead.
 /// Nonzero capacity must be at least 2 MiB. Changing the file capacity invalidates disk entries.
@@ -20,105 +17,30 @@ use thiserror::Error;
 /// capacity to disable caching should bypass cache construction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheConfig {
-    directory: PathBuf,
-    file_name: String,
-    payload_version: u64,
-    disk_capacity: u64,
-    memory_capacity: u64,
-    access_count_half_life: NonZeroU64,
-    history_entry_limit: NonZeroUsize,
-    eviction: SampledEvictionConfig,
+    pub(super) directory: PathBuf,
+    pub(super) file_name: String,
+    pub(super) payload_version: u64,
+    pub(super) disk_capacity: u64,
+    pub(super) memory_capacity: u64,
+    pub(super) access_count_half_life: NonZeroU64,
+    pub(super) history_entry_limit: NonZeroUsize,
+    pub(super) reclaim_sample_size: usize,
 }
 
 impl CacheConfig {
-    /// Creates a cache configuration with no implicit capacity defaults.
-    ///
-    /// Requires positive memory capacity. Disk capacity is checked when opening the cache.
-    /// Uses [`SampledEvictionConfig::new`] for eviction settings.
-    /// Reads `FEUER_ACCESS_COUNT_HALF_LIFE`, defaulting to 262,144 requests.
-    /// The half-life must be positive and applies to both tiers of this cache.
-    /// Reads `FEUER_HISTORY_ENTRY_LIMIT`, defaulting to 2,000,000 entries. Must be positive.
-    pub fn new(
-        directory: impl Into<PathBuf>,
-        disk_capacity: u64,
-        memory_capacity: u64,
-    ) -> Result<Self, CacheConfigError> {
-        if memory_capacity == 0 {
-            return Err(CacheConfigError::InvalidMemoryCapacity);
-        }
-
-        Ok(Self {
-            directory: directory.into(),
-            file_name: "data".to_owned(),
-            payload_version: 0,
-            disk_capacity,
-            memory_capacity,
-            eviction: SampledEvictionConfig::new()?,
-            access_count_half_life: read_env_number("FEUER_ACCESS_COUNT_HALF_LIFE", DEFAULT_ACCESS_COUNT_HALF_LIFE, 1)
-                .map_err(|_| CacheConfigError::InvalidAccessCountHalfLife)?,
-            history_entry_limit: read_env_number("FEUER_HISTORY_ENTRY_LIMIT", DEFAULT_HISTORY_ENTRY_LIMIT.get(), 1)
-                .map(|limit| NonZeroUsize::new(limit).unwrap())
-                .map_err(|_| CacheConfigError::InvalidHistoryEntryLimit)?,
-        })
-    }
-
-    /// Sets the backing filename within the cache directory. Defaults to `data`.
-    /// Different filenames allow independent caches in the same directory.
-    /// Must be a single filename, without NUL bytes or the reserved `.feuer.` prefix.
-    pub fn with_file_name(mut self, file_name: impl Into<String>) -> Result<Self, CacheConfigError> {
-        let file_name = file_name.into();
-        if Path::new(&file_name).file_name() != Some(OsStr::new(&file_name))
-            || file_name.contains('\0')
-            || file_name.starts_with(".feuer.")
-        {
-            return Err(CacheConfigError::InvalidFileName);
-        }
-        self.file_name = file_name;
-        Ok(self)
-    }
-
-    /// Sets the application's payload format version. Defaults to zero.
-    /// Opening with a different version clears all previous disk entries, including on downgrade.
-    /// This is independent of Feuer's disk format version and unused when disk is disabled.
-    pub fn with_payload_version(mut self, payload_version: u64) -> Self {
-        self.payload_version = payload_version;
-        self
-    }
-
     /// Returns the application's payload format version.
     pub const fn payload_version(&self) -> u64 {
         self.payload_version
     }
 
-    /// Sets the sampled eviction settings shared by memory and disk.
-    pub fn with_eviction(mut self, eviction: SampledEvictionConfig) -> Self {
-        self.eviction = eviction;
-        self
-    }
-
-    /// Returns the sampled eviction settings.
-    pub const fn eviction(&self) -> &SampledEvictionConfig {
-        &self.eviction
-    }
-
-    /// Sets the access count half-life in requests across all keys of this cache.
-    /// Applies to both tiers. Overrides `FEUER_ACCESS_COUNT_HALF_LIFE` for this cache.
-    pub fn with_access_count_half_life(mut self, half_life: u64) -> Result<Self, CacheConfigError> {
-        self.access_count_half_life = NonZeroU64::new(half_life).ok_or(CacheConfigError::InvalidAccessCountHalfLife)?;
-        Ok(self)
+    /// Returns the maximum candidates inspected per eviction decision.
+    pub const fn reclaim_sample_size(&self) -> usize {
+        self.reclaim_sample_size
     }
 
     /// Returns the access count half-life in requests across all keys of this cache.
     pub const fn access_count_half_life(&self) -> NonZeroU64 {
         self.access_count_half_life
-    }
-
-    /// Sets the history entry count above which cleanup removes the least recently requested keys.
-    /// Cleanup targets 90% of the limit. Concurrent requests can temporarily exceed it.
-    /// Overrides `FEUER_HISTORY_ENTRY_LIMIT` for this cache. Must be positive.
-    pub fn with_history_entry_limit(mut self, entry_limit: usize) -> Result<Self, CacheConfigError> {
-        self.history_entry_limit = NonZeroUsize::new(entry_limit).ok_or(CacheConfigError::InvalidHistoryEntryLimit)?;
-        Ok(self)
     }
 
     /// Returns the entry-count cleanup threshold for the history shared by both cache tiers.
@@ -144,40 +66,6 @@ impl CacheConfig {
     /// Returns the soft memory eviction target for entry allocation charges in bytes.
     pub const fn memory_capacity(&self) -> u64 {
         self.memory_capacity
-    }
-}
-
-/// Settings for evicting the lowest-scoring entry from a sample.
-/// Scoring parameters belong to the supplied [`crate::RetentionScorer`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SampledEvictionConfig {
-    sample_size: usize,
-}
-
-impl SampledEvictionConfig {
-    /// Reads `FEUER_RECLAIM_SAMPLE_SIZE`, defaulting to 64 when unset.
-    /// Accepts size suffixes as multipliers (e.g. `1KiB` for 1024).
-    /// The result must be positive and fit `usize`.
-    pub fn new() -> Result<Self, CacheConfigError> {
-        Ok(Self {
-            sample_size: read_env_number("FEUER_RECLAIM_SAMPLE_SIZE", RECLAIM_SAMPLE_SIZE, 1)
-                .map_err(|_| CacheConfigError::InvalidReclaimSampleSize)?,
-        })
-    }
-
-    /// Sets the maximum candidates inspected per decision.
-    /// Overrides the value read from `FEUER_RECLAIM_SAMPLE_SIZE`.
-    pub fn with_sample_size(mut self, sample_size: usize) -> Result<Self, CacheConfigError> {
-        if sample_size == 0 {
-            return Err(CacheConfigError::InvalidReclaimSampleSize);
-        }
-        self.sample_size = sample_size;
-        Ok(self)
-    }
-
-    /// Returns the maximum candidates inspected per eviction decision.
-    pub const fn sample_size(&self) -> usize {
-        self.sample_size
     }
 }
 
@@ -210,10 +98,15 @@ pub enum CacheConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Cache, CacheBuilder};
     use std::{
         env::{current_exe, var},
         process::Command,
     };
+
+    fn builder() -> CacheBuilder<'static> {
+        Cache::builder().memory_capacity(1)
+    }
 
     fn check_environment_overrides(test: &str, name: &str, child: &str, cases: &[(Option<&str>, &str)]) {
         for &(setting, expected) in cases {
@@ -228,10 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn configures_independent_files_in_one_directory() {
-        let config = CacheConfig::new("cache", 1, 1).unwrap();
-        assert_eq!(config.file_name(), "data");
-        assert_eq!(config.clone().with_file_name("images").unwrap().file_name(), "images");
+    fn rejects_invalid_file_names() {
         for name in [
             "",
             ".",
@@ -243,7 +133,7 @@ mod tests {
             "data\0",
         ] {
             assert_eq!(
-                config.clone().with_file_name(name),
+                builder().file_name(name).resolve_config(),
                 Err(CacheConfigError::InvalidFileName)
             );
         }
@@ -252,32 +142,32 @@ mod tests {
     #[test]
     fn reclaim_sample_size_environment_override() {
         if let Ok(expected) = var("FEUER_TEST_RECLAIM_SAMPLE_CHILD") {
-            let result = CacheConfig::new("cache", 1, 1).map(|config| config.eviction().sample_size());
+            let result = builder().resolve_config().map(|config| config.reclaim_sample_size());
             let expected = expected
                 .parse::<usize>()
                 .map_err(|_| CacheConfigError::InvalidReclaimSampleSize);
             assert_eq!(result, expected);
+            assert_eq!(
+                builder()
+                    .reclaim_sample_size(128)
+                    .resolve_config()
+                    .unwrap()
+                    .reclaim_sample_size(),
+                128
+            );
             return;
         }
         check_environment_overrides(
             "config::tests::reclaim_sample_size_environment_override",
             "FEUER_RECLAIM_SAMPLE_SIZE",
             "FEUER_TEST_RECLAIM_SAMPLE_CHILD",
-            &[(Some("1KiB"), "1024"), (Some("0"), "error"), (Some("bad"), "error")],
+            &[
+                (None, "64"),
+                (Some("1KiB"), "1024"),
+                (Some("0"), "error"),
+                (Some("bad"), "error"),
+            ],
         );
-    }
-
-    #[test]
-    fn explicit_reclaim_sample_size_overrides_configuration() {
-        let eviction = SampledEvictionConfig::new().unwrap();
-        assert_eq!(
-            eviction.clone().with_sample_size(0),
-            Err(CacheConfigError::InvalidReclaimSampleSize)
-        );
-        let eviction = eviction.with_sample_size(128).unwrap();
-        let config = CacheConfig::new("cache", 1, 1).unwrap().with_eviction(eviction.clone());
-        assert_eq!(config.eviction(), &eviction);
-        assert_eq!(config.eviction().sample_size(), 128);
     }
 
     #[test]
@@ -286,10 +176,21 @@ mod tests {
         const CHILD: &str = "FEUER_TEST_HALF_LIFE_CHILD";
         if let Ok(expected) = var(CHILD) {
             assert_eq!(
-                CacheConfig::new("cache", 1, 1).map(|config| config.access_count_half_life().get()),
+                builder()
+                    .resolve_config()
+                    .map(|config| config.access_count_half_life().get()),
                 expected
                     .parse::<u64>()
                     .map_err(|_| CacheConfigError::InvalidAccessCountHalfLife)
+            );
+            assert_eq!(
+                builder()
+                    .access_count_half_life(128)
+                    .resolve_config()
+                    .unwrap()
+                    .access_count_half_life()
+                    .get(),
+                128
             );
             return;
         }
@@ -306,27 +207,28 @@ mod tests {
                 (Some("bad"), "error"),
             ],
         );
-        assert_eq!(
-            CacheConfig::new("cache", 1, 1).unwrap().with_access_count_half_life(0),
-            Err(CacheConfigError::InvalidAccessCountHalfLife)
-        );
     }
 
     #[test]
     fn history_entry_limit_environment_override() {
         if let Ok(expected) = var("FEUER_TEST_HISTORY_ENTRY_LIMIT_CHILD") {
             assert_eq!(
-                CacheConfig::new("cache", 0, 1).map(|config| config.history_entry_limit().get()),
+                builder()
+                    .resolve_config()
+                    .map(|config| config.history_entry_limit().get()),
                 expected
                     .parse::<usize>()
                     .map_err(|_| CacheConfigError::InvalidHistoryEntryLimit)
             );
-            if let Ok(config) = CacheConfig::new("cache", 0, 1) {
-                assert_eq!(
-                    config.with_history_entry_limit(32).unwrap().history_entry_limit().get(),
-                    32
-                );
-            }
+            assert_eq!(
+                builder()
+                    .history_entry_limit(32)
+                    .resolve_config()
+                    .unwrap()
+                    .history_entry_limit()
+                    .get(),
+                32
+            );
             return;
         }
         check_environment_overrides(
@@ -342,30 +244,5 @@ mod tests {
                 (Some("18446744073709551616"), "error"),
             ],
         );
-        assert_eq!(
-            CacheConfig::new("cache", 0, 1).unwrap().with_history_entry_limit(0),
-            Err(CacheConfigError::InvalidHistoryEntryLimit)
-        );
-    }
-
-    #[test]
-    fn preserves_configured_capacities() {
-        for (disk_capacity, memory_capacity) in [(0, 256 << 20), (1 << 40, 256 << 20), (4 * (1 << 40), 1)] {
-            let config = CacheConfig::new("cache", disk_capacity, memory_capacity).unwrap();
-
-            assert_eq!(config.directory(), Path::new("cache"));
-            assert_eq!(config.disk_capacity(), disk_capacity);
-            assert_eq!(config.memory_capacity(), memory_capacity);
-        }
-    }
-
-    #[test]
-    fn rejects_zero_memory_capacity() {
-        for disk_capacity in [0, 1] {
-            assert_eq!(
-                CacheConfig::new("cache", disk_capacity, 0),
-                Err(CacheConfigError::InvalidMemoryCapacity)
-            );
-        }
     }
 }

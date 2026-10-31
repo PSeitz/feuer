@@ -12,7 +12,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use feuer::{AlignedBuffer, Cache, CacheConfig, ObjectKeyHash};
+use feuer::{AlignedBuffer, Cache, ObjectKeyHash};
 use feuer_replay::{Result, decode_package, load_requests};
 use tempfile::tempdir;
 use tokio::{
@@ -23,7 +23,8 @@ use tokio::{
 #[tokio::test]
 async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    let cache = Cache::builder(CacheConfig::new("unused", 0, 1 << 20)?)
+    let cache = Cache::builder()
+        .memory_capacity(1 << 20)
         .open()
         .await?
         .with_trace(move |package| ready(sender.send(package).map_err(io::Error::other)));
@@ -127,7 +128,8 @@ fn replays_objects_with_and_without_disk() -> Result<()> {
 #[tokio::test]
 async fn decodes_empty_object_from_current_writer() -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    let cache = Cache::builder(CacheConfig::new("unused", 0, 1 << 20)?)
+    let cache = Cache::builder()
+        .memory_capacity(1 << 20)
         .open()
         .await?
         .with_trace(move |package| ready(sender.send(package).map_err(io::Error::other)));

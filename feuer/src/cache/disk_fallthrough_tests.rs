@@ -7,7 +7,10 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
     for disk_capacity in [0, 4 << 20] {
         let directory = tempdir().unwrap();
         let (registry, backend) = registry();
-        let cache = Cache::builder(CacheConfig::new(directory.path(), disk_capacity, 1 << 20).unwrap())
+        let cache = Cache::builder()
+            .directory(directory.path())
+            .disk_capacity(disk_capacity)
+            .memory_capacity(1 << 20)
             .with_metrics(&backend)
             .open()
             .await

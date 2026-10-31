@@ -86,7 +86,7 @@ Per-tier request costs accept finite, nonnegative floating-point values. Both
 `cost_per_requested_byte` coefficients are fixed at `1`. Both tiers share the
 historian.
 
-`--access-count-half-life` must be positive. It sets `CacheConfig` and overrides
+`--access-count-half-life` must be positive. It configures the cache builder and overrides
 `FEUER_ACCESS_COUNT_HALF_LIFE`. Eviction sample size and buffer retention use the
 cache environment variables.
 

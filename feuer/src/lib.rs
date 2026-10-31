@@ -1,11 +1,84 @@
-//! Feuer is a tiered cache for immutable objects.
+//! Feuer caches immutable objects in memory and on disk.
 //!
-//! The public boundary provides object payloads, opaque object identities,
-//! a soft-capacity memory tier, integrity-checked disk hits,
-//! best-effort disk writes through a 512-entry queue, and per-call asynchronous download callbacks.
-//! Zero disk capacity disables the disk tier on every platform without requiring a Tokio runtime.
-//! With disk enabled, opening requires Linux direct I/O and io_uring, and waits for metadata recovery.
-//! Other platforms reject nonzero disk capacity. Access tracing requires Tokio.
+//! On a cache miss, it calls your function to fetch or compute the object.
+//! Eviction considers how often an object is requested, its size, and the cost of fetching it again.
+//!
+//! # Quick start
+//!
+//! Create a memory-only cache and fetch an object. This example runs on every supported
+//! platform. Replace the callback body with your application's source access.
+//!
+//! ```
+//! use std::convert::Infallible;
+//! use bytes::Bytes;
+//! use feuer::Cache;
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let cache = Cache::builder()
+//!         .memory_capacity(64 * 1024 * 1024)
+//!         .open()
+//!         .await?;
+//!
+//!     let bytes = cache
+//!         .get_or_fetch("object-v1".to_owned(), || async {
+//!             Ok::<_, Infallible>(Bytes::from_static(b"hello world"))
+//!         })
+//!         .await?;
+//!
+//!     assert_eq!(bytes.as_ref(), b"hello world");
+//!     Ok(())
+//! }
+//! ```
+//!
+//! Capacities are in bytes. Memory capacity must be positive. Disk caching is disabled
+//! until you set a nonzero [`disk_capacity`](CacheBuilder::disk_capacity).
+//!
+//! # How lookups work
+//!
+//! [`Cache::get_or_fetch`] checks memory first, then disk when enabled. A disk hit is
+//! checksum-verified and promoted to memory. On a miss, Feuer calls your callback,
+//! caches the result in memory, and queues a disk write when disk caching is enabled.
+//!
+//! Use [`Cache::get`] to check the cache without fetching from the source.
+//! Cloning a [`Cache`] shares its contents and in-flight work, so handles can be used
+//! across tasks. Callbacks that share a fetch must be interchangeable.
+//!
+//! # Object identity and recovery
+//!
+//! Each key must identify one immutable payload. Use a new key when the content changes.
+//! Feuer has no invalidation API. Your application remains responsible for source retries
+//! and concurrency limits.
+//!
+//! Treat cached data as disposable. Disk writes and recovery are best-effort, and your
+//! source must remain able to supply objects after eviction or a restart. Each disk cache
+//! needs its own backing file. See [`CacheConfig`] for capacity and payload-version rules.
+//!
+//! # Disk caching and retention
+//!
+//! To enable SSD caching, configure a nonzero disk capacity and open the cache on Linux
+//! with Tokio, `io_uring`, and direct-I/O support:
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), feuer::CacheOpenError> {
+//! let cache = feuer::Cache::builder()
+//!     .memory_capacity(64 * 1024 * 1024)
+//!     .disk_capacity(1024 * 1024 * 1024)
+//!     .directory("cache")
+//!     .file_name("objects")
+//!     .open()
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! This stores disk data in `cache/objects`. The directory defaults to `cache` and the
+//! filename to `data`. Opening waits for disk metadata recovery.
+//! Memory-only operation works on every supported platform without a Tokio runtime.
+//! Access tracing through [`Cache::with_trace`] requires Tokio.
+//!
+//! The default retention policy is [`AvoidedRetrievalCostScorer`]. For workload-specific
+//! decisions, implement [`RetentionScorer`] and configure each tier through [`CacheBuilder`].
 
 mod access_trace;
 mod cache;
@@ -15,8 +88,8 @@ mod metrics;
 #[path = "../../test_support/metrics.rs"]
 mod test_metrics;
 
-pub use cache::{BytesAndMemoryCharge, Cache, CacheBuilder, GetOrFetchError};
-pub use config::{CacheConfig, CacheConfigError, SampledEvictionConfig};
+pub use cache::{BytesAndMemoryCharge, Cache, CacheBuilder, CacheOpenError, GetOrFetchError};
+pub use config::{CacheConfig, CacheConfigError};
 pub use feuer_historian::ObjectAccessHistories;
 pub use feuer_memory::{
     AlignedBuffer,

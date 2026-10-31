@@ -6,7 +6,10 @@ use prometheus::Registry;
 fn memory_cache(memory_capacity: u64, metrics_registry: &BoxedRegistry) -> Cache {
     Cache {
         inner: Arc::new(CacheInner {
-            config: CacheConfig::new("unused", 0, memory_capacity).unwrap(),
+            config: Cache::builder()
+                .memory_capacity(memory_capacity)
+                .resolve_config()
+                .unwrap(),
             memory: MemoryCache::with_metrics(memory_capacity, MemoryMetrics::new(metrics_registry)),
             metrics: LookupMetrics::new(metrics_registry),
             pending_fetches: PendingFetches::default(),

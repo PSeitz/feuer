@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     use bytes::Bytes;
-    use feuer::{Cache, CacheConfig};
+    use feuer::Cache;
     use tokio::{sync::mpsc::unbounded_channel, task::spawn_blocking};
 
     let directory = PathBuf::from(args().nth(1).unwrap_or_else(|| "trace".to_owned()));
@@ -23,7 +23,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     create_dir(&directory)?;
     let mut file_number = 0u64;
     let (write_result_sender, mut write_results) = unbounded_channel();
-    let cache = Cache::builder(CacheConfig::new("unused", 0, 1 << 20).unwrap())
+    let cache = Cache::builder()
+        .memory_capacity(1 << 20)
         .open()
         .await?
         .with_trace(move |package| {

@@ -9,17 +9,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
     use std::{convert::Infallible, env::args, path::PathBuf};
 
     use bytes::Bytes;
-    use feuer::{Cache, CacheConfig, IoQueues};
+    use feuer::{Cache, IoQueues};
 
     let directory = PathBuf::from(args().nth(1).unwrap_or_else(|| "cache".to_owned()));
     let io_queues = IoQueues::new()?;
     // Each cache uses a different file in the same directory, with its own capacities,
     // contents, eviction, buffer pool, file lock, and background-write queue.
-    let images = Cache::builder(CacheConfig::new(&directory, 1 << 30, 64 << 20)?.with_file_name("images")?)
+    let images = Cache::builder()
+        .directory(&directory)
+        .file_name("images")
+        .disk_capacity(1 << 30)
+        .memory_capacity(64 << 20)
         .with_io_queues(io_queues.clone())
         .open()
         .await?;
-    let documents = Cache::builder(CacheConfig::new(&directory, 2 << 30, 32 << 20)?.with_file_name("documents")?)
+    let documents = Cache::builder()
+        .directory(&directory)
+        .file_name("documents")
+        .disk_capacity(2 << 30)
+        .memory_capacity(32 << 20)
         .with_io_queues(io_queues)
         .open()
         .await?;

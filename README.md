@@ -67,13 +67,16 @@ Create a cache and supply a callback for misses:
 use std::convert::Infallible;
 
 use bytes::Bytes;
-use feuer::{Cache, CacheConfig};
+use feuer::Cache;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Cache directory, disk capacity (1 GiB), memory target (64 MiB). 
-    let config = CacheConfig::new("cache", 1 << 30, 64 << 20)?;
-    let cache = Cache::builder(config).open().await?;
+    let cache = Cache::builder()
+        .memory_capacity(64 << 20)
+        .disk_capacity(1 << 30)
+        .directory("cache")
+        .open()
+        .await?;
 
     let bytes = cache
         .get_or_fetch("object-v1".to_owned(), || async {
@@ -89,13 +92,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 By default, metrics are disabled and the cache creates its own I/O queues when disk is enabled.
 Use `.with_metrics(&registry)` to register metrics or `.with_io_queues(queues)`
-to share I/O queues on Linux. Set disk capacity to `0` for memory-only operation
-on any platform. Configure each tier's scorer with `.with_memory_retention_scorer(scorer)`
-and `.with_disk_retention_scorer(scorer)` before calling `.open().await`.
+to share I/O queues on Linux. Disk capacity defaults to `0` for memory-only operation
+on any platform. The default directory is `cache` and file name is `data`.
+Configure each tier's scorer with `.with_memory_retention_scorer(scorer)` and
+`.with_disk_retention_scorer(scorer)` before calling `.open().await`.
 
 Memory capacity must be positive. Applications using zero memory capacity to
 disable caching should bypass cache construction and fetch directly from the source.
-`CacheConfig::new` rejects zero memory capacity.
+Builder setters are infallible. `.open().await` validates configuration and returns
+`CacheOpenError::Config(CacheConfigError)` or `CacheOpenError::Disk(DiskCacheError)`
+on failure.
 
 ## How lookups work
 
@@ -122,9 +128,9 @@ miss and does not wait for an in-progress source callback.
 - Keys are hashed to 128-bit identities without retaining the strings or checking for collisions.
 - Disk caching and recovery are best-effort. Opening waits for metadata recovery.
 - Changing capacity, disk format, or application payload version invalidates disk entries. Use
-  `config.with_payload_version(n)` when changing your payload encoding.
+  `.payload_version(n)` when changing your payload encoding.
 - Give each cache its own backing file. The file is exclusively locked while
-  open. Use separate directories or `config.with_file_name("images")`.
+  open. Use separate directories or `.file_name("images")`.
 
 ## Tuning and integration
 
@@ -140,7 +146,7 @@ See [eviction](eviction.md) for the formula, configuration examples, and trade-o
 
 ### Environment variables
 
-`CacheConfig::new` reads these defaults. Builder methods override them per cache.
+`.open().await` reads these defaults. Builder setters override them per cache.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -150,10 +156,13 @@ See [eviction](eviction.md) for the formula, configuration examples, and trade-o
 
 Values accept integers and size suffixes such as `8KiB` or `1.5 GiB`.
 Binary suffixes use powers of 1024, decimal suffixes powers of 1000.
-Invalid values cause `CacheConfig::new` to fail.
+Invalid values cause `.open().await` to fail with `CacheOpenError::Config`.
 
-`config.with_history_entry_limit(n)` overrides the soft history limit per cache.
-One background worker checks it each second and prunes the oldest requests to 90% of the limit.
+Use `.reclaim_sample_size(n)`, `.access_count_half_life(n)`, and
+`.history_entry_limit(n)` to override these defaults. Read resolved settings through
+`cache.config()`.
+One background worker checks the history limit each second and prunes the oldest
+requests to 90% of the limit.
 
 ## Development
 

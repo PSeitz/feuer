@@ -1,19 +1,28 @@
-use std::{fmt, future::Future, io, sync::Arc, time::Instant};
+use std::{
+    ffi::OsStr,
+    fmt,
+    future::Future,
+    io,
+    num::{NonZeroU64, NonZeroUsize},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use bytes::Bytes;
-use feuer_historian::ObjectAccessHistories;
+use feuer_historian::{DEFAULT_ACCESS_COUNT_HALF_LIFE, DEFAULT_HISTORY_ENTRY_LIMIT, ObjectAccessHistories};
 use feuer_memory::{
     AlignedBuffer, MemoryCache, MemoryMetrics,
-    retention::{AvoidedRetrievalCostScorer, RetentionScorer},
+    retention::{AvoidedRetrievalCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer},
 };
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskCache, DiskCacheOptions, DiskMetrics, IoMetrics};
-use feuer_types::ObjectKeyHash;
+use feuer_types::{ObjectKeyHash, config::read_env_number};
 use mixtrics::{metrics::BoxedRegistry, registry::noop::NoopMetricsRegistry};
 use thiserror::Error;
 
 use crate::{
-    CacheConfig, DiskCacheError, IoQueues, ObjectKey,
+    CacheConfig, CacheConfigError, DiskCacheError, IoQueues, ObjectKey,
     access_trace::AccessTrace,
     metrics::{LookupMetrics, LookupOutcome},
 };
@@ -79,11 +88,32 @@ impl fmt::Debug for Cache {
     }
 }
 
-/// Configuration and optional resources used to open a [`Cache`].
-/// Created by [`Cache::builder`]. Defaults use no-op metrics, dedicated I/O queues,
+/// An error configuring or opening a [`Cache`].
+#[derive(Debug, Error)]
+pub enum CacheOpenError {
+    /// The cache settings are invalid.
+    #[error(transparent)]
+    Config(#[from] CacheConfigError),
+    /// The disk cache could not be opened.
+    #[error(transparent)]
+    Disk(#[from] DiskCacheError),
+}
+
+/// Settings and optional resources used to open a [`Cache`].
+///
+/// Created by [`Cache::builder`]. Set a positive memory capacity before calling
+/// [`open`](Self::open). Disk caching is disabled by default. Settings are validated
+/// when opening. Defaults use no-op metrics, dedicated I/O queues,
 /// and [`AvoidedRetrievalCostScorer`] for both tiers.
 pub struct CacheBuilder<'a> {
-    config: CacheConfig,
+    directory: PathBuf,
+    file_name: String,
+    disk_capacity: u64,
+    memory_capacity: u64,
+    payload_version: u64,
+    access_count_half_life: Option<u64>,
+    history_entry_limit: Option<usize>,
+    reclaim_sample_size: Option<usize>,
     metrics_registry: Option<&'a BoxedRegistry>,
     io_queues: Option<IoQueues>,
     memory_scorer: Arc<dyn RetentionScorer>,
@@ -91,6 +121,100 @@ pub struct CacheBuilder<'a> {
 }
 
 impl<'a> CacheBuilder<'a> {
+    /// Sets the memory eviction target in bytes. Must be positive.
+    pub fn memory_capacity(mut self, bytes: u64) -> Self {
+        self.memory_capacity = bytes;
+        self
+    }
+
+    /// Sets disk capacity in bytes, including metadata and alignment overhead.
+    /// Defaults to zero, which disables disk caching. Nonzero capacity must be at least 2 MiB.
+    pub fn disk_capacity(mut self, bytes: u64) -> Self {
+        self.disk_capacity = bytes;
+        self
+    }
+
+    /// Sets the disk cache directory. Defaults to `cache`. Unused when disk caching is disabled.
+    pub fn directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.directory = directory.into();
+        self
+    }
+
+    /// Sets the backing filename within the directory. Defaults to `data`.
+    /// Must be a single filename without NUL bytes or the reserved `.feuer.` prefix.
+    pub fn file_name(mut self, file_name: impl Into<String>) -> Self {
+        self.file_name = file_name.into();
+        self
+    }
+
+    /// Sets the application's payload format version. Defaults to zero.
+    /// Changing the version clears previous disk entries when opening.
+    pub fn payload_version(mut self, version: u64) -> Self {
+        self.payload_version = version;
+        self
+    }
+
+    /// Sets the number of requests after which demand weight halves. Must be positive.
+    /// Overrides `FEUER_ACCESS_COUNT_HALF_LIFE`, whose default is 262,144.
+    pub fn access_count_half_life(mut self, requests: u64) -> Self {
+        self.access_count_half_life = Some(requests);
+        self
+    }
+
+    /// Sets the entry-count cleanup threshold for request history. Must be positive.
+    /// Overrides `FEUER_HISTORY_ENTRY_LIMIT`, whose default is 2,000,000.
+    pub fn history_entry_limit(mut self, entries: usize) -> Self {
+        self.history_entry_limit = Some(entries);
+        self
+    }
+
+    /// Sets the number of candidates sampled per eviction. Must be positive.
+    /// Overrides `FEUER_RECLAIM_SAMPLE_SIZE`, whose default is 64.
+    pub fn reclaim_sample_size(mut self, candidates: usize) -> Self {
+        self.reclaim_sample_size = Some(candidates);
+        self
+    }
+
+    pub(super) fn resolve_config(&self) -> Result<CacheConfig, CacheConfigError> {
+        if self.memory_capacity == 0 {
+            return Err(CacheConfigError::InvalidMemoryCapacity);
+        }
+        if Path::new(&self.file_name).file_name() != Some(OsStr::new(&self.file_name))
+            || self.file_name.contains('\0')
+            || self.file_name.starts_with(".feuer.")
+        {
+            return Err(CacheConfigError::InvalidFileName);
+        }
+        let sample_size = self
+            .reclaim_sample_size
+            .map(Ok)
+            .unwrap_or_else(|| read_env_number("FEUER_RECLAIM_SAMPLE_SIZE", RECLAIM_SAMPLE_SIZE, 1))
+            .map_err(|_| CacheConfigError::InvalidReclaimSampleSize)?;
+        if sample_size == 0 {
+            return Err(CacheConfigError::InvalidReclaimSampleSize);
+        }
+        let half_life = self
+            .access_count_half_life
+            .map(Ok)
+            .unwrap_or_else(|| read_env_number("FEUER_ACCESS_COUNT_HALF_LIFE", DEFAULT_ACCESS_COUNT_HALF_LIFE.get(), 1))
+            .map_err(|_| CacheConfigError::InvalidAccessCountHalfLife)?;
+        let history_limit = self
+            .history_entry_limit
+            .map(Ok)
+            .unwrap_or_else(|| read_env_number("FEUER_HISTORY_ENTRY_LIMIT", DEFAULT_HISTORY_ENTRY_LIMIT.get(), 1))
+            .map_err(|_| CacheConfigError::InvalidHistoryEntryLimit)?;
+        Ok(CacheConfig {
+            directory: self.directory.clone(),
+            file_name: self.file_name.clone(),
+            payload_version: self.payload_version,
+            disk_capacity: self.disk_capacity,
+            memory_capacity: self.memory_capacity,
+            access_count_half_life: NonZeroU64::new(half_life).ok_or(CacheConfigError::InvalidAccessCountHalfLife)?,
+            history_entry_limit: NonZeroUsize::new(history_limit).ok_or(CacheConfigError::InvalidHistoryEntryLimit)?,
+            reclaim_sample_size: sample_size,
+        })
+    }
+
     /// Records metrics in this registry. Sharing a registry aggregates metrics.
     /// Labels contain no object identities or cache names.
     pub fn with_metrics(mut self, registry: &'a BoxedRegistry) -> Self {
@@ -126,12 +250,13 @@ impl<'a> CacheBuilder<'a> {
     /// Nonzero disk capacity returns an error on platforms other than Linux.
     /// On Linux, disk caching requires Tokio, io_uring and direct I/O, locks the backing file,
     /// and waits for metadata recovery. Disk failures never fall back to memory.
-    pub async fn open(self) -> Result<Cache, DiskCacheError> {
-        let config = self.config;
+    /// Validates settings and reads environment defaults before opening any files.
+    pub async fn open(self) -> Result<Cache, CacheOpenError> {
+        let config = self.resolve_config()?;
         #[cfg(not(target_os = "linux"))]
         {
             if config.disk_capacity() != 0 {
-                return Err(DiskCacheError::UnsupportedPlatform);
+                return Err(DiskCacheError::UnsupportedPlatform.into());
             }
             let _ = (self.io_queues, self.disk_scorer);
         }
@@ -142,7 +267,7 @@ impl<'a> CacheBuilder<'a> {
                 config.access_count_half_life(),
                 config.history_entry_limit(),
             )))
-            .with_reclaim_sample_size(config.eviction().sample_size())
+            .with_reclaim_sample_size(config.reclaim_sample_size())
             .with_retention_scorer(self.memory_scorer);
         #[cfg(target_os = "linux")]
         let disk = if config.disk_capacity() == 0 {
@@ -154,7 +279,7 @@ impl<'a> CacheBuilder<'a> {
                 io_metrics: IoMetrics::new(metrics_registry),
                 metrics: DiskMetrics::new(metrics_registry),
                 access_histories: memory.access_histories().clone(),
-                reclaim_sample_size: config.eviction().sample_size(),
+                reclaim_sample_size: config.reclaim_sample_size(),
                 buffer_pool: memory.buffer_pool(),
                 io_queues: self.io_queues,
                 retention_scorer: self.disk_scorer,
@@ -177,12 +302,19 @@ impl<'a> CacheBuilder<'a> {
 }
 
 impl Cache {
-    /// Configures a cache with optional metrics, shared I/O queues, and retention scorers.
-    /// Call [`CacheBuilder::open`] to open it.
-    pub fn builder<'a>(config: CacheConfig) -> CacheBuilder<'a> {
+    /// Starts configuring a memory-only cache. Set its memory capacity, then call
+    /// [`CacheBuilder::open`]. Enable disk caching by setting a nonzero disk capacity.
+    pub fn builder<'a>() -> CacheBuilder<'a> {
         let scorer = Arc::new(AvoidedRetrievalCostScorer::default());
         CacheBuilder {
-            config,
+            directory: PathBuf::from("cache"),
+            file_name: "data".to_owned(),
+            disk_capacity: 0,
+            memory_capacity: 0,
+            payload_version: 0,
+            access_count_half_life: None,
+            history_entry_limit: None,
+            reclaim_sample_size: None,
             metrics_registry: None,
             io_queues: None,
             memory_scorer: scorer.clone(),
@@ -482,7 +614,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let scorer = Arc::new(ScoredEntries::default());
         let disk_scorer = Arc::new(ScoredEntries::default());
-        let cache = Cache::builder(CacheConfig::new(directory.path(), 4 << 20, 1).unwrap())
+        let cache = Cache::builder()
+            .directory(directory.path())
+            .disk_capacity(4 << 20)
+            .memory_capacity(1)
             .with_memory_retention_scorer(scorer.clone())
             .with_disk_retention_scorer(disk_scorer.clone())
             .open()
@@ -524,7 +659,10 @@ mod tests {
     async fn public_registry_observes_memory_disk_callbacks_and_writes() {
         let directory = tempfile::tempdir().unwrap();
         let (registry, backend) = registry();
-        let cache = Cache::builder(CacheConfig::new(directory.path(), 4 << 20, 32).unwrap())
+        let cache = Cache::builder()
+            .directory(directory.path())
+            .disk_capacity(4 << 20)
+            .memory_capacity(32)
             .with_metrics(&backend)
             .open()
             .await
@@ -615,7 +753,10 @@ mod tests {
 
     async fn cache(memory_capacity: u64) -> (TempDir, Cache) {
         let directory = tempfile::tempdir().unwrap();
-        let cache = Cache::builder(CacheConfig::new(directory.path(), 4 << 20, memory_capacity).unwrap())
+        let cache = Cache::builder()
+            .directory(directory.path())
+            .disk_capacity(4 << 20)
+            .memory_capacity(memory_capacity)
             .open()
             .await
             .unwrap();
@@ -638,31 +779,27 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let (metrics_registry, backend) = registry();
         let queues = IoQueues::new().unwrap();
-        let first = Cache::builder(
-            CacheConfig::new(directory.path(), 4 << 20, 1 << 20)
-                .unwrap()
-                .with_access_count_half_life(2)
-                .unwrap(),
-        )
-        .with_metrics(&backend)
-        .with_io_queues(queues.clone())
-        .open()
-        .await
-        .unwrap();
+        let first = Cache::builder()
+            .directory(directory.path())
+            .disk_capacity(4 << 20)
+            .memory_capacity(1 << 20)
+            .access_count_half_life(2)
+            .with_metrics(&backend)
+            .with_io_queues(queues.clone())
+            .open()
+            .await
+            .unwrap();
         // Queue sharing does not require the caches to use the same metrics configuration.
-        let second = Cache::builder(
-            CacheConfig::new(directory.path(), 4 << 20, 1 << 20)
-                .unwrap()
-                .with_file_name("objects")
-                .unwrap()
-                .with_access_count_half_life(4)
-                .unwrap(),
-        )
-        .with_io_queues(queues)
-        .open()
-        .await
-        .unwrap();
-        assert!(Cache::builder(second.config().clone()).open().await.is_err());
+        let second = Cache::builder()
+            .directory(directory.path())
+            .disk_capacity(4 << 20)
+            .memory_capacity(1 << 20)
+            .file_name("objects")
+            .access_count_half_life(4)
+            .with_io_queues(queues)
+            .open()
+            .await
+            .unwrap();
         assert!(!Arc::ptr_eq(
             &first.inner.memory.buffer_pool(),
             &second.inner.memory.buffer_pool()
@@ -854,11 +991,23 @@ mod tests {
     #[tokio::test]
     async fn opening_validates_disk_capacity_and_exclusive_file_ownership() {
         let (directory, cache) = cache(32).await;
-        assert!(Cache::builder(cache.config().clone()).open().await.is_err());
-        let invalid = CacheConfig::new(directory.path(), 1024, 32).unwrap();
+        assert!(
+            Cache::builder()
+                .directory(cache.config().directory())
+                .disk_capacity(cache.config().disk_capacity())
+                .memory_capacity(cache.config().memory_capacity())
+                .open()
+                .await
+                .is_err()
+        );
         assert!(matches!(
-            Cache::builder(invalid).open().await,
-            Err(DiskCacheError::InvalidCapacity)
+            Cache::builder()
+                .directory(directory.path())
+                .disk_capacity(1024)
+                .memory_capacity(32)
+                .open()
+                .await,
+            Err(CacheOpenError::Disk(DiskCacheError::InvalidCapacity))
         ));
     }
 
@@ -872,7 +1021,9 @@ mod tests {
     async fn callback_and_memory_hit_share_the_object_without_creating_disk_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("unused");
-        let cache = Cache::builder(CacheConfig::new(&path, 0, 32).unwrap())
+        let cache = Cache::builder()
+            .directory(&path)
+            .memory_capacity(32)
             .open()
             .await
             .unwrap();

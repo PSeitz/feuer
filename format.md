@@ -71,7 +71,7 @@ The first 4 KiB of the file contain:
 The rest of the first chunk is reserved and unused. Shard chunks begin at 1 MiB.
 Configured capacity includes this header chunk and must be at least 2 MiB.
 
-`CacheConfig::with_payload_version` (or `DiskCacheOptions::payload_version`) sets the
+`CacheBuilder::payload_version` (or `DiskCacheOptions::payload_version`) sets the
 application's payload format version independently of Feuer's disk format. On open,
 an unequal payload version or file capacity, missing header, unsupported disk-format tag,
 or invalid header checksum causes the first metadata chunk of every shard to be zeroed before

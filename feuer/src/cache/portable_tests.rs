@@ -17,15 +17,46 @@ fn ready<T>(future: impl Future<Output = T>) -> T {
 }
 
 #[test]
+fn builder_validates_settings_at_open_before_creating_files() {
+    let directory = tempdir().unwrap();
+    let unused_directory = directory.path().join("unused");
+    for (builder, expected) in [
+        (Cache::builder(), CacheConfigError::InvalidMemoryCapacity),
+        (
+            Cache::builder().memory_capacity(1).file_name("../objects"),
+            CacheConfigError::InvalidFileName,
+        ),
+        (
+            Cache::builder().memory_capacity(1).access_count_half_life(0),
+            CacheConfigError::InvalidAccessCountHalfLife,
+        ),
+        (
+            Cache::builder().memory_capacity(1).history_entry_limit(0),
+            CacheConfigError::InvalidHistoryEntryLimit,
+        ),
+        (
+            Cache::builder().memory_capacity(1).reclaim_sample_size(0),
+            CacheConfigError::InvalidReclaimSampleSize,
+        ),
+    ] {
+        let error = ready(builder.directory(&unused_directory).disk_capacity(4 << 20).open()).unwrap_err();
+        assert!(matches!(error, CacheOpenError::Config(actual) if actual == expected));
+        assert!(!unused_directory.exists());
+    }
+}
+
+#[test]
 fn memory_only_builder_and_lookups_need_no_runtime() {
     assert!(Handle::try_current().is_err());
     for scorer_overrides in 0..3 {
         let directory = tempdir().unwrap();
         let unused_directory = directory.path().join("unused");
-        let config = CacheConfig::new(&unused_directory, 0, 1 << 20).unwrap();
         let (registry, backend) = registry();
         let scorer = Arc::new(AvoidedRetrievalCostScorer::default());
-        let builder = Cache::builder(config).with_metrics(&backend);
+        let builder = Cache::builder()
+            .memory_capacity(1 << 20)
+            .directory(&unused_directory)
+            .with_metrics(&backend);
         let builder = match scorer_overrides {
             0 => builder,
             1 => builder.with_memory_retention_scorer(scorer),
@@ -55,11 +86,7 @@ fn memory_only_builder_and_lookups_need_no_runtime() {
 #[test]
 fn memory_only_history_cleanup_preserves_cached_payloads_without_a_runtime() {
     assert!(Handle::try_current().is_err());
-    let config = CacheConfig::new("unused", 0, 1 << 20)
-        .unwrap()
-        .with_history_entry_limit(1)
-        .unwrap();
-    let cache = ready(Cache::builder(config).open()).unwrap();
+    let cache = ready(Cache::builder().memory_capacity(1 << 20).history_entry_limit(1).open()).unwrap();
     let histories = cache.inner.memory.access_histories();
     for key in ["old", "new"] {
         ready(cache.get_or_fetch(key.into(), || async { Ok::<_, &str>(Bytes::from_static(b"payload")) })).unwrap();
@@ -90,7 +117,8 @@ fn memory_only_builder_preserves_retention_scorer() {
 
     let scorer = Arc::new(ScoredEntries::default());
     let cache = ready(
-        Cache::builder(CacheConfig::new("unused", 0, 1).unwrap())
+        Cache::builder()
+            .memory_capacity(1)
             .with_memory_retention_scorer(scorer.clone())
             .with_disk_retention_scorer(scorer.clone())
             .open(),
@@ -109,9 +137,18 @@ fn nonzero_disk_capacity_is_rejected_without_runtime_or_files() {
     let directory = tempdir().unwrap();
     let unused_directory = directory.path().join("unused");
     for capacity in [1, 4 << 20] {
-        let error =
-            ready(Cache::builder(CacheConfig::new(&unused_directory, capacity, 1 << 20).unwrap()).open()).unwrap_err();
-        assert!(matches!(error, DiskCacheError::UnsupportedPlatform));
+        let error = ready(
+            Cache::builder()
+                .directory(&unused_directory)
+                .disk_capacity(capacity)
+                .memory_capacity(1 << 20)
+                .open(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            CacheOpenError::Disk(DiskCacheError::UnsupportedPlatform)
+        ));
         assert_eq!(
             error.to_string(),
             "disk caching requires Linux; set disk capacity to zero for memory-only operation"
