@@ -403,9 +403,9 @@ impl DiskCacheShard {
             let entry = &disk_index.entries_by_key[key];
             let chunk_count = entry.chunk_count() as usize;
             (chunk_count <= *remaining_eviction_chunks).then(|| {
-                let score =
-                    disk.retention_scorer
-                        .score(key, entry.payload_len, entry.payload_len, &disk.access_histories);
+                let score = disk
+                    .retention_scorer
+                    .score(key, entry.payload_len, &disk.access_histories);
                 (key, score, chunk_count)
             })
         })

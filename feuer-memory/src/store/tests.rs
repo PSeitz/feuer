@@ -197,19 +197,11 @@ fn custom_scores_use_live_application_metadata_without_cache_byte_normalization(
 
     struct ComputationCost(AtomicU64);
     impl RetentionScorer for ComputationCost {
-        fn score(
-            &self,
-            key: &ObjectKeyHash,
-            payload_len: u64,
-            entry_size_bytes: u64,
-            _: &ObjectAccessHistories,
-        ) -> f64 {
+        fn score(&self, key: &ObjectKeyHash, payload_len: u64, _: &ObjectAccessHistories) -> f64 {
             assert_eq!(payload_len, 1);
             if *key == ObjectKeyHash(1) {
-                assert_eq!(entry_size_bytes, 100);
                 self.0.load(Ordering::Relaxed) as f64
             } else {
-                assert_eq!(entry_size_bytes, 1);
                 1.0
             }
         }
@@ -289,18 +281,20 @@ fn maximum_allocation_charge_is_evicted_before_admission() {
 
 #[test]
 fn evicts_entry_with_lower_retrieval_value() {
-    let cache = cache(2);
-    let hot = ObjectKeyHash::from("hot");
-    let cold = ObjectKeyHash::from("cold");
-    let payload = Bytes::from_static(b"x");
-    cache.insert(hot, payload.clone(), 1);
-    cache.insert(cold, payload.clone(), 1);
-    cache.access_histories.record_request(&cold);
-    repeat_request(&cache, hot, 2);
-    cache.insert("incoming".into(), payload, 1);
-    assert!(cache.get(&hot).is_some());
-    assert!(cache.get(&cold).is_none());
-    assert!(cache.get(&"incoming".into()).is_some());
+    for hot_charge in [1, 100] {
+        let cache = cache(hot_charge as u64 + 1);
+        let hot = ObjectKeyHash::from("hot");
+        let cold = ObjectKeyHash::from("cold");
+        let payload = Bytes::from_static(b"x");
+        cache.insert(hot, payload.clone(), hot_charge);
+        cache.insert(cold, payload.clone(), 1);
+        cache.access_histories.record_request(&cold);
+        repeat_request(&cache, hot, 2);
+        cache.insert("incoming".into(), payload, 1);
+        assert!(cache.get(&hot).is_some());
+        assert!(cache.get(&cold).is_none());
+        assert!(cache.get(&"incoming".into()).is_some());
+    }
 }
 
 #[test]

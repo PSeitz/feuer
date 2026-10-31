@@ -2,7 +2,7 @@
 
 ## Retention objective
 
-Retain entries that avoid the most retrieval cost per byte of cache capacity.
+Retain entries that avoid the most retrieval cost per payload byte.
 Memory avoids the disk or source work that would otherwise serve a request.
 Disk saves source retrieval cost minus the disk read cost. Moving a disk hit into
 memory lowers disk's hit percentage but avoids a read, so tier hit percentages
@@ -19,12 +19,12 @@ Both tiers sample eligible entries and evict the entry with the lowest retention
 ```text
 decayed_request_count × max(cost_per_request + payload_len × cost_per_requested_byte, 0)
 ────────────────────────────────────────────────────────────────────────────────────
-                              max(entry_size_bytes, 1)
+                              max(payload_len, 1)
 ```
 
-Every request for the object contributes to its decayed count. The denominator
-is the allocation charge in memory and payload length on disk. Disk alignment
-and metadata overhead are excluded. A zero entry size uses a one-byte denominator.
+Every request for the object contributes to its decayed count. Both tiers normalize
+by payload length. Memory allocation overhead, disk alignment, and metadata overhead
+are excluded. A zero payload length uses a one-byte denominator.
 Negative avoided costs are clamped to zero.
 Coefficients and resulting scores must be finite.
 
@@ -66,8 +66,8 @@ disk can also overvalue copies of memory-hot objects.
 Disk alignment and memory allocation buckets make costs non-linear. For
 example, a 10-byte payload may require a 4-KiB disk read and occupy a 32-KiB pooled
 memory buffer. Callback results of type `Bytes` charge payload length.
-`AlignedBuffer` results and disk promotions charge backing capacity. A custom
-scorer receives this charge as `entry_size_bytes`.
+`AlignedBuffer` results and disk promotions charge backing capacity. These charges
+enforce memory capacity. Scorers receive payload length.
 
 Applications can supply a custom scorer when linear size-based costs are
 insufficient. Eviction accounts for size, demand, and avoided fixed costs.
@@ -93,8 +93,7 @@ cached payloads. History is not persisted across restarts.
 
 ## Custom retention scores
 
-A `RetentionScorer` receives the key hash, object payload length, tier-specific
-entry size, and request history. It can own per-object computation costs keyed by
+A `RetentionScorer` receives the key hash, object payload length, and request history. It can own per-object computation costs keyed by
 `ObjectKeyHash::from(key.as_str())`. Higher finite scores favor retention. Any
 byte normalization belongs to the scorer.
 

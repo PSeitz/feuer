@@ -589,24 +589,16 @@ mod tests {
     use crate::test_metrics::{registry, value};
 
     #[tokio::test]
-    async fn tier_scorers_receive_entry_sizes_and_shared_history() {
+    async fn tier_scorers_receive_payload_lengths_and_shared_history() {
         #[derive(Default)]
-        struct ScoredEntries(Mutex<Vec<(ObjectKeyHash, u64, u64, usize)>>);
+        struct ScoredEntries(Mutex<Vec<(ObjectKeyHash, u64, usize)>>);
 
         impl RetentionScorer for ScoredEntries {
-            fn score(
-                &self,
-                key: &ObjectKeyHash,
-                payload_len: u64,
-                entry_size_bytes: u64,
-                histories: &ObjectAccessHistories,
-            ) -> f64 {
-                self.0.lock().unwrap().push((
-                    *key,
-                    payload_len,
-                    entry_size_bytes,
-                    histories as *const ObjectAccessHistories as usize,
-                ));
+            fn score(&self, key: &ObjectKeyHash, payload_len: u64, histories: &ObjectAccessHistories) -> f64 {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((*key, payload_len, histories as *const ObjectAccessHistories as usize));
                 1.0
             }
         }
@@ -644,15 +636,17 @@ mod tests {
         let memory_scores = scorer.0.lock().unwrap();
         assert!(!memory_scores.is_empty());
         assert!(
-            memory_scores.iter().all(|(_, payload_len, charge, histories)| {
-                (*payload_len, *charge, *histories) == (1, 100, history)
-            })
+            memory_scores
+                .iter()
+                .all(|(_, payload_len, histories)| (*payload_len, *histories) == (1, history))
         );
         let disk_scores = disk_scorer.0.lock().unwrap();
         assert!(!disk_scores.is_empty());
-        assert!(disk_scores.iter().all(|(_, payload_len, charge, histories)| {
-            (*payload_len, *charge, *histories) == (1 << 20, 1 << 20, history)
-        }));
+        assert!(
+            disk_scores
+                .iter()
+                .all(|(_, payload_len, histories)| (*payload_len, *histories) == (1 << 20, history))
+        );
     }
 
     #[tokio::test]

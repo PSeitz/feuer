@@ -109,7 +109,7 @@ fn memory_only_builder_preserves_retention_scorer() {
     struct ScoredEntries(AtomicUsize);
 
     impl RetentionScorer for ScoredEntries {
-        fn score(&self, _: &ObjectKeyHash, _: u64, _: u64, _: &ObjectAccessHistories) -> f64 {
+        fn score(&self, _: &ObjectKeyHash, _: u64, _: &ObjectAccessHistories) -> f64 {
             self.0.fetch_add(1, Ordering::Relaxed);
             1.0
         }

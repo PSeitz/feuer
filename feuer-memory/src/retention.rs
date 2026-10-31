@@ -6,33 +6,26 @@ use feuer_types::ObjectKeyHash;
 /// Scores how valuable a cached object is to retain.
 ///
 /// Scores must be finite. The lowest-scoring eligible sampled entry is evicted.
-/// Normalization is up to the scorer. `entry_size_bytes` is the entry's size for this tier:
-/// memory allocation charge or disk payload length, possibly zero.
+/// Normalization is up to the scorer. `payload_len` is the object's data size, possibly zero.
 /// Each tier can use its own scorer or share one. It may own application metadata keyed by [`ObjectKeyHash`].
 /// Calls run concurrently under shard locks: avoid I/O, cache re-entry, and holding
 /// application locks across cache operations if scoring acquires those locks.
 /// The cache owns sampling and removal. The application owns custom metadata.
 pub trait RetentionScorer: Send + Sync {
-    /// Returns the retention score for an object's payload length and tier-specific entry size.
-    fn score(
-        &self,
-        key: &ObjectKeyHash,
-        payload_len: u64,
-        entry_size_bytes: u64,
-        histories: &ObjectAccessHistories,
-    ) -> f64;
+    /// Returns the retention score for an object's payload length and request history.
+    fn score(&self, key: &ObjectKeyHash, payload_len: u64, histories: &ObjectAccessHistories) -> f64;
 }
 
-/// Scores entries by retrieval cost avoided per byte of entry size, weighted by decayed request counts.
+/// Scores entries by retrieval cost avoided per payload byte, weighted by decayed request counts.
 ///
 /// The object's decayed request count multiplies
 /// `max(cost_per_request + payload_len * cost_per_requested_byte, 0)`.
-/// A zero entry size uses a one-byte denominator.
+/// A zero payload length uses a one-byte denominator.
 /// Costs must use one consistent unit, such as equivalent bytes, I/O time, or CPU time.
 /// Coefficients must be finite and keep scores finite over the application's sizes and demand.
 ///
 /// Defaults are zero fixed cost and one cost unit per byte, preserving byte-weighted demand.
-/// With a nonzero payload length equal to the entry size, the default score equals the object's
+/// With a nonzero payload length, the default score equals the object's
 /// decayed count. Using the default half-life and current decay approximation:
 ///
 /// | Matching request frequency | Score approached immediately after a matching request |
@@ -61,20 +54,14 @@ impl Default for AvoidedRetrievalCostScorer {
 }
 
 impl RetentionScorer for AvoidedRetrievalCostScorer {
-    fn score(
-        &self,
-        key: &ObjectKeyHash,
-        payload_len: u64,
-        entry_size_bytes: u64,
-        histories: &ObjectAccessHistories,
-    ) -> f64 {
+    fn score(&self, key: &ObjectKeyHash, payload_len: u64, histories: &ObjectAccessHistories) -> f64 {
         decayed_avoided_retrieval_cost(
             histories,
             key,
             payload_len,
             self.cost_per_request,
             self.cost_per_requested_byte,
-        ) / entry_size_bytes.max(1) as f64
+        ) / payload_len.max(1) as f64
     }
 }
 
@@ -98,7 +85,7 @@ pub fn sample_candidates<'a, T>(
 
 /// Weights the object's avoided retrieval cost by its decayed request count.
 /// Unknown keys have zero cost.
-/// Eviction divides this cost by the memory allocation charge or disk payload length.
+/// The default scorer divides this cost by the payload length, using one for empty payloads.
 pub fn decayed_avoided_retrieval_cost(
     histories: &ObjectAccessHistories,
     key: &ObjectKeyHash,
@@ -117,9 +104,8 @@ use std::num::NonZeroU64;
 #[cfg(test)]
 proptest! {
     #[test]
-    fn scores_match_avoided_cost_per_charged_byte(
+    fn scores_match_avoided_cost_per_payload_byte(
         payload_len in any::<u64>(),
-        entry_size in any::<u64>(),
         fixed_cost in -1_000_000i32..=1_000_000,
         byte_cost in -16i32..=16,
         requests in 0i32..8,
@@ -135,13 +121,13 @@ proptest! {
             cost_per_request: fixed_cost as f64 / 8.0,
             cost_per_requested_byte: byte_cost as f64 / 8.0,
         };
-        for (payload_len, entry_size) in [(0, 0), (u64::MAX, u64::MAX), (payload_len, entry_size)] {
+        for payload_len in [0, u64::MAX, payload_len] {
             let savings = (scorer.cost_per_request + payload_len as f64 * scorer.cost_per_requested_byte).max(0.0);
             prop_assert_eq!(
-                scorer.score(&key, payload_len, entry_size, &histories),
-                demand * savings / entry_size.max(1) as f64
+                scorer.score(&key, payload_len, &histories),
+                demand * savings / payload_len.max(1) as f64
             );
-            prop_assert_eq!(scorer.score(&ObjectKeyHash::from("unknown"), payload_len, entry_size, &histories), 0.0);
+            prop_assert_eq!(scorer.score(&ObjectKeyHash::from("unknown"), payload_len, &histories), 0.0);
         }
     }
 }
@@ -169,10 +155,10 @@ fn scores_follow_decayed_object_demand() {
     let scorer = AvoidedRetrievalCostScorer::default();
     assert_eq!(scorer.cost_per_request, 0.0);
     assert_eq!(scorer.cost_per_requested_byte, 1.0);
-    assert_eq!(scorer.score(&key, 10, 10, &histories), 1.0);
+    assert_eq!(scorer.score(&key, 10, &histories), 1.0);
     for _ in 0..2 {
         histories.record_request(&ObjectKeyHash::from("other"));
     }
-    assert_eq!(scorer.score(&key, 10, 10, &histories), 0.5);
-    assert_eq!(scorer.score(&key, 10, 20, &histories), 0.25);
+    assert_eq!(scorer.score(&key, 10, &histories), 0.5);
+    assert_eq!(scorer.score(&key, 20, &histories), 0.5);
 }

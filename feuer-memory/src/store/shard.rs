@@ -82,12 +82,9 @@ impl MemoryCacheShard {
         )
         .map(|key| {
             let entry = &self.entries_by_key[key];
-            let score = cache.retention_scorer.score(
-                key,
-                entry.bytes.len() as u64,
-                entry.allocation_charge as u64,
-                &cache.access_histories,
-            );
+            let score = cache
+                .retention_scorer
+                .score(key, entry.bytes.len() as u64, &cache.access_histories);
             (score, *key)
         })
         .min_by(|(score, key), (other_score, other_key)| score.total_cmp(other_score).then_with(|| key.cmp(other_key)))
