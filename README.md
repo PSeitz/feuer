@@ -103,21 +103,14 @@ disable caching should bypass cache construction and fetch directly from the sou
 2. Disk hit: read and checksum-verify the object, then promote it to memory.
 3. Miss: run your callback, cache the result in memory, and queue a disk write.
 
-`get_or_fetch` and `get_or_fetch_with_disk_fallthrough` accept callbacks returning
-`Result<V, E>` where `V: Into<BytesAndMemoryCharge>`. Both accept `Bytes` or
-`AlignedBuffer` and return `Bytes`. `Bytes` charges payload length in memory.
-`AlignedBuffer` charges capacity and converts to shared `Bytes` without copying.
-Use `cache.allocate_buffer(length)` to acquire a pooled buffer and fill its
-`as_mut_slice()` before returning it. `feuer` reexports `AlignedBuffer` and exposes
-`BytesAndMemoryCharge`, which has private fields and `From` conversions for both
-payload types. The conversion is normally inferred from the callback result.
-The fallthrough method allows source fallback under disk pressure.
+`get_or_fetch` callbacks return `Result<Bytes, E>` or `Result<AlignedBuffer, E>`.
+The cache returns `Bytes`. For pooled, zero-copy buffers, use
+`cache.allocate_buffer(length)` and fill `as_mut_slice()`.
+Use `get_or_fetch_with_disk_fallthrough` to allow source fallback under disk pressure.
 
-Objects can be empty, and their lengths can be determined during fetching. Callback
-errors must implement `Clone + Send + Sync + 'static`. Concurrent misses for the same
-key and error type share work across `Bytes` and `AlignedBuffer` callbacks. Callbacks
-sharing work must be interchangeable. Your application owns source retries and
-concurrency limits.
+Concurrent misses for the same key and error type share work, so callbacks must be
+interchangeable. Errors must implement `Clone + Send + Sync + 'static`.
+Your application handles source retries and concurrency limits.
 
 Use `get(key)` to check the cache without fetching. It returns `None` on a
 miss and does not wait for an in-progress source callback.
