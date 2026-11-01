@@ -3,6 +3,8 @@
 use std::{
     alloc::{Layout, alloc_zeroed, dealloc},
     io,
+    mem::ManuallyDrop,
+    num::NonZeroUsize,
     ptr::NonNull,
     slice,
     sync::{Arc, Weak},
@@ -94,7 +96,12 @@ impl BufferPool {
         let capacity = BUFFER_SIZES.get(index).copied().unwrap_or(length);
         let idle_buffer = self.take_idle_buffer(&mut self.state.lock(), index);
         let mut buffer = match idle_buffer {
-            Some(buffer) => buffer.resize_for_reuse(capacity)?,
+            Some(mut buffer) => {
+                if let BufferMemory::Large(memory) = &mut *buffer.memory {
+                    memory.resize_for_reuse(NonZeroUsize::new(capacity).unwrap())?;
+                }
+                buffer
+            }
             None => AlignedBuffer::allocate_zeroed(capacity)?,
         };
         buffer.length = length;
@@ -166,28 +173,69 @@ impl Drop for BufferPool {
 
 /// An owned, initialized, 4-KiB-aligned allocation with a separate exposed length.
 /// After conversion to `Bytes`, it returns to its pool only when the last owner drops it.
-/// On Linux, capacities above 64 MiB use anonymous mappings. Resizing stays in that
-/// bucket, so capacity also determines how the allocation is released.
+/// Fixed buffers keep their capacity. Large buffers can resize and use anonymous mappings on Linux.
 pub struct AlignedBuffer {
-    ptr: NonNull<u8>,
-    layout: Layout,
+    memory: ManuallyDrop<BufferMemory>,
     length: usize,
     // Checked-out pooled buffers retain metrics, but only a weak reference to their pool.
     pool: Option<(Weak<BufferPool>, Arc<MemoryMetrics>)>,
 }
 
-impl AlignedBuffer {
-    /// Allocates zeroed memory that is freed on release (used for write scratch).
-    pub fn allocate_zeroed(length: usize) -> io::Result<Self> {
-        assert!(length > 0);
-        let layout = Self::layout(length)?;
+/// Backing memory and the information required to release it.
+enum BufferMemory {
+    Fixed(FixedBuffer),
+    Large(LargeBuffer),
+}
+
+impl BufferMemory {
+    fn ptr(&self) -> NonNull<u8> {
+        match self {
+            Self::Fixed(buffer) => buffer.ptr,
+            Self::Large(buffer) => buffer.ptr,
+        }
+    }
+
+    fn capacity(&self) -> usize {
+        match self {
+            Self::Fixed(buffer) => buffer.layout.size(),
+            Self::Large(buffer) => buffer.capacity(),
+        }
+    }
+}
+
+/// Allocator-owned backing memory whose capacity stays unchanged.
+struct FixedBuffer {
+    ptr: NonNull<u8>,
+    layout: Layout,
+}
+
+impl Drop for FixedBuffer {
+    fn drop(&mut self) {
+        // SAFETY: this owner holds the allocation made with exactly this layout.
+        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
+    }
+}
+
+/// Resizable backing memory for buffers above the largest fixed bucket.
+/// Linux uses an anonymous mapping. Other platforms use the allocator.
+struct LargeBuffer {
+    ptr: NonNull<u8>,
+    #[cfg(target_os = "linux")]
+    length: NonZeroUsize,
+    #[cfg(not(target_os = "linux"))]
+    layout: Layout,
+}
+
+impl LargeBuffer {
+    fn allocate_zeroed(length: NonZeroUsize) -> io::Result<Self> {
+        let layout = AlignedBuffer::layout(length.get())?;
         #[cfg(target_os = "linux")]
-        if length > MAX_FIXED_BUFFER_BYTES {
+        {
             // SAFETY: length is nonzero and valid. Anonymous private pages are initialized to zero.
             let ptr = unsafe {
                 mmap(
                     null_mut(),
-                    length,
+                    layout.size(),
                     PROT_READ | PROT_WRITE,
                     MAP_PRIVATE | MAP_ANONYMOUS,
                     -1,
@@ -197,67 +245,124 @@ impl AlignedBuffer {
             if ptr == MAP_FAILED {
                 return Err(io::Error::last_os_error());
             }
-            return Ok(Self {
+            Ok(Self {
                 ptr: NonNull::new(ptr.cast()).expect("mmap returned a null address"),
-                layout,
                 length,
-                pool: None,
-            });
+            })
         }
-        // SAFETY: layout is nonzero with a valid power-of-two alignment.
-        let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
-            .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer allocation failed"))?;
-        Ok(Self {
-            ptr,
-            layout,
-            length,
-            pool: None,
-        })
+        #[cfg(not(target_os = "linux"))]
+        {
+            // SAFETY: layout is nonzero with a valid power-of-two alignment.
+            let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
+                .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer allocation failed"))?;
+            Ok(Self { ptr, layout })
+        }
     }
 
-    /// Prepares an idle buffer for reuse, preserving initialized bytes and zeroing added bytes.
-    /// Fixed capacities stay unchanged. Resizing occurs only above 64 MiB, and shrinking
-    /// requires the old capacity to be at least 10% larger than the requested capacity.
-    /// On failure, dropping `self` frees the original allocation.
-    fn resize_for_reuse(mut self, capacity: usize) -> io::Result<Self> {
-        let old_capacity = self.capacity();
-        if capacity <= old_capacity && old_capacity - capacity < capacity.div_ceil(10) {
-            return Ok(self);
-        }
-        let layout = Self::layout(capacity)?;
+    fn capacity(&self) -> usize {
         #[cfg(target_os = "linux")]
-        let ptr = {
+        {
+            self.length.get()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.layout.size()
+        }
+    }
+
+    /// Preserves initialized bytes and zeroes added bytes. Shrinks only when the old capacity
+    /// is at least 10% larger than the requested capacity. Failure leaves the memory unchanged.
+    fn resize_for_reuse(&mut self, capacity: NonZeroUsize) -> io::Result<()> {
+        let old_capacity = self.capacity();
+        let new_capacity = capacity.get();
+        if new_capacity <= old_capacity {
+            let spare_bytes = old_capacity - new_capacity;
+            // Shrink only when spare bytes reach 10% of the requested capacity.
+            let minimum_shrink_bytes = new_capacity.div_ceil(10);
+            if spare_bytes < minimum_shrink_bytes {
+                return Ok(());
+            }
+        }
+        let layout = AlignedBuffer::layout(new_capacity)?;
+        #[cfg(target_os = "linux")]
+        {
             // SAFETY: this buffer owns an anonymous mapping. Both sizes are nonzero and valid.
-            let ptr = unsafe { mremap(self.ptr.as_ptr().cast(), old_capacity, capacity, MREMAP_MAYMOVE) };
-            if ptr == MAP_FAILED {
+            let resized = unsafe {
+                mremap(
+                    self.ptr.as_ptr().cast(),
+                    self.length.get(),
+                    layout.size(),
+                    MREMAP_MAYMOVE,
+                )
+            };
+            if resized == MAP_FAILED {
                 return Err(io::Error::last_os_error());
             }
-            let ptr = NonNull::<u8>::new(ptr.cast()).expect("mremap returned a null address");
-            if capacity > old_capacity {
+            self.ptr = NonNull::new(resized.cast()).expect("mremap returned a null address");
+            self.length = capacity;
+            if new_capacity > old_capacity {
                 // New pages are zeroed by the kernel. Only the retained last page can contain
                 // old bytes beyond the previous capacity, after a shrink and subsequent growth.
                 // SAFETY: sysconf queries the process's page size.
                 let page_size = unsafe { sysconf(_SC_PAGESIZE) } as usize;
-                let end = old_capacity.next_multiple_of(page_size).min(capacity);
+                let end = old_capacity.next_multiple_of(page_size).min(new_capacity);
                 // SAFETY: these bytes belong to the resized mapping.
-                unsafe { ptr.add(old_capacity).write_bytes(0, end - old_capacity) };
+                unsafe { self.ptr.add(old_capacity).write_bytes(0, end - old_capacity) };
             }
-            ptr
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // SAFETY: ptr was allocated with self.layout. The new size is nonzero and valid.
+            let resized = NonNull::new(unsafe { realloc(self.ptr.as_ptr(), self.layout, new_capacity) })
+                .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer resize failed"))?;
+            self.ptr = resized;
+            self.layout = layout;
+            if new_capacity > old_capacity {
+                // SAFETY: bytes past the old capacity belong to the new allocation.
+                unsafe { self.ptr.add(old_capacity).write_bytes(0, new_capacity - old_capacity) };
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LargeBuffer {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        // SAFETY: this owner holds the mapping, which the kernel rounds to whole pages.
+        unsafe {
+            munmap(self.ptr.as_ptr().cast(), self.length.get())
         };
         #[cfg(not(target_os = "linux"))]
-        let ptr = {
-            // SAFETY: ptr was allocated with self.layout. The new size is valid for its alignment.
-            let ptr = NonNull::new(unsafe { realloc(self.ptr.as_ptr(), self.layout, capacity) })
-                .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer resize failed"))?;
-            if capacity > old_capacity {
-                // SAFETY: bytes past the old capacity belong to the new allocation.
-                unsafe { ptr.add(old_capacity).write_bytes(0, capacity - old_capacity) };
-            }
-            ptr
+        // SAFETY: this owner holds the allocation made with exactly this layout.
+        unsafe {
+            dealloc(self.ptr.as_ptr(), self.layout)
         };
-        self.ptr = ptr;
-        self.layout = layout;
-        Ok(self)
+    }
+}
+
+impl AlignedBuffer {
+    /// Allocates zeroed memory that is freed on release (used for write scratch).
+    pub fn allocate_zeroed(length: usize) -> io::Result<Self> {
+        assert!(length > 0);
+        if length > MAX_FIXED_BUFFER_BYTES {
+            return Ok(Self {
+                memory: ManuallyDrop::new(BufferMemory::Large(LargeBuffer::allocate_zeroed(
+                    NonZeroUsize::new(length).unwrap(),
+                )?)),
+                length,
+                pool: None,
+            });
+        }
+        let layout = Self::layout(length)?;
+        // SAFETY: layout is nonzero with a valid power-of-two alignment.
+        let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
+            .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer allocation failed"))?;
+        Ok(Self {
+            memory: ManuallyDrop::new(BufferMemory::Fixed(FixedBuffer { ptr, layout })),
+            length,
+            pool: None,
+        })
     }
 
     fn layout(capacity: usize) -> io::Result<Layout> {
@@ -267,7 +372,7 @@ impl AlignedBuffer {
 
     /// Backing allocation bytes, including spare capacity.
     pub fn capacity(&self) -> usize {
-        self.layout.size()
+        self.memory.capacity()
     }
 
     /// Transfers this allocation to reference-counted bytes without copying.
@@ -278,14 +383,14 @@ impl AlignedBuffer {
     /// Exclusively accesses the requested bytes, never spare capacity.
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         // SAFETY: this initialized allocation is exclusively owned by self.
-        unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr(), self.length) }
+        unsafe { slice::from_raw_parts_mut(self.memory.ptr().as_ptr(), self.length) }
     }
 }
 
 impl AsRef<[u8]> for AlignedBuffer {
     fn as_ref(&self) -> &[u8] {
         // SAFETY: self owns initialized bytes for the exposed length.
-        unsafe { slice::from_raw_parts(self.ptr.as_ptr(), self.length) }
+        unsafe { slice::from_raw_parts(self.memory.ptr().as_ptr(), self.length) }
     }
 }
 
@@ -294,35 +399,27 @@ unsafe impl Send for AlignedBuffer {}
 
 impl Drop for AlignedBuffer {
     fn drop(&mut self) {
+        // SAFETY: Drop takes the backing memory exactly once and never accesses self.memory again.
+        let memory = unsafe { ManuallyDrop::take(&mut self.memory) };
         if let Some((pool, metrics)) = self.pool.take() {
-            let index = bucket_index(self.capacity());
-            let capacity = self.capacity() as u64;
+            let index = bucket_index(memory.capacity());
+            let capacity = memory.capacity() as u64;
             metrics.used_buffer_bytes[index].decrease(capacity);
             if let Some(pool) = pool.upgrade() {
                 let mut state = pool.state.lock();
                 let idle_limit = pool.capacity.saturating_sub(state.entry_bytes);
                 if state.idle_bytes + capacity <= idle_limit {
                     state.idle_buffers[index].push(Self {
-                        ptr: self.ptr,
-                        layout: self.layout,
+                        memory: ManuallyDrop::new(memory),
                         length: self.length,
                         pool: None,
                     });
                     state.idle_bytes += capacity;
                     pool.metrics.idle_buffer_bytes[index].increase(capacity);
                     pool.metrics.used_bytes.increase(capacity);
-                    return;
                 }
             }
         }
-        #[cfg(target_os = "linux")]
-        if self.capacity() > MAX_FIXED_BUFFER_BYTES {
-            // SAFETY: this owner holds the anonymous mapping, which the kernel rounds to whole pages.
-            unsafe { munmap(self.ptr.as_ptr().cast(), self.capacity()) };
-            return;
-        }
-        // SAFETY: this owner holds the allocation made with exactly this layout.
-        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
     }
 }
 

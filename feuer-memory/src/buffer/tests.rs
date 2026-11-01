@@ -18,6 +18,7 @@ fn buffer_pool_bytes(registry: &Registry, bucket: &str, status: &str) -> f64 {
 fn scratch_buffers_keep_requested_capacity_and_alignment() {
     for length in [1, BUFFER_ALIGNMENT - 1, BUFFER_ALIGNMENT, BUFFER_ALIGNMENT + 1] {
         let mut buffer = AlignedBuffer::allocate_zeroed(length).unwrap();
+        assert!(matches!(&*buffer.memory, BufferMemory::Fixed(_)));
         assert_eq!(buffer.capacity(), length);
         assert_eq!(buffer.as_ref().len(), length);
         assert_eq!(buffer.as_ref().as_ptr() as usize % BUFFER_ALIGNMENT, 0);
@@ -30,6 +31,31 @@ fn scratch_buffers_keep_requested_capacity_and_alignment() {
 }
 
 #[test]
+fn large_buffer_keeps_its_backing_memory_below_the_fixed_bucket_limit() {
+    let mut buffer = AlignedBuffer::allocate_zeroed(MAX_FIXED_BUFFER_BYTES + 1).unwrap();
+    buffer.as_mut_slice()[..3 * BUFFER_ALIGNMENT].fill(0x99);
+    let capacity = BUFFER_ALIGNMENT + 1;
+    let BufferMemory::Large(memory) = &mut *buffer.memory else {
+        panic!("expected a large buffer")
+    };
+    memory.resize_for_reuse(NonZeroUsize::new(capacity).unwrap()).unwrap();
+    buffer.length = capacity;
+    assert_eq!(buffer.capacity(), capacity);
+    assert_eq!(buffer.as_ref().len(), capacity);
+    assert!(buffer.as_ref().iter().all(|&byte| byte == 0x99));
+
+    let BufferMemory::Large(memory) = &mut *buffer.memory else {
+        panic!("expected a large buffer")
+    };
+    memory
+        .resize_for_reuse(NonZeroUsize::new(3 * BUFFER_ALIGNMENT).unwrap())
+        .unwrap();
+    buffer.length = buffer.capacity();
+    assert!(buffer.as_ref()[..capacity].iter().all(|&byte| byte == 0x99));
+    assert!(buffer.as_ref()[capacity..].iter().all(|&byte| byte == 0));
+}
+
+#[test]
 fn size_boundaries_round_up_without_exposing_spare_capacity() {
     let pool = BufferPool::new(100 * *BUFFER_SIZES.last().unwrap() as u64, MemoryMetrics::noop());
     let mut lower_bound = 0;
@@ -37,6 +63,7 @@ fn size_boundaries_round_up_without_exposing_spare_capacity() {
         for length in [lower_bound + 1, size] {
             assert_eq!(BufferPool::allocation_capacity(length), size);
             let buffer = pool.allocate(length).unwrap();
+            assert!(matches!(&*buffer.memory, BufferMemory::Fixed(_)));
             assert_eq!(buffer.capacity(), size);
             assert_eq!(buffer.as_ref().len(), length);
             assert_eq!(buffer.as_ref().as_ptr() as usize % BUFFER_ALIGNMENT, 0);
