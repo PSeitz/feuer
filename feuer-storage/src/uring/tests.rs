@@ -1,5 +1,6 @@
 use crate::{DataFileError, test_metrics::registry};
 use feuer_memory::MemoryCache;
+use proptest::{collection, prelude::*};
 use std::{
     cmp::Reverse,
     error::Error,
@@ -92,6 +93,106 @@ fn queue() -> (IoQueue, mpsc::Sender<IoRequest>, Arc<DataFileAndLock>) {
 
 fn buffer_pool() -> Arc<BufferPool> {
     MemoryCache::new(384 * 1024 * 1024).buffer_pool()
+}
+
+async fn check_replies(replies: &mut Vec<IoResultReceiver>, operation: IoOperation) {
+    for reply in replies.drain(..) {
+        let buffer = reply.await.unwrap().unwrap();
+        assert_eq!(buffer.is_some(), operation == IoOperation::Read);
+        if let Some(buffer) = buffer {
+            assert_eq!(buffer.into_buffer().as_ref(), &[0; DIRECT_IO_ALIGNMENT_BYTES]);
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn requests_complete_across_bursts_cancellation_and_shutdown(
+        write in any::<bool>(),
+        producers in collection::vec(
+            collection::vec((1usize..=3 * MAX_IN_FLIGHT_READS, any::<u8>(), any::<bool>()), 1..5),
+            1..4,
+        ),
+    ) {
+        let operation = if write { IoOperation::Write } else { IoOperation::Read };
+        let files = data_file();
+        let pool = buffer_pool();
+        let mut handle = IoQueueHandle::new(operation).unwrap();
+        // Check thread termination separately so a lost wakeup cannot hang Drop's join.
+        let worker = handle.thread.take().unwrap();
+        let handle = Arc::new(handle);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_time()
+            .build()
+            .unwrap();
+        let requests = async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            let mut tasks = tokio::task::JoinSet::new();
+            for bursts in producers {
+                let handle = handle.clone();
+                let files = files.clone();
+                let pool = pool.clone();
+                tasks.spawn(async move {
+                    let mut replies = Vec::new();
+                    for (count, cancel, drain) in bursts {
+                        for index in 0..count {
+                            let permit = handle.reserve_channel_capacity().await.unwrap();
+                            let mut buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
+                            let buffers = if write {
+                                buffer.as_mut_slice().fill(0x99);
+                                IoBuffers::from_write_bytes(DIRECT_IO_ALIGNMENT_BYTES, buffer.into_bytes()).unwrap()
+                            } else {
+                                IoBuffers::Read(ReadBuffer::new(buffer))
+                            };
+                            let reply = handle.submit_request(
+                                files.clone(),
+                                (index * DIRECT_IO_ALIGNMENT_BYTES) as u64,
+                                buffers,
+                                0..DIRECT_IO_ALIGNMENT_BYTES,
+                                permit,
+                            );
+                            if cancel & (1 << (index % 8)) != 0 {
+                                drop(reply);
+                            } else {
+                                replies.push(reply);
+                            }
+                        }
+                        if drain {
+                            check_replies(&mut replies, operation).await;
+                            // Leave room for the worker to sleep before the next burst.
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        } else {
+                            yield_now().await;
+                        }
+                    }
+                    replies
+                });
+            }
+            drop(handle);
+            let mut replies = Vec::new();
+            while let Some(result) = tasks.join_next().await {
+                replies.extend(result.unwrap());
+            }
+            // All senders are gone. Outstanding requests must still complete during shutdown.
+            check_replies(&mut replies, operation).await;
+        };
+        let completed = runtime.block_on(async { timeout(Duration::from_secs(5), requests).await });
+        let stopped = runtime.block_on(async {
+            timeout(Duration::from_secs(5), async {
+                while !worker.is_finished() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }).await
+        });
+        if stopped.is_ok() {
+            worker.join().unwrap();
+        }
+        prop_assert!(completed.is_ok(), "requests stalled");
+        prop_assert!(stopped.is_ok(), "worker did not stop after all senders were dropped");
+    }
 }
 
 #[test]
