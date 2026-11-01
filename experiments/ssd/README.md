@@ -12,4 +12,5 @@ workloads, not universal SSD behavior or current cache performance.
 Original reports remain at `0a02014^:experiments/ssd/` in Git history.
 Commit `0a02014` removed them on October 29, 2026 at 14:11 CET.
 These concise summaries were reconstructed from those reports. No tests
-were rerun. The directory remains local and Git-ignored.
+were rerun. These summaries are tracked in Git. Other experiment artifacts
+remain ignored.
