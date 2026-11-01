@@ -7,7 +7,7 @@ use std::{
     hash::BuildHasher,
     num::{NonZeroU64, NonZeroUsize},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     thread,
@@ -15,6 +15,7 @@ use std::{
 };
 
 use feuer_types::ObjectKeyHash;
+use parking_lot::Mutex;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 
 /// Independent of the number of memory or disk cache shards.
@@ -22,7 +23,7 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 
 /// Request history shared by both cache tiers.
 /// Object keys select one of 64 independently locked history maps. The request clock remains global.
-/// Counters survive cache eviction. Once per second, one background worker checks the entry limit
+/// Counters survive cache eviction. Every 10 seconds, one background worker checks the entry limit
 /// and removes the least recently requested keys, targeting 90% of the limit.
 /// The limit is a soft threshold. A restart begins with empty history.
 pub struct ObjectAccessHistories {
@@ -55,7 +56,7 @@ impl ObjectAccessHistories {
         let weak = Arc::downgrade(&shards);
         thread::spawn(move || {
             loop {
-                thread::sleep(Duration::from_secs(1));
+                thread::sleep(Duration::from_secs(10));
                 let Some(shards) = weak.upgrade() else { break };
                 Self::remove_oldest(&*shards, entry_limit.get());
             }
@@ -68,21 +69,22 @@ impl ObjectAccessHistories {
     }
 
     fn remove_oldest(shards: &[Mutex<FxHashMap<ObjectKeyHash, DecayedRequestCount>>], limit: usize) {
-        let count: usize = shards.iter().map(|shard| shard.lock().unwrap().len()).sum();
+        let count: usize = shards.iter().map(|shard| shard.lock().len()).sum();
         if count <= limit {
             return;
         }
         let mut clocks = Vec::with_capacity(count);
         for shard in shards {
-            clocks.extend(shard.lock().unwrap().values().map(|count| count.last_update_clock));
+            clocks.extend(shard.lock().values().map(|count| count.last_update_clock));
         }
-        let cutoff_index = clocks.len() - (limit - limit / 10) - 1;
+        let entries_to_keep = limit - limit / 10;
+        let entries_to_remove = clocks.len() - entries_to_keep;
+        let cutoff_index = entries_to_remove - 1;
         let cutoff = *clocks.select_nth_unstable(cutoff_index).1;
         for shard in shards {
-            let mut histories = shard.lock().unwrap();
+            let mut histories = shard.lock();
             // Requests since the snapshot have newer clocks and keep their history.
             histories.retain(|_, count| count.last_update_clock > cutoff);
-            histories.shrink_to_fit();
         }
     }
 
@@ -96,7 +98,7 @@ impl ObjectAccessHistories {
     /// Repeated requests update the same counter.
     /// Cache insertion and eviction do not record or remove history.
     pub fn record_request(&self, key: &ObjectKeyHash) {
-        let mut histories = self.shard(key).lock().unwrap();
+        let mut histories = self.shard(key).lock();
         // Assign the clock under the shard lock so this key's updates cannot arrive out of order.
         // The atomic only measures request age. The shard mutex protects the history itself.
         let request_clock = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -115,7 +117,7 @@ impl ObjectAccessHistories {
     /// Returns the object's request count decayed to the global request clock.
     /// Unknown keys have a count of zero.
     pub fn decayed_request_count(&self, key: &ObjectKeyHash) -> f64 {
-        let histories = self.shard(key).lock().unwrap();
+        let histories = self.shard(key).lock();
         histories
             .get(key)
             .map(|count| count.decayed_count(self.request_count(), self.half_life))

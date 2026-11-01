@@ -3,7 +3,7 @@ use std::time::Instant;
 use super::*;
 
 fn wait_until(mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     while !ready() {
         assert!(Instant::now() < deadline, "history cleanup did not finish");
         thread::sleep(Duration::from_millis(1));
@@ -54,7 +54,7 @@ fn background_cleanup_handles_concurrent_requests_and_releases_history_on_drop()
         histories
             .shards
             .iter()
-            .map(|shard| shard.lock().unwrap().len())
+            .map(|shard| shard.lock().len())
             .sum::<usize>()
             <= 100
     });

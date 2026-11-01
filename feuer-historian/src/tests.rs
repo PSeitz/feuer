@@ -8,13 +8,13 @@ fn history_needs_no_cached_entry_and_keeps_one_counter_per_key() {
     let key = ObjectKeyHash::from("object");
     assert_eq!(histories.decayed_request_count(&key), 0.0);
     assert_eq!(histories.request_count(), 0);
-    assert!(histories.shards.iter().all(|shard| shard.lock().unwrap().is_empty()));
+    assert!(histories.shards.iter().all(|shard| shard.lock().is_empty()));
     histories.record_request(&key);
     assert_eq!(histories.decayed_request_count(&key), 1.0);
     histories.record_request(&key);
     assert!(histories.decayed_request_count(&key) > 1.0);
     assert_eq!(histories.request_count(), 2);
-    assert_eq!(histories.shard(&key).lock().unwrap().len(), 1);
+    assert_eq!(histories.shard(&key).lock().len(), 1);
 }
 
 #[test]
@@ -31,7 +31,7 @@ fn concurrent_recording_counts_every_request() {
         }
     });
     assert_eq!(histories.request_count(), 8000);
-    assert_eq!(histories.shard(&key).lock().unwrap().len(), 1);
+    assert_eq!(histories.shard(&key).lock().len(), 1);
     let mut expected = DecayedRequestCount::default();
     for clock in 1..=8000 {
         expected.add_request(clock, histories.half_life());
@@ -52,7 +52,7 @@ fn another_history_shard_can_record_and_read_while_one_is_locked() {
         .unwrap();
     let (done, received) = mpsc::channel();
     thread::scope(|scope| {
-        let _locked = histories.shard(&locked_key).lock().unwrap();
+        let _locked = histories.shard(&locked_key).lock();
         scope.spawn(|| {
             histories.record_request(&other);
             assert_eq!(histories.decayed_request_count(&other), 1.0);
@@ -114,7 +114,7 @@ fn counters_remain_after_their_demand_decays_to_zero() {
         histories.record_request(&ObjectKeyHash::from("other"));
     }
     assert_eq!(histories.decayed_request_count(&key), 0.0);
-    assert!(histories.shard(&key).lock().unwrap().contains_key(&key));
+    assert!(histories.shard(&key).lock().contains_key(&key));
     histories.record_request(&key);
     assert_eq!(histories.decayed_request_count(&key), 1.0);
 }

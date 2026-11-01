@@ -325,6 +325,7 @@ name = "feuer-historian"
 version = "0.23.0-dev"
 dependencies = [
  "feuer-types",
+ "parking_lot",
  "rustc-hash",
 ]
 

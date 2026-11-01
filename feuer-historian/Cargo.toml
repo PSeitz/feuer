@@ -14,6 +14,7 @@ exclude.workspace = true
 
 [dependencies]
 feuer-types = { workspace = true }
+parking_lot = { workspace = true }
 rustc-hash = { workspace = true }
 
 [lints]
