@@ -80,6 +80,8 @@
 //! The default retention policy is [`AvoidedRetrievalCostScorer`]. For workload-specific
 //! decisions, implement [`RetentionScorer`] and configure each tier through [`CacheBuilder`].
 
+#![doc(html_logo_url = "https://raw.githubusercontent.com/PSeitz/feuer/main/horse_logo_transparent.svg")]
+
 mod access_trace;
 mod cache;
 mod config;
