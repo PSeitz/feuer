@@ -84,7 +84,6 @@
 
 #![doc(html_logo_url = "https://raw.githubusercontent.com/PSeitz/feuer/main/horse_logo_transparent.svg?v=2")]
 
-mod access_trace;
 mod cache;
 mod config;
 mod metrics;

@@ -13,8 +13,13 @@ readme.workspace = true
 exclude.workspace = true
 
 [dependencies]
+bytes.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
 bytesize = "2.7"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }
 
 [lints]
 workspace = true

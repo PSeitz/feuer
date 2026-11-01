@@ -16,7 +16,7 @@ fn memory_cache(memory_capacity: u64, metrics_registry: &BoxedRegistry) -> Cache
             #[cfg(target_os = "linux")]
             disk: None,
         }),
-        access_trace: None,
+        trace: None,
     }
 }
 

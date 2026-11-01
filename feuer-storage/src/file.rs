@@ -6,12 +6,13 @@ use std::{
     mem::MaybeUninit,
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
 use bytes::Bytes;
 use feuer_memory::BufferPool;
+use feuer_types::trace::Trace;
 use fs4::fs_std::FileExt as LockFileExt;
 use tokio::{runtime::Handle, sync::SemaphorePermit};
 use tracing::{Instrument, Span, field};
@@ -28,6 +29,7 @@ pub(crate) fn payload_disk_bytes(length: u64) -> u64 {
 
 /// Queues, path, capacity, and metrics shared by cloned data-file handles.
 struct DataFileState {
+    trace: OnceLock<Trace>,
     read_queue: uring::ReadQueue,
     write_queue: uring::WriteQueue,
     data_path: PathBuf,
@@ -138,6 +140,13 @@ impl DataFile {
         result
     }
 
+    /// Enables read/write tracing for this file and every cloned handle.
+    /// Panics if tracing was already enabled.
+    #[doc(hidden)]
+    pub fn set_trace(&self, trace: Trace) {
+        assert!(self.state.trace.set(trace).is_ok(), "disk tracing is already enabled");
+    }
+
     /// Returns the fixed physical capacity in bytes.
     pub fn capacity(&self) -> u64 {
         self.state.capacity
@@ -244,6 +253,10 @@ impl DataFile {
             error_kind = field::Empty,
             duration_seconds = field::Empty,
         );
+        if let Some(trace) = self.state.trace.get() {
+            let kind = if operation == IoOperation::Write { 7 } else { 6 };
+            trace.send(kind, 0, offset as u128, observed_bytes).await;
+        }
         let result = execute.instrument(span.clone()).await;
         let elapsed = started.elapsed();
         self.state
@@ -352,6 +365,7 @@ fn open_file_state(
         .set_len(capacity)
         .map_err(|source| error(IoOperation::ResizeDataFile, source))?;
     Ok(DataFileState {
+        trace: OnceLock::new(),
         read_queue,
         write_queue,
         data_path,

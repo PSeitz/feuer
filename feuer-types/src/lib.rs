@@ -6,6 +6,8 @@ use xxhash_rust::xxh3::xxh3_128;
 
 #[doc(hidden)]
 pub mod config;
+#[doc(hidden)]
+pub mod trace;
 
 /// An immutable object's identity, represented by its XXH3-128 hash with seed zero.
 ///
