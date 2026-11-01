@@ -25,6 +25,7 @@ Concurrent requests for the same key and callback error type share in-flight wor
 ## Start here
 
 - [Quick start](quick-start.md): create a cache and supply a fetch callback.
+- [Disk I/O](ssd-design.md): disk demand, write batching, and buffer reuse.
 - [API reference](https://docs.rs/feuer): types, builder options, and examples.
 - [Eviction](https://github.com/PSeitz/feuer/blob/main/eviction.md): scoring, configuration, and trade-offs.
 - [Source code](https://github.com/PSeitz/feuer): development, issues, and contributions.
