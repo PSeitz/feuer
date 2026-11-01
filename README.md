@@ -108,7 +108,7 @@ Configure each tier's scorer with `.with_memory_retention_scorer(scorer)` and
 Use `get(key)` to read from memory or disk without fetching from the source.
 
 If you'd rather fetch from the source than wait for a busy disk, use `get_or_fetch_with_disk_fallthrough`.
-This allows to maximize utilization of your ressources. E.g. network bandwidth can be used to fetch from the source while disk is busy.
+This allows to maximize utilization of your resources. E.g. network bandwidth can be used to fetch from the source while disk is busy.
 
 ## Before you use it
 
