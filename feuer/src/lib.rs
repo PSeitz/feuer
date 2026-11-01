@@ -1,3 +1,5 @@
+//! ![Feuer — cost-aware tiered cache, with a flaming horse logo](https://raw.githubusercontent.com/PSeitz/feuer/main/full_logo.svg?v=cfeda6a)
+//!
 //! Feuer caches immutable objects in memory and on disk.
 //!
 //! On a cache miss, it calls your function to fetch or compute the object.
