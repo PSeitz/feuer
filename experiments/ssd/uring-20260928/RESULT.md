@@ -1,18 +1,51 @@
-# Historical Feuer io_uring benchmark
+# Feuer io_uring benchmark
 
-Direct I/O. Medians of three runs, including per-run p99s.
-Write-only 1-MiB requests:
+Historical Feuer I/O implementation, O_DIRECT. Write requests are
+1 MiB. Each main-table cell is the median of three runs. p99 is the
+median of per-run p99s. CPU 100% is one core. QD is application
+outstanding requests per direction. Adjacent fio controls omit Feuer
+allocation, admission, eventfd, and reply overhead. Their completion
+latency has a different scope from Feuer API latency.
 
-| Write QD | MB/s | Write p99 ms |
+| Read KiB | Read QD | Write QD | Read MB/s | Write MB/s | Read p99 µs | Write p99 µs | CPU % |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 1 | 0 | 51.9 | 0.0 | 85.0 | 0.0 | 18.8 |
+| 4 | 8 | 0 | 391.2 | 0.0 | 124.0 | 0.0 | 89.9 |
+| 4 | 32 | 0 | 1266.1 | 0.0 | 172.0 | 0.0 | 167.7 |
+| 4 | 32 | 1 | 475.2 | 1609.0 | 642.0 | 730.0 | 131.4 |
+| 4 | 32 | 8 | 417.4 | 1828.5 | 644.0 | 4631.0 | 121.3 |
+| 4 | 32 | 64 | 264.9 | 1827.1 | 3337.0 | 47775.0 | 108.9 |
+| 4 | 64 | 0 | 1800.3 | 0.0 | 238.0 | 0.0 | 181.9 |
+| 4 | 128 | 0 | 1533.4 | 0.0 | 431.0 | 0.0 | 185.0 |
+| 64 | 1 | 0 | 609.1 | 0.0 | 115.0 | 0.0 | 16.3 |
+| 64 | 8 | 0 | 3689.7 | 0.0 | 233.0 | 0.0 | 81.2 |
+| 64 | 32 | 0 | 3878.8 | 0.0 | 641.0 | 0.0 | 84.7 |
+| 64 | 64 | 0 | 3878.8 | 0.0 | 1182.0 | 0.0 | 85.7 |
+| 1024 | 0 | 1 | 0.0 | 1568.4 | 0.0 | 744.0 | 54.4 |
+| 1024 | 0 | 8 | 0.0 | 1828.6 | 0.0 | 4639.0 | 61.5 |
+| 1024 | 0 | 32 | 0.0 | 1827.7 | 0.0 | 22415.0 | 65.1 |
+| 1024 | 0 | 64 | 0.0 | 1827.7 | 0.0 | 47135.0 | 68.4 |
+| 1024 | 1 | 0 | 1753.0 | 0.0 | 602.0 | 0.0 | 56.6 |
+| 1024 | 8 | 0 | 3780.1 | 0.0 | 2149.0 | 0.0 | 122.8 |
+| 1024 | 32 | 0 | 3758.5 | 0.0 | 8847.0 | 0.0 | 122.9 |
+| 1024 | 32 | 1 | 3588.5 | 111.8 | 9263.0 | 9359.0 | 123.5 |
+| 1024 | 32 | 8 | 3001.5 | 756.2 | 11135.0 | 11159.0 | 125.7 |
+| 1024 | 32 | 64 | 1936.0 | 1790.7 | 22175.0 | 49823.0 | 120.7 |
+| 1024 | 64 | 0 | 3856.3 | 0.0 | 19775.0 | 0.0 | 122.3 |
+
+## Adjacent fio controls
+
+| Case | MB/s | Completion p99 µs |
 |---|---:|---:|
-| 1 | 1,568 | 0.744 |
-| 8 | 1,829 | 4.639 |
-| 32 | 1,828 | 22.415 |
-| 64 | 1,828 | 47.135 |
-
-Beyond QD8, queued writes increased latency without improving throughput.
-Read-only 64-KiB requests reached 3,879 MB/s at QD32 and QD64, while
-p99 rose from 0.641 to 1.182 ms.
-
-This historical I/O path includes allocation, admission, and reply overhead.
-Its latency scope differs from fio completion latency.
+| fio-r0-bs1048576-rq0-wq32 | 1829.3 | 18219.0 |
+| fio-r0-bs1048576-rq32-wq0 | 3879.5 | 8585.2 |
+| fio-r0-bs4096-rq1-wq0 | 59.2 | 75.3 |
+| fio-r0-bs4096-rq64-wq0 | 2211.2 | 238.6 |
+| fio-r1-bs1048576-rq0-wq32 | 1829.4 | 17694.7 |
+| fio-r1-bs1048576-rq32-wq0 | 3879.5 | 8585.2 |
+| fio-r1-bs4096-rq1-wq0 | 59.1 | 75.3 |
+| fio-r1-bs4096-rq64-wq0 | 2199.1 | 238.6 |
+| fio-r2-bs1048576-rq0-wq32 | 1829.4 | 17694.7 |
+| fio-r2-bs1048576-rq32-wq0 | 3879.5 | 8585.2 |
+| fio-r2-bs4096-rq1-wq0 | 59.2 | 75.3 |
+| fio-r2-bs4096-rq64-wq0 | 2199.0 | 238.6 |
