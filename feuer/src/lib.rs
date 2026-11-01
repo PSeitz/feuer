@@ -64,7 +64,7 @@
 //! let cache = feuer::Cache::builder()
 //!     .memory_capacity(64 * 1024 * 1024)
 //!     .disk_capacity(1024 * 1024 * 1024)
-//!     .directory("cache")
+//!     .directory("feuer_cache")
 //!     .file_name("objects")
 //!     .open()
 //!     .await?;
@@ -72,7 +72,7 @@
 //! # }
 //! ```
 //!
-//! This stores disk data in `cache/objects`. The directory defaults to `cache` and the
+//! This stores disk data in `feuer_cache/objects`. The directory defaults to `feuer_cache` and the
 //! filename to `data`. Opening waits for disk metadata recovery.
 //! Memory-only operation works on every supported platform without a Tokio runtime.
 //! Access tracing through [`Cache::with_trace`] requires Tokio.

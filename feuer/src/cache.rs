@@ -134,7 +134,7 @@ impl<'a> CacheBuilder<'a> {
         self
     }
 
-    /// Sets the disk cache directory. Defaults to `cache`. Unused when disk caching is disabled.
+    /// Sets the disk cache directory. Defaults to `feuer_cache`. Unused when disk caching is disabled.
     pub fn directory(mut self, directory: impl Into<PathBuf>) -> Self {
         self.directory = directory.into();
         self
@@ -307,7 +307,7 @@ impl Cache {
     pub fn builder<'a>() -> CacheBuilder<'a> {
         let scorer = Arc::new(AvoidedRetrievalCostScorer::default());
         CacheBuilder {
-            directory: PathBuf::from("cache"),
+            directory: PathBuf::from("feuer_cache"),
             file_name: "data".to_owned(),
             disk_capacity: 0,
             memory_capacity: 0,

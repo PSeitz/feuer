@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     use bytes::Bytes;
     use feuer::{Cache, IoQueues};
 
-    let directory = PathBuf::from(args().nth(1).unwrap_or_else(|| "cache".to_owned()));
+    let directory = PathBuf::from(args().nth(1).unwrap_or_else(|| "feuer_cache".to_owned()));
     let io_queues = IoQueues::new()?;
     // Each cache uses a different file in the same directory, with its own capacities,
     // contents, eviction, buffer pool, file lock, and background-write queue.

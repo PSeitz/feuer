@@ -8,16 +8,14 @@ Feuer caches immutable objects in memory and on disk, with application callbacks
 
 ## Design
 
+Feuer aims to reduce the cost of serving requests, including source fetches, disk I/O,
+and memory copies.
+
 ### Cost-aware eviction
 
-It supports a custom cost model for each cache layer. The model can account for:
-
-- The cost of fetching or recomputing an object.
-- How often and how recently it is requested.
-- Its payload size and the space it occupies in that layer.
-- Application-specific information about the object.
-
-Each layer uses its model to assign retention scores, then evicts the lowest-scoring object among sampled candidates.
+Memory and disk can use different retention scorers. Scorers can account for fetch
+or computation cost, request frequency and recency, and payload size.
+Each layer samples objects and evicts the one with the lowest score.
 
 ### SSD I/O and buffer reuse
 
@@ -26,29 +24,20 @@ the kernel page cache.
 
 - Aligned buffer reuse. Downloads can use the disk-read buffer pool. Fill a buffer
   and hand it to the cache without copying its payload.
-- Payload packing. Small entries share 1-MiB payload chunks. Larger entries occupy
-  consecutive whole chunks. Each payload is contiguous, with metadata in separate chunks.
+- Batched writes. Small entries are packed together to reduce disk I/O.
 - Separate read and write queues. Reads and writes have separate `io_uring` rings
   and worker threads, so they can progress concurrently.
 - Source fallthrough under disk pressure. Applications can choose to fetch from
   the source when disk reads are backed up.
-- In-flight fetch sharing. Concurrent misses for the same key and callback error
-  type share disk reads and source work.
-
-The tiered cache API supports memory-only operation on every platform. Disk caching requires Linux.
+- In-flight fetch sharing. Concurrent misses share disk reads and source work.
 
 ## Runtime requirements
 
-Disk caching requires Linux with usable `io_uring` and a filesystem supporting
-`O_DIRECT` and `STATX_DIOALIGN`. Opening a disk cache fails when these requirements
-are unmet. Set disk capacity to `0` for memory-only operation on any platform,
-including macOS, without a Tokio runtime or `io_uring`. Nonzero disk capacity
-returns an error on other platforms. Access tracing through `with_trace` requires Tokio.
+Disk caching requires Linux with `io_uring` and a filesystem supporting `O_DIRECT`
+and `STATX_DIOALIGN`. Memory-only operation works on every supported platform.
 
-Verify customer environments before enabling disk caching. Kernel support alone
-is insufficient: `kernel.io_uring_disabled` can restrict ring creation, and
-container seccomp policies can block the io_uring syscalls. A blocked
-`io_uring_setup` can return `Operation not permitted (os error 1)`.
+Check that the deployment environment permits `io_uring`. Kernel settings and
+container seccomp policies can block it, causing `Operation not permitted` errors.
 
 ## Quick start
 
@@ -74,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache = Cache::builder()
         .memory_capacity(64 << 20)
         .disk_capacity(1 << 30)
-        .directory("cache")
+        .directory("feuer_cache")
         .open()
         .await?;
 
@@ -90,45 +79,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-By default, metrics are disabled and the cache creates its own I/O queues when disk is enabled.
-Use `.with_metrics(&registry)` to register metrics or `.with_io_queues(queues)`
-to share I/O queues on Linux. Disk capacity defaults to `0` for memory-only operation
-on any platform. The default directory is `cache` and file name is `data`.
-Configure each tier's scorer with `.with_memory_retention_scorer(scorer)` and
-`.with_disk_retention_scorer(scorer)` before calling `.open().await`.
-
-Memory capacity must be positive. Applications using zero memory capacity to
-disable caching should bypass cache construction and fetch directly from the source.
-Builder setters are infallible. `.open().await` validates configuration and returns
-`CacheOpenError::Config(CacheConfigError)` or `CacheOpenError::Disk(DiskCacheError)`
-on failure.
+The example uses 64 MiB of memory and 1 GiB of disk. Memory capacity must be
+positive. Omit `.disk_capacity(...)` for memory-only operation.
+The default disk path is `feuer_cache/data`.
 
 ## How lookups work
 
+`get_or_fetch(key, callback)` checks memory, then disk, then calls your callback:
+
 1. Memory hit: return the bytes.
 2. Disk hit: read and checksum-verify the object, then promote it to memory.
-3. Miss: run your callback, cache the result in memory, and queue a disk write.
+3. Miss: run the callback, cache the result in memory, and queue a disk write.
 
-`get_or_fetch` callbacks return `Result<Bytes, E>` or `Result<AlignedBuffer, E>`.
-The cache returns `Bytes`. For pooled, zero-copy buffers, use
-`cache.allocate_buffer(length)` and fill `as_mut_slice()`.
-Use `get_or_fetch_with_disk_fallthrough` to allow source fallback under disk pressure.
+Use `get(key)` to read from memory or disk without fetching from the source.
 
-Concurrent misses for the same key and error type share work, so callbacks must be
-interchangeable. Errors must implement `Clone + Send + Sync + 'static`.
-Your application handles source retries and concurrency limits.
-
-Use `get(key)` to check the cache without fetching. It returns `None` on a
-miss and does not wait for an in-progress source callback.
+Use `get_or_fetch_with_disk_fallthrough` to fetch from the source rather than wait
+for a busy disk. This can use available network bandwidth at the cost of additional
+source requests.
 
 ## Before you use it
 
-- Don't use the same key for different payloads. If you mutate an object, use a new key.
-  Feuer has no invalidation API. 
-- Keys are hashed to 128-bit identities without retaining the strings or checking for collisions.
-- Disk caching and recovery are best-effort. Opening waits for metadata recovery.
-- Changing capacity, disk format, or application payload version invalidates disk entries. Use
-  `.payload_version(n)` when changing your payload encoding.
+- Use a new key when an object's contents change. Feuer has no invalidation API.
+- Concurrent misses for the same key and callback error type share one fetch.
+  Their callbacks must be interchangeable.
+- Treat cached data as disposable. Disk writes and recovery are best-effort, so
+  the source must remain able to supply objects.
+- Changing disk capacity, disk format, or application payload version invalidates
+  disk entries. Use `.payload_version(n)` when changing your payload encoding.
 - Give each cache its own backing file. The file is exclusively locked while
   open. Use separate directories or `.file_name("images")`.
 
@@ -136,13 +113,15 @@ miss and does not wait for an in-progress source callback.
 
 ### Eviction
 
-Both tiers sample objects and evict the one with the lowest retention score.
-The default scorer combines decayed demand with avoided retrieval cost per
-charged byte. Its default cost model weights bytes. Configure a per-request cost
-to account for fixed fetch overhead, or provide a scorer for computation costs.
-Memory and disk can use different scorers.
-
+The default scorer uses request frequency and recency with a byte-based cost
+model. Customize it to account for fixed fetch overhead or computation costs.
 See [eviction](eviction.md) for the formula, configuration examples, and trade-offs.
+
+### Metrics and shared I/O
+
+Use `.with_metrics(&registry)` to enable metrics. When several caches share an
+SSD, use `.with_io_queues(queues)` to share their I/O workers. See the
+[shared I/O example](feuer/examples/shared_io_objects.rs).
 
 ### Environment variables
 
@@ -150,19 +129,13 @@ See [eviction](eviction.md) for the formula, configuration examples, and trade-o
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Candidates per eviction. Must be positive. |
-| `FEUER_ACCESS_COUNT_HALF_LIFE` | `262144` | Requests across keys before demand weight halves. Must be positive. |
-| `FEUER_HISTORY_ENTRY_LIMIT` | `2000000` | History entry-count cleanup threshold per cache. Must be positive. |
+| `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Candidates per eviction. |
+| `FEUER_ACCESS_COUNT_HALF_LIFE` | `262144` | Requests across keys before demand weight halves. |
+| `FEUER_HISTORY_ENTRY_LIMIT` | `2000000` | History entry-count cleanup threshold per cache. |
 
-Values accept integers and size suffixes such as `8KiB` or `1.5 GiB`.
+All values must be positive. Values accept integers and size suffixes such as `8KiB` or `1.5 GiB`.
 Binary suffixes use powers of 1024, decimal suffixes powers of 1000.
-Invalid values cause `.open().await` to fail with `CacheOpenError::Config`.
-
-Use `.reclaim_sample_size(n)`, `.access_count_half_life(n)`, and
-`.history_entry_limit(n)` to override these defaults. Read resolved settings through
-`cache.config()`.
-One background worker checks the history limit each second and prunes the oldest
-requests to 90% of the limit.
+See [eviction](eviction.md) for sampling and access-history behavior.
 
 ## Development
 
