@@ -1,10 +1,10 @@
 # Random reads with sequential writes
 
-fio/libaio, O_DIRECT. One random reader QD32 and one sequential
-1-MiB writer QD32. Initialized 128-GiB read and 64-GiB write files.
-5 s warmup + 30 s per case. Longer validation runs measure 60 s.
-Table columns are requested write caps in MB/s. Actual rates are reported
-separately. p99 measures fio completion latency.
+- **Reads:** random requests, with up to 32 reads in flight. Each row uses a different request size.
+- **Writes:** sequential 1 MiB requests, with up to 32 writes in flight. Columns vary the write-rate limit.
+- **Tool:** fio with libaio and direct I/O.
+- **Duration:** 5 seconds of warmup and 30 seconds of measurement per case. Validation repeats measure 60 seconds.
+- **Tables:** achieved write rates are listed separately from their limits.
 
 ## Random read throughput (MB/s)
 

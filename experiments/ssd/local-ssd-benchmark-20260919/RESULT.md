@@ -1,10 +1,10 @@
 # m8g-32cpu-local-ssd: local NVMe benchmarks
 
-fio/libaio, O_DIRECT. Initialized 128-GiB read and 64-GiB write files.
-5 s warmup + 30 s per case, single runs. Validation repeats measure 60 s.
-Mixed cases use one sequential reader QD32 and one sequential 1-MiB
-writer QD32. Mixed-table columns are requested write caps in MB/s.
-Application requests above 128 KiB can be split by the kernel.
+- **Workloads:** random reads, sequential writes, and sequential reads alongside writes.
+- **Concurrency:** standalone tests use 1 or 32 requests in flight. Mixed tests allow 32 reads and 32 writes, using 1 MiB writes.
+- **Tool:** fio with libaio and direct I/O.
+- **Duration:** 5 seconds of warmup and 30 seconds of measurement per case. Validation repeats measure 60 seconds.
+- **Tables:** mixed-workload columns show write-rate limits. Achieved write rates are listed separately.
 
 ## Random read throughput
 

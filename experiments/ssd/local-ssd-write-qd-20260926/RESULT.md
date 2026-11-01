@@ -1,10 +1,10 @@
 # Random reads: sequential writer queue-depth sweep
 
-fio/libaio, O_DIRECT. Random reader QD32 and sequential 1-MiB writer.
-No write-rate cap in the QD sweep. Initialized 128-GiB read and 64-GiB
-write files. 5 s warmup + 30 s per case, shuffled order. Longer repeats
-measure 60 s and are separate from main results. Rate-capped controls
-use writer QD32. p99 measures fio completion latency.
+- **Reads:** random requests, with up to 32 reads in flight.
+- **Writes:** sequential 1 MiB requests. The main sweep varies write concurrency without limiting the write rate.
+- **Tool:** fio with libaio and direct I/O.
+- **Duration:** 5 seconds of warmup and 30 seconds of measurement per case. Longer repeats measure 60 seconds.
+- **Rate-limited controls:** allow up to 32 writes in flight.
 
 ## Read throughput (MB/s)
 

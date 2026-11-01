@@ -1,11 +1,10 @@
 # Buffered I/O screening versus the original direct-I/O benchmark
 
-fio/libaio, buffered I/O, nominal QD32. 2 s warmup + 10 s per case.
-Direct baselines are earlier 30-second runs. Buffered submission can block.
-Application writes measure page-cache acceptance. Each file is flushed
-with fdatasync afterward, outside measurement. Device rates cover the
-whole fio invocation, including startup and warmup. They are not exactly
-time-aligned with application rates. Write targets are caps.
+- **Comparison:** buffered I/O versus the earlier direct-I/O measurements, using fio with libaio.
+- **Concurrency:** configured for 32 requests in flight. Buffered submission can block, reducing actual concurrency.
+- **Duration:** 2 seconds of warmup and 10 seconds of measurement. Direct-I/O baselines used 30-second measurements.
+- **Write timing:** buffered writes finish when accepted into the page cache. The subsequent disk flush is measured separately.
+- **Device metrics:** cover the full invocation, including startup and warmup.
 
 ## Random reads
 

@@ -1,11 +1,10 @@
 # Write chunking during mixed 4 KiB / 1 MiB random reads
 
-fio/libaio, O_DIRECT. One QD32 random reader, 4-KiB/1-MiB requests
-50/50 by count (99.61% large-read bytes). Uncapped sequential writer.
-Initialized 8-GiB read and 4-GiB write files. Two shuffled rounds,
-3 s warmup + 15 s per case. p99 is nearest-rank completion latency by
-request size. QD16 batch submits and completes 16 requests together.
-QD16 rolling submits/reaps one at a time. Short screening runs.
+- **Reads:** equal numbers of random 4 KiB and 1 MiB requests, with up to 32 reads in flight.
+- **Writes:** sequential, with no rate limit. The table varies request size and concurrency.
+- **Submission:** `batch` submits 16 writes and waits for all of them. `rolling` replaces each completed write to keep up to 16 in flight.
+- **Tool:** fio with libaio and direct I/O.
+- **Duration:** two rounds, each with 3 seconds of warmup and 15 seconds of measurement per case.
 
 | Round | Writer | Read MB/s | Write MB/s | 4 KiB requests % | 4 KiB p99 ms | 1 MiB p99 ms |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: |

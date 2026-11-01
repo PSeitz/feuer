@@ -1,11 +1,9 @@
 # Feuer io_uring benchmark
 
-Historical Feuer I/O implementation, O_DIRECT. Write requests are
-1 MiB. Each main-table cell is the median of three runs. p99 is the
-median of per-run p99s. CPU 100% is one core. QD is application
-outstanding requests per direction. Adjacent fio controls omit Feuer
-allocation, admission, eventfd, and reply overhead. Their completion
-latency has a different scope from Feuer API latency.
+- **Implementation:** Feuer's I/O path as of September 28, using direct I/O.
+- **Workload:** varying read sizes and read/write concurrency. Writes use 1 MiB requests.
+- **Results:** main-table values are medians of three runs.
+- **Comparison:** fio controls measure I/O without Feuer's allocation, queueing, and reply overhead.
 
 | Read KiB | Read QD | Write QD | Read MB/s | Write MB/s | Read p99 µs | Write p99 µs | CPU % |
 |---:|---:|---:|---:|---:|---:|---:|---:|

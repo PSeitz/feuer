@@ -1,10 +1,10 @@
 # Actual latency to complete 500 random 4 KiB reads
 
-Native AIO, O_DIRECT. Each batch contains 500 random 4-KiB reads.
-Initialized 8-GiB read and 4-GiB write files. Two rounds, each with
-100 warmup and 1,000 measured batches per case. Timing spans first
-submission to last completion, excluding setup. Table ranges cover the
-two rounds, not confidence intervals. p99 describes whole batches.
+- **Workload:** batches of 500 random 4 KiB reads, allowing 32 or 64 reads in flight.
+- **Measurement:** time to complete the entire batch, from first submission to last completion.
+- **Background writes:** sequential 1 MiB requests, with up to 32 writes in flight and no rate limit.
+- **Tool:** native Linux AIO with direct I/O.
+- **Repetitions:** two rounds of 100 warmup batches and 1,000 measured batches per case. Table ranges span the two rounds.
 
 | Maximum outstanding reads | Background writes | Mean batch latency ms | Batch p99 ms |
 | ---: | --- | ---: | ---: |

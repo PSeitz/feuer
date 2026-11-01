@@ -1,12 +1,10 @@
 # I/O queue overhead: Linux before/after
 
-Historical before/after comparison, O_DIRECT. Baseline b8881dc.
-Candidate coalesces wakeups, avoids unnecessary kernel calls, and avoids
-oversized unpooled allocations. Predates the later buffer-pool API.
-Three alternating runs per case, 2 s warmup + 5 s measurement.
-Cells are medians, including per-run p99s. CPU 100% is one core.
-Callers are application concurrency. Syscall counts come from separate
-8-second windows of pooled 4-KiB reads with 32 callers.
+- **Comparison:** baseline `b8881dc` versus changes that combine wakeups, skip unnecessary kernel calls, and avoid oversized unpooled allocations.
+- **I/O:** direct I/O through Feuer. This test predates the later buffer-pool API.
+- **Duration:** 2 seconds of warmup and 5 seconds of measurement per case.
+- **Repetitions:** three runs per version, alternating baseline and candidate. Tables report medians.
+- **Syscall counts:** separate 8-second measurements of pooled 4 KiB reads with 32 callers.
 
 ## Results
 

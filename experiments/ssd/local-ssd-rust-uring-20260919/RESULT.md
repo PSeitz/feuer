@@ -1,12 +1,10 @@
 # Rust validation and io_uring comparison
 
-Rust AIO and io_uring, O_DIRECT, one worker per stream. Initialized
-128-GiB read and 64-GiB write files. Single runs: 5 s warmup + 30 s.
-Longer repeats: 60 s. AIO phase precedes io_uring. Rust buffer generation
-and instrumentation differ from fio. Throughput columns are MB/s.
-Mixed cases use sequential reads at QD32 and 1-MiB sequential writes at
-QD32. Column headings are requested write caps. Adjacent fio controls
-run immediately before matching Rust cases. CPU 100% is one core.
+- **Comparison:** the same workloads implemented in Rust with Linux AIO and io_uring, using direct I/O.
+- **Mixed workloads:** sequential reads and 1 MiB writes, with up to 32 requests in flight per stream. Columns show write-rate limits.
+- **Duration:** 5 seconds of warmup and 30 seconds of measurement per case. Longer repeats measure 60 seconds.
+- **Order:** the AIO phase runs first. Each adjacent fio control runs immediately before its matching Rust case.
+- **Units:** throughput is MB/s. Rust and fio differ in buffer generation and instrumentation.
 
 ## Random reads
 

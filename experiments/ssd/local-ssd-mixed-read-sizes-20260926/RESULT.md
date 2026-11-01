@@ -1,10 +1,9 @@
 # Mixed 4 KiB / 1 MiB random reads
 
-fio/libaio, O_DIRECT. One QD32 random reader, 4-KiB/1-MiB requests
-50/50 by count (99.61% large-read bytes). Sequential 1-MiB writer QD32.
-Initialized 8-GiB read and 4-GiB write files. Two shuffled rounds,
-3 s warmup + 15 s per case. p99 is nearest-rank completion latency,
-computed separately for each request size. Short screening runs.
+- **Reads:** equal numbers of random 4 KiB and 1 MiB requests, with up to 32 reads in flight.
+- **Writes:** sequential 1 MiB requests, with up to 32 writes in flight. The table varies the write-rate limit.
+- **Tool:** fio with libaio and direct I/O.
+- **Duration:** two rounds, each with 3 seconds of warmup and 15 seconds of measurement per case.
 
 | Round | Write cap MB/s | Read MB/s | Actual write MB/s | 4 KiB requests % | 4 KiB p99 ms | 1 MiB p99 ms |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: |
