@@ -96,7 +96,7 @@ impl MemoryCacheShard {
     /// Adds an object known not to be indexed.
     fn add_entry(&mut self, object_key: ObjectKeyHash, bytes: Bytes, allocation_charge: usize) {
         self.used_bytes += allocation_charge as u64;
-        self.buffer_pool.add_entry_bytes(allocation_charge as u64);
+        self.buffer_pool.add_used_bytes(allocation_charge as u64);
         self.buffer_pool.metrics.entries.increase(1);
         let candidate_index = self.eviction_candidates.len();
         self.eviction_candidates.push(object_key);
@@ -133,7 +133,7 @@ impl MemoryCacheShard {
         }
         let removed_bytes = removed_entry.allocation_charge as u64;
         self.used_bytes -= removed_bytes;
-        self.buffer_pool.remove_entry_bytes(removed_bytes);
+        self.buffer_pool.remove_used_bytes(removed_bytes);
         self.buffer_pool.metrics.entries.decrease(1);
         true
     }
@@ -146,6 +146,6 @@ impl MemoryCacheShard {
 impl Drop for MemoryCacheShard {
     fn drop(&mut self) {
         self.buffer_pool.metrics.entries.decrease(self.entry_count() as u64);
-        self.buffer_pool.remove_entry_bytes(self.used_bytes);
+        self.buffer_pool.remove_used_bytes(self.used_bytes);
     }
 }

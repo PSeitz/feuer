@@ -40,7 +40,7 @@ impl MemoryMetrics {
         );
         let used_bytes = registry.register_gauge_vec(
             "feuer_memory_used_bytes".into(),
-            "Cached allocation charges plus idle buffer capacity".into(),
+            "Allocation bytes charged to cached objects plus idle buffer capacity".into(),
             &[],
         );
         let capacity_bytes = registry.register_gauge_vec(

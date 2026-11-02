@@ -26,7 +26,7 @@ const MAX_SHARDS: usize = 64;
 /// Request history is supplied separately. Cache operations consult it for
 /// retention decisions but never record requests or remove history.
 ///
-/// Cached allocation charges and idle read buffers share the configured capacity.
+/// Allocation bytes charged to cached objects and idle read buffers share the configured capacity.
 /// Each shard evicts locally against its share before insertion. Admission also
 /// frees idle buffers when needed. An allocation charge larger than its shard's
 /// target is admitted once that shard's charged usage reaches zero, so total usage
@@ -58,7 +58,7 @@ impl MemoryCache {
         Self::with_metrics(capacity, MemoryMetrics::noop())
     }
 
-    /// Creates a cache with registered metrics. Idle buffers use capacity left by cached entries.
+    /// Creates a cache with registered metrics. Idle buffers use capacity left by cached objects.
     pub fn with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self {
         Self::with_shard_count(BufferPool::new(capacity, metrics), default_shard_count())
     }
@@ -116,7 +116,7 @@ impl MemoryCache {
         self.buffer_pool.capacity
     }
 
-    /// Returns cached allocation charges plus idle buffer capacity.
+    /// Returns allocation bytes charged to cached objects plus idle buffer capacity.
     /// Active reads and caller-only results are excluded.
     pub fn used_bytes(&self) -> u64 {
         self.buffer_pool.used_bytes()

@@ -52,18 +52,19 @@ pub(crate) fn bucket_index(length: usize) -> usize {
     BUFFER_SIZES.partition_point(|&size| size < length)
 }
 
-/// Idle aligned buffers and entry allocation charges sharing one cache's budget.
+/// Idle aligned buffers and allocation bytes charged to cached objects share one cache's budget.
 /// Checked-out buffers are charged when admitted to the cache.
 pub struct BufferPool {
     pub(crate) capacity: u64,
-    state: Mutex<CachedBytesAndIdleBuffers>,
+    inner: Mutex<BufferPoolInner>,
     pub(crate) metrics: Arc<MemoryMetrics>,
 }
 
 /// Cached-byte accounting and idle buffers, updated under one lock.
 #[derive(Default)]
-struct CachedBytesAndIdleBuffers {
-    entry_bytes: u64,
+struct BufferPoolInner {
+    /// Allocation bytes charged to cached objects.
+    used_bytes: u64,
     idle_bytes: u64,
     idle_buffers: [Vec<AlignedBuffer>; BUCKET_COUNT],
 }
@@ -73,7 +74,7 @@ impl BufferPool {
         metrics.capacity_bytes.increase(capacity);
         Arc::new(Self {
             capacity,
-            state: Mutex::default(),
+            inner: Mutex::default(),
             metrics,
         })
     }
@@ -94,7 +95,7 @@ impl BufferPool {
     pub fn allocate(self: &Arc<Self>, length: usize) -> io::Result<AlignedBuffer> {
         let index = bucket_index(length);
         let capacity = BUFFER_SIZES.get(index).copied().unwrap_or(length);
-        let idle_buffer = self.take_idle_buffer(&mut self.state.lock(), index);
+        let idle_buffer = self.take_idle_buffer(&mut self.inner.lock(), index);
         let mut buffer = match idle_buffer {
             Some(mut buffer) => {
                 if let BufferMemory::Large(memory) = &mut *buffer.memory {
@@ -110,27 +111,27 @@ impl BufferPool {
         Ok(buffer)
     }
 
-    /// Entry allocation charges plus idle buffer capacity.
+    /// Allocation bytes charged to cached objects plus idle buffer capacity.
     pub fn used_bytes(&self) -> u64 {
-        let state = self.state.lock();
-        state.entry_bytes + state.idle_bytes
+        let inner = self.inner.lock();
+        inner.used_bytes + inner.idle_bytes
     }
 
     /// Allocation bytes available for reuse.
     pub fn idle_bytes(&self) -> u64 {
-        self.state.lock().idle_bytes
+        self.inner.lock().idle_bytes
     }
 
-    /// Adds entry-allocation bytes to accounting and metrics, freeing idle buffers if needed.
-    pub(crate) fn add_entry_bytes(&self, bytes: u64) {
-        let mut state = self.state.lock();
-        state.entry_bytes += bytes;
+    /// Adds allocation bytes charged to cached objects, freeing idle buffers if needed.
+    pub(crate) fn add_used_bytes(&self, bytes: u64) {
+        let mut inner = self.inner.lock();
+        inner.used_bytes += bytes;
         self.metrics.used_bytes.increase(bytes);
-        let remaining_capacity = self.capacity.saturating_sub(state.entry_bytes);
-        // Cache entries take precedence over idle buffers. Free larger buffers first.
+        let remaining_capacity = self.capacity.saturating_sub(inner.used_bytes);
+        // Cached objects take precedence over idle buffers. Free larger buffers first.
         for index in (0..BUCKET_COUNT).rev() {
-            while state.idle_bytes > remaining_capacity
-                && let Some(buffer) = self.take_idle_buffer(&mut state, index)
+            while inner.idle_bytes > remaining_capacity
+                && let Some(buffer) = self.take_idle_buffer(&mut inner, index)
             {
                 // Idle buffers have no pool reference. Dropping them frees their allocations.
                 drop(buffer);
@@ -138,17 +139,17 @@ impl BufferPool {
         }
     }
 
-    /// Subtracts entry-allocation bytes from accounting and metrics.
-    pub(crate) fn remove_entry_bytes(&self, bytes: u64) {
-        self.state.lock().entry_bytes -= bytes;
+    /// Subtracts allocation bytes charged to cached objects.
+    pub(crate) fn remove_used_bytes(&self, bytes: u64) {
+        self.inner.lock().used_bytes -= bytes;
         self.metrics.used_bytes.decrease(bytes);
     }
 
     /// Takes an idle buffer and subtracts its bytes from accounting and metrics under the pool lock.
-    fn take_idle_buffer(&self, state: &mut CachedBytesAndIdleBuffers, index: usize) -> Option<AlignedBuffer> {
-        let buffer = state.idle_buffers[index].pop()?;
+    fn take_idle_buffer(&self, inner: &mut BufferPoolInner, index: usize) -> Option<AlignedBuffer> {
+        let buffer = inner.idle_buffers[index].pop()?;
         let capacity = buffer.capacity() as u64;
-        state.idle_bytes -= capacity;
+        inner.idle_bytes -= capacity;
         self.decrease_idle_buffer_metrics(index, capacity);
         Some(buffer)
     }
@@ -163,7 +164,7 @@ impl BufferPool {
 impl Drop for BufferPool {
     fn drop(&mut self) {
         for index in 0..BUCKET_COUNT {
-            let buffers = &self.state.get_mut().idle_buffers[index];
+            let buffers = &self.inner.get_mut().idle_buffers[index];
             let bytes = buffers.iter().map(|buffer| buffer.capacity() as u64).sum();
             self.decrease_idle_buffer_metrics(index, bytes);
         }
@@ -406,15 +407,15 @@ impl Drop for AlignedBuffer {
             let capacity = memory.capacity() as u64;
             metrics.used_buffer_bytes[index].decrease(capacity);
             if let Some(pool) = pool.upgrade() {
-                let mut state = pool.state.lock();
-                let idle_limit = pool.capacity.saturating_sub(state.entry_bytes);
-                if state.idle_bytes + capacity <= idle_limit {
-                    state.idle_buffers[index].push(Self {
+                let mut inner = pool.inner.lock();
+                let idle_limit = pool.capacity.saturating_sub(inner.used_bytes);
+                if inner.idle_bytes + capacity <= idle_limit {
+                    inner.idle_buffers[index].push(Self {
                         memory: ManuallyDrop::new(memory),
                         length: self.length,
                         pool: None,
                     });
-                    state.idle_bytes += capacity;
+                    inner.idle_bytes += capacity;
                     pool.metrics.idle_buffer_bytes[index].increase(capacity);
                     pool.metrics.used_bytes.increase(capacity);
                 }
