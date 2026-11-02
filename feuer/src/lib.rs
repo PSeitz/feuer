@@ -23,7 +23,7 @@
 //!         .await?;
 //!
 //!     let bytes = cache
-//!         .get_or_fetch("object-v1".to_owned(), || async {
+//!         .get_or_fetch("object-v1", || async {
 //!             Ok::<_, Infallible>(Bytes::from_static(b"hello world"))
 //!         })
 //!         .await?;
@@ -126,7 +126,7 @@ pub enum DiskCacheError {
 #[derive(Clone, Debug)]
 pub enum IoQueues {}
 
-/// The UTF-8 identity supplied at the public cache boundary.
+/// An owned UTF-8 object identity. Cache lookups accept a borrowed `&str`.
 ///
 /// Keys must be non-adversarial. Only the XXH3-128 hash is stored, with no collision checks.
 /// XXH3 is non-cryptographic and provides no protection against deliberately constructed

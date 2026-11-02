@@ -366,7 +366,7 @@ mod linux {
                 let started = Instant::now();
                 let fetch_cache = cache.clone();
                 let bytes = cache
-                    .get_or_fetch(request.object_key, move || async move {
+                    .get_or_fetch(&request.object_key, move || async move {
                         source.download(&fetch_cache, request.payload_len).await
                     })
                     .await?;
@@ -516,7 +516,7 @@ mod linux {
             drop(buffer);
             let fetch_cache = cache.clone();
             let bytes = cache
-                .get_or_fetch(request.object_key, move || async move {
+                .get_or_fetch(&request.object_key, move || async move {
                     source.download(&fetch_cache, request.payload_len).await
                 })
                 .await

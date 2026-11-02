@@ -30,21 +30,17 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
         .with_trace(move |package| ready(sender.send(package).map_err(io::Error::other)));
     let key = ObjectKeyHash::from("object");
     cache
-        .get_or_fetch("object".to_owned(), || async {
-            Ok::<_, Infallible>(Bytes::from_static(b"abcd"))
-        })
+        .get_or_fetch("object", || async { Ok::<_, Infallible>(Bytes::from_static(b"abcd")) })
         .await?;
     let hit = cache
-        .get_or_fetch("object".to_owned(), || async {
+        .get_or_fetch("object", || async {
             Err::<AlignedBuffer, _>(Arc::new(io::Error::other("same key must hit the cached entry")))
         })
         .await?;
     assert_eq!(hit.as_ref(), b"abcd");
     assert!(
         cache
-            .get_or_fetch("failed".to_owned(), || async {
-                Err::<AlignedBuffer, _>("source error")
-            })
+            .get_or_fetch("failed", || async { Err::<AlignedBuffer, _>("source error") })
             .await
             .is_err()
     );
@@ -53,7 +49,7 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
     let canceled_cache = cache.clone();
     let task = spawn(async move {
         canceled_cache
-            .get_or_fetch("canceled".to_owned(), move || async move {
+            .get_or_fetch("canceled", move || async move {
                 started.send(()).unwrap();
                 pending::<result::Result<AlignedBuffer, Infallible>>().await
             })
@@ -133,11 +129,11 @@ async fn decodes_empty_object_from_current_writer() -> Result<()> {
         .open()
         .await?
         .with_trace(move |package| ready(sender.send(package).map_err(io::Error::other)));
-    assert!(cache.get("empty".to_owned()).await.is_none());
+    assert!(cache.get("empty").await.is_none());
     cache
-        .get_or_fetch("empty".to_owned(), || async { Ok::<_, Infallible>(Bytes::new()) })
+        .get_or_fetch("empty", || async { Ok::<_, Infallible>(Bytes::new()) })
         .await?;
-    let hit = cache.get("empty".to_owned()).await.unwrap();
+    let hit = cache.get("empty").await.unwrap();
     assert!(hit.is_empty());
     drop(cache);
     let package = receiver.recv().await.ok_or("missing tail")?;

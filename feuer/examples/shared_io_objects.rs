@@ -36,20 +36,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Replace these callbacks with downloads from the respective sources.
     // The same key can identify different content in independent caches.
     let image = images
-        .get_or_fetch("object-v1".to_owned(), || async {
+        .get_or_fetch("object-v1", || async {
             Ok::<_, Infallible>(Bytes::from_static(b"image bytes"))
         })
         .await?;
     assert_eq!(image.as_ref(), b"image bytes");
 
     let document = documents
-        .get_or_fetch("object-v1".to_owned(), || async {
+        .get_or_fetch("object-v1", || async {
             Ok::<_, Infallible>(Bytes::from_static(b"document bytes"))
         })
         .await?;
     assert_eq!(document.as_ref(), b"document bytes");
 
-    let image = images.get("object-v1".to_owned()).await.unwrap();
+    let image = images.get("object-v1").await.unwrap();
     assert_eq!(image.as_ref(), b"image bytes");
     // Callbacks for the same key must return interchangeable objects.
     Ok(())

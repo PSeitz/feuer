@@ -36,7 +36,7 @@ async fn callback_output_types_share_successes_and_errors_but_not_completed_fail
         let release = Arc::new(Notify::new());
         let fetch_release = release.clone();
         let fetch_cache = cache.clone();
-        let mut first = Box::pin(cache.get_or_fetch("object".into(), move || async move {
+        let mut first = Box::pin(cache.get_or_fetch("object", move || async move {
             fetch_release.notified().await;
             if success {
                 let mut buffer = fetch_cache.allocate_buffer(2).unwrap();
@@ -47,7 +47,7 @@ async fn callback_output_types_share_successes_and_errors_but_not_completed_fail
             }
         }));
         let mut second =
-            Box::pin(cache.get_or_fetch("object".into(), || ready(Err::<Bytes, &str>("waiter must not execute"))));
+            Box::pin(cache.get_or_fetch("object", || ready(Err::<Bytes, &str>("waiter must not execute"))));
         assert_pending(first.as_mut());
         assert_pending(second.as_mut());
         assert_eq!(pending_count(&cache), 1);
@@ -78,7 +78,7 @@ async fn callback_output_types_share_successes_and_errors_but_not_completed_fail
         if first.is_err() {
             assert_eq!(
                 cache
-                    .get_or_fetch("object".into(), || async { Err::<Bytes, &str>("new attempt") })
+                    .get_or_fetch("object", || async { Err::<Bytes, &str>("new attempt") })
                     .await,
                 Err(GetOrFetchError::Callback("new attempt"))
             );
@@ -89,9 +89,9 @@ async fn callback_output_types_share_successes_and_errors_but_not_completed_fail
 #[tokio::test]
 async fn different_error_types_and_keys_do_not_share() {
     let (cache, _) = cache().await;
-    let mut first = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Bytes, &str>>));
-    let mut different_error = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Bytes, String>>));
-    let mut different_key = Box::pin(cache.get_or_fetch("other".into(), pending::<Result<Bytes, &str>>));
+    let mut first = Box::pin(cache.get_or_fetch("object", pending::<Result<Bytes, &str>>));
+    let mut different_error = Box::pin(cache.get_or_fetch("object", pending::<Result<Bytes, String>>));
+    let mut different_key = Box::pin(cache.get_or_fetch("other", pending::<Result<Bytes, &str>>));
     assert_pending(first.as_mut());
     assert_pending(different_error.as_mut());
     assert_pending(different_key.as_mut());
@@ -108,14 +108,13 @@ async fn waiters_continue_the_original_fetch_and_last_caller_cancels_it() {
         let fetch_release = release.clone();
         let guard = Arc::new(());
         let weak = Arc::downgrade(&guard);
-        let mut first = Box::pin(cache.get_or_fetch("object".into(), move || async move {
+        let mut first = Box::pin(cache.get_or_fetch("object", move || async move {
             fetch_release.notified().await;
             drop(guard);
             Ok::<_, &str>(Bytes::from_static(b"original"))
         }));
-        let mut second = Box::pin(cache.get_or_fetch("object".into(), || async {
-            Err::<Bytes, &str>("waiter must not execute")
-        }));
+        let mut second =
+            Box::pin(cache.get_or_fetch("object", || async { Err::<Bytes, &str>("waiter must not execute") }));
         assert_pending(first.as_mut());
         assert_pending(second.as_mut());
         assert_eq!(pending_count(&cache), 1);
@@ -161,16 +160,16 @@ async fn old_waiter_cannot_remove_a_new_attempt() {
     let (cache, _) = cache().await;
     let release = Arc::new(Notify::new());
     let fetch_release = release.clone();
-    let mut first = Box::pin(cache.get_or_fetch("object".into(), move || async move {
+    let mut first = Box::pin(cache.get_or_fetch("object", move || async move {
         fetch_release.notified().await;
         Err::<Bytes, &str>("old failure")
     }));
-    let mut waiter = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<AlignedBuffer, &str>>));
+    let mut waiter = Box::pin(cache.get_or_fetch("object", pending::<Result<AlignedBuffer, &str>>));
     assert_pending(first.as_mut());
     assert_pending(waiter.as_mut());
     release.notify_one();
     assert_eq!(first.await, Err(GetOrFetchError::Callback("old failure")));
-    let mut replacement = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Bytes, &str>>));
+    let mut replacement = Box::pin(cache.get_or_fetch("object", pending::<Result<Bytes, &str>>));
     assert_pending(replacement.as_mut());
     assert_eq!(waiter.await, Err(GetOrFetchError::Callback("old failure")));
     assert_eq!(pending_count(&cache), 1);
@@ -200,10 +199,10 @@ fn simultaneous_cancellation_removes_the_last_callers() {
 #[tokio::test]
 async fn lookup_only_checks_cached_bytes_without_waiting_for_a_callback() {
     let (cache, registry) = cache().await;
-    let mut fetch = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<Bytes, &str>>));
+    let mut fetch = Box::pin(cache.get_or_fetch("object", pending::<Result<Bytes, &str>>));
     assert_pending(fetch.as_mut());
     assert_eq!(
-        Box::pin(cache.get("object".into()))
+        Box::pin(cache.get("object"))
             .as_mut()
             .poll(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(None)
@@ -213,7 +212,7 @@ async fn lookup_only_checks_cached_bytes_without_waiting_for_a_callback() {
             .inner
             .memory
             .insert(ObjectKeyHash::from(key), bytes.clone(), bytes.len());
-        assert_eq!(cache.get(key.into()).await, Some(bytes));
+        assert_eq!(cache.get(key).await, Some(bytes));
     }
     assert_eq!(cache.inner.memory.access_histories().request_count(), 4);
     assert_eq!(value(&registry, "feuer_lookup_total", &[("outcome", "miss")]), 1.0);

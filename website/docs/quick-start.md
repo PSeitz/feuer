@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let bytes = cache
-        .get_or_fetch("object-v1".to_owned(), || async {
+        .get_or_fetch("object-v1", || async {
             // Replace this with your download or computation.
             Ok::<_, Infallible>(Bytes::from_static(b"hello world"))
         })

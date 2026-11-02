@@ -23,7 +23,7 @@ use mixtrics::{metrics::BoxedRegistry, registry::noop::NoopMetricsRegistry};
 use thiserror::Error;
 
 use crate::{
-    CacheConfig, CacheConfigError, DiskCacheError, IoQueues, ObjectKey,
+    CacheConfig, CacheConfigError, DiskCacheError, IoQueues,
     access_trace::AccessTrace,
     metrics::{LookupMetrics, LookupOutcome},
 };
@@ -354,7 +354,7 @@ impl Cache {
 
     /// Returns an object from memory or disk, or `None` on a miss.
     /// Does not invoke or wait for source callbacks. Disk hits are promoted to memory.
-    pub async fn get(&self, object_key: ObjectKey) -> Option<Bytes> {
+    pub async fn get(&self, object_key: &str) -> Option<Bytes> {
         let object_key = ObjectKeyHash::from(object_key);
         self.inner.memory.access_histories().record_request(&object_key);
         let request_id = self.trace_request_start(object_key).await;
@@ -389,11 +389,7 @@ impl Cache {
     /// Failures and cancellation still count. Insertion records no request.
     /// Callback results are queued to disk immediately, subject to queue capacity.
     /// Tracing can backpressure lookups but never changes their results.
-    pub async fn get_or_fetch<F, Fut, V, E>(
-        &self,
-        object_key: ObjectKey,
-        callback: F,
-    ) -> Result<Bytes, GetOrFetchError<E>>
+    pub async fn get_or_fetch<F, Fut, V, E>(&self, object_key: &str, callback: F) -> Result<Bytes, GetOrFetchError<E>>
     where
         E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut + Send + 'static,
@@ -416,7 +412,7 @@ impl Cache {
     /// without rewriting them to disk. Source failures return without retrying disk.
     pub async fn get_or_fetch_with_disk_fallthrough<F, Fut, V, E>(
         &self,
-        object_key: ObjectKey,
+        object_key: &str,
         should_fall_through: impl FnOnce() -> bool + Send + 'static,
         callback: F,
     ) -> Result<Bytes, GetOrFetchError<E>>
@@ -674,23 +670,23 @@ mod tests {
         ));
         assert!(
             cache
-                .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("failed") })
+                .get_or_fetch(&key, || async { Err::<Bytes, _>("failed") })
                 .await
                 .is_err()
         );
         cache
-            .get_or_fetch(key.clone(), || async { Ok::<_, Infallible>(Bytes::from_static(b"bc")) })
+            .get_or_fetch(&key, || async { Ok::<_, Infallible>(Bytes::from_static(b"bc")) })
             .await
             .unwrap();
         wait_for_buffered(&cache, &key).await;
         cache.inner.disk.as_ref().unwrap().flush().await.unwrap();
         cache
-            .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("memory hit must not fetch") })
+            .get_or_fetch(&key, || async { Err::<Bytes, _>("memory hit must not fetch") })
             .await
             .unwrap();
         assert!(cache.inner.memory.remove(&ObjectKeyHash::from(key.as_str())));
         cache
-            .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("disk hit must not fetch") })
+            .get_or_fetch(&key, || async { Err::<Bytes, _>("disk hit must not fetch") })
             .await
             .unwrap();
         for outcome in ["memory_hit", "disk_hit", "callback", "callback_error"] {
@@ -822,14 +818,8 @@ mod tests {
         let first_download = first_bytes.clone();
         let second_download = second_bytes.clone();
         let (first_result, second_result) = tokio::join!(
-            first.get_or_fetch(
-                key.to_owned(),
-                move || async move { Ok::<_, Infallible>(first_download) }
-            ),
-            second.get_or_fetch(
-                key.to_owned(),
-                move || async move { Ok::<_, Infallible>(second_download) }
-            ),
+            first.get_or_fetch(key, move || async move { Ok::<_, Infallible>(first_download) }),
+            second.get_or_fetch(key, move || async move { Ok::<_, Infallible>(second_download) }),
         );
         assert_eq!(first_result.unwrap(), first_bytes);
         assert_eq!(second_result.unwrap(), second_bytes);
@@ -848,8 +838,8 @@ mod tests {
         assert!(first.inner.memory.remove(&hash));
         assert!(second.inner.memory.remove(&hash));
         let (first_result, second_result) = tokio::join!(
-            first.get_or_fetch(key.to_owned(), || async { Err::<Bytes, _>("must hit first disk") }),
-            second.get_or_fetch(key.to_owned(), || async { Err::<Bytes, _>("must hit second disk") }),
+            first.get_or_fetch(key, || async { Err::<Bytes, _>("must hit first disk") }),
+            second.get_or_fetch(key, || async { Err::<Bytes, _>("must hit second disk") }),
         );
         assert_eq!(first_result.unwrap(), first_bytes);
         assert_eq!(second_result.unwrap(), second_bytes);
@@ -861,7 +851,7 @@ mod tests {
         assert!(second.inner.memory.remove(&hash));
         assert_eq!(
             second
-                .get_or_fetch(key.to_owned(), || async { Err::<Bytes, _>("must hit surviving disk") })
+                .get_or_fetch(key, || async { Err::<Bytes, _>("must hit surviving disk") })
                 .await
                 .unwrap(),
             second_bytes,
@@ -876,7 +866,7 @@ mod tests {
         let payload = Bytes::from_static(b"abcdef");
         let download = payload.clone();
         cache
-            .get_or_fetch(key.clone(), move || async move { Ok::<_, &str>(download) })
+            .get_or_fetch(&key, move || async move { Ok::<_, &str>(download) })
             .await
             .unwrap();
         wait_for_buffered(&cache, &key).await;
@@ -887,10 +877,10 @@ mod tests {
             for lookup_only in [false, true] {
                 assert!(cache.inner.memory.remove(&hash));
                 let bytes = if lookup_only {
-                    cache.get(key.clone()).await.unwrap()
+                    cache.get(&key).await.unwrap()
                 } else {
                     cache
-                        .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("must hit disk") })
+                        .get_or_fetch(&key, || async { Err::<Bytes, _>("must hit disk") })
                         .await
                         .unwrap()
                 };
@@ -910,7 +900,7 @@ mod tests {
             .await
             .unwrap();
         let bytes = cache
-            .get_or_fetch(key.clone(), || async { Err::<Bytes, _>("disk hit must not fetch") })
+            .get_or_fetch(&key, || async { Err::<Bytes, _>("disk hit must not fetch") })
             .await
             .unwrap();
         assert_eq!(&bytes[..], &[0x77; 40 * 1024]);
@@ -932,8 +922,8 @@ mod tests {
         disk.insert_batch(vec![(hash, payload.clone())]).await.unwrap();
         disk.flush().await.unwrap();
         let (first, second) = tokio::join!(
-            cache.get_or_fetch(key.clone(), || async { Err::<Bytes, _>("disk hit must not fetch") }),
-            cache.get_or_fetch(key, || async { Err::<Bytes, _>("disk hit must not fetch") }),
+            cache.get_or_fetch(&key, || async { Err::<Bytes, _>("disk hit must not fetch") }),
+            cache.get_or_fetch(&key, || async { Err::<Bytes, _>("disk hit must not fetch") }),
         );
         let first = first.unwrap();
         let second = second.unwrap();
@@ -959,7 +949,7 @@ mod tests {
             let entered = entered.clone();
             tokio::spawn(async move {
                 cache
-                    .get_or_fetch(key, || async move {
+                    .get_or_fetch(&key, || async move {
                         entered.notify_one();
                         pending::<Result<Bytes, Infallible>>().await
                     })
@@ -1019,14 +1009,14 @@ mod tests {
         let payload = Bytes::from_static(b"abcdefghij");
         let download = payload.clone();
         let result = cache
-            .get_or_fetch(key.clone(), move || async move { Ok::<_, Infallible>(download) })
+            .get_or_fetch(&key, move || async move { Ok::<_, Infallible>(download) })
             .await
             .unwrap();
         assert_eq!(result, payload);
         assert_eq!(result.as_ptr(), payload.as_ptr());
 
         let result = cache
-            .get_or_fetch(key, || async { Err::<Bytes, _>("memory hit must not fetch") })
+            .get_or_fetch(&key, || async { Err::<Bytes, _>("memory hit must not fetch") })
             .await
             .unwrap();
         assert_eq!(result, payload);
@@ -1044,7 +1034,7 @@ mod tests {
         for expected_count in 1..=2 {
             let invocation_count = callback_count.clone();
             let error = cache
-                .get_or_fetch(key.clone(), move || async move {
+                .get_or_fetch(&key, move || async move {
                     invocation_count.fetch_add(1, Ordering::Relaxed);
                     Err::<Bytes, _>("source unavailable")
                 })
@@ -1061,15 +1051,13 @@ mod tests {
         let (_directory, cache) = cache(4).await;
         let key = String::from("object");
         let result = cache
-            .get_or_fetch(key.clone(), || async {
-                Ok::<_, Infallible>(Bytes::from_static(b"abcde"))
-            })
+            .get_or_fetch(&key, || async { Ok::<_, Infallible>(Bytes::from_static(b"abcde")) })
             .await
             .unwrap();
         assert_eq!(result, Bytes::from_static(b"abcde"));
         assert_eq!(cache.inner.memory.used_bytes(), 5);
         let hit = cache
-            .get_or_fetch(key, || async { Err::<Bytes, _>("memory hit must not fetch") })
+            .get_or_fetch(&key, || async { Err::<Bytes, _>("memory hit must not fetch") })
             .await
             .unwrap();
         assert_eq!(hit, result);
@@ -1090,7 +1078,7 @@ mod tests {
             let release_callback = release_callback.clone();
             tokio::spawn(async move {
                 cache
-                    .get_or_fetch(key, move || async move {
+                    .get_or_fetch(&key, move || async move {
                         callback_entered.notify_one();
                         release_callback.notified().await;
                         Ok::<_, Infallible>(Bytes::from(vec![b'x'; 6]))
@@ -1111,7 +1099,7 @@ mod tests {
         let returned = pending.await.unwrap();
         assert_eq!(returned, payload);
         let cached = cache
-            .get_or_fetch(key, || async { Err::<Bytes, _>("memory hit must not fetch") })
+            .get_or_fetch(&key, || async { Err::<Bytes, _>("memory hit must not fetch") })
             .await
             .unwrap();
         assert_eq!(cached, payload);

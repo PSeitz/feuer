@@ -43,14 +43,14 @@ async fn shared_bytes_slices_charge_payload_length() {
     for (object_key, slice_offset) in object_keys.into_iter().zip([0, (1 << 20) + 1024]) {
         let slice_bytes = source.slice(slice_offset..slice_offset + 1024);
         let bytes = cache
-            .get_or_fetch(object_key.to_owned(), || async { Ok::<_, &str>(slice_bytes) })
+            .get_or_fetch(object_key, || async { Ok::<_, &str>(slice_bytes) })
             .await
             .unwrap();
         assert_eq!(bytes.len(), 1024);
         assert!(bytes.iter().all(|byte| *byte == 17));
         assert_eq!(bytes.as_ptr(), source_ptr.wrapping_add(slice_offset));
         let memory_hit_bytes = cache
-            .get_or_fetch(object_key.to_owned(), || async { Err::<Bytes, _>("must hit memory") })
+            .get_or_fetch(object_key, || async { Err::<Bytes, _>("must hit memory") })
             .await
             .unwrap();
         assert_eq!(memory_hit_bytes.as_ptr(), bytes.as_ptr());
@@ -91,7 +91,7 @@ async fn allocation_capacity_drives_eviction() {
     for index in 0..65 {
         let buffer = cache.allocate_buffer(1024).unwrap();
         cache
-            .get_or_fetch(format!("object-{index}"), || async { Ok::<_, &str>(buffer) })
+            .get_or_fetch(&format!("object-{index}"), || async { Ok::<_, &str>(buffer) })
             .await
             .unwrap();
     }

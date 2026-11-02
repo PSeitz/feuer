@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         });
     cache
-        .get_or_fetch("object-v1".to_owned(), || async {
+        .get_or_fetch("object-v1", || async {
             Ok::<_, Infallible>(Bytes::from_static(b"data"))
         })
         .await?;
