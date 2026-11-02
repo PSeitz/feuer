@@ -52,7 +52,7 @@ fn memory_only_builder_and_lookups_need_no_runtime() {
         let directory = tempdir().unwrap();
         let unused_directory = directory.path().join("unused");
         let (registry, backend) = registry();
-        let scorer = Arc::new(AvoidedRetrievalCostScorer::default());
+        let scorer = Arc::new(FetchCostScorer::default());
         let builder = Cache::builder()
             .memory_capacity(1 << 20)
             .directory(&unused_directory)

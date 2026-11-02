@@ -13,7 +13,7 @@ use rustc_hash::FxBuildHasher;
 use self::shard::{InsertResult, MemoryCacheShard};
 use crate::{
     BufferPool, MemoryMetrics,
-    retention::{AvoidedRetrievalCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer},
+    retention::{FetchCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer},
 };
 
 /// Caps lock partitioning to avoid excessive per-cache metadata.
@@ -92,7 +92,7 @@ impl MemoryCache {
         Self {
             shards,
             access_histories: Arc::new(ObjectAccessHistories::new()),
-            retention_scorer: Arc::new(AvoidedRetrievalCostScorer::default()),
+            retention_scorer: Arc::new(FetchCostScorer::default()),
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             buffer_pool,
         }

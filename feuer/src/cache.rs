@@ -13,7 +13,7 @@ use bytes::Bytes;
 use feuer_historian::{DEFAULT_ACCESS_COUNT_HALF_LIFE, DEFAULT_HISTORY_ENTRY_LIMIT, ObjectAccessHistories};
 use feuer_memory::{
     AlignedBuffer, MemoryCache, MemoryMetrics,
-    retention::{AvoidedRetrievalCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer},
+    retention::{FetchCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer},
 };
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskCache, DiskCacheOptions, DiskMetrics, IoMetrics};
@@ -104,7 +104,7 @@ pub enum CacheOpenError {
 /// Created by [`Cache::builder`]. Set a positive memory capacity before calling
 /// [`open`](Self::open). Disk caching is disabled by default. Settings are validated
 /// when opening. Defaults use no-op metrics, dedicated I/O queues,
-/// and [`AvoidedRetrievalCostScorer`] for both tiers.
+/// and [`FetchCostScorer`] for both tiers.
 pub struct CacheBuilder<'a> {
     directory: PathBuf,
     file_name: String,
@@ -305,7 +305,7 @@ impl Cache {
     /// Starts configuring a memory-only cache. Set its memory capacity, then call
     /// [`CacheBuilder::open`]. Enable disk caching by setting a nonzero disk capacity.
     pub fn builder<'a>() -> CacheBuilder<'a> {
-        let scorer = Arc::new(AvoidedRetrievalCostScorer::default());
+        let scorer = Arc::new(FetchCostScorer::default());
         CacheBuilder {
             directory: PathBuf::from("feuer_cache"),
             file_name: "data".to_owned(),

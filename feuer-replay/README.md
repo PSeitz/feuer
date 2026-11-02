@@ -75,16 +75,17 @@ concurrency, synthetic downloads, and metrics collection.
 | `--memory-bytes` | Memory capacity in bytes | 16 GiB |
 | `--disk-bytes` | Disk capacity in bytes | `0` (disabled) |
 | `--fixed-retrieval-equivalent-bytes` | Fallback `cost_per_request` for both tiers | `256000` |
-| `--memory-cost-per-request` | Override the memory tier's request cost | Uses the fallback |
-| `--disk-cost-per-request` | Override the disk tier's request cost | Uses the fallback |
+| `--memory-cost-per-request` | Override the memory scorer's fixed fetch cost | Uses the fallback |
+| `--disk-cost-per-request` | Override the disk scorer's fixed fetch cost | Uses the fallback |
 | `--access-count-half-life` | Access-count half-life in caller-demand requests | Cache environment/default setting |
 
 **Comparison runs must pass both capacity options.** The executable defaults differ
 from the comparison settings above.
 
-Per-tier request costs accept finite, nonnegative floating-point values. Both
-`cost_per_requested_byte` coefficients are fixed at `1`. Both tiers share the
-historian.
+Both tiers use `FetchCostScorer`. Per-tier fetch costs accept finite, nonnegative
+floating-point values. Both `cost_per_byte` coefficients are fixed at `1`. The replay
+passes these costs directly to the scorers, treating cache reads as free. Both tiers share the historian. CLI flags and output column names are unchanged,
+including the `*_cost_per_requested_byte` columns.
 
 `--access-count-half-life` must be positive. It configures the cache builder and overrides
 `FEUER_ACCESS_COUNT_HALF_LIFE`. Eviction sample size and buffer retention use the

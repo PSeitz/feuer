@@ -29,7 +29,7 @@ use bytes::Bytes;
 use feuer_historian::ObjectAccessHistories;
 use feuer_memory::{
     BufferPool,
-    retention::{AvoidedRetrievalCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer, sample_candidates},
+    retention::{FetchCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer, sample_candidates},
 };
 use feuer_types::ObjectKeyHash;
 #[cfg(test)]
@@ -180,7 +180,7 @@ impl Default for DiskCacheOptions {
             reclaim_sample_size: RECLAIM_SAMPLE_SIZE,
             buffer_pool: BufferPool::unpooled(),
             io_queues: None,
-            retention_scorer: Arc::new(AvoidedRetrievalCostScorer::default()),
+            retention_scorer: Arc::new(FetchCostScorer::default()),
         }
     }
 }

@@ -79,8 +79,10 @@
 //! Memory-only operation works on every supported platform without a Tokio runtime.
 //! Access tracing through [`Cache::with_trace`] requires Tokio.
 //!
-//! The default retention policy is [`AvoidedRetrievalCostScorer`]. For workload-specific
-//! decisions, implement [`RetentionScorer`] and configure each tier through [`CacheBuilder`].
+//! The default retention policy is [`FetchCostScorer`]. [`CacheReadSavingsScorer`] scores
+//! the cost saved by reading from cache instead of fetching from the fallback.
+//! For workload-specific decisions, implement [`RetentionScorer`] and configure each tier
+//! through [`CacheBuilder`].
 
 #![doc(html_logo_url = "https://raw.githubusercontent.com/PSeitz/feuer/main/horse_logo_transparent.svg?v=2")]
 
@@ -97,7 +99,7 @@ pub use config::{CacheConfig, CacheConfigError};
 pub use feuer_historian::ObjectAccessHistories;
 pub use feuer_memory::{
     AlignedBuffer,
-    retention::{AvoidedRetrievalCostScorer, RetentionScorer},
+    retention::{CacheReadSavingsScorer, FetchCostScorer, RetentionScorer},
 };
 #[cfg(target_os = "linux")]
 pub use feuer_storage::{DiskCacheError, IoQueues};

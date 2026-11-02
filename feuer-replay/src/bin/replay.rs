@@ -21,7 +21,7 @@ mod linux {
 
     use async_channel::{Receiver, Sender, unbounded};
     use clap::Parser;
-    use feuer::{AlignedBuffer, AvoidedRetrievalCostScorer, Cache};
+    use feuer::{AlignedBuffer, Cache, FetchCostScorer};
     use feuer_replay::{Request, Result, load_requests};
     use mixtrics::{metrics::BoxedRegistry, registry::prometheus::PrometheusMetricsRegistry};
     use prometheus::{
@@ -53,10 +53,10 @@ mod linux {
         trace_seconds: Option<u64>,
         #[arg(long, default_value_t = 256_000)]
         fixed_retrieval_equivalent_bytes: u64,
-        /// Override the shared fixed retrieval cost for memory. Per-byte cost remains 1.
+        /// Override the memory scorer's fixed fetch cost. Fetch cost per byte remains 1.
         #[arg(long, value_parser = parse_cost)]
         memory_cost_per_request: Option<f64>,
-        /// Override the shared fixed retrieval cost for disk. Per-byte cost remains 1.
+        /// Override the disk scorer's fixed fetch cost. Fetch cost per byte remains 1.
         #[arg(long, value_parser = parse_cost)]
         disk_cost_per_request: Option<f64>,
         /// Caller-demand requests per access-count half-life. Omit to use cache defaults/environment.
@@ -317,9 +317,9 @@ mod linux {
         let metrics: BoxedRegistry = Box::new(PrometheusMetricsRegistry::new(registry.clone()));
         let opening = Instant::now();
         let scorer = |cost_per_request| {
-            Arc::new(AvoidedRetrievalCostScorer {
+            Arc::new(FetchCostScorer {
                 cost_per_request,
-                cost_per_requested_byte: 1.0,
+                cost_per_byte: 1.0,
             })
         };
         let cache = builder

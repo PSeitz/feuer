@@ -16,52 +16,83 @@ pub trait RetentionScorer: Send + Sync {
     fn score(&self, key: &ObjectKeyHash, payload_len: u64, histories: &ObjectAccessHistories) -> f64;
 }
 
-/// Scores entries by retrieval cost avoided per payload byte, weighted by decayed request counts.
+/// Scores objects by fetch cost, weighted by demand and divided by payload size.
 ///
-/// The object's decayed request count multiplies
-/// `max(cost_per_request + payload_len * cost_per_requested_byte, 0)`.
-/// A zero payload length uses a one-byte denominator.
-/// Costs must use one consistent unit, such as equivalent bytes, I/O time, or CPU time.
-/// Coefficients must be finite and keep scores finite over the application's sizes and demand.
+/// Decayed request counts estimate future demand. Payload length represents keeping cost.
+/// Each tier uses total request history, independently of the contents of other tiers.
 ///
-/// Defaults are zero fixed cost and one cost unit per byte, preserving byte-weighted demand.
-/// With a nonzero payload length, the default score equals the object's
-/// decayed count. Using the default half-life and current decay approximation:
+/// ```text
+/// score = decayed_request_count * (cost_per_request + payload_len * cost_per_byte)
+///         / max(payload_len, 1)
+/// ```
 ///
-/// | Matching request frequency | Score approached immediately after a matching request |
-/// | --- | ---: |
-/// | Every request | 524,288 |
-/// | Every second request | 262,144 |
+/// The coefficients estimate fetching from the fallback. This model treats cache reads
+/// as free. Use [`CacheReadSavingsScorer`] to account for both retrieval paths.
+/// Costs must be finite, nonnegative, and use one consistent unit, such as I/O time or
+/// equivalent bytes. They must keep intermediate costs and scores finite for the workload.
+/// Unknown keys score zero. Empty payloads use a one-byte denominator.
 ///
-/// Separate tier scorers can model memory's assumed fallback cost and disk's source-minus-disk
-/// cost. Negative savings are clamped to zero. Both use request history.
-/// This linear model does not inspect disk residency or model alignment and whole-entry reads.
+/// Defaults are zero fixed cost and one cost unit per byte. For nonempty objects, the
+/// default score equals the decayed request count. This is a frequency-based default.
 #[derive(Debug)]
-pub struct AvoidedRetrievalCostScorer {
-    /// Cost avoided once per request, regardless of requested byte count. Defaults to zero.
+pub struct FetchCostScorer {
+    /// Fetch cost per request, independent of payload size. Defaults to zero.
     pub cost_per_request: f64,
-    /// Cost avoided for each requested byte. Defaults to one.
-    pub cost_per_requested_byte: f64,
+    /// Fetch cost per payload byte. Defaults to one.
+    pub cost_per_byte: f64,
 }
 
-impl Default for AvoidedRetrievalCostScorer {
+impl Default for FetchCostScorer {
     fn default() -> Self {
         Self {
             cost_per_request: 0.0,
-            cost_per_requested_byte: 1.0,
+            cost_per_byte: 1.0,
         }
     }
 }
 
-impl RetentionScorer for AvoidedRetrievalCostScorer {
+impl RetentionScorer for FetchCostScorer {
     fn score(&self, key: &ObjectKeyHash, payload_len: u64, histories: &ObjectAccessHistories) -> f64 {
-        decayed_avoided_retrieval_cost(
-            histories,
-            key,
-            payload_len,
-            self.cost_per_request,
-            self.cost_per_requested_byte,
-        ) / payload_len.max(1) as f64
+        let fetch_cost = self.cost_per_request + payload_len as f64 * self.cost_per_byte;
+        histories.decayed_request_count(key) * fetch_cost / payload_len.max(1) as f64
+    }
+}
+
+/// Scores objects by the cost saved by cache reads, weighted by demand and divided by payload size.
+///
+/// Each cache read replaces a fetch from the assumed fallback. The caller supplies linear
+/// cost estimates for both paths. For disk, the fallback is the source. For memory, choose
+/// an assumed disk or source fallback. Costs are independent of the contents of other tiers.
+/// Decayed total request counts estimate future demand.
+///
+/// ```text
+/// fallback_cost = fallback_cost_per_request + payload_len * fallback_cost_per_byte
+/// cache_read_cost = cache_read_cost_per_request + payload_len * cache_read_cost_per_byte
+/// score = decayed_request_count * (fallback_cost - cache_read_cost) / max(payload_len, 1)
+/// ```
+///
+/// Both paths' costs must be finite, nonnegative, and use the same unit. They must keep
+/// intermediate costs and scores finite for the workload. Negative savings produce negative
+/// scores, prioritizing eviction when cache reads cost more than fallback fetches.
+/// Payload length represents keeping cost. Empty payloads
+/// use a one-byte denominator. Unknown keys score zero.
+#[derive(Debug)]
+pub struct CacheReadSavingsScorer {
+    /// Fallback fetch cost per request, independent of payload size.
+    pub fallback_cost_per_request: f64,
+    /// Fallback fetch cost per payload byte.
+    pub fallback_cost_per_byte: f64,
+    /// Cost of reading from the cache per request, independent of payload size.
+    pub cache_read_cost_per_request: f64,
+    /// Cost of reading from the cache per payload byte.
+    pub cache_read_cost_per_byte: f64,
+}
+
+impl RetentionScorer for CacheReadSavingsScorer {
+    fn score(&self, key: &ObjectKeyHash, payload_len: u64, histories: &ObjectAccessHistories) -> f64 {
+        let fallback_cost = self.fallback_cost_per_request + payload_len as f64 * self.fallback_cost_per_byte;
+        let cache_read_cost = self.cache_read_cost_per_request + payload_len as f64 * self.cache_read_cost_per_byte;
+        histories.decayed_request_count(key) * (fallback_cost - cache_read_cost) / payload_len.max(1) as f64
     }
 }
 
@@ -83,19 +114,6 @@ pub fn sample_candidates<'a, T>(
     from_start.iter().chain(before_start).take(sample_size)
 }
 
-/// Weights the object's avoided retrieval cost by its decayed request count.
-/// Unknown keys have zero cost.
-/// The default scorer divides this cost by the payload length, using one for empty payloads.
-pub fn decayed_avoided_retrieval_cost(
-    histories: &ObjectAccessHistories,
-    key: &ObjectKeyHash,
-    payload_len: u64,
-    cost_per_request: f64,
-    cost_per_requested_byte: f64,
-) -> f64 {
-    histories.decayed_request_count(key) * (cost_per_request + payload_len as f64 * cost_per_requested_byte).max(0.0)
-}
-
 #[cfg(test)]
 use proptest::prelude::*;
 #[cfg(test)]
@@ -104,10 +122,10 @@ use std::num::NonZeroU64;
 #[cfg(test)]
 proptest! {
     #[test]
-    fn scores_match_avoided_cost_per_payload_byte(
+    fn fetch_cost_scores_preserve_previous_nonnegative_scores(
         payload_len in any::<u64>(),
-        fixed_cost in -1_000_000i32..=1_000_000,
-        byte_cost in -16i32..=16,
+        fixed_cost in 0i32..=1_000_000,
+        byte_cost in 0i32..=16,
         requests in 0i32..8,
     ) {
         let histories = ObjectAccessHistories::with_half_life(NonZeroU64::MIN);
@@ -117,17 +135,23 @@ proptest! {
         }
         // One half-life between requests makes this geometric sum exact.
         let demand = 2.0 - 2.0_f64.powi(1 - requests);
-        let scorer = AvoidedRetrievalCostScorer {
+        let scorer = FetchCostScorer {
             cost_per_request: fixed_cost as f64 / 8.0,
-            cost_per_requested_byte: byte_cost as f64 / 8.0,
+            cost_per_byte: byte_cost as f64 / 8.0,
         };
         for payload_len in [0, u64::MAX, payload_len] {
-            let savings = (scorer.cost_per_request + payload_len as f64 * scorer.cost_per_requested_byte).max(0.0);
-            prop_assert_eq!(
-                scorer.score(&key, payload_len, &histories),
-                demand * savings / payload_len.max(1) as f64
-            );
+            // Compare against the previous formula, including its clamp.
+            let expected = demand * (fixed_cost as f64 / 8.0 + payload_len as f64 * (byte_cost as f64 / 8.0)).max(0.0)
+                / payload_len.max(1) as f64;
+            prop_assert_eq!(scorer.score(&key, payload_len, &histories).to_bits(), expected.to_bits());
             prop_assert_eq!(scorer.score(&ObjectKeyHash::from("unknown"), payload_len, &histories), 0.0);
+            let savings_scorer = CacheReadSavingsScorer {
+                fallback_cost_per_request: scorer.cost_per_request,
+                fallback_cost_per_byte: scorer.cost_per_byte,
+                cache_read_cost_per_request: 0.0,
+                cache_read_cost_per_byte: 0.0,
+            };
+            prop_assert_eq!(savings_scorer.score(&key, payload_len, &histories).to_bits(), expected.to_bits());
         }
     }
 }
@@ -152,13 +176,54 @@ fn scores_follow_decayed_object_demand() {
     let histories = ObjectAccessHistories::with_half_life(NonZeroU64::new(2).unwrap());
     let key = ObjectKeyHash::from("object");
     histories.record_request(&key);
-    let scorer = AvoidedRetrievalCostScorer::default();
+    let scorer = FetchCostScorer::default();
     assert_eq!(scorer.cost_per_request, 0.0);
-    assert_eq!(scorer.cost_per_requested_byte, 1.0);
+    assert_eq!(scorer.cost_per_byte, 1.0);
     assert_eq!(scorer.score(&key, 10, &histories), 1.0);
     for _ in 0..2 {
         histories.record_request(&ObjectKeyHash::from("other"));
     }
     assert_eq!(scorer.score(&key, 10, &histories), 0.5);
     assert_eq!(scorer.score(&key, 20, &histories), 0.5);
+    assert_eq!(scorer.score(&key, 0, &histories), 0.0);
+}
+
+#[test]
+fn source_minus_disk_costs_determine_retention_benefit() {
+    let histories = ObjectAccessHistories::new();
+    let key = ObjectKeyHash::from("object");
+    histories.record_request(&key);
+    // Source retrieval costs 100 + 3 * size. Disk retrieval costs 120 + size.
+    let scorer = CacheReadSavingsScorer {
+        fallback_cost_per_request: 100.0,
+        fallback_cost_per_byte: 3.0,
+        cache_read_cost_per_request: 120.0,
+        cache_read_cost_per_byte: 1.0,
+    };
+    assert_eq!(scorer.score(&key, 5, &histories), -2.0);
+    assert_eq!(scorer.score(&key, 10, &histories), 0.0);
+    assert_eq!(scorer.score(&key, 20, &histories), 1.0);
+    assert_eq!(scorer.score(&key, 0, &histories), -20.0);
+    assert_eq!(scorer.score(&ObjectKeyHash::from("unknown"), 20, &histories), 0.0);
+
+    let cheaper_reads = CacheReadSavingsScorer {
+        cache_read_cost_per_request: 80.0,
+        ..scorer
+    };
+    assert_eq!(cheaper_reads.score(&key, 20, &histories), 3.0);
+    assert_eq!(cheaper_reads.score(&key, 0, &histories), 20.0);
+}
+
+#[test]
+fn fixed_fetch_cost_favors_smaller_objects_at_equal_demand() {
+    let histories = ObjectAccessHistories::new();
+    let key = ObjectKeyHash::from("object");
+    histories.record_request(&key);
+    let scorer = FetchCostScorer {
+        cost_per_request: 100.0,
+        cost_per_byte: 1.0,
+    };
+    assert_eq!(scorer.score(&key, 10, &histories), 11.0);
+    assert_eq!(scorer.score(&key, 20, &histories), 6.0);
+    assert_eq!(scorer.score(&key, 0, &histories), 100.0);
 }

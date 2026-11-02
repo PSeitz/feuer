@@ -9,7 +9,7 @@ use std::{
 use tempfile::TempDir;
 use tokio::{sync::Barrier, task::yield_now, time::timeout};
 
-use feuer_memory::{BUFFER_ALIGNMENT, MemoryCache, MemoryMetrics, retention::decayed_avoided_retrieval_cost};
+use feuer_memory::{BUFFER_ALIGNMENT, MemoryCache, MemoryMetrics};
 
 use super::*;
 
@@ -409,9 +409,9 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
 #[tokio::test]
 async fn disk_value_uses_payload_length_rather_than_padding_or_chunk_size() {
     let (_directory, mut cache) = open_test_cache(2 * CHUNK_BYTES).await;
-    Arc::get_mut(&mut cache.disk).unwrap().retention_scorer = Arc::new(AvoidedRetrievalCostScorer {
+    Arc::get_mut(&mut cache.disk).unwrap().retention_scorer = Arc::new(FetchCostScorer {
         cost_per_request: 1.0,
-        cost_per_requested_byte: 0.0,
+        cost_per_byte: 0.0,
     });
     let small = ObjectKeyHash::from("small");
     let large = ObjectKeyHash::from("large");
@@ -496,7 +496,7 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
     drop(memory);
     drop(cache);
     assert!(history.decayed_request_count(&hot) > 0.0);
-    assert!(decayed_avoided_retrieval_cost(&history, &hot, 100, 0.0, 1.0) > 0.0);
+    assert!(FetchCostScorer::default().score(&hot, 100, &history) > 0.0);
 }
 
 #[tokio::test]
