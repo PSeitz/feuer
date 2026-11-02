@@ -25,9 +25,10 @@ async fn records_each_started_request_before_any_result() {
     };
     let history = cache.inner.memory.access_histories();
     let key = "object".to_owned();
+    let fetch_history = history.clone();
     let result = cache
-        .get_or_fetch(key.clone(), || async {
-            assert_eq!(history.request_count(), 1);
+        .get_or_fetch(key.clone(), move || async move {
+            assert_eq!(fetch_history.request_count(), 1);
             Err::<Bytes, _>("source failed")
         })
         .await;
@@ -48,9 +49,10 @@ async fn records_each_started_request_before_any_result() {
     drop(pending);
     assert_eq!(history.request_count(), 2, "cancellation does not erase demand");
 
+    let fetch_history = history.clone();
     cache
-        .get_or_fetch(key.clone(), || async {
-            assert_eq!(history.request_count(), 3);
+        .get_or_fetch(key.clone(), move || async move {
+            assert_eq!(fetch_history.request_count(), 3);
             Ok::<_, &str>(Bytes::from_static(b"x"))
         })
         .await

@@ -18,6 +18,7 @@ use feuer_memory::{
 #[cfg(all(target_os = "linux", feature = "disk"))]
 use feuer_storage::{DiskCache, DiskCacheOptions, DiskMetrics, IoMetrics};
 use feuer_utils::{ObjectKeyHash, config::read_env_number};
+use futures_util::FutureExt;
 use mixtrics::{metrics::BoxedRegistry, registry::noop::NoopMetricsRegistry};
 use thiserror::Error;
 
@@ -374,7 +375,9 @@ impl Cache {
     /// Disk hits promote the object to memory. Concurrent memory misses with
     /// the same key and exact error type share one disk-or-callback operation, including errors.
     /// Callbacks for matching requests must be interchangeable. Each callback runs at most once.
-    /// Cancellation of the executing caller allows a waiter to take over with its own callback.
+    /// Any waiter can drive the shared fetch. Cancelling one caller preserves the original callback
+    /// for remaining waiters. Dropping the last waiter cancels the fetch.
+    /// Callbacks and their futures must own their captures and be `Send + 'static`.
     /// Completed failures are not cached for later requests.
     ///
     /// The callback can return [`Bytes`] or [`AlignedBuffer`], including empty objects.
@@ -393,8 +396,8 @@ impl Cache {
     ) -> Result<Bytes, GetOrFetchError<E>>
     where
         E: Clone + Send + Sync + 'static,
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<V, E>>,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<V, E>> + Send + 'static,
         V: Into<BytesAndMemoryCharge>,
     {
         self.get_or_fetch_with_disk_fallthrough(object_key, || false, callback)
@@ -407,11 +410,11 @@ impl Cache {
     /// every unchecked waiter is scheduled to call `should_fall_through` before I/O,
     /// even if earlier fallthroughs have since reduced the number of waiting reads.
     /// Each request is checked at most once. True invokes `callback`, false waits for disk.
-    /// The synchronous decision runs in the caller's task, should be cheap, and can capture
-    /// request details and current source load.
+    /// The synchronous decision runs in a waiting caller's task, should be cheap, and can capture
+    /// owned request details and shared source-load state.
     /// Memory hits, buffered disk hits, disk misses, admitted reads, and shared-read waiters
-    /// do not call the decision callback. Callers sharing a fetch follow its executing caller's
-    /// disk-versus-source decision. After cancellation, a waiter taking over uses its own decision.
+    /// do not call the decision callback. Callers sharing a fetch use the original fetch's
+    /// disk-versus-source decision, including after its initiating caller cancels.
     ///
     /// Fallthrough leaves the disk entry intact. Successful source downloads are admitted to
     /// memory. Objects already on disk are not queued for another write.
@@ -420,31 +423,33 @@ impl Cache {
     pub async fn get_or_fetch_with_disk_fallthrough<F, Fut, V, E>(
         &self,
         object_key: ObjectKey,
-        should_fall_through: impl FnOnce() -> bool,
+        should_fall_through: impl FnOnce() -> bool + Send + 'static,
         callback: F,
     ) -> Result<Bytes, GetOrFetchError<E>>
     where
         E: Clone + Send + Sync + 'static,
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<V, E>>,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<V, E>> + Send + 'static,
         V: Into<BytesAndMemoryCharge>,
     {
-        self.get_or_fetch_by_hash(ObjectKeyHash::from(object_key), should_fall_through, || async {
-            callback().await.map(Into::into)
-        })
+        self.get_or_fetch_by_hash(
+            ObjectKeyHash::from(object_key),
+            should_fall_through,
+            move || async move { callback().await.map(Into::into) },
+        )
         .await
     }
 
     async fn get_or_fetch_by_hash<F, Fut, E>(
         &self,
         object_key: ObjectKeyHash,
-        should_fall_through: impl FnOnce() -> bool,
+        should_fall_through: impl FnOnce() -> bool + Send + 'static,
         callback: F,
     ) -> Result<Bytes, GetOrFetchError<E>>
     where
         E: Clone + Send + Sync + 'static,
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<BytesAndMemoryCharge, E>>,
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = Result<BytesAndMemoryCharge, E>> + Send + 'static,
     {
         self.inner.memory.access_histories().record_request(&object_key);
         let request_id = self.trace_request_start(object_key).await;
@@ -455,9 +460,14 @@ impl Cache {
             let fetch = PendingFetch::<E>::join(&self.inner.pending_fetches, object_key);
             let result = fetch
                 .result
-                .get_or_init(|| self.fetch(object_key, should_fall_through, callback))
-                .await
-                .clone();
+                .get_or_init(|| {
+                    let cache = self.clone();
+                    async move { cache.fetch(object_key, should_fall_through, callback).await }
+                        .boxed()
+                        .shared()
+                })
+                .clone()
+                .await;
             fetch.remove_from_registry();
             result
         };
@@ -813,9 +823,17 @@ mod tests {
         let hash = ObjectKeyHash::from(key);
         let first_bytes = Bytes::from_static(b"first object");
         let second_bytes = Bytes::from_static(b"second object");
+        let first_download = first_bytes.clone();
+        let second_download = second_bytes.clone();
         let (first_result, second_result) = tokio::join!(
-            first.get_or_fetch(key.to_owned(), || async { Ok::<_, Infallible>(first_bytes.clone()) }),
-            second.get_or_fetch(key.to_owned(), || async { Ok::<_, Infallible>(second_bytes.clone()) }),
+            first.get_or_fetch(
+                key.to_owned(),
+                move || async move { Ok::<_, Infallible>(first_download) }
+            ),
+            second.get_or_fetch(
+                key.to_owned(),
+                move || async move { Ok::<_, Infallible>(second_download) }
+            ),
         );
         assert_eq!(first_result.unwrap(), first_bytes);
         assert_eq!(second_result.unwrap(), second_bytes);
@@ -860,8 +878,9 @@ mod tests {
         let key = "whole-object".to_owned();
         let hash = ObjectKeyHash::from(key.as_str());
         let payload = Bytes::from_static(b"abcdef");
+        let download = payload.clone();
         cache
-            .get_or_fetch(key.clone(), || async { Ok::<_, &str>(payload.clone()) })
+            .get_or_fetch(key.clone(), move || async move { Ok::<_, &str>(download) })
             .await
             .unwrap();
         wait_for_buffered(&cache, &key).await;
@@ -937,10 +956,11 @@ mod tests {
         let (_directory, cache) = cache(32).await;
         let key = String::from("object");
         let history = cache.inner.memory.access_histories();
+        let fetch_cache = cache.clone();
         let bytes = cache
-            .get_or_fetch(key.clone(), || async {
+            .get_or_fetch(key.clone(), move || async move {
                 // Simulate another disk write finishing while this callback is pending.
-                let disk = cache.inner.disk.as_ref().unwrap();
+                let disk = fetch_cache.inner.disk.as_ref().unwrap();
                 disk.insert_batch(vec![(ObjectKeyHash::from(key.as_str()), Bytes::from_static(b"cd"))])
                     .await
                     .unwrap();
@@ -1023,8 +1043,9 @@ mod tests {
             .unwrap();
         let key = String::from("object");
         let payload = Bytes::from_static(b"abcdefghij");
+        let download = payload.clone();
         let result = cache
-            .get_or_fetch(key.clone(), || async { Ok::<_, Infallible>(payload.clone()) })
+            .get_or_fetch(key.clone(), move || async move { Ok::<_, Infallible>(download) })
             .await
             .unwrap();
         assert_eq!(result, payload);

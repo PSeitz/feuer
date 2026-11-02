@@ -364,8 +364,11 @@ mod linux {
             let (cache, completed, source) = (cache.clone(), completed.clone(), source.clone());
             async move {
                 let started = Instant::now();
+                let fetch_cache = cache.clone();
                 let bytes = cache
-                    .get_or_fetch(request.object_key, || source.download(&cache, request.payload_len))
+                    .get_or_fetch(request.object_key, move || async move {
+                        source.download(&fetch_cache, request.payload_len).await
+                    })
                     .await?;
                 assert_eq!(bytes.len() as u64, request.payload_len);
                 drop(bytes);
@@ -511,8 +514,11 @@ mod linux {
             assert!(charge > request.payload_len as usize);
             buffer.as_mut().fill(17);
             drop(buffer);
+            let fetch_cache = cache.clone();
             let bytes = cache
-                .get_or_fetch(request.object_key, || source.download(&cache, request.payload_len))
+                .get_or_fetch(request.object_key, move || async move {
+                    source.download(&fetch_cache, request.payload_len).await
+                })
                 .await
                 .unwrap();
             assert_eq!(bytes.len(), request.payload_len as usize);

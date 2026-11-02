@@ -33,11 +33,13 @@ fn pending_count(cache: &Cache) -> usize {
 async fn callback_output_types_share_successes_and_errors_but_not_completed_failures() {
     for success in [true, false] {
         let (cache, registry) = cache().await;
-        let release = Notify::new();
-        let mut first = Box::pin(cache.get_or_fetch("object".into(), || async {
-            release.notified().await;
+        let release = Arc::new(Notify::new());
+        let fetch_release = release.clone();
+        let fetch_cache = cache.clone();
+        let mut first = Box::pin(cache.get_or_fetch("object".into(), move || async move {
+            fetch_release.notified().await;
             if success {
-                let mut buffer = cache.allocate_buffer(2).unwrap();
+                let mut buffer = fetch_cache.allocate_buffer(2).unwrap();
                 buffer.as_mut().copy_from_slice(b"ok");
                 Ok(buffer)
             } else {
@@ -99,30 +101,57 @@ async fn different_error_types_and_keys_do_not_share() {
 }
 
 #[tokio::test]
-async fn cancellation_allows_takeover_and_cleans_up_in_either_order() {
-    for order in 0..3 {
+async fn waiters_continue_the_original_fetch_and_last_caller_cancels_it() {
+    for order in 0..4 {
         let (cache, _) = cache().await;
-        let mut first = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<AlignedBuffer, &str>>));
+        let release = Arc::new(Notify::new());
+        let fetch_release = release.clone();
+        let guard = Arc::new(());
+        let weak = Arc::downgrade(&guard);
+        let mut first = Box::pin(cache.get_or_fetch("object".into(), move || async move {
+            fetch_release.notified().await;
+            drop(guard);
+            Ok::<_, &str>(Bytes::from_static(b"original"))
+        }));
         let mut second = Box::pin(cache.get_or_fetch("object".into(), || async {
-            Ok::<_, &str>(Bytes::from_static(b"replacement"))
+            Err::<Bytes, &str>("waiter must not execute")
         }));
         assert_pending(first.as_mut());
         assert_pending(second.as_mut());
+        assert_eq!(pending_count(&cache), 1);
         match order {
-            0 => {
-                drop(first);
-                assert_eq!(pending_count(&cache), 1);
-                assert_eq!(second.await.unwrap(), "replacement");
+            0 | 1 => {
+                let first = if order == 0 {
+                    Some(first)
+                } else {
+                    drop(first);
+                    None
+                };
+                assert!(weak.upgrade().is_some());
+                release.notify_one();
+                // The initializer stays unpolled or is dropped. Only the waiter drives completion.
+                let bytes = tokio::time::timeout(std::time::Duration::from_secs(1), second)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(bytes, "original");
+                assert_eq!(pending_count(&cache), 0);
+                if let Some(first) = first {
+                    assert_eq!(first.await.unwrap(), bytes);
+                }
             }
-            1 => {
+            2 => {
                 drop(first);
+                assert!(weak.upgrade().is_some());
                 drop(second);
             }
             _ => {
                 drop(second);
+                assert!(weak.upgrade().is_some());
                 drop(first);
             }
         }
+        assert!(weak.upgrade().is_none());
         assert_eq!(pending_count(&cache), 0);
     }
 }
@@ -130,9 +159,10 @@ async fn cancellation_allows_takeover_and_cleans_up_in_either_order() {
 #[tokio::test]
 async fn old_waiter_cannot_remove_a_new_attempt() {
     let (cache, _) = cache().await;
-    let release = Notify::new();
-    let mut first = Box::pin(cache.get_or_fetch("object".into(), || async {
-        release.notified().await;
+    let release = Arc::new(Notify::new());
+    let fetch_release = release.clone();
+    let mut first = Box::pin(cache.get_or_fetch("object".into(), move || async move {
+        fetch_release.notified().await;
         Err::<Bytes, &str>("old failure")
     }));
     let mut waiter = Box::pin(cache.get_or_fetch("object".into(), pending::<Result<AlignedBuffer, &str>>));

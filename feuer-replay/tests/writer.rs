@@ -53,7 +53,7 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
     let canceled_cache = cache.clone();
     let task = spawn(async move {
         canceled_cache
-            .get_or_fetch("canceled".to_owned(), || async {
+            .get_or_fetch("canceled".to_owned(), move || async move {
                 started.send(()).unwrap();
                 pending::<result::Result<AlignedBuffer, Infallible>>().await
             })

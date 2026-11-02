@@ -313,6 +313,7 @@ dependencies = [
  "feuer-memory",
  "feuer-storage",
  "feuer-utils",
+ "futures-util",
  "mixtrics",
  "prometheus",
  "tempfile",

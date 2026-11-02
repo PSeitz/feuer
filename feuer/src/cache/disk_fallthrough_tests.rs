@@ -18,13 +18,15 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
         let key = "download".to_owned();
         let hash = ObjectKeyHash::from(key.as_str());
         let source = Bytes::from_static(b"abcd");
+        let fetch_cache = cache.clone();
+        let fetch_source = source.clone();
         let bytes = cache
             .get_or_fetch_with_disk_fallthrough(
                 key.clone(),
                 || panic!("disk miss"),
-                || async {
-                    let mut buffer = cache.allocate_buffer(source.len()).unwrap();
-                    buffer.as_mut().copy_from_slice(&source);
+                move || async move {
+                    let mut buffer = fetch_cache.allocate_buffer(fetch_source.len()).unwrap();
+                    buffer.as_mut().copy_from_slice(&fetch_source);
                     Ok::<_, &str>(buffer)
                 },
             )
@@ -67,12 +69,13 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
 
         let object = "whole object".to_owned();
         let bytes = Bytes::from_static(b"object");
+        let fetch_bytes = bytes.clone();
         assert_eq!(
             cache
                 .get_or_fetch_with_disk_fallthrough(
                     object.clone(),
                     || panic!("disk miss"),
-                    || async { Ok::<_, &str>(bytes.clone()) },
+                    move || async move { Ok::<_, &str>(fetch_bytes) },
                 )
                 .await
                 .unwrap(),

@@ -46,8 +46,9 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
     assert_eq!(hit.as_ptr(), address);
     for payload in [Bytes::new(), Bytes::from_static(b"abcdef")] {
         let key = format!("whole-object-{}", payload.len());
+        let download = payload.clone();
         let bytes = cache
-            .get_or_fetch(key.clone(), || async { Ok::<_, &str>(payload.clone()) })
+            .get_or_fetch(key.clone(), move || async move { Ok::<_, &str>(download) })
             .await
             .unwrap();
         assert_eq!(bytes, payload);

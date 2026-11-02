@@ -43,10 +43,11 @@ or written again within a tier.
 Concurrent memory misses with the same key and exact callback error type share
 one disk-or-callback operation, including across `Bytes` and `AlignedBuffer`
 callbacks. Callbacks for that group must be interchangeable.
-Errors implement `Clone + Send + Sync + 'static`. Callbacks and futures may borrow
-caller state. Different error types do not share work. If the executing caller is
-canceled, a waiter can take over using its own callback. Completed errors are not
-cached for later requests. Application callbacks run without cache metadata locks.
+Errors implement `Clone + Send + Sync + 'static`. Callbacks and their futures must
+be `Send + 'static`. Different error types do not share work. Any waiter can drive
+the original fetch, including after its initiating caller cancels. Dropping the
+last waiter cancels the fetch. Completed errors are not cached for later requests.
+Application callbacks run without cache metadata locks.
 
 Returned `Bytes` may share a larger allocation and remain valid after eviction.
 The cache does not own source scheduling, source retries, or process memory used
@@ -57,11 +58,11 @@ by callbacks and caller-held results.
 `get_or_fetch_with_disk_fallthrough` accepts a synchronous decision closure.
 At least 64 waiting payload reads trigger decisions for unchecked waiters.
 A true result invokes the source callback instead of waiting for a disk-read permit.
-Each decision runs at most once in its caller's task. `get_or_fetch` waits for disk.
+Each decision runs at most once in a waiting caller's task. `get_or_fetch` waits for disk.
 
 Fallthrough neither cancels submitted I/O nor removes the disk entry. Shared fetch
-callers follow the executing caller's decision. A takeover after cancellation uses
-the new executing caller's closure. Source errors return without retrying disk.
+callers use the original fetch's decision closure, including after its initiating
+caller cancels. Source errors return without retrying disk.
 
 ## Demand and retention
 

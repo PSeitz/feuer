@@ -38,7 +38,9 @@ the kernel page cache.
 - Source fallthrough under disk pressure. Applications can choose to fetch from
   the source when disk reads are backed up.
 - In-flight fetch sharing. Concurrent misses for the same key and callback error
-  type share disk reads and source work.
+  type share disk reads and source work. Any waiter can drive the shared fetch. Cancelling
+  one caller preserves it for the others. Dropping the last waiter cancels it.
+  Fetch callbacks and their futures must be `Send + 'static`.
 
 The tiered cache API supports memory-only operation on every platform. Disk caching requires Linux.
 

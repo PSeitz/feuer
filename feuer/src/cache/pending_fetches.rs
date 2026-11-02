@@ -2,10 +2,10 @@ use std::{
     any::{Any, TypeId},
     collections::HashMap,
     ptr::addr_eq,
-    sync::{Arc, Mutex, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
-use tokio::sync::OnceCell;
+use futures_util::future::{BoxFuture, Shared};
 
 use super::{FetchResult, ObjectKeyHash};
 
@@ -13,11 +13,11 @@ type FetchKey = (ObjectKeyHash, TypeId);
 pub(super) type PendingFetches = Arc<Mutex<HashMap<FetchKey, Weak<dyn Any + Send + Sync>>>>;
 
 /// A disk-or-source fetch owned by its callers. The registry holds weak references.
-/// Cancelling the initializer lets a waiter initialize the result with its own callback.
+/// Any waiter can drive the fetch. Dropping the last caller cancels it.
 pub(super) struct PendingFetch<E> {
     key: FetchKey,
     registry: PendingFetches,
-    pub(super) result: OnceCell<FetchResult<E>>,
+    pub(super) result: OnceLock<Shared<BoxFuture<'static, FetchResult<E>>>>,
 }
 
 impl<E: Send + Sync + 'static> PendingFetch<E> {
@@ -30,7 +30,7 @@ impl<E: Send + Sync + 'static> PendingFetch<E> {
         let fetch = Arc::new(Self {
             key,
             registry: registry.clone(),
-            result: OnceCell::new(),
+            result: OnceLock::new(),
         });
         entries.insert(key, Arc::downgrade(&(fetch.clone() as Arc<dyn Any + Send + Sync>)));
         fetch

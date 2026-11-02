@@ -25,6 +25,7 @@ bytes = { workspace = true }
 feuer-historian = { workspace = true }
 feuer-memory = { workspace = true }
 feuer-utils = { workspace = true }
+futures-util = { workspace = true }
 mixtrics = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }

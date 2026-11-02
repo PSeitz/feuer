@@ -28,7 +28,8 @@ callback**. The [contract](tiered-plan.md) describes behavior, and the
   duplicate insertions.
 - Matching concurrent misses share one disk-or-callback operation by key and
   callback error type, including across `Bytes` and `AlignedBuffer` callbacks.
-  Cancellation lets a waiter take over with its own callback.
+  Any waiter can drive the original fetch. Dropping the last waiter cancels it.
+  Callbacks and their futures must be `Send + 'static`.
 - Every started lookup records one object access before checking either tier.
   Failures and cancellation count as demand. Insertion and raw tier reads do not.
 - Both tiers sample objects and evict the lowest retention score. The default
