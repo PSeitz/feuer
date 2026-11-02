@@ -129,7 +129,10 @@ impl MemoryCacheShard {
         };
         self.eviction_candidates.swap_remove(removed_entry.candidate_index);
         if let Some(key) = self.eviction_candidates.get(removed_entry.candidate_index) {
-            self.entries_by_key.get_mut(key).unwrap().candidate_index = removed_entry.candidate_index;
+            self.entries_by_key
+                .get_mut(key)
+                .expect("internal error: eviction candidate key missing from entries_by_key")
+                .candidate_index = removed_entry.candidate_index;
         }
         let removed_bytes = removed_entry.allocation_charge as u64;
         self.used_bytes -= removed_bytes;
