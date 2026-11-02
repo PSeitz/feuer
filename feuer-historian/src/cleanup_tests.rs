@@ -50,14 +50,7 @@ fn background_cleanup_handles_concurrent_requests_and_releases_history_on_drop()
             });
         }
     });
-    wait_until(|| {
-        histories
-            .shards
-            .iter()
-            .map(|shard| shard.lock().len())
-            .sum::<usize>()
-            <= 100
-    });
+    wait_until(|| histories.shards.iter().map(|shard| shard.lock().len()).sum::<usize>() <= 100);
     assert_eq!(histories.request_count(), 8000);
     drop(histories);
     wait_until(|| weak.upgrade().is_none());
