@@ -154,7 +154,7 @@ impl MemoryCache {
             match insert_result {
                 InsertResult::Inserted => break true,
                 InsertResult::AlreadyPresent => break false,
-                InsertResult::Evicted => evicted_any_entry = true,
+                InsertResult::EvictedButDidNotInsert => evicted_any_entry = true,
             }
         };
         if evicted_any_entry {

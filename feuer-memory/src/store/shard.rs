@@ -16,11 +16,11 @@ struct MemoryEntry {
     candidate_index: usize,
 }
 
-/// Whether an insertion attempt inserted the object, found its key, or evicted an entry.
+/// Whether an insertion attempt inserted the object, found its key, or evicted another object without inserting.
 pub(super) enum InsertResult {
     Inserted,
     AlreadyPresent,
-    Evicted,
+    EvictedButDidNotInsert,
 }
 
 /// A memory-cache shard's object index and allocation accounting.
@@ -90,7 +90,7 @@ impl MemoryCacheShard {
         .min_by(|(score, key), (other_score, other_key)| score.total_cmp(other_score).then_with(|| key.cmp(other_key)))
         .expect("positive usage requires an eviction candidate");
         self.remove_entry(&key);
-        InsertResult::Evicted
+        InsertResult::EvictedButDidNotInsert
     }
 
     /// Adds an object known not to be indexed.
