@@ -406,20 +406,14 @@ impl Cache {
 
     /// Like [`Self::get_or_fetch`], but may fetch from the source instead of a busy disk.
     ///
-    /// Caches sharing `IoQueues` share 64 payload read permits. At 64 waiting reads,
-    /// every unchecked waiter is scheduled to call `should_fall_through` before I/O,
-    /// even if earlier fallthroughs have since reduced the number of waiting reads.
-    /// Each request is checked at most once. True invokes `callback`, false waits for disk.
-    /// The synchronous decision runs in a waiting caller's task, should be cheap, and can capture
-    /// owned request details and shared source-load state.
-    /// Memory hits, buffered disk hits, disk misses, admitted reads, and shared-read waiters
-    /// do not call the decision callback. Callers sharing a fetch use the original fetch's
-    /// disk-versus-source decision, including after its initiating caller cancels.
+    /// When the queue reaches 64 waiting payload reads, calls `should_fall_through`
+    /// at most once per waiting read before I/O. Caches sharing `IoQueues` share this queue.
+    /// True invokes `callback`, false waits for disk. The decision runs synchronously
+    /// in a waiting caller's task and should be cheap. Shared fetches retain the original
+    /// caller's decision closure even if that caller cancels.
     ///
-    /// Fallthrough leaves the disk entry intact. Successful source downloads are admitted to
-    /// memory. Objects already on disk are not queued for another write.
-    /// Source failures are returned without retrying disk.
-    /// Each request updates access history before checking either cache tier.
+    /// Fallthrough preserves the disk entry and admits successful downloads to memory
+    /// without rewriting them to disk. Source failures return without retrying disk.
     pub async fn get_or_fetch_with_disk_fallthrough<F, Fut, V, E>(
         &self,
         object_key: ObjectKey,
