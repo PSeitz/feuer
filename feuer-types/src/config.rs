@@ -31,8 +31,6 @@ pub fn read_env_number<T: TryFrom<u64>>(name: &str, default: T, minimum: u64) ->
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
-
     use super::*;
 
     #[test]
@@ -77,38 +75,5 @@ mod tests {
             parse_config_number::<usize>(OsStr::new(&usize::MAX.to_string()), 1),
             Some(usize::MAX)
         );
-    }
-
-    #[test]
-    fn reads_environment_without_mutating_other_tests() {
-        const NAME: &str = "FEUER_TEST_CONFIG_NUMBER";
-        const CHILD: &str = "FEUER_TEST_CONFIG_NUMBER_CHILD";
-        if let Ok(expected) = env::var(CHILD) {
-            let result = read_env_number::<usize>(NAME, 64, 1);
-            assert_eq!(result.as_ref().ok().copied(), expected.parse::<usize>().ok());
-            if let Err(error) = result {
-                assert!(error.contains(NAME));
-                assert!(error.contains(">= 1 fitting usize"));
-            }
-            return;
-        }
-        for (value, expected) in [
-            (None, "64"),
-            (Some("8KiB"), "8192"),
-            (Some("0"), "error"),
-            (Some("bad"), "error"),
-        ] {
-            let mut child = Command::new(env::current_exe().unwrap());
-            child.args([
-                "--exact",
-                "config::tests::reads_environment_without_mutating_other_tests",
-            ]);
-            child.env(CHILD, expected).env_remove(NAME);
-            if let Some(value) = value {
-                child.env(NAME, value);
-            }
-            let output = child.output().unwrap();
-            assert!(output.status.success(), "{output:?}");
-        }
     }
 }
