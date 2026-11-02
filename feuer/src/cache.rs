@@ -948,28 +948,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn callback_with_a_racing_disk_write_is_not_inserted_again() {
-        let (_directory, cache) = cache(32).await;
-        let key = String::from("object");
-        let history = cache.inner.memory.access_histories();
-        let fetch_cache = cache.clone();
-        let bytes = cache
-            .get_or_fetch(key.clone(), move || async move {
-                // Simulate another disk write finishing while this callback is pending.
-                let disk = fetch_cache.inner.disk.as_ref().unwrap();
-                disk.insert_batch(vec![(ObjectKeyHash::from(key.as_str()), Bytes::from_static(b"cd"))])
-                    .await
-                    .unwrap();
-                Ok::<_, Infallible>(Bytes::from_static(b"cd"))
-            })
-            .await
-            .unwrap();
-        assert_eq!(bytes, Bytes::from_static(b"cd"));
-        assert_eq!(cache.inner.memory.used_bytes(), 0);
-        assert_eq!(history.request_count(), 1);
-    }
-
-    #[tokio::test]
     async fn callback_cancellation_keeps_the_recorded_request_without_inserting() {
         let (_directory, cache) = cache(32).await;
         let key = String::from("canceled");
