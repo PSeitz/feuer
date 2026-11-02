@@ -15,8 +15,8 @@ exclude.workspace = true
 [dependencies]
 bytes.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
-bytesize = "2.7"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+bytesize = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }

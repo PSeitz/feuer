@@ -23,6 +23,7 @@ exclude = []
 
 [workspace.dependencies]
 bytes = "1"
+bytesize = "2.7"
 clap = { version = "4", features = ["derive"] }
 feuer-historian = { version = "0.23.0-dev", path = "feuer-historian" }
 feuer-memory = { version = "0.23.0-dev", path = "feuer-memory" }
@@ -36,6 +37,7 @@ tempfile = "3"
 thiserror = "2.0.20"
 tokio = { version = "1", default-features = false }
 tracing = "0.1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [workspace.lints.rust]
 missing_docs = "warn"
