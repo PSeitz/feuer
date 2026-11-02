@@ -23,7 +23,7 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 
 /// Request history shared by both cache tiers.
 /// Object keys select one of 64 independently locked history maps. The request clock remains global.
-/// Counters survive cache eviction. Every 10 seconds, one background worker checks the entry limit
+/// Counters survive cache eviction. Every second, one background worker checks the entry limit
 /// and removes the least recently requested keys, targeting 90% of the limit.
 /// The limit is a soft threshold. A restart begins with empty history.
 pub struct ObjectAccessHistories {
@@ -56,7 +56,7 @@ impl ObjectAccessHistories {
         let weak = Arc::downgrade(&shards);
         thread::spawn(move || {
             loop {
-                thread::sleep(Duration::from_secs(10));
+                thread::sleep(Duration::from_secs(1));
                 let Some(shards) = weak.upgrade() else { break };
                 Self::remove_oldest(&*shards, entry_limit.get());
             }
