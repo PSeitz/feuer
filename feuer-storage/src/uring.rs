@@ -369,7 +369,7 @@ struct ReadBuffer {
 
 impl ReadBuffer {
     fn new(mut buffer: AlignedBuffer) -> Arc<Self> {
-        let bytes = buffer.as_mut_slice();
+        let bytes = buffer.as_mut();
         Arc::new(Self {
             ptr: bytes.as_mut_ptr(),
             length: bytes.len(),
@@ -410,7 +410,7 @@ impl IoBuffers {
         let copy_length = length - aligned_length;
         let tail = if let Some(copy_length) = NonZeroUsize::new(copy_length) {
             let mut buffer = AlignedBuffer::allocate_zeroed(copy_length)?;
-            buffer.as_mut_slice()[..bytes.len() - aligned_length].copy_from_slice(&bytes[aligned_length..]);
+            buffer.as_mut()[..bytes.len() - aligned_length].copy_from_slice(&bytes[aligned_length..]);
             buffer.into_bytes()
         } else {
             Bytes::new()

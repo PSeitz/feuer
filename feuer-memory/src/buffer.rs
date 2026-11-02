@@ -377,9 +377,11 @@ impl AlignedBuffer {
     pub fn into_bytes(self) -> Bytes {
         Bytes::from_owner(self)
     }
+}
 
-    /// Exclusively accesses the requested bytes, never spare capacity.
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+impl AsMut<[u8]> for AlignedBuffer {
+    /// Mutably accesses the requested bytes.
+    fn as_mut(&mut self) -> &mut [u8] {
         // SAFETY: this initialized allocation is exclusively owned by self.
         unsafe { slice::from_raw_parts_mut(self.memory.ptr().as_ptr(), self.length) }
     }

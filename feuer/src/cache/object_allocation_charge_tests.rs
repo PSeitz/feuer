@@ -35,7 +35,7 @@ async fn shared_bytes_slices_charge_payload_length() {
     // Both entries fit even when their keys share a shard.
     let cache = memory_cache(256 << 20, &metrics_registry);
     let mut buffer = cache.allocate_buffer((1 << 20) + 2048).unwrap();
-    buffer.as_mut_slice().fill(17);
+    buffer.as_mut().fill(17);
     let allocation_capacity = buffer.capacity();
     let source = buffer.into_bytes();
     let source_ptr = source.as_ptr();

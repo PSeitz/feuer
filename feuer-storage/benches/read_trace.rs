@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut buffer = AlignedBuffer::allocate_zeroed(
         NonZeroUsize::new((*max_length as usize + 4095).next_multiple_of(4096)).unwrap(),
     )?;
-    buffer.as_mut_slice().fill(0x5a);
+    buffer.as_mut().fill(0x5a);
     let payload = buffer.into_bytes();
     for &[_, offset, length] in &reads {
         let start = offset / 4096 * 4096;

@@ -92,7 +92,7 @@ impl DiskCacheInner {
             offset = 0;
         }
         entry.buffer_offset = offset;
-        buffer.buffer.as_mut_slice()[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        buffer.buffer.as_mut()[offset..offset + bytes.len()].copy_from_slice(&bytes);
         drop(bytes);
         buffer.entries.push(entry);
         if offset + aligned_payload_len == CHUNK_BYTES as usize {

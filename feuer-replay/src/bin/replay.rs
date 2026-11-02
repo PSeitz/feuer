@@ -141,7 +141,7 @@ mod linux {
                 .await;
             }
             let download = cache.allocate_buffer(payload_len as usize).map(|mut buffer| {
-                buffer.as_mut_slice().fill(0);
+                buffer.as_mut().fill(0);
                 buffer
             });
             if download.is_ok() {
@@ -509,7 +509,7 @@ mod linux {
             let charge = buffer.capacity();
             let address = buffer.as_ref().as_ptr();
             assert!(charge > request.payload_len as usize);
-            buffer.as_mut_slice().fill(17);
+            buffer.as_mut().fill(17);
             drop(buffer);
             let bytes = cache
                 .get_or_fetch(request.object_key, || source.download(&cache, request.payload_len))

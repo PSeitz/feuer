@@ -24,7 +24,7 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
                 || panic!("disk miss"),
                 || async {
                     let mut buffer = cache.allocate_buffer(source.len()).unwrap();
-                    buffer.as_mut_slice().copy_from_slice(&source);
+                    buffer.as_mut().copy_from_slice(&source);
                     Ok::<_, &str>(buffer)
                 },
             )

@@ -45,7 +45,7 @@ fn request(
     let (reply, receive) = oneshot::channel();
     let buffers = if operation == IoOperation::Write {
         let mut buffer = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(length).unwrap()).unwrap();
-        buffer.as_mut_slice().fill(0x99);
+        buffer.as_mut().fill(0x99);
         IoBuffers::from_write_bytes(length, buffer.into_bytes()).unwrap()
     } else {
         IoBuffers::Read(ReadBuffer::new(buffer_pool().allocate(length).unwrap()))
@@ -142,7 +142,7 @@ proptest! {
                             let permit = handle.reserve_channel_capacity().await.unwrap();
                             let mut buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
                             let buffers = if write {
-                                buffer.as_mut_slice().fill(0x99);
+                                buffer.as_mut().fill(0x99);
                                 IoBuffers::from_write_bytes(DIRECT_IO_ALIGNMENT_BYTES, buffer.into_bytes()).unwrap()
                             } else {
                                 IoBuffers::Read(ReadBuffer::new(buffer))
@@ -549,7 +549,7 @@ fn queue_failure_retains_write_descriptors_and_files() {
     let pool = buffer_pool();
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     let mut buffer = pool.allocate(page + 17).unwrap();
-    buffer.as_mut_slice().fill(0x77);
+    buffer.as_mut().fill(0x77);
     let payload_address = buffer.as_ref().as_ptr();
     let buffers = IoBuffers::from_write_bytes(2 * page, buffer.into_bytes()).unwrap();
     let (reply, mut receive) = oneshot::channel();
@@ -612,7 +612,7 @@ fn canceled_submitted_write_retains_buffers_on_queue_failure() {
     let (mut queue, sender, files) = queue();
     let pool = buffer_pool();
     let mut buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
-    buffer.as_mut_slice().fill(0x99);
+    buffer.as_mut().fill(0x99);
     let address = buffer.as_ref().as_ptr();
     let (mut write, reply) = request(&files, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
     write.buffers = IoBuffers::from_write_bytes(DIRECT_IO_ALIGNMENT_BYTES, buffer.into_bytes()).unwrap();
@@ -774,7 +774,7 @@ fn finished_read_transfers_buffer_ownership() {
     let IoBuffers::Read(buffer) = &mut read.buffers else {
         unreachable!()
     };
-    Arc::get_mut(buffer).unwrap().buffer.as_mut_slice().fill(0x99);
+    Arc::get_mut(buffer).unwrap().buffer.as_mut().fill(0x99);
     let ptr = buffer.ptr.cast_const();
     read.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap();
     assert!(read.buffer_range.is_empty());
@@ -794,7 +794,7 @@ fn error_completion_releases_the_read_buffer() {
     let (mut queue, sender, mut files) = queue();
     let pool = buffer_pool();
     let mut buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
-    buffer.as_mut_slice().fill(0x99);
+    buffer.as_mut().fill(0x99);
     let address = buffer.as_ref().as_ptr();
     let temporary = NamedTempFile::new().unwrap();
     // Reading a write-only file produces -EBADF in the CQE, not a submission error.
@@ -841,14 +841,14 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
     let write = WriteQueue::new(files).unwrap();
     let length = MAX_IO_REQUEST_BYTES;
     let mut payload = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(length + 18).unwrap()).unwrap();
-    payload.as_mut_slice()[1..length + 1].fill(0x99);
-    payload.as_mut_slice()[length + 1..].fill(0x77);
+    payload.as_mut()[1..length + 1].fill(0x99);
+    payload.as_mut()[length + 1..].fill(0x77);
     // Force an unaligned source so XFS would reject a submitted empty prefix vector.
     let payload = payload.into_bytes().slice(1..);
     write.write_padded(0, 3 * length, &payload).await.unwrap();
     let mut buffer = read.buffer_pool.allocate(3 * length).unwrap();
     assert_eq!(buffer.capacity(), 3 * length);
-    buffer.as_mut_slice().fill(0x55);
+    buffer.as_mut().fill(0x55);
     let address = buffer.as_ref().as_ptr() as usize;
     drop(buffer);
     let mut future = Box::pin(read.read(0, 3 * length));
@@ -969,11 +969,11 @@ fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     let pool = buffer_pool();
     let mut source = pool.allocate(2 * page).unwrap();
-    source.as_mut_slice().fill(0x77);
+    source.as_mut().fill(0x77);
     let source = source.into_bytes();
     for (start, length, borrowed_length) in [(0, page + 17, page), (1, page + 17, 0), (0, 2 * page, 2 * page)] {
         let mut dirty = pool.allocate(2 * page).unwrap();
-        dirty.as_mut_slice().fill(0xff);
+        dirty.as_mut().fill(0xff);
         drop(dirty);
         let payload = source.slice(start..start + length);
         let mut buffers = IoBuffers::from_write_bytes(2 * page, payload.clone()).unwrap();

@@ -38,7 +38,7 @@ async fn callback_output_types_share_successes_and_errors_but_not_completed_fail
             release.notified().await;
             if success {
                 let mut buffer = cache.allocate_buffer(2).unwrap();
-                buffer.as_mut_slice().copy_from_slice(b"ok");
+                buffer.as_mut().copy_from_slice(b"ok");
                 Ok(buffer)
             } else {
                 Err("source failed")

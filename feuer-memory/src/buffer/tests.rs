@@ -24,7 +24,7 @@ fn scratch_buffers_keep_requested_capacity_and_alignment() {
         assert_eq!(buffer.as_ref().as_ptr() as usize % BUFFER_ALIGNMENT, 0);
         assert!(buffer.as_ref().iter().all(|&byte| byte == 0));
         assert!(buffer.pool.is_none());
-        buffer.as_mut_slice().fill(0x99);
+        buffer.as_mut().fill(0x99);
         let bytes = buffer.into_bytes();
         assert!(bytes.iter().all(|&byte| byte == 0x99));
     }
@@ -33,7 +33,7 @@ fn scratch_buffers_keep_requested_capacity_and_alignment() {
 #[test]
 fn large_buffer_keeps_its_backing_memory_below_the_fixed_bucket_limit() {
     let mut buffer = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(MAX_FIXED_BUFFER_BYTES + 1).unwrap()).unwrap();
-    buffer.as_mut_slice()[..3 * BUFFER_ALIGNMENT].fill(0x99);
+    buffer.as_mut()[..3 * BUFFER_ALIGNMENT].fill(0x99);
     let capacity = BUFFER_ALIGNMENT + 1;
     let BufferMemory::Large(memory) = &mut *buffer.memory else {
         panic!("expected a large buffer")
@@ -80,7 +80,7 @@ fn size_boundaries_round_up_without_exposing_spare_capacity() {
 fn bytes_preserve_allocation_and_return_only_after_the_last_owner() {
     let pool = BufferPool::new(100 * BUFFER_SIZES[0] as u64, MemoryMetrics::noop());
     let mut buffer = pool.allocate(4).unwrap();
-    buffer.as_mut_slice().copy_from_slice(b"abcd");
+    buffer.as_mut().copy_from_slice(b"abcd");
     let address = buffer.as_ref().as_ptr();
     assert_eq!(buffer.capacity(), BUFFER_SIZES[0]);
     let bytes = buffer.into_bytes();
@@ -161,7 +161,7 @@ fn large_buffers_are_resized_on_reuse() {
     let mut buffer = pool.allocate(length).unwrap();
     assert_eq!(buffer.capacity(), length);
     assert_eq!(large("used"), length as f64);
-    buffer.as_mut_slice().fill(0x99);
+    buffer.as_mut().fill(0x99);
     drop(buffer);
     assert_eq!(pool.idle_bytes(), length as u64);
     assert_eq!(large("idle"), length as f64);
@@ -237,7 +237,7 @@ fn large_buffer_growth_zeroes_bytes_after_an_unaligned_shrink() {
     let length = MAX_FIXED_BUFFER_BYTES + BUFFER_ALIGNMENT + 1;
     let pool = BufferPool::new(100 * 2 * length as u64, MemoryMetrics::noop());
     let mut buffer = pool.allocate(2 * length).unwrap();
-    buffer.as_mut_slice()[length - 1..length + 2 * BUFFER_ALIGNMENT].fill(0x99);
+    buffer.as_mut()[length - 1..length + 2 * BUFFER_ALIGNMENT].fill(0x99);
     drop(buffer);
 
     let buffer = pool.allocate(length).unwrap();
@@ -265,7 +265,7 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         assert_eq!(buffer_bytes("used"), 0.0);
         assert_eq!(gauge("feuer_memory_capacity_bytes"), capacity as f64);
         let mut buffer = pool.allocate(size - 2 * BUFFER_ALIGNMENT).unwrap();
-        buffer.as_mut_slice().fill(0x99);
+        buffer.as_mut().fill(0x99);
         let bytes = buffer.into_bytes();
         let address = bytes.as_ptr();
         let slice = bytes.slice(1..);
@@ -289,11 +289,11 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         assert_eq!(gauge("feuer_memory_used_bytes"), size as f64);
         let mut reused = pool.allocate(size).unwrap();
         assert_eq!(reused.as_ref().as_ptr(), address);
-        assert_eq!(reused.as_mut_slice().len(), size);
+        assert_eq!(reused.as_mut().len(), size);
         assert_eq!(buffer_bytes("idle"), 0.0);
         assert_eq!(buffer_bytes("used"), size as f64);
         assert_eq!(gauge("feuer_memory_used_bytes"), 0.0);
-        reused.as_mut_slice().fill(0x77);
+        reused.as_mut().fill(0x77);
         drop(reused);
         let outstanding = pool.allocate(size - BUFFER_ALIGNMENT).unwrap().into_bytes();
         assert_eq!(outstanding.as_ptr(), address);
