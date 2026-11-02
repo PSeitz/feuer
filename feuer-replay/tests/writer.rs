@@ -13,21 +13,12 @@ use std::{
 
 use bytes::Bytes;
 use feuer::{AlignedBuffer, Cache, ObjectKeyHash};
-use feuer_replay::{AccessEvent, Event, Result, decode_package, load_requests};
+use feuer_replay::{Result, decode_package, load_requests};
 use tempfile::tempdir;
 use tokio::{
     spawn,
     sync::{mpsc, oneshot},
 };
-
-fn access_events(package: &[u8]) -> Result<Vec<AccessEvent>> {
-    decode_package(package)?
-        .map(|event| match event? {
-            Event::Access(event) => Ok(event),
-            Event::DiskIo { .. } => Err("memory-only trace contained disk I/O".into()),
-        })
-        .collect()
-}
 
 #[tokio::test]
 async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
@@ -73,7 +64,7 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
     assert!(task.await.unwrap_err().is_cancelled());
     drop(cache);
     let package = receiver.recv().await.ok_or("writer did not deliver its tail")?;
-    let events = access_events(&package)?;
+    let events = decode_package(&package)?.collect::<Result<Vec<_>>>()?;
     assert_eq!(
         events.iter().map(|event| event.kind).collect::<Vec<_>>(),
         [0, 3, 0, 1, 0, 4, 0]
@@ -90,25 +81,17 @@ fn replays_objects_with_and_without_disk() -> Result<()> {
     let dir = tempdir()?;
     let path = dir.path().join("trace.feuer");
     let key = ObjectKeyHash::from("object");
-    let mut package = b"FETR\x02\0\0\0".to_vec();
-    for (kind, request_id, time_ns, key_or_offset, length) in [
-        (6u8, 0u64, 0u64, 4096u128, 4096u64),
-        (0, 1, 10, key.0, 0),
-        (3, 1, 11, key.0, 2),
-        (7, 0, 12, 8192, 4096),
-        (0, 2, 13, key.0, 0),
-    ] {
+    let mut package = b"FETR\x01\0\0\0".to_vec();
+    for (kind, request_id, time_ns) in [(0u8, 1u64, 0u64), (3, 1, 1), (0, 2, 2)] {
         package.push(kind);
         package.extend(request_id.to_le_bytes());
         package.extend(time_ns.to_le_bytes());
-        package.extend(key_or_offset.to_le_bytes());
-        package.extend(length.to_le_bytes());
+        package.extend(key.0.to_le_bytes());
+        package.extend(if kind == 3 { 2u64 } else { 0 }.to_le_bytes());
     }
     fs::write(&path, package)?;
     let access_trace = load_requests(&path, None)?;
     assert_eq!(access_trace.requests.len(), 2);
-    assert_eq!(access_trace.requests[0].time_ns, 0);
-    assert_eq!(access_trace.requests[1].time_ns, 3);
     assert_eq!(access_trace.unmatched_starts, 1);
     assert_eq!(access_trace.outcomes, [0, 0, 0, 1, 0, 0]);
     assert_eq!(access_trace.requests[0].object_key, access_trace.requests[1].object_key);
@@ -158,7 +141,7 @@ async fn decodes_empty_object_from_current_writer() -> Result<()> {
     assert!(hit.is_empty());
     drop(cache);
     let package = receiver.recv().await.ok_or("missing tail")?;
-    let events = access_events(&package)?;
+    let events = decode_package(&package)?.collect::<Result<Vec<_>>>()?;
     assert_eq!(
         events.iter().map(|event| event.kind).collect::<Vec<_>>(),
         [0, 5, 0, 3, 0, 1]

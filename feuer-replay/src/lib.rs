@@ -16,27 +16,9 @@ use zstd::Decoder;
 /// Errors from trace decoding, input files, or replay preparation.
 pub type Result<T> = result::Result<T, Box<dyn Error + Send + Sync>>;
 
-/// A recorded access request or disk I/O event.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Event {
-    /// A request start or lookup outcome.
-    Access(AccessEvent),
-    /// A DataFile read or write start.
-    DiskIo {
-        /// 6 read, 7 write.
-        kind: u8,
-        /// Nanoseconds since trace creation.
-        time_ns: u64,
-        /// Starting byte offset in the cache file.
-        offset: u64,
-        /// Requested read length or padded write length.
-        length: u64,
-    },
-}
-
 /// A recorded request start or lookup outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AccessEvent {
+pub struct Event {
     /// 0 start, 1 memory hit, 2 disk hit, 3 callback success, 4 callback error, 5 miss.
     pub kind: u8,
     /// Identity joining this request's start and outcome within one trace session.
@@ -52,8 +34,8 @@ pub struct AccessEvent {
 /// Validates a package header and length, then decodes and validates each event.
 /// Consuming the iterator validates every event. Missing events or packages can still go undetected.
 pub fn decode_package(package: &[u8]) -> Result<impl Iterator<Item = Result<Event>> + '_> {
-    if package.get(..8) != Some(b"FETR\x02\0\0\0") {
-        return Err("expected FETR v2 package header".into());
+    if package.get(..8) != Some(b"FETR\x01\0\0\0") {
+        return Err("expected FETR v1 package header".into());
     }
     let event_size = 41;
     if package.len() == 8 || !(package.len() - 8).is_multiple_of(event_size) {
@@ -62,27 +44,19 @@ pub fn decode_package(package: &[u8]) -> Result<impl Iterator<Item = Result<Even
     Ok(package[8..].chunks_exact(event_size).map(move |event_bytes| {
         let u64_at = |offset| u64::from_le_bytes(event_bytes[offset..offset + 8].try_into().unwrap());
         let kind = event_bytes[0];
-        if kind > 7 {
-            return Err("unknown FETR v2 event kind".into());
-        }
-        if kind >= 6 {
-            return Ok(Event::DiskIo {
-                kind,
-                time_ns: u64_at(9),
-                offset: u64_at(17),
-                length: u64_at(33),
-            });
+        if kind > 5 {
+            return Err("unknown FETR v1 event kind".into());
         }
         if !(1..=3).contains(&kind) && u64_at(33) != 0 {
             return Err("unexpected payload length for FETR event kind".into());
         }
-        Ok(Event::Access(AccessEvent {
+        Ok(Event {
             kind,
             request_id: u64_at(1),
             time_ns: u64_at(9),
             object_key: ObjectKeyHash(u128::from_le_bytes(event_bytes[17..33].try_into().unwrap())),
             payload_len: (1..=3).contains(&kind).then(|| u64_at(33)),
-        }))
+        })
     }))
 }
 
@@ -126,9 +100,6 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
     let mut first_start_ns = u64::MAX;
     let mut requests = Vec::new();
     visit_events(path, |event| {
-        let Event::Access(event) = event else {
-            return Ok(());
-        };
         if event.kind == 0 {
             first_start_ns = first_start_ns.min(event.time_ns);
             if prefix_ns.is_none_or(|prefix_ns| event.time_ns - first_start_ns < prefix_ns) {
@@ -151,9 +122,6 @@ pub fn load_requests(path: &Path, seconds: Option<u64>) -> Result<TraceRequests>
     }
     let mut outcomes = [0; 6];
     visit_events(path, |event| {
-        let Event::Access(event) = event else {
-            return Ok(());
-        };
         if event.kind == 0 {
             return Ok(());
         }
@@ -244,8 +212,8 @@ mod tests {
 
     use super::*;
 
-    fn package(events: &[AccessEvent]) -> Vec<u8> {
-        let mut bytes = b"FETR\x02\0\0\0".to_vec();
+    fn package(events: &[Event]) -> Vec<u8> {
+        let mut bytes = b"FETR\x01\0\0\0".to_vec();
         for event in events {
             bytes.push(event.kind);
             bytes.extend(event.request_id.to_le_bytes());
@@ -256,8 +224,8 @@ mod tests {
         bytes
     }
 
-    fn event(kind: u8, request_id: u64, time_ns: u64) -> AccessEvent {
-        AccessEvent {
+    fn event(kind: u8, request_id: u64, time_ns: u64) -> Event {
+        Event {
             kind,
             request_id,
             time_ns,
@@ -283,19 +251,19 @@ mod tests {
     fn decodes_all_kinds_hashes_and_lengths() {
         for length in [0, 10] {
             let events: Vec<_> = (0..=5)
-                .map(|kind| AccessEvent {
+                .map(|kind| Event {
                     payload_len: (1..=3).contains(&kind).then_some(length),
                     ..event(kind, 42, 100)
                 })
                 .collect();
             let bytes = package(&events);
             let decoded: Vec<_> = decode_package(&bytes).unwrap().collect::<Result<_>>().unwrap();
-            assert_eq!(decoded, events.into_iter().map(Event::Access).collect::<Vec<_>>());
+            assert_eq!(decoded, events);
         }
     }
 
     fn object_package(events: &[(u8, u64, u64, u64)]) -> Vec<u8> {
-        let mut bytes = b"FETR\x02\0\0\0".to_vec();
+        let mut bytes = b"FETR\x01\0\0\0".to_vec();
         for &(kind, id, time_ns, payload_len) in events {
             bytes.push(kind);
             bytes.extend(id.to_le_bytes());
@@ -338,7 +306,7 @@ mod tests {
         let mut events = Vec::new();
         for (index, hash) in [0, u128::MAX, 0].into_iter().enumerate() {
             for kind in [0, 3] {
-                events.push(AccessEvent {
+                events.push(Event {
                     object_key: ObjectKeyHash(hash),
                     ..event(kind, index as u64, (index * 2) as u64 + u64::from(kind == 3))
                 });
@@ -376,7 +344,7 @@ mod tests {
         assert!(decode_package(&[]).is_err());
         assert!(decode_package(&valid[..8]).is_err());
         assert!(decode_package(&valid[..valid.len() - 1]).is_err());
-        for (offset, value) in [(0, b'Q'), (4, 0), (4, 1), (4, 255), (8, 8), (8 + 33, 1)] {
+        for (offset, value) in [(0, b'Q'), (4, 0), (4, 255), (8, 6), (8 + 33, 1)] {
             let mut bad = valid.clone();
             bad[offset] = value;
             assert!(

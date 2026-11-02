@@ -1,13 +1,9 @@
 # Access-trace replay
 
 Replay recorded cache requests against Feuer with a fresh cache. The tool reads
-[FETR v2 packages](../access-trace.md) and measures how the current cache
+[FETR v1 packages](../access-trace.md) and measures how the current cache
 handles the workload. Recorded outcomes are used for diagnostics and object lengths.
 The replay cache determines its own hits, misses, evictions, admissions, and writes.
-The decoder exposes both access and disk-I/O events. Access replay selects cache
-requests and ignores the recorded disk operations, so it does not replay writes
-twice. Replaying the recorded disk-I/O stream directly is a separate workload
-and is not implemented by this command.
 
 Running the cache requires **Linux**, including memory-only replay.
 
@@ -174,7 +170,7 @@ be pending when that tail ends.
 - **`replay_active_requests`:** started lookups awaiting completion.
 
 The queued and active gauges are sampled separately. Recorded outcome counts in
-`summary.csv` use the FETR v2 access-event kind numbers, including `recorded_outcome_5` for misses.
+`summary.csv` use the FETR v1 kind numbers, including `recorded_outcome_5` for misses.
 
 ### Source metrics
 

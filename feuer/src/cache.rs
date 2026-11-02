@@ -17,12 +17,13 @@ use feuer_memory::{
 };
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskCache, DiskCacheOptions, DiskMetrics, IoMetrics};
-use feuer_types::{ObjectKeyHash, config::read_env_number, trace::Trace};
+use feuer_types::{ObjectKeyHash, config::read_env_number};
 use mixtrics::{metrics::BoxedRegistry, registry::noop::NoopMetricsRegistry};
 use thiserror::Error;
 
 use crate::{
     CacheConfig, CacheConfigError, DiskCacheError, IoQueues, ObjectKey,
+    access_trace::AccessTrace,
     metrics::{LookupMetrics, LookupOutcome},
 };
 
@@ -75,7 +76,7 @@ struct CacheInner {
 #[derive(Clone)]
 pub struct Cache {
     inner: Arc<CacheInner>,
-    trace: Option<Trace>,
+    access_trace: Option<AccessTrace>,
 }
 
 impl fmt::Debug for Cache {
@@ -295,7 +296,7 @@ impl<'a> CacheBuilder<'a> {
                 #[cfg(target_os = "linux")]
                 disk,
             }),
-            trace: None,
+            access_trace: None,
         })
     }
 }
@@ -321,28 +322,20 @@ impl Cache {
         }
     }
 
-    /// Delivers cache-access and disk-read/write trace packages as [`Bytes`].
-    /// Enable before cloning the cache. Disk tracing covers the shared backing file, including metadata.
+    /// Delivers uncompressed binary access-trace packages as [`Bytes`] for this handle and its clones.
     /// Requires Tokio. Persist packages unchanged. The callback owns retries and error reporting.
-    ///
-    /// # Panics
-    /// Panics if disk tracing has already been enabled for this cache.
     pub fn with_trace<F, Fut>(mut self, deliver_package: F) -> Self
     where
         F: FnMut(Bytes) -> Fut + Send + 'static,
         Fut: Future<Output = io::Result<()>> + Send + 'static,
     {
-        let trace = Trace::new(deliver_package);
-        #[cfg(target_os = "linux")]
-        if let Some(disk) = &self.inner.disk {
-            disk.set_trace(trace.clone());
-        }
-        self.trace = Some(trace);
+        self.access_trace = Some(AccessTrace::new(deliver_package));
         self
     }
 
     async fn trace_request_start(&self, object_key: ObjectKeyHash) -> Option<u64> {
-        Some(self.trace.as_ref()?.send(0, 0, object_key.0, 0).await)
+        let access_trace = self.access_trace.as_ref()?;
+        Some(access_trace.send_request_start(object_key).await)
     }
 
     /// Returns this cache's configuration.
@@ -368,9 +361,9 @@ impl Cache {
         let (outcome, bytes) = self.lookup(object_key, || false).await;
         let payload_length = bytes.as_ref().map(|bytes| bytes.len() as u64).unwrap_or(0);
         self.inner.metrics.record(outcome, started.elapsed(), payload_length);
-        if let (Some(trace), Some(request_id)) = (&self.trace, request_id) {
-            trace
-                .send(outcome as u8 + 1, request_id, object_key.0, payload_length)
+        if let (Some(access_trace), Some(request_id)) = (&self.access_trace, request_id) {
+            access_trace
+                .send_outcome(request_id, object_key, outcome, payload_length)
                 .await;
         }
         bytes
@@ -470,9 +463,9 @@ impl Cache {
         };
         let payload_length = result.as_ref().map(|bytes| bytes.len() as u64).unwrap_or(0);
         self.inner.metrics.record(outcome, started.elapsed(), payload_length);
-        if let (Some(trace), Some(request_id)) = (&self.trace, request_id) {
-            trace
-                .send(outcome as u8 + 1, request_id, object_key.0, payload_length)
+        if let (Some(access_trace), Some(request_id)) = (&self.access_trace, request_id) {
+            access_trace
+                .send_outcome(request_id, object_key, outcome, payload_length)
                 .await;
         }
         result

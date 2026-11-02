@@ -186,13 +186,6 @@ impl Default for DiskCacheOptions {
 }
 
 impl DiskCache {
-    /// Enables tracing of payload and metadata reads and writes after opening.
-    /// Panics if tracing was already enabled for this disk cache.
-    #[doc(hidden)]
-    pub fn set_trace(&self, trace: feuer_types::trace::Trace) {
-        self.disk.file.set_trace(trace);
-    }
-
     /// Opens an exclusively locked, fixed-capacity file after scanning every shard's metadata.
     pub async fn open(
         directory: impl AsRef<Path>,
