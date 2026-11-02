@@ -44,7 +44,7 @@ fn request(
 ) -> (IoRequest, IoResultReceiver) {
     let (reply, receive) = oneshot::channel();
     let buffers = if operation == IoOperation::Write {
-        let mut buffer = AlignedBuffer::allocate_zeroed(length).unwrap();
+        let mut buffer = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(length).unwrap()).unwrap();
         buffer.as_mut_slice().fill(0x99);
         IoBuffers::from_write_bytes(length, buffer.into_bytes()).unwrap()
     } else {
@@ -840,7 +840,7 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
     };
     let write = WriteQueue::new(files).unwrap();
     let length = MAX_IO_REQUEST_BYTES;
-    let mut payload = AlignedBuffer::allocate_zeroed(length + 18).unwrap();
+    let mut payload = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(length + 18).unwrap()).unwrap();
     payload.as_mut_slice()[1..length + 1].fill(0x99);
     payload.as_mut_slice()[length + 1..].fill(0x77);
     // Force an unaligned source so XFS would reject a submitted empty prefix vector.
@@ -1023,7 +1023,9 @@ fn write_error_logs_path_and_request_details_in_one_line() {
 
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     let (mut write, _reply) = request(&data_file(), IoOperation::Write, page as u64, 2 * page);
-    let payload = AlignedBuffer::allocate_zeroed(page + 17).unwrap().into_bytes();
+    let payload = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(page + 17).unwrap())
+        .unwrap()
+        .into_bytes();
     write.buffers = IoBuffers::from_write_bytes(2 * page, payload).unwrap();
     write.submission_entry(0);
     write.apply_completion_result(page as i32).unwrap();

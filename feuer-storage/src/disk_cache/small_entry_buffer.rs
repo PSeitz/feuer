@@ -3,7 +3,7 @@
 use super::{writer::WriteEntry, *};
 use crate::IoOperation;
 use feuer_memory::AlignedBuffer;
-use std::{mem, time::Duration};
+use std::{mem, num::NonZeroUsize, time::Duration};
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 
 // Pack entries below this aligned size so they share a payload chunk.
@@ -105,10 +105,12 @@ impl DiskCacheInner {
 impl SmallEntryBuffer {
     pub(super) fn new() -> Result<Self, DataFileError> {
         Ok(Self {
-            buffer: AlignedBuffer::allocate_zeroed(CHUNK_BYTES as usize).map_err(|source| DataFileError::Task {
-                operation: IoOperation::Write,
-                source: Box::new(source),
-            })?,
+            buffer: AlignedBuffer::allocate_zeroed(NonZeroUsize::new(CHUNK_BYTES as usize).unwrap()).map_err(
+                |source| DataFileError::Task {
+                    operation: IoOperation::Write,
+                    source: Box::new(source),
+                },
+            )?,
             entries: Vec::new(),
         })
     }

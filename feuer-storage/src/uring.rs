@@ -19,6 +19,7 @@ use std::{
     fs::File,
     future::poll_fn,
     io, mem,
+    num::NonZeroUsize,
     ops::Range,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     pin::pin,
@@ -407,7 +408,7 @@ impl IoBuffers {
             0
         };
         let copy_length = length - aligned_length;
-        let tail = if copy_length > 0 {
+        let tail = if let Some(copy_length) = NonZeroUsize::new(copy_length) {
             let mut buffer = AlignedBuffer::allocate_zeroed(copy_length)?;
             buffer.as_mut_slice()[..bytes.len() - aligned_length].copy_from_slice(&bytes[aligned_length..]);
             buffer.into_bytes()

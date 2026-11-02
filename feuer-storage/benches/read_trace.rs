@@ -6,7 +6,7 @@ use std::{
     error::Error,
     fs::read_to_string,
     hint::black_box,
-    num::ParseIntError,
+    num::{NonZeroUsize, ParseIntError},
     time::{Duration, Instant},
 };
 
@@ -44,7 +44,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Initialize only referenced disk ranges, keeping original addresses in a sparse file.
     let max_length = reads.iter().map(|[_, _, length]| length).max().unwrap();
-    let mut buffer = AlignedBuffer::allocate_zeroed((*max_length as usize + 4095).next_multiple_of(4096))?;
+    let mut buffer = AlignedBuffer::allocate_zeroed(
+        NonZeroUsize::new((*max_length as usize + 4095).next_multiple_of(4096)).unwrap(),
+    )?;
     buffer.as_mut_slice().fill(0x5a);
     let payload = buffer.into_bytes();
     for &[_, offset, length] in &reads {

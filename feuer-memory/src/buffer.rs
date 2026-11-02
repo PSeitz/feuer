@@ -103,7 +103,7 @@ impl BufferPool {
                 }
                 buffer
             }
-            None => AlignedBuffer::allocate_zeroed(capacity)?,
+            None => AlignedBuffer::allocate_zeroed(NonZeroUsize::new(capacity).unwrap())?,
         };
         buffer.length = length;
         buffer.pool = Some((Arc::downgrade(self), self.metrics.clone()));
@@ -344,24 +344,21 @@ impl Drop for LargeBuffer {
 
 impl AlignedBuffer {
     /// Allocates zeroed memory that is freed on release (used for write scratch).
-    pub fn allocate_zeroed(length: usize) -> io::Result<Self> {
-        assert!(length > 0);
-        if length > MAX_FIXED_BUFFER_BYTES {
+    pub fn allocate_zeroed(length: NonZeroUsize) -> io::Result<Self> {
+        if length.get() > MAX_FIXED_BUFFER_BYTES {
             return Ok(Self {
-                memory: ManuallyDrop::new(BufferMemory::Large(LargeBuffer::allocate_zeroed(
-                    NonZeroUsize::new(length).unwrap(),
-                )?)),
-                length,
+                memory: ManuallyDrop::new(BufferMemory::Large(LargeBuffer::allocate_zeroed(length)?)),
+                length: length.get(),
                 pool: None,
             });
         }
-        let layout = Self::layout(length)?;
+        let layout = Self::layout(length.get())?;
         // SAFETY: layout is nonzero with a valid power-of-two alignment.
         let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
             .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer allocation failed"))?;
         Ok(Self {
             memory: ManuallyDrop::new(BufferMemory::Fixed(FixedBuffer { ptr, layout })),
-            length,
+            length: length.get(),
             pool: None,
         })
     }

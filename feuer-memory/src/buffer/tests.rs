@@ -17,7 +17,7 @@ fn buffer_pool_bytes(registry: &Registry, bucket: &str, status: &str) -> f64 {
 #[test]
 fn scratch_buffers_keep_requested_capacity_and_alignment() {
     for length in [1, BUFFER_ALIGNMENT - 1, BUFFER_ALIGNMENT, BUFFER_ALIGNMENT + 1] {
-        let mut buffer = AlignedBuffer::allocate_zeroed(length).unwrap();
+        let mut buffer = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(length).unwrap()).unwrap();
         assert!(matches!(&*buffer.memory, BufferMemory::Fixed(_)));
         assert_eq!(buffer.capacity(), length);
         assert_eq!(buffer.as_ref().len(), length);
@@ -32,7 +32,7 @@ fn scratch_buffers_keep_requested_capacity_and_alignment() {
 
 #[test]
 fn large_buffer_keeps_its_backing_memory_below_the_fixed_bucket_limit() {
-    let mut buffer = AlignedBuffer::allocate_zeroed(MAX_FIXED_BUFFER_BYTES + 1).unwrap();
+    let mut buffer = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(MAX_FIXED_BUFFER_BYTES + 1).unwrap()).unwrap();
     buffer.as_mut_slice()[..3 * BUFFER_ALIGNMENT].fill(0x99);
     let capacity = BUFFER_ALIGNMENT + 1;
     let BufferMemory::Large(memory) = &mut *buffer.memory else {
