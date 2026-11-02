@@ -481,6 +481,8 @@ impl Cache {
         result
     }
 
+    /// Checks memory, then disk if configured, promoting disk hits to memory.
+    /// Unlike `fetch`, returns a miss without invoking a source callback.
     async fn lookup(
         &self,
         object_key: ObjectKeyHash,
@@ -501,8 +503,8 @@ impl Cache {
         (LookupOutcome::Miss, None)
     }
 
-    /// Rechecks memory before fetching from disk or the callback.
-    /// Another fetch may have populated memory before this caller joined the registry.
+    /// Looks up the object in memory, then disk if configured, before invoking the source callback.
+    /// The memory recheck handles insertions before this caller joined the registry.
     async fn fetch<F, Fut, E>(
         &self,
         object_key: ObjectKeyHash,
