@@ -105,7 +105,7 @@ mod tests {
         let key = ObjectKeyHash(0x1234_5678_9abc_def0_1122_3344_5566_7788);
         let cases = [
             (LookupOutcome::MemoryHit, 1234, 1),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "disk"))]
             (LookupOutcome::DiskHit, 1234, 2),
             (LookupOutcome::Callback, 1234, 3),
             (LookupOutcome::Callback, 0, 3),

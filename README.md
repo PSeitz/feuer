@@ -47,6 +47,10 @@ The tiered cache API supports memory-only operation on every platform. Disk cach
 Disk caching requires Linux with `io_uring` and a filesystem supporting `O_DIRECT` and `STATX_DIOALIGN`.
 Set disk capacity to `0` for memory-only operation on any platform.
 
+The `disk` Cargo feature is enabled by default. Set `default-features = false` on your
+`feuer` dependency to exclude `feuer-storage` entirely, including on Linux. A build without
+this feature rejects nonzero disk capacity.
+
 Verify customer environments before enabling disk caching. Kernel support alone
 is insufficient: `kernel.io_uring_disabled` can restrict ring creation, and
 container seccomp policies can block the io_uring syscalls. A blocked

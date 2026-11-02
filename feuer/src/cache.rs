@@ -15,7 +15,7 @@ use feuer_memory::{
     AlignedBuffer, MemoryCache, MemoryMetrics,
     retention::{FetchCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer},
 };
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "disk"))]
 use feuer_storage::{DiskCache, DiskCacheOptions, DiskMetrics, IoMetrics};
 use feuer_utils::{ObjectKeyHash, config::read_env_number};
 use mixtrics::{metrics::BoxedRegistry, registry::noop::NoopMetricsRegistry};
@@ -64,7 +64,7 @@ struct CacheInner {
     memory: MemoryCache,
     metrics: LookupMetrics,
     pending_fetches: PendingFetches,
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "disk"))]
     disk: Option<DiskCache>,
 }
 
@@ -72,7 +72,7 @@ struct CacheInner {
 ///
 /// Lookups check memory, then integrity-checked disk, then the per-call callback.
 /// Disk writes are best-effort. A full 512-entry queue skips new writes. Zero disk capacity disables disk.
-/// Otherwise, opening requires Linux direct I/O and io_uring and waits for metadata recovery.
+/// Otherwise, opening requires the `disk` feature, Linux direct I/O and io_uring, and waits for metadata recovery.
 #[derive(Clone)]
 pub struct Cache {
     inner: Arc<CacheInner>,
@@ -223,7 +223,7 @@ impl<'a> CacheBuilder<'a> {
     }
 
     /// Shares I/O concurrency with other caches using clones of these queues.
-    /// Available on Linux. Zero disk capacity ignores the queues.
+    /// Available on Linux with the `disk` feature. Zero disk capacity ignores the queues.
     /// Contents, capacities, eviction, buffer pools, file locks, and background-write queues
     /// remain independent.
     pub fn with_io_queues(mut self, queues: IoQueues) -> Self {
@@ -247,13 +247,13 @@ impl<'a> CacheBuilder<'a> {
 
     /// Opens a cache, using only memory when disk capacity is zero.
     /// Memory-only operation works on every platform without a Tokio runtime.
-    /// Nonzero disk capacity returns an error on platforms other than Linux.
-    /// On Linux, disk caching requires Tokio, io_uring and direct I/O, locks the backing file,
+    /// Nonzero disk capacity returns an error unless built for Linux with the `disk` feature.
+    /// Disk caching requires Tokio, io_uring and direct I/O, locks the backing file,
     /// and waits for metadata recovery. Disk failures never fall back to memory.
     /// Validates settings and reads environment defaults before opening any files.
     pub async fn open(self) -> Result<Cache, CacheOpenError> {
         let config = self.resolve_config()?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "disk")))]
         {
             if config.disk_capacity() != 0 {
                 return Err(DiskCacheError::UnsupportedPlatform.into());
@@ -269,7 +269,7 @@ impl<'a> CacheBuilder<'a> {
             )))
             .with_reclaim_sample_size(config.reclaim_sample_size())
             .with_retention_scorer(self.memory_scorer);
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "disk"))]
         let disk = if config.disk_capacity() == 0 {
             None
         } else {
@@ -293,7 +293,7 @@ impl<'a> CacheBuilder<'a> {
                 memory,
                 metrics: LookupMetrics::new(metrics_registry),
                 pending_fetches: PendingFetches::default(),
-                #[cfg(target_os = "linux")]
+                #[cfg(all(target_os = "linux", feature = "disk"))]
                 disk,
             }),
             access_trace: None,
@@ -479,9 +479,9 @@ impl Cache {
         if let Some(bytes) = self.inner.memory.get(&object_key) {
             return (LookupOutcome::MemoryHit, Some(bytes));
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(all(target_os = "linux", feature = "disk")))]
         let _ = should_fall_through;
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "disk"))]
         if let Some(disk) = &self.inner.disk
             && let Some((bytes, buffer_capacity)) = disk.get_with_fallthrough(&object_key, should_fall_through).await
         {
@@ -520,7 +520,7 @@ impl Cache {
                 return (LookupOutcome::CallbackError, Err(GetOrFetchError::Callback(error)));
             }
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "disk"))]
         if let Some(disk) = &self.inner.disk {
             let metrics = &self.inner.metrics;
             if disk.contains(&object_key) {
@@ -548,7 +548,7 @@ pub enum GetOrFetchError<E> {
     Callback(#[source] E),
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, target_os = "linux", feature = "disk"))]
 mod disk_fallthrough_tests;
 
 #[cfg(test)]
@@ -563,10 +563,10 @@ mod download_buffer_tests;
 #[cfg(test)]
 mod object_allocation_charge_tests;
 
-#[cfg(all(test, not(target_os = "linux")))]
+#[cfg(all(test, not(all(target_os = "linux", feature = "disk"))))]
 mod request_history_tests;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, target_os = "linux", feature = "disk"))]
 mod tests {
     use std::{
         convert::Infallible,

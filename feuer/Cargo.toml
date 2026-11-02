@@ -12,6 +12,14 @@ license.workspace = true
 readme.workspace = true
 exclude.workspace = true
 
+[features]
+default = ["disk"]
+disk = ["dep:feuer-storage"]
+
+[[example]]
+name = "shared_io_objects"
+required-features = ["disk"]
+
 [dependencies]
 bytes = { workspace = true }
 feuer-historian = { workspace = true }
@@ -22,7 +30,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-feuer-storage = { path = "../feuer-storage" }
+feuer-storage = { path = "../feuer-storage", optional = true }
 
 [dev-dependencies]
 mixtrics = { workspace = true, features = ["prometheus"] }

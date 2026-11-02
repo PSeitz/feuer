@@ -131,7 +131,7 @@ fn memory_only_builder_preserves_retention_scorer() {
     assert!(scorer.0.load(Ordering::Relaxed) > 0);
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", feature = "disk")))]
 #[test]
 fn nonzero_disk_capacity_is_rejected_without_runtime_or_files() {
     let directory = tempdir().unwrap();
@@ -151,7 +151,7 @@ fn nonzero_disk_capacity_is_rejected_without_runtime_or_files() {
         ));
         assert_eq!(
             error.to_string(),
-            "disk caching requires Linux; set disk capacity to zero for memory-only operation"
+            "disk caching requires Linux and the disk feature; set disk capacity to zero for memory-only operation"
         );
     }
     assert!(!unused_directory.exists());

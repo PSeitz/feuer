@@ -8,7 +8,7 @@ use mixtrics::metrics::{BoxedCounter, BoxedHistogram, BoxedRegistry, Buckets};
 #[derive(Clone, Copy)]
 pub(crate) enum LookupOutcome {
     MemoryHit,
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "disk"))]
     DiskHit,
     Callback = 2,
     CallbackError,
@@ -20,9 +20,9 @@ pub(crate) struct LookupMetrics {
     outcome_counts: [BoxedCounter; 5],
     success_durations: [BoxedHistogram; 2],
     served_bytes: [BoxedCounter; 3],
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "disk"))]
     pub(crate) disk_write_already_covered: BoxedCounter,
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "disk"))]
     pub(crate) disk_write_redundant: BoxedCounter,
 }
 
@@ -44,7 +44,7 @@ impl LookupMetrics {
             "Object payload bytes returned by successful Feuer lookups".into(),
             &["source"],
         );
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "disk"))]
         let writes = registry.register_counter_vec(
             "feuer_disk_write_queue_total".into(),
             "Disk-write queue admissions, rejections and pre-write discards. The queued outcome measures admission"
@@ -52,9 +52,9 @@ impl LookupMetrics {
             &["outcome"],
         );
         Self {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "disk"))]
             disk_write_already_covered: writes.counter(&["already_covered".into()]),
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", feature = "disk"))]
             disk_write_redundant: writes.counter(&["redundant".into()]),
             outcome_counts: ["memory_hit", "disk_hit", "callback", "callback_error", "miss"]
                 .map(|label| count.counter(&[label.into()])),

@@ -26,7 +26,7 @@ fn lookup_bytes_record_all_successes_but_latency_excludes_memory_hits() {
     let metrics = LookupMetrics::new(&backend);
     for (outcome, label) in [
         (LookupOutcome::MemoryHit, "memory_hit"),
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "disk"))]
         (LookupOutcome::DiskHit, "disk_hit"),
         (LookupOutcome::Callback, "callback"),
         (LookupOutcome::CallbackError, "callback_error"),
@@ -42,7 +42,7 @@ fn lookup_bytes_record_all_successes_but_latency_excludes_memory_hits() {
         value(&registry, "feuer_lookup_duration_seconds", &[("outcome", "callback")]),
         1.0
     );
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "disk"))]
     {
         assert_eq!(
             value(&registry, "feuer_lookup_duration_seconds", &[("outcome", "disk_hit")]),
@@ -67,7 +67,7 @@ fn lookup_bytes_record_all_successes_but_latency_excludes_memory_hits() {
             .iter()
             .all(|label| label.name() != "outcome" || matches!(label.value(), "disk_hit" | "callback"))
     }));
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(all(target_os = "linux", feature = "disk")))]
     assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", "disk")]), 0.0);
     assert!(registry.gather().iter().all(|family| {
         !matches!(

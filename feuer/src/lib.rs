@@ -35,6 +35,8 @@
 //!
 //! Capacities are in bytes. Memory capacity must be positive. Disk caching is disabled
 //! until you set a nonzero [`disk_capacity`](CacheBuilder::disk_capacity).
+//! The `disk` Cargo feature is enabled by default. Set `default-features = false` on
+//! your `feuer` dependency to exclude disk storage entirely, including on Linux.
 //!
 //! # How lookups work
 //!
@@ -63,8 +65,8 @@
 //!
 //! # Disk caching and retention
 //!
-//! To enable SSD caching, configure a nonzero disk capacity and open the cache on Linux
-//! with Tokio, `io_uring`, and direct-I/O support:
+//! To enable SSD caching, keep the `disk` feature enabled, configure a nonzero disk capacity,
+//! and open the cache on Linux with Tokio, `io_uring`, and direct-I/O support:
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), feuer::CacheOpenError> {
@@ -106,21 +108,21 @@ pub use feuer_memory::{
     AlignedBuffer,
     retention::{CacheReadSavingsScorer, FetchCostScorer, RetentionScorer},
 };
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "disk"))]
 pub use feuer_storage::{DiskCacheError, IoQueues};
 pub use feuer_utils::ObjectKeyHash;
 
-/// An error opening the disk cache on a platform without disk caching support.
-#[cfg(not(target_os = "linux"))]
+/// An error opening the disk cache in a build without disk caching support.
+#[cfg(not(all(target_os = "linux", feature = "disk")))]
 #[derive(Debug, thiserror::Error)]
 pub enum DiskCacheError {
-    /// Disk caching requires Linux. Set disk capacity to zero for memory-only operation.
-    #[error("disk caching requires Linux; set disk capacity to zero for memory-only operation")]
+    /// Disk caching requires Linux and the `disk` feature. Set disk capacity to zero for memory-only operation.
+    #[error("disk caching requires Linux and the disk feature; set disk capacity to zero for memory-only operation")]
     UnsupportedPlatform,
 }
 
-/// I/O queues are available only on Linux. Omit queue configuration on other platforms.
-#[cfg(not(target_os = "linux"))]
+/// I/O queues require Linux and the `disk` feature. Omit queue configuration in builds without disk support.
+#[cfg(not(all(target_os = "linux", feature = "disk")))]
 #[derive(Clone, Debug)]
 pub enum IoQueues {}
 

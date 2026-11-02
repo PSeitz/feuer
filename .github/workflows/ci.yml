@@ -58,6 +58,8 @@ jobs:
         env:
           RUST_BACKTRACE: 1
         run: cargo test --workspace
+      - name: Run memory-only tests
+        run: cargo test --locked -p feuer --no-default-features --all-targets
 
   docs:
     name: documentation
