@@ -21,6 +21,12 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 /// Independent of the number of memory or disk cache shards.
 const ACCESS_HISTORY_SHARDS: usize = 64;
 
+/// Default half-life of access counts, in requests across all keys.
+pub const DEFAULT_ACCESS_COUNT_HALF_LIFE: NonZeroU64 = NonZeroU64::new(262_144).unwrap();
+
+/// Default entry count above which background cleanup removes old history.
+pub const DEFAULT_HISTORY_ENTRY_LIMIT: NonZeroUsize = NonZeroUsize::new(2_000_000).unwrap();
+
 /// Request history shared by both cache tiers.
 /// Object keys select one of 64 independently locked history maps. The request clock remains global.
 /// Counters survive cache eviction. Every second, one background worker checks the entry limit
@@ -128,12 +134,6 @@ impl ObjectAccessHistories {
         &self.shards[FxBuildHasher.hash_one(key) as usize % self.shards.len()]
     }
 }
-
-/// Default half-life of access counts, in requests across all keys.
-pub const DEFAULT_ACCESS_COUNT_HALF_LIFE: NonZeroU64 = NonZeroU64::new(262_144).unwrap();
-
-/// Default entry count above which background cleanup removes old history.
-pub const DEFAULT_HISTORY_ENTRY_LIMIT: NonZeroUsize = NonZeroUsize::new(2_000_000).unwrap();
 
 /// A request count that decays as requests accumulate across all object keys.
 #[derive(Default)]
