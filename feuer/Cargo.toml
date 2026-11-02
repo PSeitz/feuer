@@ -16,7 +16,7 @@ exclude.workspace = true
 bytes = { workspace = true }
 feuer-historian = { workspace = true }
 feuer-memory = { workspace = true }
-feuer-types = { workspace = true }
+feuer-utils = { workspace = true }
 mixtrics = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }

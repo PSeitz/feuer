@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use feuer_types::ObjectKeyHash;
+use feuer_utils::ObjectKeyHash;
 use rustc_hash::FxHashMap;
 
 use super::MemoryCache;

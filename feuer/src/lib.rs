@@ -103,7 +103,7 @@ pub use feuer_memory::{
 };
 #[cfg(target_os = "linux")]
 pub use feuer_storage::{DiskCacheError, IoQueues};
-pub use feuer_types::ObjectKeyHash;
+pub use feuer_utils::ObjectKeyHash;
 
 /// An error opening the disk cache on a platform without disk caching support.
 #[cfg(not(target_os = "linux"))]

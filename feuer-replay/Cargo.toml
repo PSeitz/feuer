@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 bytes.workspace = true
 clap.workspace = true
-feuer-types.workspace = true
+feuer-utils.workspace = true
 rustc-hash.workspace = true
 tar = "0.4"
 zstd = "0.13"

@@ -2,7 +2,7 @@ use std::{array::from_fn, sync::Arc, thread};
 
 use bytes::Bytes;
 use feuer_historian::ObjectAccessHistories;
-use feuer_types::ObjectKeyHash;
+use feuer_utils::ObjectKeyHash;
 
 use super::{MemoryCache, shard_capacity_for};
 use crate::{

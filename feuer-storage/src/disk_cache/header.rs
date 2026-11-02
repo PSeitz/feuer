@@ -52,7 +52,7 @@ mod tests {
             tests::{download, entry_disk_ranges, with_manual_metadata_writes},
         },
     };
-    use feuer_types::ObjectKeyHash;
+    use feuer_utils::ObjectKeyHash;
     use std::path::Path;
 
     /// Opens a cache with manually written metadata.

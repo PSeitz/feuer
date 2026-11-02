@@ -164,7 +164,7 @@ cargo fmt --all -- --check
 On other platforms:
 
 ```console
-cargo test -p feuer -p feuer-memory -p feuer-historian -p feuer-types
+cargo test -p feuer -p feuer-memory -p feuer-historian -p feuer-utils
 ```
 
 For internals, see the [architecture](architecture.html), [I/O queues](queues.html),

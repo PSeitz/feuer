@@ -1,7 +1,7 @@
 //! Shared retention policy for the memory and disk tiers.
 
 use feuer_historian::ObjectAccessHistories;
-use feuer_types::ObjectKeyHash;
+use feuer_utils::ObjectKeyHash;
 
 /// Scores how valuable a cached object is to retain.
 ///

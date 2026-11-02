@@ -9,7 +9,7 @@ callback**. The [contract](tiered-plan.md) describes behavior, and the
 | Crate | Responsibility |
 | --- | --- |
 | `feuer` | Cloneable tiered handle, lookup, shared in-flight work, optional disk-pressure fallthrough, metrics, and access tracing |
-| `feuer-types` | XXH3-128 object identity |
+| `feuer-utils` | XXH3-128 object identity and configuration helpers |
 | `feuer-historian` | One decayed request counter per object, shared by both tiers and independent of cache residency |
 | `feuer-memory` | Sharded object index, sampled eviction, cached allocation accounting, and aligned buffer pool |
 | `feuer-storage` | Linux direct I/O and io_uring, object index, payload checksums, chunk packing, background writes, metadata persistence, and recovery |

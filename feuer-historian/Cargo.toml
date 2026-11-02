@@ -13,7 +13,7 @@ readme.workspace = true
 exclude.workspace = true
 
 [dependencies]
-feuer-types = { workspace = true }
+feuer-utils = { workspace = true }
 parking_lot = { workspace = true }
 rustc-hash = { workspace = true }
 

@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use feuer_types::ObjectKeyHash;
+use feuer_utils::ObjectKeyHash;
 use parking_lot::Mutex;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 

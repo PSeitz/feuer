@@ -8,7 +8,7 @@ use std::{
     result,
 };
 
-use feuer_types::ObjectKeyHash;
+use feuer_utils::ObjectKeyHash;
 use rustc_hash::FxHashMap;
 use tar::Archive;
 use zstd::Decoder;

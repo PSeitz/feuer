@@ -17,7 +17,7 @@ use feuer_memory::{
 };
 #[cfg(target_os = "linux")]
 use feuer_storage::{DiskCache, DiskCacheOptions, DiskMetrics, IoMetrics};
-use feuer_types::{ObjectKeyHash, config::read_env_number};
+use feuer_utils::{ObjectKeyHash, config::read_env_number};
 use mixtrics::{metrics::BoxedRegistry, registry::noop::NoopMetricsRegistry};
 use thiserror::Error;
 

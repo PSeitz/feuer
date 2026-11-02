@@ -312,7 +312,7 @@ dependencies = [
  "feuer-historian",
  "feuer-memory",
  "feuer-storage",
- "feuer-types",
+ "feuer-utils",
  "mixtrics",
  "prometheus",
  "tempfile",
@@ -324,7 +324,7 @@ dependencies = [
 name = "feuer-historian"
 version = "0.23.0-dev"
 dependencies = [
- "feuer-types",
+ "feuer-utils",
  "parking_lot",
  "rustc-hash",
 ]
@@ -336,7 +336,7 @@ dependencies = [
  "bytes",
  "bytesize",
  "feuer-historian",
- "feuer-types",
+ "feuer-utils",
  "libc",
  "mixtrics",
  "parking_lot",
@@ -353,7 +353,7 @@ dependencies = [
  "bytes",
  "clap",
  "feuer",
- "feuer-types",
+ "feuer-utils",
  "mixtrics",
  "prometheus",
  "rustc-hash",
@@ -372,7 +372,7 @@ dependencies = [
  "bytes",
  "feuer-historian",
  "feuer-memory",
- "feuer-types",
+ "feuer-utils",
  "fs4",
  "io-uring",
  "libc",
@@ -389,7 +389,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "feuer-types"
+name = "feuer-utils"
 version = "0.23.0-dev"
 dependencies = [
  "bytesize",

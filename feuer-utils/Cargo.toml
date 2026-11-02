@@ -1,6 +1,6 @@
 [package]
-name = "feuer-types"
-description = "Shared immutable-object contract types for Feuer"
+name = "feuer-utils"
+description = "Shared types and configuration helpers for Feuer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

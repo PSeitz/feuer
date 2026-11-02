@@ -1,4 +1,4 @@
-//! Shared contracts for Feuer's immutable-object cache tiers.
+//! Shared types and configuration helpers for Feuer's immutable-object cache tiers.
 //!
 //! Memory and disk exchange hashed object identities.
 

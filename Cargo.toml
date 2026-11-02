@@ -6,7 +6,7 @@ members = [
   "feuer-memory",
   "feuer-replay",
   "feuer-storage",
-  "feuer-types",
+  "feuer-utils",
 ]
 
 [workspace.package]
@@ -27,7 +27,7 @@ bytesize = "2.7"
 clap = { version = "4", features = ["derive"] }
 feuer-historian = { version = "0.23.0-dev", path = "feuer-historian" }
 feuer-memory = { version = "0.23.0-dev", path = "feuer-memory" }
-feuer-types = { version = "0.23.0-dev", path = "feuer-types" }
+feuer-utils = { version = "0.23.0-dev", path = "feuer-utils" }
 fs4 = { version = "0.13", default-features = false }
 mixtrics = "0.2"
 parking_lot = "0.12"

@@ -10,7 +10,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use feuer_types::ObjectKeyHash;
+use feuer_utils::ObjectKeyHash;
 use tokio::sync::mpsc;
 
 use crate::metrics::LookupOutcome;

@@ -31,7 +31,7 @@ use feuer_memory::{
     BufferPool,
     retention::{FetchCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer, sample_candidates},
 };
-use feuer_types::ObjectKeyHash;
+use feuer_utils::ObjectKeyHash;
 #[cfg(test)]
 use page_format::METADATA_PAGE_BYTES;
 use rustc_hash::FxHashMap;
