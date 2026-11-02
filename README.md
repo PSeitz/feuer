@@ -116,7 +116,10 @@ This allows to maximize utilization of your resources. E.g. network bandwidth ca
 
 - Don't use the same key for different payloads. If you mutate an object, use a new key.
   Feuer has no invalidation API.
-- Keys are hashed to 128-bit identities without retaining the strings or checking for collisions.
+- Keys must be non-adversarial. Feuer stores only XXH3-128 hashes, without retaining the
+  original keys or checking for collisions. XXH3 is non-cryptographic and provides no protection
+  against deliberately constructed collisions. Colliding keys identify the same object, so a
+  lookup can return another key's payload.
 - Disk caching and recovery are best-effort. Opening waits for metadata recovery.
 - Changing capacity, disk format, or application payload version invalidates disk entries. Use
   `.payload_version(n)` when changing your payload encoding.

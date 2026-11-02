@@ -48,6 +48,11 @@
 //!
 //! # Object identity and recovery
 //!
+//! Keys must be non-adversarial. Feuer stores only each key's XXH3-128 hash, without
+//! retaining the original key or checking for collisions. XXH3 is a non-cryptographic hash
+//! and provides no protection against deliberately constructed collisions. Colliding keys
+//! identify the same object, so a lookup can return another key's payload.
+//!
 //! Each key must identify one immutable payload. Use a new key when the content changes.
 //! Feuer has no invalidation API. Your application remains responsible for source retries
 //! and concurrency limits.
@@ -120,5 +125,8 @@ pub enum DiskCacheError {
 pub enum IoQueues {}
 
 /// The UTF-8 identity supplied at the public cache boundary.
-/// Internally only its XXH3-128 hash is stored. Colliding keys identify the same object.
+///
+/// Keys must be non-adversarial. Only the XXH3-128 hash is stored, with no collision checks.
+/// XXH3 is non-cryptographic and provides no protection against deliberately constructed
+/// collisions. Colliding keys identify the same object, so a lookup can return another key's payload.
 pub type ObjectKey = String;
