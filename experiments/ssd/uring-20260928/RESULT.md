@@ -1,7 +1,8 @@
 # Feuer io_uring benchmark
 
 - **Implementation:** Feuer's I/O path as of September 28, using direct I/O.
-- **Workload:** varying read sizes and read/write concurrency. Writes use 1 MiB requests.
+- **Workload:** varying read sizes and concurrent calls. Writes use 1 MiB requests.
+- **Concurrency:** Read QD and Write QD count outstanding calls. Feuer's admission limit stayed at 64 per direction. QD128 includes calls waiting for admission, rather than 128 requests submitted to io_uring.
 - **Results:** main-table values are medians of three runs.
 - **Comparison:** fio controls measure I/O without Feuer's allocation, queueing, and reply overhead.
 
