@@ -613,7 +613,7 @@ impl IoQueue {
         loop {
             // Release the completion-queue borrow before retrying a short request.
             while let Some(completion) = { self.ring.completion().next() } {
-                self.complete_request(completion.user_data(), completion.result());
+                self.handle_io_completion(completion.user_data(), completion.result());
             }
             self.queue_requests_for_submission();
             if self.receiver.is_closed() && self.receiver.is_empty() && self.active.iter().all(Option::is_none) {
@@ -641,7 +641,8 @@ impl IoQueue {
         }
     }
 
-    fn complete_request(&mut self, user_data: u64, result: i32) {
+    /// Handles an I/O completion by advancing the request, queuing its remaining I/O, or returning its result.
+    fn handle_io_completion(&mut self, user_data: u64, result: i32) {
         let request_index = user_data as usize;
         let request = self.active[request_index]
             .as_mut()

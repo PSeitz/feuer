@@ -760,7 +760,7 @@ fn canceled_requests_do_not_retry_short_io_or_eintr() {
             let (request, reply) = request(&files, operation, 0, 2 * DIRECT_IO_ALIGNMENT_BYTES);
             queue.active[0] = Some(request);
             drop(reply);
-            queue.complete_request(0, result);
+            queue.handle_io_completion(0, result);
             assert!(queue.active[0].is_none());
             assert!(queue.ring.submission().is_empty());
         }
@@ -868,7 +868,7 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
     completions.sort_unstable_by_key(|c| Reverse(c.user_data()));
     for completion in completions {
         assert_eq!(completion.result(), length as i32);
-        queue.complete_request(completion.user_data(), completion.result());
+        queue.handle_io_completion(completion.user_data(), completion.result());
     }
     assert!(queue.ring.submission().is_empty());
     let (bytes, capacity) = future.await.unwrap();
@@ -919,7 +919,7 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
         }
         if fail {
             let completion = completions.remove(0);
-            queue.complete_request(completion.user_data(), -libc::EIO);
+            queue.handle_io_completion(completion.user_data(), -libc::EIO);
             let Poll::Ready(Err(error)) = future.as_mut().poll(&mut context) else {
                 panic!("read error was not returned");
             };
@@ -930,7 +930,7 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
         for completion in completions {
             assert!(weak_files.upgrade().is_some());
             assert_eq!(pool.idle_bytes(), 0);
-            queue.complete_request(completion.user_data(), completion.result());
+            queue.handle_io_completion(completion.user_data(), completion.result());
             queue.queue_requests_for_submission(); // Discard the canceled queued piece when the active array has room.
         }
         assert!(queue.active.iter().all(Option::is_none));
