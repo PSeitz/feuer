@@ -1,5 +1,14 @@
 # SSD experiments
 
+## Read-size distribution benchmark
+
+[Read/write capacity with the captured read-size mix](read-size-mix-20261102/RESULT.md)
+measures native fio reads alongside fixed 1-MiB writes. It preserves throughput,
+latency by read size, CPU, and device metrics. The input describes successful
+logical accesses, including memory hits, rather than observed disk traffic.
+
+## Historical results
+
 Each dated directory contains a `RESULT.md` with the original report's
 measurement tables and short setup notes. Table rows are preserved verbatim.
 Per-request logs, CSVs, plots, and benchmark sources are omitted.
