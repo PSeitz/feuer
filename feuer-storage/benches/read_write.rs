@@ -1,6 +1,7 @@
 //! Histogram-driven reads alongside fixed 1-MiB writes through Feuer's DataFile.
 
 use std::{
+    collections::BTreeMap,
     fs,
     hint::black_box,
     io,
@@ -18,13 +19,6 @@ use tokio::task::JoinSet;
 
 const MIB: u64 = 1024 * 1024;
 const WRITERS: u64 = 8;
-const SIZE_BANDS: [(&str, usize, usize); 5] = [
-    ("<=4KiB", 1, 4096),
-    (">4..64KiB", 4097, 65536),
-    (">64KiB..1MiB", 65537, MIB as usize),
-    (">1..8MiB", MIB as usize + 1, 8 * MIB as usize),
-    (">8MiB", 8 * MIB as usize + 1, usize::MAX),
-];
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -144,17 +138,16 @@ async fn measure(
 }
 
 fn report(case: &str, samples: &[Sample], seconds: f64) {
-    for (operation, label, min, max) in [("read", "all", 0, usize::MAX), ("write", "all", 0, usize::MAX)]
-        .into_iter()
-        .chain(SIZE_BANDS.map(|(label, min, max)| ("read", label, min, max)))
-    {
-        let selected: Vec<_> = samples
-            .iter()
-            .filter(|s| s.write == (operation == "write") && (min..=max).contains(&s.length))
-            .collect();
-        if selected.is_empty() {
-            continue;
+    let mut groups = BTreeMap::<_, Vec<&Sample>>::new();
+    for sample in samples {
+        groups.entry((None, sample.write)).or_default().push(sample);
+        if !sample.write {
+            groups.entry((Some(sample.length), false)).or_default().push(sample);
         }
+    }
+    for ((length, write), selected) in groups {
+        let operation = if write { "write" } else { "read" };
+        let label = length.map_or_else(|| "all".to_owned(), |length| format!("{length}B"));
         let bytes: u64 = selected.iter().map(|s| s.length as u64).sum();
         let mut latencies: Vec<_> = selected.iter().map(|s| s.latency_ns).collect();
         latencies.sort_unstable();
@@ -185,21 +178,41 @@ async fn main() -> Result<()> {
         .ok_or("file capacity overflow")?;
     let mut total = 0_u64;
     let mut sizes = Vec::new();
+    let mut weights = BTreeMap::<usize, u64>::new();
     for &(size, weight) in &args.sizes {
         if size as u64 > args.read_mib * MIB {
             return Err("read sizes must fit the read region".into());
         }
         total = total.checked_add(weight).ok_or("weight sum overflow")?;
         sizes.push((size, total));
+        *weights.entry(size).or_default() += weight;
     }
     let sizes = Arc::new(sizes);
     println!(
         "Read mix: {} sizes, total weight {total}. {} read callers, {}s warmup, {}s measurement per case.",
-        sizes.len(),
+        weights.len(),
         args.readers,
         args.warmup,
         args.seconds,
     );
+
+    let weighted_bytes: u128 = weights
+        .iter()
+        .map(|(&size, &weight)| size as u128 * weight as u128)
+        .sum();
+    println!("Input read distribution:");
+    println!(
+        "{:<14} {:>12} {:>14} {:>14}",
+        "Size", "Weight", "Operations %", "Bytes %"
+    );
+    for (size, weight) in weights {
+        println!(
+            "{:<14} {weight:>12} {:>14.6} {:>14.6}",
+            format!("{size}B"),
+            100.0 * weight as f64 / total as f64,
+            100.0 * size as f64 * weight as f64 / weighted_bytes as f64,
+        );
+    }
 
     let temp = tempfile::Builder::new()
         .prefix("feuer-read-write-")

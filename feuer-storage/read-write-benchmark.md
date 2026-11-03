@@ -73,11 +73,19 @@ abort the run. A successful exit follows both cases and cleanup.
 
 ## Results
 
-The terminal report includes read/write throughput, IOPS, counts, bytes, and
-mean/p50/p95/p99 latency, including five read-size classes. It also reports
-process CPU, including I/O workers, and pool usage after drain. CPU 100% means
-one core. Its interval includes warmup and drain, and excludes initialization
-and report generation.
+The terminal report starts with the input distribution: exact size, operation
+weight, expected operation percentage, and expected byte percentage. Repeated
+sizes are combined. Measured results include overall read/write throughput,
+IOPS, counts, bytes, and mean/p50/p95/p99 latency, followed by a row for each
+exact read size with completed operations, sorted by size. There are no fixed
+size bands. Sizes without completions have no latency row.
+
+The default mix can produce thousands of rows. Check sample counts when
+interpreting percentiles, especially for rare sizes.
+
+The report also includes process CPU, including I/O workers, and pool usage
+after drain. CPU 100% means one core. Its interval includes warmup and drain,
+and excludes initialization and report generation.
 
 Throughput counts completions during the fixed measurement window. Outstanding
 operations drain afterward and are excluded. Read latency includes the DataFile
