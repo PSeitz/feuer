@@ -615,7 +615,7 @@ impl IoQueue {
             while let Some(completion) = { self.ring.completion().next() } {
                 self.complete_request(completion.user_data(), completion.result());
             }
-            self.receive_requests();
+            self.queue_requests_for_submission();
             if self.receiver.is_closed() && self.receiver.is_empty() && self.active.iter().all(Option::is_none) {
                 return Ok(());
             }
@@ -654,8 +654,9 @@ impl IoQueue {
         }
     }
 
-    /// Adds uncanceled requests to the active array and prepares their submissions.
-    fn receive_requests(&mut self) {
+    /// Moves requests from the channel into io_uring's submission queue while the active array has room.
+    /// Retains their buffers until completion. Discards requests whose callers canceled.
+    fn queue_requests_for_submission(&mut self) {
         for request_index in 0..self.active.len() {
             if self.active[request_index].is_some() {
                 continue;

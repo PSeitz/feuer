@@ -163,7 +163,7 @@
                 <summary><span class="node-name">Channel → active</span><span class="node-meta">no pending list</span></summary>
                 <div class="node-body">
                   <p>Submission sends through the reserved channel permit without another admission wait, signals the worker's eventfd, then awaits a oneshot reply.</p>
-                  <p>The worker receives requests in channel order directly into free active slots. When all slots are occupied, requests stay in the channel. Each active slot owns its request and buffers through completion; there is no intermediate pending list.</p>
+                  <p>The worker moves requests in channel order into io_uring's submission queue while the active request array has room. It discards requests whose callers canceled. When the array is full, requests stay in the channel. The array retains requests and their buffers through completion.</p>
                   <details class="source">
                     <summary>Code · enqueue and wake the worker</summary>
                     <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · submit_and_wait</a>
@@ -171,7 +171,7 @@
 permit.send(IoRequest::new(files, offset, buffers, buffer_range, result_sender));
 wake_queue(&amp;self.wake_fd);
 result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
-                    <a class="source-label" href="feuer-storage/src/uring.rs">Same file · receive_requests</a>
+                    <a class="source-label" href="feuer-storage/src/uring.rs">Same file · queue_requests_for_submission</a>
                   </details>
                 </div>
               </details>
@@ -282,7 +282,7 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;</code></pre>
               <details class="node">
                 <summary><span class="node-name">Sleep without stalling new work</span><span class="node-meta">ring fd + eventfd</span></summary>
                 <div class="node-body">
-                  <p>The loop collects completions, receives incoming requests only into free active slots, and submits. Interrupted and short submissions are retried before sleeping. Temporary resource pressure (<code>EAGAIN</code>) waits up to 1 ms before retrying, even if no accepted request can produce a completion. Once all prepared submissions have reached the kernel, it sleeps in <code>poll</code> watching both the ring and an eventfd.</p>
+                  <p>The loop collects completions, moves requests from the channel into io_uring's submission queue while the active request array has room, and submits. Interrupted and short submissions are retried before sleeping. Temporary resource pressure (<code>EAGAIN</code>) waits up to 1 ms before retrying, even if no accepted request can produce a completion. Once all prepared submissions have reached the kernel, it sleeps in <code>poll</code> watching both the ring and an eventfd.</p>
                   <p>New submissions signal the eventfd, so fresh work can wake the worker even while a slow operation is outstanding. It does not continuously spin.</p>
                   <details class="source">
                     <summary>Code · wait for completion or wakeup</summary>
@@ -314,7 +314,7 @@ let result = unsafe {
                     <li><strong>Normal shutdown:</strong> drain outstanding work, then join the worker.</li>
                     <li><strong>Unrecoverable queue failure or thread unwind:</strong> retain uncertain active buffers, files, and locks until process exit; closing the ring alone does not prove the kernel has stopped using them. Per-request error completions release resources normally.</li>
                   </ul>
-                  <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · apply_completion_result / receive_requests</a>
+                  <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · apply_completion_result / queue_requests_for_submission</a>
                 </div>
               </details>
             </div>

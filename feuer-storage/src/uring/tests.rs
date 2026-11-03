@@ -218,7 +218,7 @@ fn full_ring_does_not_block_the_other_direction() {
             full_replies.push(reply);
         }
         drop(full_sender);
-        full_queue.receive_requests();
+        full_queue.queue_requests_for_submission();
         full_queue.ring.submit().unwrap();
         assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
 
@@ -234,7 +234,7 @@ fn full_ring_does_not_block_the_other_direction() {
             other_replies.push(reply);
         }
         drop(other_sender);
-        other_queue.receive_requests();
+        other_queue.queue_requests_for_submission();
         assert_eq!(other_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
         assert_eq!(other_queue.ring.submission().len(), MAX_IN_FLIGHT_READS);
         assert!(other_queue.receiver.is_empty());
@@ -311,7 +311,7 @@ async fn active_request_limit_keeps_channel_full_until_completion() {
         sender.try_send(request).unwrap();
         replies.push(reply);
     }
-    queue.receive_requests();
+    queue.queue_requests_for_submission();
     assert_eq!(sender.capacity(), MAX_IN_FLIGHT_READS);
     for _ in 0..MAX_IN_FLIGHT_READS {
         let (request, reply) = request(&files, IoOperation::Read, 0, DIRECT_IO_ALIGNMENT_BYTES);
@@ -319,7 +319,7 @@ async fn active_request_limit_keeps_channel_full_until_completion() {
         replies.push(reply);
     }
     assert_eq!(sender.capacity(), 0);
-    queue.receive_requests();
+    queue.queue_requests_for_submission();
     assert_eq!(queue.receiver.len(), MAX_IN_FLIGHT_READS);
     assert_eq!(queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
     {
@@ -338,7 +338,7 @@ async fn active_request_limit_keeps_channel_full_until_completion() {
         }
         // Receiving a request releases channel capacity.
         assert!(reserve.as_mut().poll(&mut context).is_pending());
-        queue.receive_requests();
+        queue.queue_requests_for_submission();
         drop(reserve.await.unwrap());
     }
     assert_eq!(sender.capacity(), MAX_IN_FLIGHT_READS);
@@ -487,7 +487,7 @@ fn completed_requests_release_files_while_the_queue_remains_alive() {
     let weak_files = Arc::downgrade(&files);
     let (write, reply) = request(&files, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
     sender.try_send(write).unwrap();
-    queue.receive_requests();
+    queue.queue_requests_for_submission();
     queue.ring.submit_and_wait(1).unwrap();
     drop(files);
     drop(reply); // Completion exists but has not been processed by the queue.
@@ -562,7 +562,7 @@ fn queue_failure_retains_write_descriptors_and_files() {
     sender.try_send(other_write).unwrap();
     drop(other_files);
     drop(sender);
-    queue.receive_requests();
+    queue.queue_requests_for_submission();
     let requests_address = queue.active.as_ptr();
     let IoBuffers::Write { vectors, .. } = &queue.active[0].as_ref().unwrap().buffers else {
         unreachable!()
@@ -618,11 +618,11 @@ fn canceled_submitted_write_retains_buffers_on_queue_failure() {
     write.buffers = IoBuffers::from_write_bytes(DIRECT_IO_ALIGNMENT_BYTES, buffer.into_bytes()).unwrap();
     sender.try_send(write).unwrap();
     drop(sender);
-    queue.receive_requests();
+    queue.queue_requests_for_submission();
     // The write has reached the kernel, but its completion is not yet processed.
     queue.ring.submit_and_wait(1).unwrap();
     drop(reply);
-    queue.receive_requests();
+    queue.queue_requests_for_submission();
     assert!(queue.active[0].is_some());
     let other = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(other.as_ref().as_ptr(), address);
@@ -655,7 +655,7 @@ fn requests_are_submitted_in_channel_order_and_drained_on_shutdown() {
     sender.try_send(first).unwrap();
     sender.try_send(second).unwrap();
     drop(sender);
-    queue.receive_requests();
+    queue.queue_requests_for_submission();
     assert_eq!(
         [0, 1].map(|index| queue.active[index].as_ref().unwrap().disk_end),
         [DIRECT_IO_ALIGNMENT_BYTES as u64, 2 * DIRECT_IO_ALIGNMENT_BYTES as u64]
@@ -858,7 +858,7 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
             .poll(&mut Context::from_waker(Waker::noop()))
             .is_pending()
     );
-    queue.receive_requests();
+    queue.queue_requests_for_submission();
     assert_eq!(queue.ring.submission().len(), 3);
     for (index, request) in queue.active.iter().flatten().enumerate() {
         assert_eq!(request.buffer_range, index * length..(index + 1) * length);
@@ -905,11 +905,11 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
             assert!(future.as_mut().poll(&mut context).is_pending());
             yield_now().await; // Replenish Tokio's cooperative polling budget.
         }
-        queue.receive_requests();
+        queue.queue_requests_for_submission();
         assert_eq!(queue.ring.submission().len(), MAX_IN_FLIGHT_READS);
         assert!(future.as_mut().poll(&mut context).is_pending());
         assert_eq!(queue.receiver.len(), 1);
-        queue.receive_requests(); // The full active array leaves the last piece waiting.
+        queue.queue_requests_for_submission(); // The full active array leaves the last piece waiting.
         assert_eq!(queue.receiver.len(), 1);
         queue.ring.submit_and_wait(MAX_IN_FLIGHT_READS).unwrap();
         let mut completions: Vec<_> = queue.ring.completion().collect();
@@ -931,7 +931,7 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
             assert!(weak_files.upgrade().is_some());
             assert_eq!(pool.idle_bytes(), 0);
             queue.complete_request(completion.user_data(), completion.result());
-            queue.receive_requests(); // Discard the canceled queued piece when the active array has room.
+            queue.queue_requests_for_submission(); // Discard the canceled queued piece when the active array has room.
         }
         assert!(queue.active.iter().all(Option::is_none));
         assert!(queue.receiver.is_empty());
@@ -952,10 +952,10 @@ fn canceled_read_retains_destination_until_completion() {
     read.buffer_range = DIRECT_IO_ALIGNMENT_BYTES..2 * DIRECT_IO_ALIGNMENT_BYTES;
     sender.try_send(read).unwrap();
     drop(sender);
-    queue.receive_requests();
+    queue.queue_requests_for_submission();
     queue.ring.submit_and_wait(1).unwrap();
     drop(reply);
-    queue.receive_requests();
+    queue.queue_requests_for_submission();
     assert!(queue.active[0].is_some());
     let other = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(other.as_ref().as_ptr(), address);
