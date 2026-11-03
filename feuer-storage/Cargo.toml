@@ -16,6 +16,10 @@ exclude.workspace = true
 name = "read_trace"
 harness = false
 
+[[bench]]
+name = "read_write"
+harness = false
+
 [features]
 io-bench = []
 
@@ -39,6 +43,8 @@ libc = "0.2"
 [dev-dependencies]
 binggan = "0.17"
 blake3 = "1"
+clap = { workspace = true }
+fastrand = "2"
 mixtrics = { workspace = true, features = ["prometheus"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
 prometheus = { workspace = true }
