@@ -84,7 +84,7 @@ fn queue() -> (IoQueue, mpsc::Sender<IoRequest>, Arc<DataFileAndLock>) {
             ring: IoUring::new(MAX_IN_FLIGHT_READS as u32).unwrap(),
             wake_fd,
             receiver,
-            active: (0..MAX_IN_FLIGHT_READS).map(|_| None).collect(),
+            requests_awaiting_completion: (0..MAX_IN_FLIGHT_READS).map(|_| None).collect(),
         },
         sender,
         files,
@@ -220,7 +220,10 @@ fn full_ring_does_not_block_the_other_direction() {
         drop(full_sender);
         full_queue.queue_requests_for_submission();
         full_queue.ring.submit().unwrap();
-        assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
+        assert_eq!(
+            full_queue.requests_awaiting_completion.iter().flatten().count(),
+            MAX_IN_FLIGHT_READS
+        );
 
         for i in 0..MAX_IN_FLIGHT_READS {
             // Use disjoint aligned byte ranges on the same backing file.
@@ -235,7 +238,10 @@ fn full_ring_does_not_block_the_other_direction() {
         }
         drop(other_sender);
         other_queue.queue_requests_for_submission();
-        assert_eq!(other_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
+        assert_eq!(
+            other_queue.requests_awaiting_completion.iter().flatten().count(),
+            MAX_IN_FLIGHT_READS
+        );
         assert_eq!(other_queue.ring.submission().len(), MAX_IN_FLIGHT_READS);
         assert!(other_queue.receiver.is_empty());
         // Complete an entire ring without processing any completions on the full queue.
@@ -244,14 +250,17 @@ fn full_ring_does_not_block_the_other_direction() {
             let buffer = reply.try_recv().unwrap().unwrap();
             assert_eq!(buffer.is_some(), other_operation == IoOperation::Read);
         }
-        assert_eq!(full_queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
+        assert_eq!(
+            full_queue.requests_awaiting_completion.iter().flatten().count(),
+            MAX_IN_FLIGHT_READS
+        );
         full_queue.process_requests_until_disconnected().unwrap();
         for mut reply in full_replies {
             let buffer = reply.try_recv().unwrap().unwrap();
             assert_eq!(buffer.is_some(), operation == IoOperation::Read);
         }
         for queue in [&full_queue, &other_queue] {
-            assert!(queue.active.iter().all(Option::is_none));
+            assert!(queue.requests_awaiting_completion.iter().all(Option::is_none));
         }
     }
 }
@@ -283,14 +292,14 @@ fn resource_pressure_retries_pending_submissions() {
                     }
                     2 => Err(io::Error::from_raw_os_error(libc::EINTR)),
                     // Accept only one request so EAGAIN also occurs with a partially consumed SQ.
-                    // SAFETY: active requests own all SQE pointers. This submits one ordinary request.
+                    // SAFETY: requests awaiting completion own all SQE pointers. This submits one ordinary request.
                     3 => unsafe { ring.submitter().enter::<libc::sigset_t>(1, 0, 0, None) },
                     _ => ring.submit(),
                 }
             })
             .unwrap();
         assert!(submissions >= 5);
-        assert!(queue.active.iter().all(Option::is_none));
+        assert!(queue.requests_awaiting_completion.iter().all(Option::is_none));
         assert!(queue.ring.submission().is_empty());
         for mut reply in replies {
             let buffer = reply.try_recv().unwrap().unwrap();
@@ -321,7 +330,10 @@ async fn active_request_limit_keeps_channel_full_until_completion() {
     assert_eq!(sender.capacity(), 0);
     queue.queue_requests_for_submission();
     assert_eq!(queue.receiver.len(), MAX_IN_FLIGHT_READS);
-    assert_eq!(queue.active.iter().flatten().count(), MAX_IN_FLIGHT_READS);
+    assert_eq!(
+        queue.requests_awaiting_completion.iter().flatten().count(),
+        MAX_IN_FLIGHT_READS
+    );
     {
         let reserve = sender.reserve();
         tokio::pin!(reserve);
@@ -331,9 +343,9 @@ async fn active_request_limit_keeps_channel_full_until_completion() {
         queue.ring.submit_and_wait(MAX_IN_FLIGHT_READS).unwrap();
         for completion in queue.ring.completion() {
             let request_index = completion.user_data() as usize;
-            let mut request = queue.active[request_index].take().unwrap();
+            let mut request = queue.requests_awaiting_completion[request_index].take().unwrap();
             request.apply_completion_result(completion.result()).unwrap();
-            assert!(request.buffer_range.is_empty());
+            assert!(request.remaining_buffer_range.is_empty());
             request.send_result(Ok(()));
         }
         // Receiving a request releases channel capacity.
@@ -563,11 +575,11 @@ fn queue_failure_retains_write_descriptors_and_files() {
     drop(other_files);
     drop(sender);
     queue.queue_requests_for_submission();
-    let requests_address = queue.active.as_ptr();
-    let IoBuffers::Write { vectors, .. } = &queue.active[0].as_ref().unwrap().buffers else {
+    let requests_address = queue.requests_awaiting_completion.as_ptr();
+    let IoBuffers::Write { iovecs, .. } = &queue.requests_awaiting_completion[0].as_ref().unwrap().buffers else {
         unreachable!()
     };
-    let descriptors_address = vectors.as_ptr();
+    let descriptors_address = iovecs.as_ptr();
     let weak_files = Arc::downgrade(&files);
     drop(files);
 
@@ -581,8 +593,8 @@ fn queue_failure_retains_write_descriptors_and_files() {
     assert_eq!(error.raw_os_error(), Some(libc::EIO));
     assert!(matches!(receive.try_recv(), Err(TryRecvError::Empty)));
 
-    let retained = queue.retain_active_requests();
-    assert!(queue.active.is_empty());
+    let retained = queue.leak_requests();
+    assert!(queue.requests_awaiting_completion.is_empty());
     drop(queue);
     assert_eq!(
         receive.try_recv().unwrap().err().unwrap().kind(),
@@ -595,14 +607,14 @@ fn queue_failure_retains_write_descriptors_and_files() {
         io::ErrorKind::BrokenPipe
     );
     assert_eq!(retained.as_ptr(), requests_address);
-    let IoBuffers::Write { bytes, vectors } = &retained[0].as_ref().unwrap().buffers else {
+    let IoBuffers::Write { bytes, iovecs } = &retained[0].as_ref().unwrap().buffers else {
         unreachable!()
     };
-    assert_eq!(vectors.as_ptr(), descriptors_address);
+    assert_eq!(iovecs.as_ptr(), descriptors_address);
     assert_eq!(bytes[0].as_ptr(), payload_address);
-    for (bytes, vector) in bytes.iter().zip(vectors) {
-        assert_eq!(vector.iov_base.cast_const().cast::<u8>(), bytes.as_ptr());
-        assert_eq!(vector.iov_len, page);
+    for (bytes, iovec) in bytes.iter().zip(iovecs) {
+        assert_eq!(iovec.iov_base.cast_const().cast::<u8>(), bytes.as_ptr());
+        assert_eq!(iovec.iov_len, page);
     }
     assert_eq!(pool.idle_bytes(), 0);
 }
@@ -623,10 +635,10 @@ fn canceled_submitted_write_retains_buffers_on_queue_failure() {
     queue.ring.submit_and_wait(1).unwrap();
     drop(reply);
     queue.queue_requests_for_submission();
-    assert!(queue.active[0].is_some());
+    assert!(queue.requests_awaiting_completion[0].is_some());
     let other = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(other.as_ref().as_ptr(), address);
-    drop(queue); // Failure retains the active request, even after caller cancellation.
+    drop(queue); // Failure leaks the request, even after caller cancellation.
     let buffer = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(buffer.as_ref().as_ptr(), address);
 
@@ -657,7 +669,10 @@ fn requests_are_submitted_in_channel_order_and_drained_on_shutdown() {
     drop(sender);
     queue.queue_requests_for_submission();
     assert_eq!(
-        [0, 1].map(|index| queue.active[index].as_ref().unwrap().disk_end),
+        [0, 1].map(|index| queue.requests_awaiting_completion[index]
+            .as_ref()
+            .unwrap()
+            .file_end_offset),
         [DIRECT_IO_ALIGNMENT_BYTES as u64, 2 * DIRECT_IO_ALIGNMENT_BYTES as u64]
     );
     queue.process_requests_until_disconnected().unwrap();
@@ -747,7 +762,7 @@ fn canceled_queued_requests_drain_on_shutdown_without_submission() {
             .process_requests_with_submit(|_| panic!("canceled queued request reached submission"))
             .unwrap();
         assert!(queue.receiver.is_empty());
-        assert!(queue.active.iter().all(Option::is_none));
+        assert!(queue.requests_awaiting_completion.iter().all(Option::is_none));
         assert!(queue.ring.submission().is_empty());
     }
 }
@@ -758,10 +773,10 @@ fn canceled_requests_do_not_retry_short_io_or_eintr() {
         for result in [DIRECT_IO_ALIGNMENT_BYTES as i32, -libc::EINTR] {
             let (mut queue, _sender, files) = queue();
             let (request, reply) = request(&files, operation, 0, 2 * DIRECT_IO_ALIGNMENT_BYTES);
-            queue.active[0] = Some(request);
+            queue.requests_awaiting_completion[0] = Some(request);
             drop(reply);
             queue.handle_io_completion(0, result);
-            assert!(queue.active[0].is_none());
+            assert!(queue.requests_awaiting_completion[0].is_none());
             assert!(queue.ring.submission().is_empty());
         }
     }
@@ -777,7 +792,7 @@ fn finished_read_transfers_buffer_ownership() {
     Arc::get_mut(buffer).unwrap().buffer.as_mut().fill(0x99);
     let ptr = buffer.ptr.cast_const();
     read.apply_completion_result(DIRECT_IO_ALIGNMENT_BYTES as i32).unwrap();
-    assert!(read.buffer_range.is_empty());
+    assert!(read.remaining_buffer_range.is_empty());
     read.send_result(Ok(()));
 
     let bytes = reply.try_recv().unwrap().unwrap().unwrap().into_buffer().into_bytes();
@@ -812,7 +827,7 @@ fn error_completion_releases_the_read_buffer() {
         reply.try_recv().unwrap().err().unwrap().raw_os_error(),
         Some(libc::EBADF)
     );
-    assert!(queue.active.iter().all(Option::is_none));
+    assert!(queue.requests_awaiting_completion.iter().all(Option::is_none));
     assert_eq!(
         pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap().as_ref().as_ptr(),
         address
@@ -843,7 +858,7 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
     let mut payload = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(length + 18).unwrap()).unwrap();
     payload.as_mut()[1..length + 1].fill(0x99);
     payload.as_mut()[length + 1..].fill(0x77);
-    // Force an unaligned source so XFS would reject a submitted empty prefix vector.
+    // Force an unaligned source so XFS would reject a submitted empty prefix iovec.
     let payload = payload.into_bytes().slice(1..);
     write.write_padded(0, 3 * length, &payload).await.unwrap();
     let mut buffer = read.buffer_pool.allocate(3 * length).unwrap();
@@ -860,8 +875,8 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
     );
     queue.queue_requests_for_submission();
     assert_eq!(queue.ring.submission().len(), 3);
-    for (index, request) in queue.active.iter().flatten().enumerate() {
-        assert_eq!(request.buffer_range, index * length..(index + 1) * length);
+    for (index, request) in queue.requests_awaiting_completion.iter().flatten().enumerate() {
+        assert_eq!(request.remaining_buffer_range, index * length..(index + 1) * length);
     }
     queue.ring.submit_and_wait(3).unwrap();
     let mut completions: Vec<_> = queue.ring.completion().collect();
@@ -909,7 +924,7 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
         assert_eq!(queue.ring.submission().len(), MAX_IN_FLIGHT_READS);
         assert!(future.as_mut().poll(&mut context).is_pending());
         assert_eq!(queue.receiver.len(), 1);
-        queue.queue_requests_for_submission(); // The full active array leaves the last piece waiting.
+        queue.queue_requests_for_submission(); // The full request array leaves the last piece waiting.
         assert_eq!(queue.receiver.len(), 1);
         queue.ring.submit_and_wait(MAX_IN_FLIGHT_READS).unwrap();
         let mut completions: Vec<_> = queue.ring.completion().collect();
@@ -931,9 +946,9 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
             assert!(weak_files.upgrade().is_some());
             assert_eq!(pool.idle_bytes(), 0);
             queue.handle_io_completion(completion.user_data(), completion.result());
-            queue.queue_requests_for_submission(); // Discard the canceled queued piece when the active array has room.
+            queue.queue_requests_for_submission(); // Discard the canceled queued piece when the request array has room.
         }
-        assert!(queue.active.iter().all(Option::is_none));
+        assert!(queue.requests_awaiting_completion.iter().all(Option::is_none));
         assert!(queue.receiver.is_empty());
         assert!(queue.ring.submission().is_empty());
         assert!(weak_files.upgrade().is_none());
@@ -949,14 +964,14 @@ fn canceled_read_retains_destination_until_completion() {
     let buffer = pool.allocate(2 * DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     let address = buffer.as_ref().as_ptr();
     read.buffers = IoBuffers::Read(ReadBuffer::new(buffer));
-    read.buffer_range = DIRECT_IO_ALIGNMENT_BYTES..2 * DIRECT_IO_ALIGNMENT_BYTES;
+    read.remaining_buffer_range = DIRECT_IO_ALIGNMENT_BYTES..2 * DIRECT_IO_ALIGNMENT_BYTES;
     sender.try_send(read).unwrap();
     drop(sender);
     queue.queue_requests_for_submission();
     queue.ring.submit_and_wait(1).unwrap();
     drop(reply);
     queue.queue_requests_for_submission();
-    assert!(queue.active[0].is_some());
+    assert!(queue.requests_awaiting_completion[0].is_some());
     let other = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(other.as_ref().as_ptr(), address);
     queue.process_requests_until_disconnected().unwrap();
@@ -980,7 +995,7 @@ fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
         assert_eq!(pool.idle_bytes(), 32 * 1024);
         for range in [0..2 * page, page..2 * page] {
             buffers.submission_entry(types::Fd(-1), page as u64, range.clone());
-            let IoBuffers::Write { bytes, vectors } = &buffers else {
+            let IoBuffers::Write { bytes, iovecs } = &buffers else {
                 unreachable!()
             };
             assert_eq!(bytes[0].len(), borrowed_length);
@@ -991,25 +1006,25 @@ fn writes_borrow_aligned_bytes_and_copy_unaligned_bytes() {
             expected[..length].copy_from_slice(&payload);
             assert_eq!(bytes.concat(), expected);
             assert_eq!(
-                vectors.map(|vector| vector.iov_len),
+                iovecs.map(|iovec| iovec.iov_len),
                 if range.start == 0 && borrowed_length == page {
                     [page, page]
                 } else {
                     [range.len(), 0]
                 }
             );
-            for vector in vectors {
-                if vector.iov_len == 0 {
-                    assert!(vector.iov_base.is_null());
+            for iovec in iovecs {
+                if iovec.iov_len == 0 {
+                    assert!(iovec.iov_base.is_null());
                 } else {
-                    assert_eq!(vector.iov_base as usize % page, 0);
+                    assert_eq!(iovec.iov_base as usize % page, 0);
                 }
             }
             let last = bytes.iter().rev().find(|bytes| !bytes.is_empty()).unwrap();
-            let vector = vectors.iter().rev().find(|vector| vector.iov_len > 0).unwrap();
+            let iovec = iovecs.iter().rev().find(|iovec| iovec.iov_len > 0).unwrap();
             assert_eq!(
-                vector.iov_base.cast_const().cast::<u8>(),
-                last[last.len() - vector.iov_len..].as_ptr()
+                iovec.iov_base.cast_const().cast::<u8>(),
+                last[last.len() - iovec.iov_len..].as_ptr()
             );
         }
         drop(buffers);
@@ -1030,11 +1045,11 @@ fn write_error_logs_path_and_request_details_in_one_line() {
     write.submission_entry(0);
     write.apply_completion_result(page as i32).unwrap();
     write.submission_entry(0);
-    // Inject a misaligned submitted vector without sending it to the kernel.
-    let IoBuffers::Write { vectors, .. } = &mut write.buffers else {
+    // Inject a misaligned iovec without sending it to the kernel.
+    let IoBuffers::Write { iovecs, .. } = &mut write.buffers else {
         unreachable!()
     };
-    vectors[0].iov_base = vectors[0].iov_base.wrapping_byte_add(1);
+    iovecs[0].iov_base = iovecs[0].iov_base.wrapping_byte_add(1);
 
     let mut log = tempfile::tempfile().unwrap();
     let subscriber = tracing_subscriber::fmt()
@@ -1086,14 +1101,17 @@ fn completion_state_handles_short_io_and_errors() {
     let files = data_file();
     let page = DIRECT_IO_ALIGNMENT_BYTES;
     let (mut read, _reply) = request(&files, IoOperation::Read, page as u64, 3 * page);
-    read.buffer_range.start = page;
+    read.remaining_buffer_range.start = page;
     read.apply_completion_result(-libc::EINTR).unwrap();
-    assert_eq!((read.disk_end, read.buffer_range.start), (4 * page as u64, page));
+    assert_eq!(
+        (read.file_end_offset, read.remaining_buffer_range.start),
+        (4 * page as u64, page)
+    );
     read.apply_completion_result(page as i32).unwrap();
-    assert_eq!(read.disk_end, 4 * page as u64);
-    assert_eq!(read.buffer_range, 2 * page..3 * page);
+    assert_eq!(read.file_end_offset, 4 * page as u64);
+    assert_eq!(read.remaining_buffer_range, 2 * page..3 * page);
     read.apply_completion_result(page as i32).unwrap();
-    assert!(read.buffer_range.is_empty());
+    assert!(read.remaining_buffer_range.is_empty());
 
     let (mut read, _reply) = request(&files, IoOperation::Read, 0, page);
     assert_eq!(
@@ -1119,9 +1137,12 @@ fn completion_state_handles_short_io_and_errors() {
 
     let (mut write, _reply) = request(&files, IoOperation::Write, 0, 2 * page);
     write.apply_completion_result(page as i32).unwrap();
-    assert_eq!((write.disk_end, write.buffer_range.start), (2 * page as u64, page));
+    assert_eq!(
+        (write.file_end_offset, write.remaining_buffer_range.start),
+        (2 * page as u64, page)
+    );
     write.apply_completion_result(page as i32).unwrap();
-    assert!(write.buffer_range.is_empty());
+    assert!(write.remaining_buffer_range.is_empty());
 }
 
 #[test]

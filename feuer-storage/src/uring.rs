@@ -3,14 +3,14 @@
 //!
 //! # Kernel pointer lifetime
 //!
-//! Active requests keep payload buffers and write descriptors alive at stable addresses until the
+//! Requests awaiting completion keep payload buffers and write descriptors alive at stable addresses until the
 //! request's completion queue entry (CQE), including an error CQE. An error from submit() or poll()
 //! does not prove the kernel has stopped using those buffers.
 //!
 //! EAGAIN retries pending submissions after a timed wait because no accepted I/O may exist to wake us.
 //!
 //! We do not drain outstanding requests after queue failure. Closing the ring does not wait for
-//! them, so Drop leaks the active request array to keep those pointers valid.
+//! them, so Drop leaks the requests awaiting completion to keep those pointers valid.
 //!
 //! See <https://man7.org/linux/man-pages/man2/io_uring_enter.2.html> and
 //! <https://man7.org/linux/man-pages/man7/io_uring_cancelation.7.html>.
@@ -46,7 +46,7 @@ pub(crate) const DIRECT_IO_ALIGNMENT_BYTES: usize = BUFFER_ALIGNMENT;
 // Short paced-read comparisons favored 1 MiB over whole-read submissions for
 // small/medium-read tail latency. They did not establish an optimal size.
 pub(crate) const MAX_IO_REQUEST_BYTES: usize = 1024 * 1024;
-// Each direction has its own active-request limit and an equally sized waiting channel.
+// Each direction limits requests awaiting completion and has an equally sized waiting channel.
 const MAX_IN_FLIGHT_READS: usize = 64;
 // Local-NVMe O_DIRECT tests saturated 1-MiB writes near 1.83 GB/s at QD8.
 // QD64 left throughput unchanged and raised write p99 from 4.6 to 47 ms.
@@ -64,7 +64,7 @@ pub(crate) struct DataFileAndLock {
 
 /// One read queue and one write queue shared by independent caches on the same SSD.
 ///
-/// All attached files share 64 active reads and 8 active writes, plus waiting channels
+/// All attached files share capacity for 64 reads and 8 writes awaiting completion, plus waiting channels
 /// for another 64 reads and 8 writes. Requests run in arrival order. There is no per-cache fairness.
 /// Cached payload reads also share 64 permits. At 64 waiting reads,
 /// all unchecked waiters are scheduled to consider source fallthrough before any payload I/O.
@@ -172,7 +172,7 @@ impl IoQueueHandle {
             ring,
             wake_fd: wake_fd.clone(),
             receiver,
-            active: (0..max_in_flight).map(|_| None).collect(),
+            requests_awaiting_completion: (0..max_in_flight).map(|_| None).collect(),
         };
         let thread = thread::Builder::new().name(thread_name.into()).spawn(move || {
             if let Err(error) = queue.process_requests_until_disconnected() {
@@ -394,7 +394,7 @@ enum IoBuffers {
         // Retain the aligned payload prefix and copy only the remainder into a padded,
         // aligned buffer. Either buffer may be empty. Only nonempty buffers are submitted.
         bytes: [Bytes; 2],
-        vectors: [libc::iovec; 2],
+        iovecs: [libc::iovec; 2],
     },
 }
 
@@ -417,7 +417,7 @@ impl IoBuffers {
         };
         bytes.truncate(aligned_length);
         Ok(Self::Write {
-            vectors: [libc::iovec {
+            iovecs: [libc::iovec {
                 iov_base: ptr::null_mut(),
                 iov_len: 0,
             }; 2],
@@ -432,9 +432,9 @@ impl IoBuffers {
                 let ptr = buffer.ptr.wrapping_add(range.start);
                 opcode::Read::new(fd, ptr, range.len() as u32).offset(offset).build()
             }
-            Self::Write { bytes, vectors } => {
+            Self::Write { bytes, iovecs } => {
                 let mut bytes_to_skip = range.start;
-                let mut vector_count = 0;
+                let mut iovec_count = 0;
                 for bytes in bytes.iter() {
                     let skip = bytes_to_skip.min(bytes.len());
                     bytes_to_skip -= skip;
@@ -442,18 +442,18 @@ impl IoBuffers {
                     if remaining_bytes.is_empty() {
                         continue;
                     }
-                    vectors[vector_count] = libc::iovec {
+                    iovecs[iovec_count] = libc::iovec {
                         iov_base: remaining_bytes.as_ptr().cast_mut().cast(),
                         iov_len: remaining_bytes.len(),
                     };
-                    vector_count += 1;
+                    iovec_count += 1;
                 }
-                vectors[vector_count..].fill(libc::iovec {
+                iovecs[iovec_count..].fill(libc::iovec {
                     iov_base: ptr::null_mut(),
                     iov_len: 0,
                 });
-                // XFS checks empty vectors' addresses too, so omit them from the request.
-                opcode::Writev::new(fd, vectors.as_ptr(), vector_count as u32)
+                // XFS checks empty iovecs' addresses too, so omit them from the request.
+                opcode::Writev::new(fd, iovecs.as_ptr(), iovec_count as u32)
                     .offset(offset)
                     .build()
             }
@@ -462,7 +462,7 @@ impl IoBuffers {
 }
 
 // SAFETY: read allocations and immutable Bytes stay at stable addresses when moved.
-// Only the queue submits pointers. Write descriptors stay in its fixed active request array.
+// Only the queue submits pointers. Write descriptors stay in its fixed request array.
 unsafe impl Send for IoBuffers {}
 
 /// An io_uring write request's failure, disk byte range, and buffer alignment.
@@ -485,12 +485,12 @@ struct WriteRequestError {
 struct IoRequest {
     // Each request retains its target file and lock until completion, including on cancellation.
     files: Arc<DataFileAndLock>,
-    // Exclusive disk end of this request, unchanged by short completions.
-    disk_end: u64,
+    // Exclusive file offset at the request's end, unchanged by short completions.
+    file_end_offset: u64,
     // Aligned memory for disk reads and writes, kept alive until I/O completes.
     buffers: IoBuffers,
     // Remaining byte range within the I/O buffers to read into or write from.
-    buffer_range: Range<usize>,
+    remaining_buffer_range: Range<usize>,
     // The caller's result channel is taken on completion or failure and also detects cancellation.
     reply: Option<oneshot::Sender<io::Result<Option<Arc<ReadBuffer>>>>>,
 }
@@ -513,20 +513,20 @@ impl IoRequest {
         assert!(length > 0 && length <= MAX_IO_REQUEST_BYTES);
         Self {
             files,
-            disk_end: offset + length as u64,
+            file_end_offset: offset + length as u64,
             buffers,
-            buffer_range,
+            remaining_buffer_range: buffer_range,
             reply: Some(reply),
         }
     }
 
     fn submission_entry(&mut self, request_index: usize) -> squeue::Entry {
-        let offset = self.disk_end - self.buffer_range.len() as u64;
+        let offset = self.file_end_offset - self.remaining_buffer_range.len() as u64;
         self.buffers
             .submission_entry(
                 types::Fd(self.files.file.as_raw_fd()),
                 offset,
-                self.buffer_range.clone(),
+                self.remaining_buffer_range.clone(),
             )
             .user_data(request_index as u64)
     }
@@ -538,18 +538,17 @@ impl IoRequest {
         }
         if result < 0 {
             let source = io::Error::from_raw_os_error(-result);
-            let IoBuffers::Write { vectors, .. } = &self.buffers else {
+            let IoBuffers::Write { iovecs, .. } = &self.buffers else {
                 return Err(source);
             };
             return Err(io::Error::new(
                 source.kind(),
                 WriteRequestError {
                     source,
-                    offset: self.disk_end - self.buffer_range.len() as u64,
-                    length: self.buffer_range.len(),
-                    buffer_address_remainders: vectors
-                        .map(|vector| vector.iov_base as usize % DIRECT_IO_ALIGNMENT_BYTES),
-                    buffer_lengths: vectors.map(|vector| vector.iov_len),
+                    offset: self.file_end_offset - self.remaining_buffer_range.len() as u64,
+                    length: self.remaining_buffer_range.len(),
+                    buffer_address_remainders: iovecs.map(|iovec| iovec.iov_base as usize % DIRECT_IO_ALIGNMENT_BYTES),
+                    buffer_lengths: iovecs.map(|iovec| iovec.iov_len),
                     hint: if result == -libc::EINVAL {
                         "; EINVAL can indicate an unsupported direct-I/O request or a misaligned offset, length, or buffer address"
                     } else {
@@ -563,7 +562,7 @@ impl IoRequest {
         if completion_bytes == 0 || !completion_bytes.is_multiple_of(DIRECT_IO_ALIGNMENT_BYTES) {
             return Err(self.incomplete_io_error());
         }
-        self.buffer_range.start += completion_bytes;
+        self.remaining_buffer_range.start += completion_bytes;
         Ok(())
     }
 
@@ -593,14 +592,16 @@ struct IoQueue {
     ring: IoUring,
     // Eventfd polled alongside the ring so new work need not wait for completion.
     wake_fd: Arc<OwnedFd>,
-    // Holds up to active.len() waiting requests. Receive only when the active array has room.
+    // Holds up to requests_awaiting_completion.len() waiting requests.
+    // Receive only when the request array has room.
     receiver: mpsc::Receiver<IoRequest>,
-    // Fixed addresses for in-flight buffers and write descriptors. Completions identify request indexes.
-    active: Box<[Option<IoRequest>]>,
+    // Retains requests for queued or submitted I/O at fixed addresses through completion handling.
+    // Completions identify request indexes.
+    requests_awaiting_completion: Box<[Option<IoRequest>]>,
 }
 
 impl IoQueue {
-    /// Processes requests until the sender disconnects and all queued and active I/O drains.
+    /// Processes requests until the sender disconnects and all I/O drains.
     fn process_requests_until_disconnected(&mut self) -> io::Result<()> {
         self.process_requests_with_submit(|ring| ring.submit())
     }
@@ -616,7 +617,10 @@ impl IoQueue {
                 self.handle_io_completion(completion.user_data(), completion.result());
             }
             self.queue_requests_for_submission();
-            if self.receiver.is_closed() && self.receiver.is_empty() && self.active.iter().all(Option::is_none) {
+            if self.receiver.is_closed()
+                && self.receiver.is_empty()
+                && self.requests_awaiting_completion.iter().all(Option::is_none)
+            {
                 return Ok(());
             }
             // submit() never waits for a completion. poll watches BOTH completions and
@@ -625,7 +629,7 @@ impl IoQueue {
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    // EAGAIN leaves requests in the active array. Avoid spinning, but retry
+                    // EAGAIN leaves requests in the request array. Avoid spinning, but retry
                     // after 1 ms even if no request was accepted and no completion can wake us.
                     self.wait_for_completion_or_wakeup(1)?;
                     continue;
@@ -644,22 +648,25 @@ impl IoQueue {
     /// Handles an I/O completion by advancing the request, queuing its remaining I/O, or returning its result.
     fn handle_io_completion(&mut self, user_data: u64, result: i32) {
         let request_index = user_data as usize;
-        let request = self.active[request_index]
+        let request = self.requests_awaiting_completion[request_index]
             .as_mut()
-            .expect("completion for inactive request");
+            .expect("completion for an empty request-array position");
         match request.apply_completion_result(result) {
-            Ok(()) if !request.buffer_range.is_empty() && !request.reply.as_ref().unwrap().is_closed() => {
+            Ok(()) if !request.remaining_buffer_range.is_empty() && !request.reply.as_ref().unwrap().is_closed() => {
                 self.queue_request_for_submission(request_index)
             }
-            result => self.active[request_index].take().unwrap().send_result(result),
+            result => self.requests_awaiting_completion[request_index]
+                .take()
+                .unwrap()
+                .send_result(result),
         }
     }
 
-    /// Moves requests from the channel into io_uring's submission queue while the active array has room.
+    /// Moves requests from the channel into io_uring's submission queue while the request array has room.
     /// Retains their buffers until completion. Discards requests whose callers canceled.
     fn queue_requests_for_submission(&mut self) {
-        for request_index in 0..self.active.len() {
-            if self.active[request_index].is_some() {
+        for request_index in 0..self.requests_awaiting_completion.len() {
+            if self.requests_awaiting_completion[request_index].is_some() {
                 continue;
             }
             let request = loop {
@@ -669,33 +676,34 @@ impl IoQueue {
                     Err(_) => return,
                 }
             };
-            self.active[request_index] = Some(request);
+            self.requests_awaiting_completion[request_index] = Some(request);
             self.queue_request_for_submission(request_index);
         }
     }
 
     /// Adds the request's remaining I/O to io_uring's submission queue.
     fn queue_request_for_submission(&mut self, request_index: usize) {
-        let entry = self.active[request_index]
+        let entry = self.requests_awaiting_completion[request_index]
             .as_mut()
             .unwrap()
             .submission_entry(request_index);
-        // SAFETY: the fixed active array owns buffers and descriptors through completion.
-        // The ring is sized for all active requests, each with at most one submitted or queued SQE.
+        // SAFETY: the fixed request array owns buffers and descriptors through completion.
+        // The ring is sized for the request array, with at most one submitted or queued SQE per request.
         unsafe {
             self.ring
                 .submission()
                 .push(&entry)
-                .expect("ring sized for all active requests")
+                .expect("ring sized for the request array")
         };
     }
 
-    /// Retains active requests at their original addresses after failure and notifies their callers.
-    fn retain_active_requests(&mut self) -> &'static [Option<IoRequest>] {
-        // Ring close does not wait for outstanding requests. Leak the active array and its file owners
+    /// Leaks the request array to preserve buffer and descriptor addresses after failure.
+    /// Reports the failure to waiting callers.
+    fn leak_requests(&mut self) -> &'static [Option<IoRequest>] {
+        // Ring close does not wait for outstanding requests. Leak the request array and its file owners
         // to prevent use-after-free or early reuse.
-        tracing::error!(target: "feuer::storage::io", "retaining active I/O resources after queue failure");
-        let requests = Box::leak(mem::take(&mut self.active));
+        tracing::error!(target: "feuer::storage::io", "leaking I/O requests after queue failure");
+        let requests = Box::leak(mem::take(&mut self.requests_awaiting_completion));
         for request in requests.iter_mut().flatten() {
             let _ = request.reply.take().unwrap().send(Err(queue_stopped_error()));
         }
@@ -744,9 +752,9 @@ impl IoQueue {
 impl Drop for IoQueue {
     fn drop(&mut self) {
         self.receiver.close();
-        if self.active.iter().any(Option::is_some) {
+        if self.requests_awaiting_completion.iter().any(Option::is_some) {
             // Normal shutdown drains all completions and never takes this path.
-            self.retain_active_requests();
+            self.leak_requests();
         }
     }
 }
