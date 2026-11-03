@@ -13,3 +13,5 @@ trace.txt
 AGENTS.md
 
 /experiments/
+
+__pycache__/

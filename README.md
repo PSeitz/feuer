@@ -178,7 +178,8 @@ cargo test -p feuer -p feuer-memory -p feuer-historian -p feuer-utils
 
 For internals, see the [architecture](architecture.html), [I/O queues](queues.html),
 [disk format](format.md), and [implementation status](implementation-status.md).
-See [timed SSD replay](timed-replay.md) and the
+See [timed SSD replay](timed-replay.md), the
+[read-size histogram SSD benchmark](benchmarks/ssd/README.md), and the
 [recovery benchmark](feuer-storage/recovery-benchmark.md) for performance validation.
 
 ## License
