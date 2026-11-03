@@ -371,6 +371,7 @@ dependencies = [
  "binggan",
  "blake3",
  "bytes",
+ "bytesize",
  "clap",
  "fastrand",
  "feuer-historian",

@@ -43,6 +43,7 @@ libc = "0.2"
 [dev-dependencies]
 binggan = "0.17"
 blake3 = "1"
+bytesize = { workspace = true }
 clap = { workspace = true }
 fastrand = "2"
 mixtrics = { workspace = true, features = ["prometheus"] }

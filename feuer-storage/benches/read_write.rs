@@ -14,7 +14,7 @@ use bytes::Bytes;
 use clap::Parser;
 use feuer_memory::{AlignedBuffer, MemoryCache};
 use feuer_storage::{DataFile, DataFileError, IoMetrics};
-use tokio::{task::JoinSet, time::sleep_until};
+use tokio::task::JoinSet;
 
 const MIB: u64 = 1024 * 1024;
 const WRITERS: u64 = 8;
@@ -31,8 +31,9 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[derive(Debug, Parser)]
 #[command(about = "Read-size histogram benchmark using Feuer's pooled DataFile I/O")]
 struct Args {
-    /// CSV columns: size_bytes,count. Counts are operation weights.
-    histogram: PathBuf,
+    /// Read sizes and relative operation weights, e.g. 4KiB:50,32KiB:30,1MiB:20.
+    #[arg(long, required = true, value_delimiter = ',', value_parser = size_weight)]
+    sizes: Vec<(usize, u64)>,
     /// Existing SSD directory. Only a new temporary directory is modified.
     #[arg(long)]
     directory: PathBuf,
@@ -63,26 +64,15 @@ struct Sample {
     latency_ns: u64,
 }
 
-fn histogram(csv: &str, capacity: u64) -> Result<Vec<(usize, u64)>> {
-    let mut lines = csv.lines();
-    if lines.next() != Some("size_bytes,count") {
-        return Err("expected CSV header size_bytes,count".into());
+fn size_weight(value: &str) -> std::result::Result<(usize, u64), String> {
+    let (size, weight) = value.split_once(':').ok_or("expected size:weight, e.g. 32KiB:50")?;
+    let size = size.trim().parse::<bytesize::ByteSize>().map_err(|e| e.to_string())?;
+    let size = usize::try_from(size.as_u64()).map_err(|e| e.to_string())?;
+    let weight = weight.trim().parse::<u64>().map_err(|e| e.to_string())?;
+    if size == 0 || weight == 0 {
+        return Err("size and weight must be positive".into());
     }
-    let mut total = 0_u64;
-    let mut sizes = Vec::new();
-    for line in lines {
-        let (size, count) = line.split_once(',').ok_or("expected size,count")?;
-        let (size, count) = (size.parse::<usize>()?, count.parse::<u64>()?);
-        if size == 0 || size as u64 > capacity || count == 0 {
-            return Err("sizes must fit the read region and counts must be positive".into());
-        }
-        total = total.checked_add(count).ok_or("histogram count overflow")?;
-        sizes.push((size, total));
-    }
-    if sizes.is_empty() {
-        return Err("empty histogram".into());
-    }
-    Ok(sizes)
+    Ok((size, weight))
 }
 
 fn cpu_seconds() -> io::Result<f64> {
@@ -99,7 +89,7 @@ async fn measure(
     sizes: &Arc<Vec<(usize, u64)>>,
     payload: &Bytes,
     args: &Args,
-    rate: Option<u64>,
+    writes: bool,
 ) -> Result<(Vec<Sample>, f64, f64)> {
     let read_bytes = args.read_mib * MIB;
     let writer_chunks = args.write_mib / WRITERS;
@@ -109,7 +99,7 @@ async fn measure(
     let measured = started + Duration::from_secs(args.warmup);
     let end = measured + Duration::from_secs(args.seconds);
     let mut tasks = JoinSet::new();
-    for worker in 0..readers + if rate.is_some() { WRITERS } else { 0 } {
+    for worker in 0..readers + if writes { WRITERS } else { 0 } {
         let (file, sizes, payload) = (file.clone(), sizes.clone(), payload.clone());
         tasks.spawn(async move {
             let write = worker >= readers;
@@ -117,14 +107,6 @@ async fn measure(
             let mut samples = Vec::new();
             let mut iteration = 0_u64;
             loop {
-                if write && let Some(rate) = rate.filter(|rate| *rate > 0) {
-                    let slot = iteration * WRITERS + worker - readers;
-                    let scheduled = started + Duration::from_secs_f64(slot as f64 * MIB as f64 / rate as f64);
-                    if scheduled >= end {
-                        break;
-                    }
-                    sleep_until(scheduled.into()).await;
-                }
                 let (offset, length) = if write {
                     let chunk = (worker - readers) * writer_chunks + iteration % writer_chunks;
                     (read_bytes + chunk * MIB, MIB as usize)
@@ -208,13 +190,20 @@ async fn main() -> Result<()> {
         .checked_add(args.write_mib)
         .and_then(|mib| mib.checked_mul(MIB))
         .ok_or("file capacity overflow")?;
-    let input = fs::read_to_string(&args.histogram)?;
-    let sizes = Arc::new(histogram(&input, args.read_mib * MIB)?);
+    let mut total = 0_u64;
+    let mut sizes = Vec::new();
+    for &(size, weight) in &args.sizes {
+        if size as u64 > args.read_mib * MIB {
+            return Err("read sizes must fit the read region".into());
+        }
+        total = total.checked_add(weight).ok_or("weight sum overflow")?;
+        sizes.push((size, total));
+    }
+    let sizes = Arc::new(sizes);
     if let Some(parent) = args.output.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::create_dir(&args.output)?;
-    fs::write(args.output.join("histogram.csv"), input)?;
     fs::write(
         args.output.join("settings.txt"),
         format!("{args:#?}\ncommand={:?}\n", env::args().collect::<Vec<_>>()),
@@ -270,15 +259,11 @@ async fn main() -> Result<()> {
         costs,
         "case,seconds_including_warmup_and_drain,cpu_percent,pool_used_bytes,pool_idle_bytes"
     )?;
-    for (case, rate) in [
-        ("read-only", None),
-        ("writes-450MB", Some(450_000_000)),
-        ("writes-uncapped", Some(0)),
-    ] {
+    for (case, writes) in [("read-only", false), ("read-write", true)] {
         tokio::time::sleep(Duration::from_secs(5)).await;
         eprintln!("Running {case}");
-        let (samples, elapsed, cpu_percent) = measure(&file, &sizes, &payload, &args, rate).await?;
-        if !samples.iter().any(|s| !s.write) || (rate.is_some() && !samples.iter().any(|s| s.write)) {
+        let (samples, elapsed, cpu_percent) = measure(&file, &sizes, &payload, &args, writes).await?;
+        if !samples.iter().any(|s| !s.write) || (writes && !samples.iter().any(|s| s.write)) {
             return Err("measurement window contained no completed I/O for an enabled stream".into());
         }
         report(&mut summary, case, &samples, args.seconds as f64)?;
@@ -306,7 +291,7 @@ async fn main() -> Result<()> {
     temp.close()?;
     fs::write(
         args.output.join("DONE"),
-        "Three cases completed once each. Temporary data removed.\n",
+        "Both cases completed once each. Temporary data removed.\n",
     )?;
     Ok(())
 }
