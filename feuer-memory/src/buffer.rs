@@ -29,7 +29,8 @@ use crate::MemoryMetrics;
 pub const BUFFER_ALIGNMENT: usize = 4096;
 /// Largest fixed capacity in the buffer pool.
 const MAX_FIXED_BUFFER_BYTES: usize = 64 * 1024 * 1024;
-pub(crate) const BUFFER_SIZES: [usize; 13] = [
+pub(crate) const BUFFER_SIZES: [usize; 14] = [
+    4 * 1024,
     32 * 1024,
     256 * 1024,
     512 * 1024,

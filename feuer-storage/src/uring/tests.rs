@@ -972,10 +972,10 @@ fn canceled_read_retains_destination_until_completion() {
     drop(reply);
     queue.queue_requests_for_submission();
     assert!(queue.requests_awaiting_completion[0].is_some());
-    let other = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
+    let other = pool.allocate(2 * DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_ne!(other.as_ref().as_ptr(), address);
     queue.process_requests_until_disconnected().unwrap();
-    let reused = pool.allocate(DIRECT_IO_ALIGNMENT_BYTES).unwrap();
+    let reused = pool.allocate(2 * DIRECT_IO_ALIGNMENT_BYTES).unwrap();
     assert_eq!(reused.as_ref().as_ptr(), address);
 }
 

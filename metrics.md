@@ -145,8 +145,8 @@ Use `0.50` or `0.99` for p50 or p99. Percentiles are estimated from the buckets.
 
 ## I/O buffer pools
 
-Each memory-cache instance owns one pool with fixed allocation sizes of 32 KiB,
-256 KiB, 512 KiB, 1 MiB, 2 MiB, 4 MiB, 8 MiB, 16 MiB, 32 MiB, and 64 MiB.
+Each memory-cache instance owns one pool with fixed allocation sizes of 4 KiB, 32 KiB,
+256 KiB, 512 KiB, 1 MiB, 2 MiB, 3 MiB, 4 MiB, 8 MiB, 12 MiB, 16 MiB, 24 MiB, 32 MiB, and 64 MiB.
 Cached allocation charges and idle buffers share the configured memory capacity.
 Idle buffers can use all capacity left by cached entries. All buckets share this
 budget, without per-bucket caps or reservations. Admission frees idle buffers when needed.
@@ -156,8 +156,8 @@ On Linux, these buffers use `mmap`/`mremap`/`munmap`. Writes use aligned input s
 These metrics are registered by `MemoryMetrics` and have no `pool`
 or `operation` label. The former `pool=small|medium|large` labels have been removed.
 The buffer gauge has a `bucket` label containing human-readable allocation capacity:
-`32 KiB`, `256 KiB`, `512 KiB`, `1 MiB`, `2 MiB`, `4 MiB`, `8 MiB`, `16 MiB`,
-`32 MiB`, `64 MiB`, or `>64 MiB`.
+`4 KiB`, `32 KiB`, `256 KiB`, `512 KiB`, `1 MiB`, `2 MiB`, `3 MiB`, `4 MiB`,
+`8 MiB`, `12 MiB`, `16 MiB`, `24 MiB`, `32 MiB`, `64 MiB`, or `>64 MiB`.
 Gauge values remain in bytes. Update filters using the former numeric bucket labels.
 
 | Metric | Type | Meaning |

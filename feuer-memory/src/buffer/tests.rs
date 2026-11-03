@@ -264,7 +264,7 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         assert_eq!(buffer_bytes("idle"), 0.0);
         assert_eq!(buffer_bytes("used"), 0.0);
         assert_eq!(gauge("feuer_memory_capacity_bytes"), capacity as f64);
-        let mut buffer = pool.allocate(size - 2 * BUFFER_ALIGNMENT).unwrap();
+        let mut buffer = pool.allocate(size - 2).unwrap();
         buffer.as_mut().fill(0x99);
         let bytes = buffer.into_bytes();
         let address = bytes.as_ptr();
@@ -295,9 +295,9 @@ fn metrics_follow_reuse_idle_limit_and_pool_lifetime() {
         assert_eq!(gauge("feuer_memory_used_bytes"), 0.0);
         reused.as_mut().fill(0x77);
         drop(reused);
-        let outstanding = pool.allocate(size - BUFFER_ALIGNMENT).unwrap().into_bytes();
+        let outstanding = pool.allocate(size - 1).unwrap().into_bytes();
         assert_eq!(outstanding.as_ptr(), address);
-        assert_eq!(outstanding.len(), size - BUFFER_ALIGNMENT);
+        assert_eq!(outstanding.len(), size - 1);
         let second = BufferPool::new(capacity, metrics);
         drop(second.allocate(size).unwrap());
         assert_eq!(gauge("feuer_memory_capacity_bytes"), (2 * capacity) as f64);

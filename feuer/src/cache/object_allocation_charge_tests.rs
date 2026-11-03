@@ -84,9 +84,9 @@ async fn shared_bytes_slices_charge_payload_length() {
 #[tokio::test]
 async fn allocation_capacity_drives_eviction() {
     let (registry, metrics_registry) = registry();
-    let memory_capacity = 2 << 20;
+    let memory_capacity = 256 << 10;
     let cache = memory_cache(memory_capacity, &metrics_registry);
-    // 65 separate 32 KiB allocations exceed the target, but their 1 KiB payloads fit.
+    // 65 separate 4 KiB allocations exceed the target, but their 1 KiB payloads fit.
     // Every allocation fits the target share of a shard, so oversized admission is not involved.
     for index in 0..65 {
         let buffer = cache.allocate_buffer(1024).unwrap();
@@ -98,11 +98,11 @@ async fn allocation_capacity_drives_eviction() {
     let entry_count = value(&registry, "feuer_memory_entries", &[]);
     let charged_bytes = value(&registry, "feuer_memory_used_bytes", &[]);
     assert!(entry_count > 0.0 && entry_count < 65.0);
-    let cached_bytes = entry_count * (32 * 1024) as f64;
+    let cached_bytes = entry_count * (4 * 1024) as f64;
     assert_eq!(
         charged_bytes,
         cached_bytes + cache.inner.memory.buffer_pool().idle_bytes() as f64
     );
     assert!(charged_bytes <= memory_capacity as f64);
-    assert_eq!(checked_out_buffer_capacity(&registry, "32 KiB"), cached_bytes);
+    assert_eq!(checked_out_buffer_capacity(&registry, "4 KiB"), cached_bytes);
 }

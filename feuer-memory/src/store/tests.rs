@@ -76,7 +76,7 @@ fn cached_payloads_and_idle_buffers_share_allocation_accounting() {
 
 #[test]
 fn cached_capacity_drives_eviction_not_payload_length() {
-    let cache = cache(32 * 1024);
+    let cache = cache(4 * 1024);
     for key in ["first", "second"] {
         let buffer = cache.buffer_pool().allocate(1).unwrap();
         let charge = buffer.capacity();
@@ -84,11 +84,11 @@ fn cached_capacity_drives_eviction_not_payload_length() {
     }
     assert!(cache.get(&"first".into()).is_none());
     assert!(cache.get(&"second".into()).is_some());
-    assert_eq!(cache.used_bytes(), 32 * 1024);
+    assert_eq!(cache.used_bytes(), 4 * 1024);
     assert_eq!(cache.buffer_pool().idle_bytes(), 0);
     cache.remove(&"second".into());
-    assert_eq!(cache.used_bytes(), 32 * 1024);
-    assert_eq!(cache.buffer_pool().idle_bytes(), 32 * 1024);
+    assert_eq!(cache.used_bytes(), 4 * 1024);
+    assert_eq!(cache.buffer_pool().idle_bytes(), 4 * 1024);
 }
 
 #[test]
