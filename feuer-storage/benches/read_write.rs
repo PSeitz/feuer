@@ -18,7 +18,7 @@ use feuer_storage::{DataFile, DataFileError, IoMetrics};
 use tokio::task::JoinSet;
 
 const MIB: u64 = 1024 * 1024;
-const WRITERS: u64 = 8;
+const INITIALIZATION_WRITERS: u64 = 8;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -39,9 +39,12 @@ struct Args {
     /// Concurrent whole DataFile reads. Production I/O limits remain unchanged.
     #[arg(long, default_value_t = 32)]
     readers: u64,
+    /// Concurrent write callers per case, run after a read-only baseline.
+    #[arg(long, default_value = "8", value_delimiter = ',', value_parser = clap::value_parser!(u64).range(1..))]
+    writers: Vec<u64>,
     #[arg(long, default_value_t = 65536)]
     read_mib: u64,
-    /// At least eight MiB. Each writer owns a separate byte range.
+    /// At least one MiB per writer. Each writer owns a separate byte range.
     #[arg(long, default_value_t = 8192)]
     write_mib: u64,
     // Cargo passes this to harness-free benchmarks.
@@ -80,17 +83,17 @@ async fn measure(
     sizes: &Arc<Vec<(usize, u64)>>,
     payload: &Bytes,
     args: &Args,
-    writes: bool,
+    writers: u64,
 ) -> Result<(Vec<Sample>, f64, f64)> {
     let read_bytes = args.read_mib * MIB;
-    let writer_chunks = args.write_mib / WRITERS;
+    let writer_chunks = args.write_mib / writers.max(1);
     let readers = args.readers;
     let cpu_before = cpu_seconds()?;
     let started = Instant::now();
     let measured = started + Duration::from_secs(args.warmup);
     let end = measured + Duration::from_secs(args.seconds);
     let mut tasks = JoinSet::new();
-    for worker in 0..readers + if writes { WRITERS } else { 0 } {
+    for worker in 0..readers + writers {
         let (file, sizes, payload) = (file.clone(), sizes.clone(), payload.clone());
         tasks.spawn(async move {
             let write = worker >= readers;
@@ -168,8 +171,11 @@ fn report(case: &str, samples: &[Sample], seconds: f64) {
 #[tokio::main(worker_threads = 4)]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    if args.seconds == 0 || args.readers == 0 || args.read_mib == 0 || args.write_mib < WRITERS {
-        return Err("seconds, readers, and read-mib must be positive, write-mib must be at least eight".into());
+    if args.seconds == 0 || args.readers == 0 || args.read_mib == 0 {
+        return Err("seconds, readers, and read-mib must be positive".into());
+    }
+    if args.writers.iter().any(|&writers| writers > args.write_mib) {
+        return Err("write-mib must provide at least one MiB per writer".into());
     }
     let capacity = args
         .read_mib
@@ -225,10 +231,10 @@ async fn main() -> Result<()> {
     let payload = buffer.into_bytes();
     eprintln!("Initializing {} MiB through DataFile", capacity / MIB);
     let mut initialization = JoinSet::new();
-    for worker in 0..WRITERS {
+    for worker in 0..INITIALIZATION_WRITERS {
         let (file, payload) = (file.clone(), payload.clone());
         initialization.spawn(async move {
-            for offset in (worker * MIB..capacity).step_by((WRITERS * MIB) as usize) {
+            for offset in (worker * MIB..capacity).step_by((INITIALIZATION_WRITERS * MIB) as usize) {
                 file.write_at(offset, &payload).await?;
             }
             Ok::<_, DataFileError>(())
@@ -243,14 +249,19 @@ async fn main() -> Result<()> {
         "{:<10} {:<5} {:<14} {:>9} {:>12} {:>10} {:>10} {:>9} {:>9} {:>9} {:>9}",
         "Case", "I/O", "Size", "Count", "Bytes", "MB/s", "IOPS", "Mean ms", "p50 ms", "p95 ms", "p99 ms",
     );
-    for (case, writes) in [("read-only", false), ("read-write", true)] {
+    for writers in std::iter::once(0).chain(args.writers.iter().copied()) {
+        let case = if writers == 0 {
+            "read-only".to_owned()
+        } else {
+            format!("writers-{writers}")
+        };
         tokio::time::sleep(Duration::from_secs(5)).await;
         eprintln!("Running {case}");
-        let (samples, elapsed, cpu_percent) = measure(&file, &sizes, &payload, &args, writes).await?;
-        if !samples.iter().any(|s| !s.write) || (writes && !samples.iter().any(|s| s.write)) {
+        let (samples, elapsed, cpu_percent) = measure(&file, &sizes, &payload, &args, writers).await?;
+        if !samples.iter().any(|s| !s.write) || (writers != 0 && !samples.iter().any(|s| s.write)) {
             return Err("measurement window contained no completed I/O for an enabled stream".into());
         }
-        report(case, &samples, args.seconds as f64);
+        report(&case, &samples, args.seconds as f64);
         println!(
             "{case}: CPU {cpu_percent:.1}% over {elapsed:.3}s including warmup/drain. Pool: {} used bytes, {} idle bytes.",
             pool.used_bytes(),

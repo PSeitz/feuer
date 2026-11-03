@@ -32,10 +32,17 @@ Two cases run once each, with ten seconds warmup and sixty measured seconds:
 2. Concurrent reads and continuous **1-MiB writes**, with no benchmark rate cap.
 
 Feuer's internal concurrency limits and backpressure remain unchanged. The
-benchmark creates 32 whole-read callers and eight write callers. Each caller
+benchmark defaults to 32 whole-read callers and eight write callers. Each caller
 starts its next operation after the previous one completes. Whole-read caller
-count, active 1-MiB read pieces, and actual device queue depth are different
-quantities. The reported write throughput is what Feuer and the device achieve.
+count, active 1-MiB read pieces, and device queue depth are different quantities.
+The reported write throughput is what Feuer and the device achieve.
+
+Use `--writers 1,2,3,4,5,6,7,8` to run a read-only baseline followed by each
+listed write concurrency, once each, in that order. Each write caller has at most
+one 1-MiB request outstanding. Up to eight callers therefore limit outstanding
+writes to the selected count. More callers wait behind the production limit of
+eight active writes. This measures steady-state concurrency rather than adaptive
+admission. Each case has its own warmup and measurement window.
 
 Read sizes are sampled with replacement according to the supplied weights.
 Offsets are uniformly random and 4-KiB-aligned. Sizes are passed unchanged to
@@ -53,8 +60,8 @@ output to a file under the repository's ignored `experiments/` directory.
 Defaults:
 
 - A newly created DataFile with a 64-GiB read region and an 8-GiB write region.
-  Allow at least **80 GiB free SSD space**. The entire file is initialized through
-  DataFile and synced before testing.
+  Allow at least **80 GiB free SSD space**. Eight write callers initialize the
+  entire file through DataFile, which is then synced before testing.
 - Each writer cycles through its own disjoint byte range, reusing a 1-MiB buffer.
   Reads and writes never overlap. Writers never overwrite another writer's
   in-flight bytes. No per-write stable-storage sync.
@@ -65,11 +72,12 @@ Defaults:
 
 `--readers`, `--seconds`, and `--warmup` adjust concurrency and timing.
 `--read-mib` and `--write-mib` adjust the disk regions. Read sizes must fit the
-read region. The write region must contain at least eight MiB. These options
-also allow small correctness checks without a full SSD performance run.
+read region. The write region must contain at least one MiB per writer in the
+largest selected case. These options also allow small correctness checks
+without a full SSD performance run.
 
 Only the benchmark's temporary data directory is removed afterward. I/O failures
-abort the run. A successful exit follows both cases and cleanup.
+abort the run. A successful exit follows all selected cases and cleanup.
 
 ## Results
 
