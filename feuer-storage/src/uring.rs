@@ -648,7 +648,7 @@ impl IoQueue {
             .expect("completion for inactive request");
         match request.apply_completion_result(result) {
             Ok(()) if !request.buffer_range.is_empty() && !request.reply.as_ref().unwrap().is_closed() => {
-                self.queue_active_request(request_index)
+                self.queue_request_for_submission(request_index)
             }
             result => self.active[request_index].take().unwrap().send_result(result),
         }
@@ -669,12 +669,12 @@ impl IoQueue {
                 }
             };
             self.active[request_index] = Some(request);
-            self.queue_active_request(request_index);
+            self.queue_request_for_submission(request_index);
         }
     }
 
-    /// Queues the active request's remaining I/O in the ring without submitting it to the kernel yet.
-    fn queue_active_request(&mut self, request_index: usize) {
+    /// Adds the request's remaining I/O to io_uring's submission queue.
+    fn queue_request_for_submission(&mut self, request_index: usize) {
         let entry = self.active[request_index]
             .as_mut()
             .unwrap()
