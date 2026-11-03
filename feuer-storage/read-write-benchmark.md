@@ -1,18 +1,23 @@
 # Storage read/write benchmark
 
-Supply your payload sizes and relative read-operation weights directly:
+Run with the observed read-size mix and print results to the terminal:
 
 ```sh
 cargo bench --locked -p feuer-storage --bench read_write -- \
-  --sizes '4KiB:50,32KiB:30,1MiB:20' \
-  --directory /mnt/local-ssd \
-  --output "$PWD/experiments/ssd/read-write-$(date -u +%Y%m%dT%H%M%SZ)"
+  --directory /mnt/local-ssd
 ```
 
-This example generates 50% 4-KiB reads, 30% 32-KiB reads, and 20% 1-MiB reads.
-Weights count **operations**, rather than bytes. They need not sum to 100.
-Sizes accept byte units such as `B`, `KiB`, and `MiB`. Sizes and integer weights
-must be positive. No input file is required.
+The default preserves 6,076 sampled sizes and 1,377,574 operation weights from our
+observed logical accesses, including memory hits. Sizes were rounded to 4 KiB
+for the original experiment, adding 0.1383% to sampled bytes. The source capture
+had disk caching disabled, so this represents payload sizes rather than observed
+physical disk demand. The mix is compiled into the benchmark.
+
+Override it for your own payloads with `--sizes '4KiB:50,32KiB:30,1MiB:20'`.
+This selects sizes with weights of 50%, 30%, and 20% of read **operations**, rather
+than bytes. Weights need not sum to 100. Sizes accept units such as `B`, `KiB`,
+and `MiB`. Sizes and integer weights must be positive. No input file or output
+directory is required.
 
 ## What it tests
 
@@ -42,8 +47,8 @@ a size mix, rather than reproducing application timing or locality.
 
 Use Linux with io_uring, O_DIRECT, and STATX_DIOALIGN support. For project SSD
 measurements, use `ssh m8g-32cpu-local-ssd-2` and check for other jobs first.
-Run the command from the repository root on EBS. Keep output in the ignored
-`experiments/` directory, on a separate device from the measured SSD.
+Run the command from the repository root on EBS. To retain results, redirect
+output to a file under the repository's ignored `experiments/` directory.
 
 Defaults:
 
@@ -63,27 +68,22 @@ Defaults:
 read region. The write region must contain at least eight MiB. These options
 also allow small correctness checks without a full SSD performance run.
 
-The output directory must be new. Only the benchmark's temporary data directory
-is removed afterward. I/O failures abort the run. `DONE` appears after both
-cases and cleanup succeed.
+Only the benchmark's temporary data directory is removed afterward. I/O failures
+abort the run. A successful exit follows both cases and cleanup.
 
 ## Results
 
-- `summary.csv` and stdout: read/write throughput, IOPS, counts, bytes, and
-  mean/p50/p95/p99 latency, including five read-size classes.
-- `process.csv`: process CPU, including I/O workers, and pool usage after drain.
-  CPU 100% means one core. This interval includes warmup and drain, and excludes
-  initialization and report generation.
-- Per-case CSVs: requested sizes, completion times, and operation latencies.
-  Rows are grouped by worker. Timestamps are nanoseconds since the end of warmup.
-- `settings.txt`, `input-sizes.csv`, and `read_write.rs`: exact arguments, grouped
-  input weights/bytes, and compiled benchmark source.
+The terminal report includes read/write throughput, IOPS, counts, bytes, and
+mean/p50/p95/p99 latency, including five read-size classes. It also reports
+process CPU, including I/O workers, and pool usage after drain. CPU 100% means
+one core. Its interval includes warmup and drain, and excludes initialization
+and report generation.
 
 Throughput counts completions during the fixed measurement window. Outstanding
 operations drain afterward and are excluded. Read latency includes the DataFile
 call and returning the result buffer. Size/offset selection is outside this
-latency. CPU includes workload generation and sample collection. CSV output
-occurs after each case. Requested bytes exclude any direct-I/O padding.
+latency. CPU includes workload generation and sample collection. Results are
+printed after each case. Requested bytes exclude any direct-I/O padding.
 
 For SSD measurements, retain `iostat -dx -y` and `pidstat -u -r -d` output, source
 revision and working-tree patch, Rust version, host/device details, and command.

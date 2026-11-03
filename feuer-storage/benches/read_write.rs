@@ -1,9 +1,9 @@
 //! Histogram-driven reads alongside fixed 1-MiB writes through Feuer's DataFile.
 
 use std::{
-    env, fs,
+    fs,
     hint::black_box,
-    io::{self, BufWriter, Write},
+    io,
     num::NonZeroUsize,
     path::PathBuf,
     sync::Arc,
@@ -28,18 +28,16 @@ const SIZE_BANDS: [(&str, usize, usize); 5] = [
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(about = "Read-size histogram benchmark using Feuer's pooled DataFile I/O")]
 struct Args {
-    /// Read sizes and relative operation weights, e.g. 4KiB:50,32KiB:30,1MiB:20.
-    #[arg(long, required = true, value_delimiter = ',', value_parser = size_weight)]
+    /// Read sizes and relative weights, e.g. 4KiB:50,32KiB:30,1MiB:20. Defaults to the observed mix.
+    #[arg(long, default_value = include_str!("read-sizes.txt").trim(), hide_default_value = true,
+        value_delimiter = ',', value_parser = size_weight)]
     sizes: Vec<(usize, u64)>,
     /// Existing SSD directory. Only a new temporary directory is modified.
     #[arg(long)]
     directory: PathBuf,
-    /// New output directory under experiments/, on a separate device.
-    #[arg(long)]
-    output: PathBuf,
     #[arg(long, default_value_t = 60)]
     seconds: u64,
     #[arg(long, default_value_t = 10)]
@@ -60,7 +58,6 @@ struct Args {
 struct Sample {
     write: bool,
     length: usize,
-    completed_ns: u64,
     latency_ns: u64,
 }
 
@@ -129,7 +126,6 @@ async fn measure(
                     samples.push(Sample {
                         write,
                         length,
-                        completed_ns: finished.duration_since(measured).as_nanos() as u64,
                         latency_ns: finished.duration_since(before).as_nanos() as u64,
                     });
                 }
@@ -147,7 +143,7 @@ async fn measure(
     Ok((batches.into_iter().flatten().collect(), elapsed, cpu_percent))
 }
 
-fn report(out: &mut impl Write, case: &str, samples: &[Sample], seconds: f64) -> io::Result<()> {
+fn report(case: &str, samples: &[Sample], seconds: f64) {
     for (operation, label, min, max) in [("read", "all", 0, usize::MAX), ("write", "all", 0, usize::MAX)]
         .into_iter()
         .chain(SIZE_BANDS.map(|(label, min, max)| ("read", label, min, max)))
@@ -165,18 +161,15 @@ fn report(out: &mut impl Write, case: &str, samples: &[Sample], seconds: f64) ->
         let count = selected.len();
         let mean = latencies.iter().map(|ns| *ns as f64).sum::<f64>() / count as f64 / 1e6;
         let percentile = |p: usize| latencies[((count - 1) * p).div_ceil(100)] as f64 / 1e6;
-        let row = format!(
-            "{case},{operation},{label},{count},{bytes},{:.3},{:.3},{mean:.3},{:.3},{:.3},{:.3}",
+        println!(
+            "{case:<10} {operation:<5} {label:<14} {count:>9} {bytes:>12} {:>10.3} {:>10.3} {mean:>9.3} {:>9.3} {:>9.3} {:>9.3}",
             bytes as f64 / seconds / 1e6,
             count as f64 / seconds,
             percentile(50),
             percentile(95),
             percentile(99),
         );
-        writeln!(out, "{row}")?;
-        println!("{row}");
     }
-    Ok(())
 }
 
 #[tokio::main(worker_threads = 4)]
@@ -200,29 +193,13 @@ async fn main() -> Result<()> {
         sizes.push((size, total));
     }
     let sizes = Arc::new(sizes);
-    if let Some(parent) = args.output.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::create_dir(&args.output)?;
-    fs::write(
-        args.output.join("settings.txt"),
-        format!("{args:#?}\ncommand={:?}\n", env::args().collect::<Vec<_>>()),
-    )?;
-    fs::write(args.output.join("read_write.rs"), include_str!("read_write.rs"))?;
-    let mut input_summary = fs::File::create(args.output.join("input-sizes.csv"))?;
-    writeln!(input_summary, "size,count,bytes")?;
-    for (label, min, max) in SIZE_BANDS {
-        let mut previous = 0;
-        let (mut count, mut bytes) = (0_u64, 0_u128);
-        for &(size, cumulative) in sizes.iter() {
-            if (min..=max).contains(&size) {
-                count += cumulative - previous;
-                bytes += size as u128 * (cumulative - previous) as u128;
-            }
-            previous = cumulative;
-        }
-        writeln!(input_summary, "{label},{count},{bytes}")?;
-    }
+    println!(
+        "Read mix: {} sizes, total weight {total}. {} read callers, {}s warmup, {}s measurement per case.",
+        sizes.len(),
+        args.readers,
+        args.warmup,
+        args.seconds,
+    );
 
     let temp = tempfile::Builder::new()
         .prefix("feuer-read-write-")
@@ -249,16 +226,10 @@ async fn main() -> Result<()> {
     }
     fs::File::open(temp.path().join("data"))?.sync_all()?;
 
-    let mut summary = fs::File::create(args.output.join("summary.csv"))?;
-    writeln!(
-        summary,
-        "case,operation,size,count,bytes,MB_s,IOPS,mean_ms,p50_ms,p95_ms,p99_ms"
-    )?;
-    let mut costs = fs::File::create(args.output.join("process.csv"))?;
-    writeln!(
-        costs,
-        "case,seconds_including_warmup_and_drain,cpu_percent,pool_used_bytes,pool_idle_bytes"
-    )?;
+    println!(
+        "{:<10} {:<5} {:<14} {:>9} {:>12} {:>10} {:>10} {:>9} {:>9} {:>9} {:>9}",
+        "Case", "I/O", "Size", "Count", "Bytes", "MB/s", "IOPS", "Mean ms", "p50 ms", "p95 ms", "p99 ms",
+    );
     for (case, writes) in [("read-only", false), ("read-write", true)] {
         tokio::time::sleep(Duration::from_secs(5)).await;
         eprintln!("Running {case}");
@@ -266,32 +237,14 @@ async fn main() -> Result<()> {
         if !samples.iter().any(|s| !s.write) || (writes && !samples.iter().any(|s| s.write)) {
             return Err("measurement window contained no completed I/O for an enabled stream".into());
         }
-        report(&mut summary, case, &samples, args.seconds as f64)?;
-        writeln!(
-            costs,
-            "{case},{elapsed:.3},{cpu_percent:.3},{},{}",
+        report(case, &samples, args.seconds as f64);
+        println!(
+            "{case}: CPU {cpu_percent:.1}% over {elapsed:.3}s including warmup/drain. Pool: {} used bytes, {} idle bytes.",
             pool.used_bytes(),
-            pool.idle_bytes()
-        )?;
-        let mut raw = BufWriter::new(fs::File::create(args.output.join(format!("{case}.csv")))?);
-        writeln!(raw, "operation,size_bytes,completion_ns,latency_ns")?;
-        for sample in samples {
-            writeln!(
-                raw,
-                "{},{},{},{}",
-                if sample.write { "write" } else { "read" },
-                sample.length,
-                sample.completed_ns,
-                sample.latency_ns
-            )?;
-        }
-        raw.flush()?;
+            pool.idle_bytes(),
+        );
     }
     drop(file);
     temp.close()?;
-    fs::write(
-        args.output.join("DONE"),
-        "Both cases completed once each. Temporary data removed.\n",
-    )?;
     Ok(())
 }
