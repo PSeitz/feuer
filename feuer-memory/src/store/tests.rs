@@ -342,6 +342,25 @@ fn access_history_is_independent_of_cache_operations_and_lifetime() {
 }
 
 #[test]
+fn default_shard_count_scales_with_capacity() {
+    let gib = 1024 * 1024 * 1024;
+    for (capacity, expected) in [
+        (0, 1),
+        (1, 1),
+        (8 * gib, 1),
+        (16 * gib - 1, 1),
+        (16 * gib, 2),
+        (32 * gib, 4),
+        (256 * gib, 32),
+        (300_000_000_000, 34),
+        (512 * gib, 64),
+        (1024 * gib, 128),
+    ] {
+        assert_eq!(MemoryCache::new(capacity).shards.len(), expected, "capacity: {capacity}");
+    }
+}
+
+#[test]
 fn configured_target_is_divided_without_losing_remainder_bytes() {
     assert_eq!(
         (0..2).map(|index| shard_capacity_for(3, 2, index)).collect::<Vec<_>>(),

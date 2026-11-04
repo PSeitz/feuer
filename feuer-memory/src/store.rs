@@ -2,7 +2,7 @@ mod shard;
 #[cfg(test)]
 mod tests;
 
-use std::{fmt, hash::BuildHasher, sync::Arc, thread::available_parallelism};
+use std::{fmt, hash::BuildHasher, sync::Arc};
 
 use bytes::Bytes;
 use feuer_historian::ObjectAccessHistories;
@@ -16,10 +16,9 @@ use crate::{
     retention::{FetchCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer},
 };
 
-/// Caps lock partitioning to avoid excessive per-cache metadata.
-const MAX_SHARDS: usize = 64;
-
 /// A sharded object cache with soft capacity.
+///
+/// The default shard count is capacity divided by 8 GiB, rounded down, with at least one shard.
 ///
 /// Each [`ObjectKeyHash`] identifies an immutable object. Lookups return its
 /// payload, sharing the entry's allocation without holding an entry guard.
@@ -60,7 +59,7 @@ impl MemoryCache {
 
     /// Creates a cache with registered metrics. Idle buffers use capacity left by cached objects.
     pub fn with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self {
-        Self::with_shard_count(BufferPool::new(capacity, metrics), default_shard_count())
+        Self::with_shard_count(BufferPool::new(capacity, metrics), default_shard_count(capacity))
     }
 
     /// Consults the supplied request history for retention decisions.
@@ -194,8 +193,6 @@ fn shard_capacity_for(total_capacity: u64, num_shards: usize, shard_index: usize
     total_capacity / num_shards + u64::from((shard_index as u64) < total_capacity % num_shards)
 }
 
-fn default_shard_count() -> usize {
-    available_parallelism()
-        .map(|cpus| cpus.get().min(MAX_SHARDS / 4) * 4)
-        .unwrap_or(4)
+fn default_shard_count(capacity: u64) -> usize {
+    (capacity / (8 * 1024 * 1024 * 1024)).max(1) as usize
 }
