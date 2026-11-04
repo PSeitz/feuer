@@ -356,7 +356,11 @@ fn default_shard_count_scales_with_capacity() {
         (512 * gib, 64),
         (1024 * gib, 128),
     ] {
-        assert_eq!(MemoryCache::new(capacity).shards.len(), expected, "capacity: {capacity}");
+        assert_eq!(
+            MemoryCache::new(capacity).shards.len(),
+            expected,
+            "capacity: {capacity}"
+        );
     }
 }
 
