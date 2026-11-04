@@ -26,7 +26,7 @@ It exercises Feuer's pooled buffers, read admission, large-read splitting,
 io_uring queues, and completion handling. Cache lookup, eviction, packing, and
 metadata updates are outside this storage-path benchmark.
 
-Two cases run once each, with ten seconds warmup and sixty measured seconds:
+By default, two cases run once each, with ten seconds warmup and sixty measured seconds:
 
 1. Concurrent reads, without writes.
 2. Concurrent reads and continuous **1-MiB writes**, with no benchmark rate cap.
@@ -41,8 +41,14 @@ Use `--writers 1,2,3,4,5,6,7,8` to run a read-only baseline followed by each
 listed write concurrency, once each, in that order. Each write caller has at most
 one 1-MiB request outstanding. Up to eight callers therefore limit outstanding
 writes to the selected count. More callers wait behind the production limit of
-eight active writes. This measures steady-state concurrency rather than adaptive
-admission. Each case has its own warmup and measurement window.
+eight active writes. The production read-pressure limiter also applies: while
+reads wait for channel capacity, new writes wait for active writes to finish and
+are paced at 1 GiB/s. The restriction remains for 100 ms after the last read
+stops waiting, then normal admission resumes. A new read wait restarts this hold
+when it ends. While restricted, the worker rechecks every millisecond, subject to
+thread scheduling. The benchmark varies caller concurrency
+and measures the resulting admission behavior. Each case has its own
+warmup and measurement window.
 
 Read sizes are sampled with replacement according to the supplied weights.
 Offsets are uniformly random and 4-KiB-aligned. Sizes are passed unchanged to
@@ -79,7 +85,7 @@ without a full SSD performance run.
 Only the benchmark's temporary data directory is removed afterward. I/O failures
 abort the run. A successful exit follows all selected cases and cleanup.
 
-## Results
+## Report format
 
 The terminal report starts with the input distribution: exact size, operation
 weight, expected operation percentage, and expected byte percentage. Repeated
@@ -103,5 +109,5 @@ printed after each case. Requested bytes exclude any direct-I/O padding.
 
 For SSD measurements, retain `iostat -dx -y` and `pidstat -u -r -d` output, source
 revision and working-tree patch, Rust version, host/device details, and command.
-The [earlier fio measurements](../experiments/ssd/read-size-mix-20261102/RESULT.md)
-are a separate native-I/O baseline, not results from this benchmark.
+[Experiment results](../experiments/ssd/read-write-results.md) are kept locally
+under the ignored `experiments/` directory.

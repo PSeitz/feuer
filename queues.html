@@ -243,6 +243,7 @@ result_receiver.await.map_err(|_| queue_stopped_error())?</code></pre>
                 <summary><span class="node-name">Why eight active writes?</span><span class="node-meta">local SSD measurement</span></summary>
                 <div class="node-body">
                   <p>The current code caps active writes at 8, with a separate 8-request waiting channel. Its comment cites local-SSD measurements: 1-MiB writes saturated at QD8; QD64 added no write-only throughput and increased write p99 from 4.6 to 47 ms, while worsening small-read latency.</p>
+                  <p>While reads wait for channel capacity, new writes wait for active writes to finish and are paced at 1 GiB/s. The restriction remains for 100 ms after the last read stops waiting, then normal admission resumes. A new read wait restarts this hold when it ends. While restricted, the worker rechecks at least every millisecond, subject to thread scheduling. The signal combines all files sharing these queues.</p>
                   <p>This is hardware/workload-specific evidence, not a universal optimal depth or a measurement of the current metadata-write pipeline.</p>
                   <a class="source-label" href="experiments/ssd/uring-20260928/REPORT.md">experiments/ssd/uring-20260928/REPORT.md</a>
                   <details class="source">
@@ -283,7 +284,7 @@ const MAX_IN_FLIGHT_WRITES: usize = 8;</code></pre>
                 <summary><span class="node-name">Sleep without stalling new work</span><span class="node-meta">ring fd + eventfd</span></summary>
                 <div class="node-body">
                   <p>The loop collects completions, moves requests from the channel into io_uring's submission queue while the active request array has room, and submits. Interrupted and short submissions are retried before sleeping. Temporary resource pressure (<code>EAGAIN</code>) waits up to 1 ms before retrying, even if no accepted request can produce a completion. Once all prepared submissions have reached the kernel, it sleeps in <code>poll</code> watching both the ring and an eventfd.</p>
-                  <p>New submissions signal the eventfd, so fresh work can wake the worker even while a slow operation is outstanding. It does not continuously spin.</p>
+                  <p>New submissions signal the eventfd, so fresh work can wake the worker even while a slow operation is outstanding. Write pacing sets a poll timeout so admission resumes even when no request is active. Pending writes remain in the channel and preserve backpressure.</p>
                   <details class="source">
                     <summary>Code · wait for completion or wakeup</summary>
                     <a class="source-label" href="feuer-storage/src/uring.rs">feuer-storage/src/uring.rs · wait_for_completion_or_wakeup (excerpt)</a>

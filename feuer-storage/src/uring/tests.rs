@@ -85,6 +85,7 @@ fn queue() -> (IoQueue, mpsc::Sender<IoRequest>, Arc<DataFileAndLock>) {
             wake_fd,
             receiver,
             requests_awaiting_completion: (0..MAX_IN_FLIGHT_READS).map(|_| None).collect(),
+            write_rate_limit: None,
         },
         sender,
         files,
@@ -119,7 +120,7 @@ proptest! {
         let operation = if write { IoOperation::Write } else { IoOperation::Read };
         let files = data_file();
         let pool = buffer_pool();
-        let mut handle = IoQueueHandle::new(operation).unwrap();
+        let mut handle = IoQueueHandle::new(operation, Arc::new(Mutex::new(ReadQueueWaiters::default()))).unwrap();
         // Check thread termination separately so a lost wakeup cannot hang Drop's join.
         let worker = handle.thread.take().unwrap();
         let handle = Arc::new(handle);
@@ -361,6 +362,128 @@ async fn active_request_limit_keeps_channel_full_until_completion() {
     }
 }
 
+fn paced_write_queue() -> (
+    IoQueue,
+    mpsc::Sender<IoRequest>,
+    Arc<DataFileAndLock>,
+    Arc<Mutex<ReadQueueWaiters>>,
+) {
+    let (mut queue, _, files) = queue();
+    let (sender, receiver) = mpsc::channel(MAX_IN_FLIGHT_WRITES);
+    let waiters = Arc::new(Mutex::new(ReadQueueWaiters::default()));
+    queue.receiver = receiver;
+    queue.requests_awaiting_completion = (0..MAX_IN_FLIGHT_WRITES).map(|_| None).collect();
+    queue.write_rate_limit = Some(WriteRateLimit::new(waiters.clone()));
+    (queue, sender, files, waiters)
+}
+
+#[test]
+fn read_pressure_leaves_writes_queued_until_all_active_positions_finish() {
+    let (mut queue, sender, files, waiters) = paced_write_queue();
+    let mut replies = Vec::new();
+    for _ in 0..MAX_IN_FLIGHT_WRITES {
+        let (request, reply) = request(&files, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
+        sender.try_send(request).unwrap();
+        replies.push(reply);
+    }
+    assert_eq!(queue.queue_requests_for_submission(), -1);
+    queue.ring.submit_and_wait(MAX_IN_FLIGHT_WRITES).unwrap();
+    let mut completions: Vec<_> = queue.ring.completion().collect();
+    completions.sort_by_key(|completion| completion.user_data());
+    for completion in completions.drain(..MAX_IN_FLIGHT_WRITES - 2) {
+        queue.handle_io_completion(completion.user_data(), completion.result());
+    }
+    waiters.lock().unwrap().waiting_reads = 1;
+    for _ in 0..MAX_IN_FLIGHT_WRITES {
+        let (request, reply) = request(&files, IoOperation::Write, 0, DIRECT_IO_ALIGNMENT_BYTES);
+        sender.try_send(request).unwrap();
+        replies.push(reply);
+    }
+    for completion in completions {
+        assert_eq!(queue.queue_requests_for_submission(), 1);
+        assert_eq!(sender.capacity(), 0);
+        assert!(queue.ring.submission().is_empty());
+        queue.handle_io_completion(completion.user_data(), completion.result());
+    }
+    let limit = queue.write_rate_limit.as_mut().unwrap();
+    limit.record_write(MAX_IO_REQUEST_BYTES, Instant::now() + Duration::from_secs(1));
+    assert_eq!(queue.queue_requests_for_submission(), 1);
+    assert_eq!(sender.capacity(), 0);
+    queue
+        .write_rate_limit
+        .as_mut()
+        .unwrap()
+        .record_write(MAX_IO_REQUEST_BYTES, Instant::now() - Duration::from_secs(1));
+    assert_eq!(queue.queue_requests_for_submission(), 1);
+    assert_eq!(sender.capacity(), 1);
+    assert_eq!(queue.requests_awaiting_completion.iter().flatten().count(), 1);
+
+    waiters
+        .lock()
+        .unwrap()
+        .remove_waiting_read(Instant::now() - Duration::from_millis(100));
+    assert_eq!(queue.queue_requests_for_submission(), -1);
+    assert_eq!(sender.capacity(), MAX_IN_FLIGHT_WRITES);
+    assert_eq!(
+        queue.requests_awaiting_completion.iter().flatten().count(),
+        MAX_IN_FLIGHT_WRITES
+    );
+    drop(sender);
+    queue.process_requests_until_disconnected().unwrap();
+    for mut reply in replies {
+        reply.try_recv().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn paced_writes_wake_without_new_requests_and_drain_during_read_pressure() {
+    let (mut queue, sender, files, waiters) = paced_write_queue();
+    waiters.lock().unwrap().waiting_reads = 1;
+    let mut replies = Vec::new();
+    for _ in 0..MAX_IN_FLIGHT_WRITES {
+        let (request, reply) = request(&files, IoOperation::Write, 0, MAX_IO_REQUEST_BYTES);
+        sender.try_send(request).unwrap();
+        replies.push(reply);
+    }
+    drop(sender);
+    let started = Instant::now();
+    let (finished, receive) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let mut retry = true;
+        let result = queue.process_requests_with_submit(|ring| {
+            if mem::take(&mut retry) {
+                Err(io::Error::from_raw_os_error(libc::EAGAIN))
+            } else {
+                ring.submit()
+            }
+        });
+        finished.send(result).unwrap();
+    });
+    receive.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    worker.join().unwrap();
+    assert!(started.elapsed() >= Duration::from_secs_f64(1.0 / 1024.0) * (MAX_IN_FLIGHT_WRITES as u32 - 1));
+    for mut reply in replies {
+        reply.try_recv().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn canceled_paced_writes_release_capacity_without_submission() {
+    let (mut queue, sender, files, waiters) = paced_write_queue();
+    waiters.lock().unwrap().waiting_reads = 1;
+    for _ in 0..MAX_IN_FLIGHT_WRITES {
+        let (request, reply) = request(&files, IoOperation::Write, 0, MAX_IO_REQUEST_BYTES);
+        sender.try_send(request).unwrap();
+        drop(reply);
+    }
+    drop(sender);
+    queue
+        .process_requests_with_submit(|_| panic!("canceled write reached submission"))
+        .unwrap();
+    assert!(queue.receiver.is_empty());
+    assert!(queue.requests_awaiting_completion.iter().all(Option::is_none));
+}
+
 #[tokio::test]
 async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
     use crate::test_metrics::value;
@@ -369,7 +492,15 @@ async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
     let queues = IoQueues::new().unwrap();
     let first = queues.read_queue(data_file(), buffer_pool(), IoMetrics::new(&backend));
     let second = queues.read_queue(data_file(), buffer_pool(), IoMetrics::new(&backend));
+    assert!(Arc::ptr_eq(
+        &queues.read.read_queue_waiters,
+        &queues.write.read_queue_waiters
+    ));
     let assert_metrics = |waiters, waits| {
+        assert_eq!(
+            queues.read.read_queue_waiters.lock().unwrap().waiting_reads,
+            waiters as usize
+        );
         assert_eq!(value(&registry, "feuer_disk_read_queue_waiters", &[]), waiters);
         assert_eq!(
             value(&registry, "feuer_disk_read_queue_wait_duration_seconds", &[]),
@@ -406,6 +537,7 @@ async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
             sender: Some(sender),
             wake_fd: queue.wake_fd.clone(),
             thread: None,
+            read_queue_waiters: queues.read.read_queue_waiters.clone(),
         }),
         payload_reads: Arc::new(PayloadReadQueue::new()),
         files,
@@ -429,6 +561,41 @@ async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
     drop(reservations);
     drop(read.reserve_channel_capacity().await.err().unwrap());
     assert_metrics(0.0, 3.0);
+}
+
+#[tokio::test]
+async fn cooperative_read_yields_limit_writes_only_when_the_channel_is_full() {
+    let queues = IoQueues::new().unwrap();
+    let read = queues.read_queue(data_file(), buffer_pool(), IoMetrics::noop());
+    tokio::spawn(async move {
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::coop::consume_budget().await;
+        }
+        let mut reserve = Box::pin(read.reserve_channel_capacity());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(reserve.as_mut().poll(&mut context).is_pending());
+        let limit = WriteRateLimit::new(read.handle.read_queue_waiters.clone());
+        assert!(!limit.must_wait(true, Instant::now()));
+        assert_eq!(read.handle.read_queue_waiters.lock().unwrap().waiting_reads, 0);
+
+        let reservations = read
+            .handle
+            .sender
+            .as_ref()
+            .unwrap()
+            .try_reserve_many(MAX_IN_FLIGHT_READS)
+            .unwrap();
+        assert!(reserve.as_mut().poll(&mut context).is_pending());
+        assert_eq!(read.handle.read_queue_waiters.lock().unwrap().waiting_reads, 1);
+        assert!(limit.must_wait(true, Instant::now()));
+        let canceled_at = Instant::now();
+        drop(reserve);
+        assert_eq!(read.handle.read_queue_waiters.lock().unwrap().waiting_reads, 0);
+        assert!(limit.must_wait(true, canceled_at));
+        drop(reservations);
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -725,6 +892,7 @@ async fn queue_exit_releases_admission_waiters_and_queued_requests() {
             sender: Some(sender),
             wake_fd: queue.wake_fd.clone(),
             thread: None,
+            read_queue_waiters: Arc::new(Mutex::new(ReadQueueWaiters::default())),
         }),
         files: files.clone(),
         buffer_pool: buffer_pool(),
@@ -848,6 +1016,7 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
             sender: Some(sender),
             wake_fd: queue.wake_fd.clone(),
             thread: None,
+            read_queue_waiters: Arc::new(Mutex::new(ReadQueueWaiters::default())),
         }),
         files: files.clone(),
         buffer_pool: pool.clone(),
@@ -909,6 +1078,7 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
                 sender: Some(sender),
                 wake_fd: queue.wake_fd.clone(),
                 thread: None,
+                read_queue_waiters: Arc::new(Mutex::new(ReadQueueWaiters::default())),
             }),
             files,
             buffer_pool: pool.clone(),

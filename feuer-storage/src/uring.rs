@@ -24,7 +24,7 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     pin::pin,
     ptr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::Instant,
 };
@@ -36,6 +36,8 @@ use tokio::sync::{SemaphorePermit, mpsc, oneshot};
 
 mod read_admission;
 use read_admission::PayloadReadQueue;
+mod write_admission;
+use write_admission::{ReadQueueWaiters, WriteRateLimit};
 
 use crate::{IoMetrics, IoOperation};
 
@@ -66,6 +68,8 @@ pub(crate) struct DataFileAndLock {
 ///
 /// All attached files share capacity for 64 reads and 8 writes awaiting completion, plus waiting channels
 /// for another 64 reads and 8 writes. Requests run in arrival order. There is no per-cache fairness.
+/// While reads wait for channel capacity, new writes are paced at 1 GiB/s and wait for active
+/// writes to finish. These limits continue for 100 ms after the last read stops waiting.
 /// Cached payload reads also share 64 permits. At 64 waiting reads,
 /// all unchecked waiters are scheduled to consider source fallthrough before any payload I/O.
 /// File ownership and read-buffer pools remain independent. Idle queues retain no files.
@@ -80,9 +84,10 @@ pub struct IoQueues {
 impl IoQueues {
     /// Creates the two io_uring rings and worker threads. Requires Linux io_uring support.
     pub fn new() -> io::Result<Self> {
+        let read_queue_waiters = Arc::new(Mutex::new(ReadQueueWaiters::default()));
         Ok(Self {
-            read: Arc::new(IoQueueHandle::new(IoOperation::Read)?),
-            write: Arc::new(IoQueueHandle::new(IoOperation::Write)?),
+            read: Arc::new(IoQueueHandle::new(IoOperation::Read, read_queue_waiters.clone())?),
+            write: Arc::new(IoQueueHandle::new(IoOperation::Write, read_queue_waiters)?),
             payload_reads: Arc::new(PayloadReadQueue::new()),
         })
     }
@@ -149,10 +154,11 @@ struct IoQueueHandle {
     wake_fd: Arc<OwnedFd>,
     // The queue thread is taken and joined on drop so submitted I/O drains first.
     thread: Option<JoinHandle<()>>,
+    read_queue_waiters: Arc<Mutex<ReadQueueWaiters>>,
 }
 
 impl IoQueueHandle {
-    fn new(operation: IoOperation) -> io::Result<Self> {
+    fn new(operation: IoOperation, read_queue_waiters: Arc<Mutex<ReadQueueWaiters>>) -> io::Result<Self> {
         let (thread_name, max_in_flight) = match operation {
             IoOperation::Read => ("feuer-read-io", MAX_IN_FLIGHT_READS),
             IoOperation::Write => ("feuer-write-io", MAX_IN_FLIGHT_WRITES),
@@ -173,6 +179,8 @@ impl IoQueueHandle {
             wake_fd: wake_fd.clone(),
             receiver,
             requests_awaiting_completion: (0..max_in_flight).map(|_| None).collect(),
+            write_rate_limit: (operation == IoOperation::Write)
+                .then(|| WriteRateLimit::new(read_queue_waiters.clone())),
         };
         let thread = thread::Builder::new().name(thread_name.into()).spawn(move || {
             if let Err(error) = queue.process_requests_until_disconnected() {
@@ -183,6 +191,7 @@ impl IoQueueHandle {
             sender: Some(sender),
             wake_fd,
             thread: Some(thread),
+            read_queue_waiters,
         })
     }
 
@@ -230,18 +239,22 @@ pub(crate) struct ReadQueue {
     metrics: Arc<IoMetrics>,
 }
 
-/// Measures a read request's wait for channel capacity, including cancellation.
-struct ReadQueueWaitMetrics<'a> {
+/// Tracks a read request's wait for channel capacity, including cancellation.
+struct ReadQueueWait<'a> {
     metrics: &'a IoMetrics,
-    started: Instant,
+    read_queue_waiters: Option<&'a Mutex<ReadQueueWaiters>>,
+    started_at: Instant,
 }
 
-impl Drop for ReadQueueWaitMetrics<'_> {
+impl Drop for ReadQueueWait<'_> {
     fn drop(&mut self) {
+        if let Some(waiters) = self.read_queue_waiters {
+            waiters.lock().unwrap().remove_waiting_read(Instant::now());
+        }
         self.metrics.read_queue_waiters.decrease(1);
         self.metrics
             .read_queue_wait_duration
-            .record(self.started.elapsed().as_secs_f64());
+            .record(self.started_at.elapsed().as_secs_f64());
     }
 }
 
@@ -253,7 +266,10 @@ impl ReadQueue {
         metrics: Arc<IoMetrics>,
     ) -> io::Result<Self> {
         Ok(Self {
-            handle: Arc::new(IoQueueHandle::new(IoOperation::Read)?),
+            handle: Arc::new(IoQueueHandle::new(
+                IoOperation::Read,
+                Arc::new(Mutex::new(ReadQueueWaiters::default())),
+            )?),
             payload_reads: Arc::new(PayloadReadQueue::new()),
             files,
             buffer_pool,
@@ -266,12 +282,20 @@ impl ReadQueue {
         let mut reserve = pin!(self.handle.reserve_channel_capacity());
         poll_fn(|cx| {
             let result = reserve.as_mut().poll(cx);
-            if result.is_pending() && wait.is_none() {
-                self.metrics.read_queue_waiters.increase(1);
-                wait = Some(ReadQueueWaitMetrics {
-                    metrics: &self.metrics,
-                    started: Instant::now(),
+            if result.is_pending() {
+                let wait = wait.get_or_insert_with(|| {
+                    self.metrics.read_queue_waiters.increase(1);
+                    ReadQueueWait {
+                        metrics: &self.metrics,
+                        read_queue_waiters: None,
+                        started_at: Instant::now(),
+                    }
                 });
+                // Cooperative yields can return Pending while the channel still has room.
+                if wait.read_queue_waiters.is_none() && self.handle.sender.as_ref().unwrap().capacity() == 0 {
+                    self.handle.read_queue_waiters.lock().unwrap().waiting_reads += 1;
+                    wait.read_queue_waiters = Some(&self.handle.read_queue_waiters);
+                }
             }
             result
         })
@@ -328,7 +352,10 @@ impl WriteQueue {
     #[cfg(test)]
     pub(crate) fn new(files: Arc<DataFileAndLock>) -> io::Result<Self> {
         Ok(Self {
-            handle: Arc::new(IoQueueHandle::new(IoOperation::Write)?),
+            handle: Arc::new(IoQueueHandle::new(
+                IoOperation::Write,
+                Arc::new(Mutex::new(ReadQueueWaiters::default())),
+            )?),
             files,
         })
     }
@@ -598,6 +625,7 @@ struct IoQueue {
     // Retains requests for queued or submitted I/O at fixed addresses through completion handling.
     // Completions identify request indexes.
     requests_awaiting_completion: Box<[Option<IoRequest>]>,
+    write_rate_limit: Option<WriteRateLimit>,
 }
 
 impl IoQueue {
@@ -616,7 +644,7 @@ impl IoQueue {
             while let Some(completion) = { self.ring.completion().next() } {
                 self.handle_io_completion(completion.user_data(), completion.result());
             }
-            self.queue_requests_for_submission();
+            let admission_wait_millis = self.queue_requests_for_submission();
             if self.receiver.is_closed()
                 && self.receiver.is_empty()
                 && self.requests_awaiting_completion.iter().all(Option::is_none)
@@ -641,7 +669,7 @@ impl IoQueue {
             if !self.ring.submission().is_empty() {
                 continue;
             }
-            self.wait_for_completion_or_wakeup(-1)?;
+            self.wait_for_completion_or_wakeup(admission_wait_millis)?;
         }
     }
 
@@ -664,21 +692,38 @@ impl IoQueue {
 
     /// Moves requests from the channel into io_uring's submission queue while the request array has room.
     /// Retains their buffers until completion. Discards requests whose callers canceled.
-    fn queue_requests_for_submission(&mut self) {
+    /// Returns a poll timeout for write pacing, or -1 to wait for a completion or wakeup.
+    fn queue_requests_for_submission(&mut self) -> i32 {
         for request_index in 0..self.requests_awaiting_completion.len() {
             if self.requests_awaiting_completion[request_index].is_some() {
                 continue;
+            }
+            if self.receiver.is_empty() {
+                return -1;
+            }
+            if let Some(limit) = &self.write_rate_limit
+                && limit.must_wait(
+                    self.requests_awaiting_completion.iter().any(Option::is_some),
+                    Instant::now(),
+                )
+            {
+                // Read-wait changes do not wake this queue, so recheck after 1 ms.
+                return 1;
             }
             let request = loop {
                 match self.receiver.try_recv() {
                     Ok(request) if request.reply.as_ref().unwrap().is_closed() => continue,
                     Ok(request) => break request,
-                    Err(_) => return,
+                    Err(_) => return -1,
                 }
             };
+            if let Some(limit) = &mut self.write_rate_limit {
+                limit.record_write(request.remaining_buffer_range.len(), Instant::now());
+            }
             self.requests_awaiting_completion[request_index] = Some(request);
             self.queue_request_for_submission(request_index);
         }
+        -1
     }
 
     /// Adds the request's remaining I/O to io_uring's submission queue.

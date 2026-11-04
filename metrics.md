@@ -238,6 +238,16 @@ exclude admitted pieces, buffer allocation, and I/O completion waits. Durations
 include task rescheduling and Tokio cooperative yields. Immediately ready reservations produce no histogram observation.
 Cancellation removes the waiter and records its elapsed wait.
 
+Write admission uses a shared count of reads observed waiting with a full channel.
+Cooperative yields while capacity remains available contribute to the metrics
+above and leave this count unchanged. While these reads wait, new writes wait
+for active writes to finish and are paced at 1 GiB/s. The restriction remains
+for 100 ms after the last read stops waiting, then admission returns to eight
+concurrent writes without pacing. A new read wait restarts this hold when it ends.
+While admission is restricted, the write worker rechecks at least every millisecond,
+subject to thread scheduling.
+The signal combines all files sharing `IoQueues`, independently of metric registries.
+
 Each piece is at most 1 MiB. A larger data-file read can wait separately for each
 piece, so histogram counts are not payload-read or cache-lookup counts. Metadata
 reads and the opening probe are included. Metrics use the requesting data file's
