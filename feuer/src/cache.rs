@@ -694,7 +694,11 @@ mod tests {
         }
         for outcome in ["disk_hit", "callback"] {
             assert_eq!(
-                value(&registry, "feuer_lookup_duration_seconds", &[("outcome", outcome)]),
+                value(
+                    &registry,
+                    "feuer_lookup_duration_seconds",
+                    &[("outcome", outcome), ("size_range", "lt_100kib")],
+                ),
                 1.0
             );
         }

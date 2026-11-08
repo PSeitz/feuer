@@ -21,6 +21,43 @@ fn memory_operations_exclude_access_hit_miss_and_victim_counters() {
 }
 
 #[test]
+fn lookup_duration_size_ranges() {
+    for (bytes, expected_range) in [
+        (0, "lt_100kib"),
+        (100 * 1024 - 1, "lt_100kib"),
+        (100 * 1024, "lt_1mib"),
+        ((1 << 20) - 1, "lt_1mib"),
+        (1 << 20, "lt_10mib"),
+        ((10 << 20) - 1, "lt_10mib"),
+        (10 << 20, "lt_32mib"),
+        ((32 << 20) - 1, "lt_32mib"),
+        (32 << 20, "gte_32mib"),
+        (u64::MAX, "gte_32mib"),
+    ] {
+        let (registry, backend) = registry();
+        let metrics = LookupMetrics::new(&backend);
+        for (outcome, label) in [
+            (LookupOutcome::Callback, "callback"),
+            #[cfg(all(target_os = "linux", feature = "disk"))]
+            (LookupOutcome::DiskHit, "disk_hit"),
+        ] {
+            metrics.record(outcome, Duration::from_micros(10), bytes);
+            for size_range in ["lt_100kib", "lt_1mib", "lt_10mib", "lt_32mib", "gte_32mib"] {
+                assert_eq!(
+                    value(
+                        &registry,
+                        "feuer_lookup_duration_seconds",
+                        &[("outcome", label), ("size_range", size_range)],
+                    ),
+                    if size_range == expected_range { 1.0 } else { 0.0 },
+                    "{label}, {bytes} bytes, {size_range}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn lookup_bytes_record_all_successes_but_latency_excludes_memory_hits() {
     let (registry, backend) = registry();
     let metrics = LookupMetrics::new(&backend);
@@ -39,13 +76,21 @@ fn lookup_bytes_record_all_successes_but_latency_excludes_memory_hits() {
         assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", source)]), 7.0);
     }
     assert_eq!(
-        value(&registry, "feuer_lookup_duration_seconds", &[("outcome", "callback")]),
+        value(
+            &registry,
+            "feuer_lookup_duration_seconds",
+            &[("outcome", "callback"), ("size_range", "lt_100kib")],
+        ),
         1.0
     );
     #[cfg(all(target_os = "linux", feature = "disk"))]
     {
         assert_eq!(
-            value(&registry, "feuer_lookup_duration_seconds", &[("outcome", "disk_hit")]),
+            value(
+                &registry,
+                "feuer_lookup_duration_seconds",
+                &[("outcome", "disk_hit"), ("size_range", "lt_100kib")],
+            ),
             1.0
         );
         assert_eq!(value(&registry, "feuer_lookup_bytes_total", &[("source", "disk")]), 7.0);
@@ -60,7 +105,7 @@ fn lookup_bytes_record_all_successes_but_latency_excludes_memory_hits() {
         .iter()
         .find(|family| family.name() == "feuer_lookup_duration_seconds")
         .unwrap();
-    assert_eq!(durations.get_metric().len(), 2);
+    assert_eq!(durations.get_metric().len(), 10);
     assert!(durations.get_metric().iter().all(|metric| {
         metric
             .get_label()

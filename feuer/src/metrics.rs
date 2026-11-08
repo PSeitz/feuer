@@ -18,7 +18,7 @@ pub(crate) enum LookupOutcome {
 /// Completed public lookups, never keyed by object identity.
 pub(crate) struct LookupMetrics {
     outcome_counts: [BoxedCounter; 5],
-    success_durations: [BoxedHistogram; 2],
+    success_durations: [[BoxedHistogram; 5]; 2],
     served_bytes: [BoxedCounter; 3],
     #[cfg(all(target_os = "linux", feature = "disk"))]
     pub(crate) disk_write_already_covered: BoxedCounter,
@@ -36,7 +36,7 @@ impl LookupMetrics {
         let duration = registry.register_histogram_vec_with_buckets(
             "feuer_lookup_duration_seconds".into(),
             "Successful Feuer lookup duration after a memory miss, including callback work".into(),
-            &["outcome"],
+            &["outcome", "size_range"],
             Buckets::exponential(0.000_001, 2.0, 30),
         );
         let served_bytes = registry.register_counter_vec(
@@ -58,7 +58,10 @@ impl LookupMetrics {
             disk_write_redundant: writes.counter(&["redundant".into()]),
             outcome_counts: ["memory_hit", "disk_hit", "callback", "callback_error", "miss"]
                 .map(|label| count.counter(&[label.into()])),
-            success_durations: ["disk_hit", "callback"].map(|label| duration.histogram(&[label.into()])),
+            success_durations: ["disk_hit", "callback"].map(|outcome| {
+                ["lt_100kib", "lt_1mib", "lt_10mib", "lt_32mib", "gte_32mib"]
+                    .map(|size_range| duration.histogram(&[outcome.into(), size_range.into()]))
+            }),
             served_bytes: ["memory", "disk", "callback"].map(|label| served_bytes.counter(&[label.into()])),
         }
     }
@@ -70,11 +73,12 @@ impl LookupMetrics {
             served_bytes.increase(bytes);
         }
         // Disk hits and callbacks immediately follow memory hits in the outcome order.
-        if let Some(duration) = (outcome as usize)
+        if let Some(durations) = (outcome as usize)
             .checked_sub(1)
             .and_then(|index| self.success_durations.get(index))
         {
-            duration.record(elapsed.as_secs_f64());
+            let size_range = [100 * 1024, 1 << 20, 10 << 20, 32 << 20].partition_point(|&limit| bytes >= limit);
+            durations[size_range].record(elapsed.as_secs_f64());
         }
     }
 }

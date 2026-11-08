@@ -16,8 +16,19 @@ counters and gauges. Use separate registries if they must be distinguished.
 | Metric | Type | Labels / meaning |
 |---|---|---|
 | `feuer_lookup_total` | Counter | `outcome`: `memory_hit`, `disk_hit`, `callback`, `callback_error`, `miss` |
-| `feuer_lookup_duration_seconds` | Histogram | `outcome`: `disk_hit`, `callback`. Successful lookup after a memory miss, including callback work and synchronous disk-write scheduling |
+| `feuer_lookup_duration_seconds` | Histogram | `outcome`: `disk_hit`, `callback`. `size_range`: returned payload size, as listed below. Successful lookup after a memory miss, including callback work and synchronous disk-write scheduling |
 | `feuer_lookup_bytes_total` | Counter | `source`: `memory`, `disk`, `callback`. Object payload bytes returned |
+
+Lookup duration size ranges are mutually exclusive, with inclusive lower bounds
+and exclusive upper bounds. Each lookup records one duration in one size range.
+
+| `size_range` | Returned payload size |
+|---|---|
+| `lt_100kib` | < 100 KiB |
+| `lt_1mib` | 100 KiB–< 1 MiB |
+| `lt_10mib` | 1 MiB–< 10 MiB |
+| `lt_32mib` | 10 MiB–< 32 MiB |
+| `gte_32mib` | ≥ 32 MiB |
 
 Lookup outcomes count only completed operations. Duration
 histograms record successful disk hits and callbacks only, including time spent
