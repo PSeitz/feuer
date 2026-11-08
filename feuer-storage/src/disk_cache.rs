@@ -353,16 +353,12 @@ impl DiskCache {
             metrics.record_lookup(DiskLookupOutcome::Fallthrough, started.elapsed());
             return None;
         };
-        match result {
-            Ok((bytes, capacity)) => {
-                metrics.record_lookup(DiskLookupOutcome::Hit, started.elapsed());
-                Some((bytes.clone(), *capacity))
-            }
-            Err(outcome) => {
-                metrics.record_lookup(*outcome, started.elapsed());
-                None
-            }
-        }
+        let outcome = match result {
+            Ok(_) => DiskLookupOutcome::Hit,
+            Err(outcome) => *outcome,
+        };
+        metrics.record_lookup(outcome, started.elapsed());
+        result.as_ref().ok().cloned()
     }
 }
 
