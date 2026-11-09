@@ -115,6 +115,13 @@ Configure each tier's scorer with `.with_memory_retention_scorer(scorer)` and
 
 Use `get(key)` to read from memory or disk without fetching from the source.
 
+Use `insert(key, bytes)` when you already have the immutable payload. It accepts `Bytes`
+or `AlignedBuffer`, inserts into memory synchronously, and attempts a best-effort disk
+write enqueue for new memory entries. Existing memory entries are retained. A full disk
+queue skips the write and preserves the memory insertion. The call requires no runtime,
+performs no disk lookup, and records no lookup demand. All insertions and fetch callbacks
+for a key must supply equivalent bytes.
+
 If you'd rather fetch from the source than wait for a busy disk, use `get_or_fetch_with_disk_fallthrough`.
 This allows to maximize utilization of your resources. E.g. network bandwidth can be used to fetch from the source while disk is busy.
 

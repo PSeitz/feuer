@@ -71,6 +71,8 @@ struct CacheInner {
 
 /// A cloneable handle to a Feuer cache.
 ///
+/// Each key identifies one immutable payload. All insertions and fetch callbacks for
+/// the same key must supply equivalent bytes, including across cache reopenings.
 /// Lookups check memory, then integrity-checked disk, then the per-call callback.
 /// Disk writes are best-effort. A full 512-entry queue skips new writes. Zero disk capacity disables disk.
 /// Otherwise, opening requires the `disk` feature, Linux direct I/O and io_uring, and waits for metadata recovery.
@@ -352,6 +354,36 @@ impl Cache {
         self.inner.memory.buffer_pool().allocate(length)
     }
 
+    /// Inserts immutable bytes into memory synchronously, without recording lookup demand.
+    ///
+    /// Accepts [`Bytes`] or [`AlignedBuffer`], including empty objects, without copying
+    /// the payload. Charges memory by length for [`Bytes`] and capacity for
+    /// [`AlignedBuffer`]. The memory target is soft and entries remain subject to eviction.
+    /// An existing memory entry is retained without another disk enqueue.
+    ///
+    /// Newly inserted entries are queued to disk when enabled, using best-effort admission.
+    /// A full or closed queue skips the disk write while preserving the memory insertion.
+    /// This call performs no disk lookup, waits for no I/O, and requires no Tokio runtime.
+    /// The runtime that opened the disk cache drives background writes.
+    ///
+    /// All insertions and fetch callbacks for a key must supply equivalent immutable bytes.
+    /// In-flight fetches continue independently and may return their own equivalent bytes.
+    pub fn insert<V: Into<BytesAndMemoryCharge>>(&self, object_key: &str, value: V) {
+        let object_key = ObjectKeyHash::from(object_key);
+        let BytesAndMemoryCharge { bytes, memory_charge } = value.into();
+        let inserted = self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
+        #[cfg(not(all(target_os = "linux", feature = "disk")))]
+        let _ = inserted;
+        #[cfg(all(target_os = "linux", feature = "disk"))]
+        if let Some(disk) = &self.inner.disk {
+            if inserted {
+                disk.enqueue_if_space_available(object_key, bytes);
+            } else {
+                self.inner.metrics.disk_write_redundant.increase(1);
+            }
+        }
+    }
+
     /// Returns an object from memory or disk, or `None` on a miss.
     /// Does not invoke or wait for source callbacks. Disk hits are promoted to memory.
     pub async fn get(&self, object_key: &str) -> Option<Bytes> {
@@ -555,6 +587,9 @@ mod disk_fallthrough_tests;
 
 #[cfg(test)]
 mod portable_tests;
+
+#[cfg(test)]
+mod insert_tests;
 
 #[cfg(test)]
 mod sharing_tests;
