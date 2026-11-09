@@ -2,6 +2,7 @@ use std::{
     ffi::OsStr,
     fmt,
     future::Future,
+    hash::Hash,
     io,
     num::{NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
@@ -354,20 +355,27 @@ impl Cache {
 
     /// Returns an object from memory or disk, or `None` on a miss.
     /// Does not invoke or wait for source callbacks. Disk hits are promoted to memory.
-    pub async fn get(&self, object_key: &str) -> Option<Bytes> {
-        let object_key = ObjectKeyHash::from(object_key);
-        self.inner.memory.access_histories().record_request(&object_key);
-        let request_id = self.trace_request_start(object_key).await;
-        let started = Instant::now();
-        let (outcome, bytes) = self.lookup(object_key, || false).await;
-        let payload_length = bytes.as_ref().map(|bytes| bytes.len() as u64).unwrap_or(0);
-        self.inner.metrics.record(outcome, started.elapsed(), payload_length);
-        if let (Some(access_trace), Some(request_id)) = (&self.access_trace, request_id) {
-            access_trace
-                .send_outcome(request_id, object_key, outcome, payload_length)
-                .await;
+    /// The key is hashed immediately. The returned future retains only its fingerprint.
+    /// Keys must follow the identity contract in [`ObjectKeyHash::from_hash`].
+    pub fn get<'cache, K: Hash + ?Sized>(
+        &'cache self,
+        object_key: &K,
+    ) -> impl Future<Output = Option<Bytes>> + Send + use<'cache, K> {
+        let object_key = ObjectKeyHash::from_hash(object_key);
+        async move {
+            self.inner.memory.access_histories().record_request(&object_key);
+            let request_id = self.trace_request_start(object_key).await;
+            let started = Instant::now();
+            let (outcome, bytes) = self.lookup(object_key, || false).await;
+            let payload_length = bytes.as_ref().map(|bytes| bytes.len() as u64).unwrap_or(0);
+            self.inner.metrics.record(outcome, started.elapsed(), payload_length);
+            if let (Some(access_trace), Some(request_id)) = (&self.access_trace, request_id) {
+                access_trace
+                    .send_outcome(request_id, object_key, outcome, payload_length)
+                    .await;
+            }
+            bytes
         }
-        bytes
     }
 
     /// Returns the object from memory, disk, or a shared callback.
@@ -389,15 +397,21 @@ impl Cache {
     /// Failures and cancellation still count. Insertion records no request.
     /// Callback results are queued to disk immediately, subject to queue capacity.
     /// Tracing can backpressure lookups but never changes their results.
-    pub async fn get_or_fetch<F, Fut, V, E>(&self, object_key: &str, callback: F) -> Result<Bytes, GetOrFetchError<E>>
+    /// The key is hashed immediately. The returned future retains only its fingerprint.
+    /// Keys must follow the identity contract in [`ObjectKeyHash::from_hash`].
+    pub fn get_or_fetch<'cache, K, F, Fut, V, E>(
+        &'cache self,
+        object_key: &K,
+        callback: F,
+    ) -> impl Future<Output = Result<Bytes, GetOrFetchError<E>>> + Send + use<'cache, K, F, Fut, V, E>
     where
+        K: Hash + ?Sized,
         E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = Result<V, E>> + Send + 'static,
         V: Into<BytesAndMemoryCharge>,
     {
         self.get_or_fetch_with_disk_fallthrough(object_key, || false, callback)
-            .await
     }
 
     /// Like [`Self::get_or_fetch`], but may fetch from the source instead of a busy disk.
@@ -410,24 +424,28 @@ impl Cache {
     ///
     /// Fallthrough preserves the disk entry and admits successful downloads to memory
     /// without rewriting them to disk. Source failures return without retrying disk.
-    pub async fn get_or_fetch_with_disk_fallthrough<F, Fut, V, E>(
-        &self,
-        object_key: &str,
-        should_fall_through: impl FnOnce() -> bool + Send + 'static,
+    /// Keys must follow the identity contract in [`ObjectKeyHash::from_hash`].
+    pub fn get_or_fetch_with_disk_fallthrough<'cache, K, S, F, Fut, V, E>(
+        &'cache self,
+        object_key: &K,
+        should_fall_through: S,
         callback: F,
-    ) -> Result<Bytes, GetOrFetchError<E>>
+    ) -> impl Future<Output = Result<Bytes, GetOrFetchError<E>>> + Send + use<'cache, K, S, F, Fut, V, E>
     where
+        K: Hash + ?Sized,
+        S: FnOnce() -> bool + Send + 'static,
         E: Clone + Send + Sync + 'static,
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = Result<V, E>> + Send + 'static,
         V: Into<BytesAndMemoryCharge>,
     {
-        self.get_or_fetch_by_hash(
-            ObjectKeyHash::from(object_key),
-            should_fall_through,
-            move || async move { callback().await.map(Into::into) },
-        )
-        .await
+        let object_key = ObjectKeyHash::from_hash(object_key);
+        async move {
+            self.get_or_fetch_by_hash(object_key, should_fall_through, move || async move {
+                callback().await.map(Into::into)
+            })
+            .await
+        }
     }
 
     async fn get_or_fetch_by_hash<F, Fut, E>(
@@ -555,6 +573,9 @@ mod disk_fallthrough_tests;
 
 #[cfg(test)]
 mod portable_tests;
+
+#[cfg(test)]
+mod key_tests;
 
 #[cfg(test)]
 mod sharing_tests;
@@ -763,10 +784,11 @@ mod tests {
         (directory, cache)
     }
 
-    async fn wait_for_buffered(cache: &Cache, key: &str) {
+    async fn wait_for_buffered(cache: &Cache, key: &(impl Hash + ?Sized)) {
         let disk = cache.inner.disk.as_ref().unwrap();
+        let hash = ObjectKeyHash::from_hash(key);
         timeout(Duration::from_secs(10), async {
-            while !disk.contains(&ObjectKeyHash::from(key)) {
+            while !disk.contains(&hash) {
                 yield_now().await;
             }
         })
@@ -865,8 +887,8 @@ mod tests {
     #[tokio::test]
     async fn whole_object_buffer_and_disk_hits_promote_all_bytes() {
         let (_directory, cache) = cache(32).await;
-        let key = "whole-object".to_owned();
-        let hash = ObjectKeyHash::from(key.as_str());
+        let key = ("whole-object".to_owned(), 100u64..106);
+        let hash = ObjectKeyHash::from_hash(&key);
         let payload = Bytes::from_static(b"abcdef");
         let download = payload.clone();
         cache

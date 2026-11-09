@@ -50,6 +50,26 @@
 //!
 //! # Object identity and recovery
 //!
+//! Lookups accept borrowed [`Hash`](std::hash::Hash) keys, including strings, tuples, and derived structs.
+//! Feuer streams their hash input directly into XXH3-128. Keys do not need to implement `Eq`.
+//! Include every field that distinguishes objects and a namespace when key types share a cache.
+//!
+//! ```
+//! # async fn example(cache: &feuer::Cache) -> Result<(), Box<dyn std::error::Error>> {
+//! let key = ("split", 100u64, 200u64);
+//! let bytes = cache.get_or_fetch(&key, || async {
+//!     Ok::<_, std::convert::Infallible>(bytes::Bytes::from_static(b"payload"))
+//! }).await?;
+//! assert_eq!(cache.get(&key).await, Some(bytes));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Keep key hashing stable when reusing persistent entries. Rust's `Hash` encoding can change across
+//! compiler versions and platforms. Change [`payload_version`](CacheBuilder::payload_version) when
+//! key encoding or payload semantics change to clear old entries on reopen. Switching from raw UTF-8
+//! string hashing to `Hash` also changes fingerprints. See [`ObjectKeyHash::from_hash`].
+//!
 //! Keys must be non-adversarial. Feuer stores only each key's XXH3-128 hash, without
 //! retaining the original key or checking for collisions. XXH3 is a non-cryptographic hash
 //! and provides no protection against deliberately constructed collisions. Colliding keys
@@ -126,7 +146,7 @@ pub enum DiskCacheError {
 #[derive(Clone, Debug)]
 pub enum IoQueues {}
 
-/// An owned UTF-8 object identity. Cache lookups accept a borrowed `&str`.
+/// An owned string key. Cache lookups also accept any borrowed [`Hash`](std::hash::Hash) key.
 ///
 /// Keys must be non-adversarial. Only the XXH3-128 hash is stored, with no collision checks.
 /// XXH3 is non-cryptographic and provides no protection against deliberately constructed
