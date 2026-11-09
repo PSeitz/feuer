@@ -45,6 +45,8 @@
 //! caches the result in memory, and queues a disk write when disk caching is enabled.
 //!
 //! Use [`Cache::get`] to check the cache without fetching from the source.
+//! Use [`Cache::insert`] to supply immutable bytes synchronously without a lookup or
+//! runtime. It inserts into memory and attempts a best-effort disk write enqueue.
 //! Cloning a [`Cache`] shares its contents and in-flight work, so handles can be used
 //! across tasks. Callbacks that share a fetch must be interchangeable.
 //!
