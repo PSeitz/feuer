@@ -13,7 +13,6 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
             .memory_capacity(1 << 20)
             .with_metrics(&backend)
             .open()
-            .await
             .unwrap();
         let key = "download";
         let hash = ObjectKeyHash::from(key);

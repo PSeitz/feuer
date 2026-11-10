@@ -1,6 +1,6 @@
 # Metrics
 
-Use `Cache::builder().memory_capacity(bytes).with_metrics(&metrics_registry).open().await`
+Use `Cache::builder().memory_capacity(bytes).with_metrics(&metrics_registry).open()`
 with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup and
 memory metrics, plus disk I/O, disk-cache and disk-write metrics when disk is enabled.
 On Linux, `.with_io_queues(io_queues)` independently selects shared I/O queues.
@@ -203,7 +203,7 @@ Buffers remain `used` until their last owner releases them, even if the pool has
 already been destroyed. They then become `idle` if returned to the pool, or leave
 the gauge if freed. Idle bytes are included in `feuer_memory_used_bytes`; used buffer bytes
 are charged there only when held by cache entries. Do not add the two gauges.
-Write scratch bypasses the pool gauge. Admission frees
+Write scratch and startup I/O buffers bypass the pool gauge. Admission frees
 idle buffers as necessary before retaining cached allocations. Gauges sum across
 cache instances sharing a registry. Storage without a memory cache
 retains no idle buffers.
@@ -260,8 +260,8 @@ subject to thread scheduling.
 The signal combines all files sharing `IoQueues`, independently of metric registries.
 
 Each piece is at most 1 MiB. A larger data-file read can wait separately for each
-piece, so histogram counts are not payload-read or cache-lookup counts. Metadata
-reads and the opening probe are included. Metrics use the requesting data file's
+piece, so histogram counts are not payload-read or cache-lookup counts. Startup
+metadata reads and the opening probe use blocking I/O outside the queue. Metrics use the requesting data file's
 registry, including when multiple files share an I/O queue. Aggregate the registries
 for those files to see their combined waits. Periodic gauge samples can miss short
 spikes. Waiting for a payload-read permit happens separately and has no queue-wait metric.

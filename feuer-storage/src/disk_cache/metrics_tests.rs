@@ -13,7 +13,7 @@ fn download(length: usize) -> Bytes {
     Bytes::from(vec![7; length])
 }
 
-async fn measured_cache(capacity: u64) -> (TempDir, DiskCache, Registry) {
+fn measured_cache(capacity: u64) -> (TempDir, DiskCache, Registry) {
     let directory = tempfile::tempdir().unwrap();
     let (registry, backend) = registry();
     let cache = DiskCache::open(
@@ -25,14 +25,13 @@ async fn measured_cache(capacity: u64) -> (TempDir, DiskCache, Registry) {
             ..Default::default()
         },
     )
-    .await
     .unwrap();
     (directory, tests::with_manual_metadata_writes(cache), registry)
 }
 
 #[tokio::test]
 async fn periodic_writer_combines_updates_into_page_writes() {
-    let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
+    let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES);
     for key in [ObjectKeyHash(1), ObjectKeyHash(2)] {
         cache.insert(key, download(1)).await.unwrap();
     }
@@ -79,7 +78,7 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
         (page_format::ENTRIES_PER_METADATA_CHUNK as u128 + 1, 1, 2),
     ] {
         let capacity = if chunks == 2 { 128 } else { 4 } * CHUNK_BYTES;
-        let (directory, cache) = tests::open_test_cache(capacity).await;
+        let (directory, cache) = tests::open_test_cache(capacity);
         let source = download(payload_bytes);
         let inputs: Vec<_> = (0..entries).map(|key| (ObjectKeyHash(key), source.clone())).collect();
         assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), entries as usize);
@@ -97,7 +96,6 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
                 ..Default::default()
             },
         )
-        .await
         .unwrap();
         assert_eq!(value(&registry, "feuer_disk_entries", &[]), entries as f64);
         assert_eq!(
@@ -135,7 +133,7 @@ async fn recovery_reads_one_full_metadata_chunk_independent_of_payload_size() {
 #[tokio::test]
 async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     let capacity = 8 * CHUNK_BYTES;
-    let (directory, cache, registry) = measured_cache(capacity).await;
+    let (directory, cache, registry) = measured_cache(capacity);
     let inputs = vec![
         (ObjectKeyHash::from("small-a"), download(4)),
         (ObjectKeyHash::from("small-b"), download(8)),
@@ -169,7 +167,6 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
             ..Default::default()
         },
     )
-    .await
     .unwrap();
     assert_eq!(value(&registry, "feuer_disk_recovered_chunks", &[]), written_chunks);
     for (key, source) in inputs {
@@ -182,7 +179,7 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
 
 #[tokio::test]
 async fn records_write_outcomes_packing_and_index_usage() {
-    let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES).await;
+    let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES);
     let key = ObjectKeyHash::from("object");
 
     let outcome = |label| value(&registry, "feuer_disk_write_entries_total", &[("outcome", label)]);
@@ -233,7 +230,7 @@ async fn records_write_outcomes_packing_and_index_usage() {
 
 #[tokio::test]
 async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
-    let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
+    let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES);
     let triggering = || value(&registry, "feuer_disk_eviction_triggering_insertions_total", &[]);
     cache
         .insert_batch(vec![("first".into(), download(4)), ("second".into(), download(4))])
@@ -262,7 +259,7 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
 
 #[tokio::test]
 async fn io_errors_preserve_entries() {
-    let (directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
+    let (directory, cache, registry) = measured_cache(2 * CHUNK_BYTES);
 
     let key = ObjectKeyHash::from("unreadable");
     cache.insert_batch(vec![(key, download(4))]).await.unwrap();
@@ -287,7 +284,7 @@ async fn io_errors_preserve_entries() {
 
 #[tokio::test]
 async fn pressure_eviction_and_write_failure_record_each_entry_outcome() {
-    let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES).await;
+    let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES);
     let outcome = |label| value(&registry, "feuer_disk_write_entries_total", &[("outcome", label)]);
     cache.insert_batch(vec![("first".into(), download(4))]).await.unwrap();
     cache.insert_batch(vec![("second".into(), download(4))]).await.unwrap();
@@ -328,7 +325,7 @@ async fn pressure_eviction_and_write_failure_record_each_entry_outcome() {
 
 #[tokio::test]
 async fn buffered_entries_only_attempt_disk_admission_when_flushed() {
-    let (_directory, cache, registry) = measured_cache(CHUNK_BYTES).await;
+    let (_directory, cache, registry) = measured_cache(CHUNK_BYTES);
     let key = ObjectKeyHash(1);
 
     assert_eq!(cache.flush().await.unwrap(), 0);

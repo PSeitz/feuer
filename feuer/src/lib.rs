@@ -19,8 +19,7 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let cache = Cache::builder()
 //!         .memory_capacity(64 * 1024 * 1024)
-//!         .open()
-//!         .await?;
+//!         .open()?;
 //!
 //!     let bytes = cache
 //!         .get_or_fetch("object-v1", || async {
@@ -91,20 +90,20 @@
 //! and open the cache on Linux with Tokio, `io_uring`, and direct-I/O support:
 //!
 //! ```no_run
-//! # async fn example() -> Result<(), feuer::CacheOpenError> {
+//! # fn example() -> Result<(), feuer::CacheOpenError> {
 //! let cache = feuer::Cache::builder()
 //!     .memory_capacity(64 * 1024 * 1024)
 //!     .disk_capacity(1024 * 1024 * 1024)
 //!     .directory("feuer_cache")
 //!     .file_name("objects")
-//!     .open()
-//!     .await?;
+//!     .open()?;
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! This stores disk data in `feuer_cache/objects`. The directory defaults to `feuer_cache` and the
-//! filename to `data`. Opening waits for disk metadata recovery.
+//! filename to `data`. Opening blocks until disk metadata recovery completes.
+//! Disk caching requires an entered Tokio runtime for background workers.
 //! Memory-only operation works on every supported platform without a Tokio runtime.
 //! Access tracing through [`Cache::with_trace`] requires Tokio.
 //!

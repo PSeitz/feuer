@@ -83,8 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .memory_capacity(64 << 20)
         .disk_capacity(1 << 30)
         .directory("feuer_cache")
-        .open()
-        .await?;
+        .open()?;
 
     let bytes = cache
         .get_or_fetch("object-v1", || async {
@@ -126,7 +125,8 @@ This allows to maximize utilization of your resources. E.g. network bandwidth ca
   original keys or checking for collisions. XXH3 is non-cryptographic and provides no protection
   against deliberately constructed collisions. Colliding keys identify the same object, so a
   lookup can return another key's payload.
-- Disk caching and recovery are best-effort. Opening waits for metadata recovery.
+- Disk caching and recovery are best-effort. Opening completes metadata recovery synchronously.
+  Disk caching requires an entered Tokio runtime for background workers. Memory-only opening needs no runtime.
 - Changing capacity, disk format, or application payload version invalidates disk entries. Use
   `.payload_version(n)` when changing your payload encoding.
 - Give each cache its own backing file. The file is exclusively locked while
@@ -146,7 +146,7 @@ See [eviction](eviction.md) for the formula, configuration examples, and trade-o
 
 ### Environment variables
 
-`.open().await` reads these defaults. Builder setters override them per cache.
+`.open()` reads these defaults. Builder setters override them per cache.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |

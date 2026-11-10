@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     let temp = Builder::new().prefix("feuer-direct-bench-").tempdir_in(root)?;
     let registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
-    let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::new(&registry)).await?;
+    let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::new(&registry))?;
     eprintln!("Initializing 8 GiB (direct writes), driver QD64, four Tokio workers");
     let payload = Bytes::from(vec![0x5a; MIB]);
     for offset in (0..CAPACITY).step_by(MIB) {

@@ -39,7 +39,11 @@ fn builder_validates_settings_at_open_before_creating_files() {
             CacheConfigError::InvalidReclaimSampleSize,
         ),
     ] {
-        let error = ready(builder.directory(&unused_directory).disk_capacity(4 << 20).open()).unwrap_err();
+        let error = builder
+            .directory(&unused_directory)
+            .disk_capacity(4 << 20)
+            .open()
+            .unwrap_err();
         assert!(matches!(error, CacheOpenError::Config(actual) if actual == expected));
         assert!(!unused_directory.exists());
     }
@@ -64,7 +68,7 @@ fn memory_only_builder_and_lookups_need_no_runtime() {
                 .with_memory_retention_scorer(scorer.clone())
                 .with_disk_retention_scorer(scorer),
         };
-        let cache = ready(builder.open()).unwrap();
+        let cache = builder.open().unwrap();
         assert_eq!(
             ready(cache.get_or_fetch("failed", || async { Err::<Bytes, _>("source failed") })),
             Err(GetOrFetchError::Callback("source failed"))
@@ -84,7 +88,11 @@ fn memory_only_builder_and_lookups_need_no_runtime() {
 #[test]
 fn memory_only_history_cleanup_preserves_cached_payloads_without_a_runtime() {
     assert!(Handle::try_current().is_err());
-    let cache = ready(Cache::builder().memory_capacity(1 << 20).history_entry_limit(1).open()).unwrap();
+    let cache = Cache::builder()
+        .memory_capacity(1 << 20)
+        .history_entry_limit(1)
+        .open()
+        .unwrap();
     let histories = cache.inner.memory.access_histories();
     for key in ["old", "new"] {
         ready(cache.get_or_fetch(key, || async { Ok::<_, &str>(Bytes::from_static(b"payload")) })).unwrap();
@@ -114,14 +122,12 @@ fn memory_only_builder_preserves_retention_scorer() {
     }
 
     let scorer = Arc::new(ScoredEntries::default());
-    let cache = ready(
-        Cache::builder()
-            .memory_capacity(1)
-            .with_memory_retention_scorer(scorer.clone())
-            .with_disk_retention_scorer(scorer.clone())
-            .open(),
-    )
-    .unwrap();
+    let cache = Cache::builder()
+        .memory_capacity(1)
+        .with_memory_retention_scorer(scorer.clone())
+        .with_disk_retention_scorer(scorer.clone())
+        .open()
+        .unwrap();
     // More entries than memory shards force eviction to consult the supplied scorer.
     for index in 0..65 {
         ready(cache.get_or_fetch(&index.to_string(), || async { Ok::<_, &str>(Bytes::from_static(b"x")) })).unwrap();
@@ -135,14 +141,12 @@ fn nonzero_disk_capacity_is_rejected_without_runtime_or_files() {
     let directory = tempdir().unwrap();
     let unused_directory = directory.path().join("unused");
     for capacity in [1, 4 << 20] {
-        let error = ready(
-            Cache::builder()
-                .directory(&unused_directory)
-                .disk_capacity(capacity)
-                .memory_capacity(1 << 20)
-                .open(),
-        )
-        .unwrap_err();
+        let error = Cache::builder()
+            .directory(&unused_directory)
+            .disk_capacity(capacity)
+            .memory_capacity(1 << 20)
+            .open()
+            .unwrap_err();
         assert!(matches!(
             error,
             CacheOpenError::Disk(DiskCacheError::UnsupportedPlatform)

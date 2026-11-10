@@ -21,16 +21,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .disk_capacity(1 << 30)
         .memory_capacity(64 << 20)
         .with_io_queues(io_queues.clone())
-        .open()
-        .await?;
+        .open()?;
     let documents = Cache::builder()
         .directory(&directory)
         .file_name("documents")
         .disk_capacity(2 << 30)
         .memory_capacity(32 << 20)
         .with_io_queues(io_queues)
-        .open()
-        .await?;
+        .open()?;
 
     // The callbacks return immutable objects.
     // Replace these callbacks with downloads from the respective sources.

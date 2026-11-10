@@ -10,13 +10,12 @@ use std::{
 };
 use tokio::sync::Notify;
 
-async fn cache() -> (Cache, Registry) {
+fn cache() -> (Cache, Registry) {
     let (registry, backend) = registry();
     let cache = Cache::builder()
         .memory_capacity(8 << 20)
         .with_metrics(&backend)
         .open()
-        .await
         .unwrap();
     (cache, registry)
 }
@@ -32,7 +31,7 @@ fn pending_count(cache: &Cache) -> usize {
 #[tokio::test]
 async fn callback_output_types_share_successes_and_errors_but_not_completed_failures() {
     for success in [true, false] {
-        let (cache, registry) = cache().await;
+        let (cache, registry) = cache();
         let release = Arc::new(Notify::new());
         let fetch_release = release.clone();
         let fetch_cache = cache.clone();
@@ -88,7 +87,7 @@ async fn callback_output_types_share_successes_and_errors_but_not_completed_fail
 
 #[tokio::test]
 async fn different_error_types_and_keys_do_not_share() {
-    let (cache, _) = cache().await;
+    let (cache, _) = cache();
     let mut first = Box::pin(cache.get_or_fetch("object", pending::<Result<Bytes, &str>>));
     let mut different_error = Box::pin(cache.get_or_fetch("object", pending::<Result<Bytes, String>>));
     let mut different_key = Box::pin(cache.get_or_fetch("other", pending::<Result<Bytes, &str>>));
@@ -103,7 +102,7 @@ async fn different_error_types_and_keys_do_not_share() {
 #[tokio::test]
 async fn waiters_continue_the_original_fetch_and_last_caller_cancels_it() {
     for order in 0..4 {
-        let (cache, _) = cache().await;
+        let (cache, _) = cache();
         let release = Arc::new(Notify::new());
         let fetch_release = release.clone();
         let guard = Arc::new(());
@@ -157,7 +156,7 @@ async fn waiters_continue_the_original_fetch_and_last_caller_cancels_it() {
 
 #[tokio::test]
 async fn old_waiter_cannot_remove_a_new_attempt() {
-    let (cache, _) = cache().await;
+    let (cache, _) = cache();
     let release = Arc::new(Notify::new());
     let fetch_release = release.clone();
     let mut first = Box::pin(cache.get_or_fetch("object", move || async move {
@@ -198,7 +197,7 @@ fn simultaneous_cancellation_removes_the_last_callers() {
 
 #[tokio::test]
 async fn lookup_only_checks_cached_bytes_without_waiting_for_a_callback() {
-    let (cache, registry) = cache().await;
+    let (cache, registry) = cache();
     let mut fetch = Box::pin(cache.get_or_fetch("object", pending::<Result<Bytes, &str>>));
     assert_pending(fetch.as_mut());
     assert_eq!(

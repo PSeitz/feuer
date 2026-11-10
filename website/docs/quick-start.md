@@ -28,8 +28,7 @@ use feuer::Cache;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache = Cache::builder()
         .memory_capacity(64 * 1024 * 1024)
-        .open()
-        .await?;
+        .open()?;
 
     let bytes = cache
         .get_or_fetch("object-v1", || async {
@@ -54,11 +53,10 @@ let cache = Cache::builder()
     .memory_capacity(64 * 1024 * 1024)
     .disk_capacity(1024 * 1024 * 1024)
     .directory("feuer_cache")
-    .open()
-    .await?;
+    .open()?;
 ```
 
-Disk caching requires Linux, Tokio, `io_uring`, and a filesystem supporting direct I/O. Container security policies and host settings must permit `io_uring`. Each cache needs its own backing file.
+Opening is synchronous and blocks until metadata recovery completes. Disk caching requires Linux, an entered Tokio runtime for background workers, `io_uring`, and a filesystem supporting direct I/O. Container security policies and host settings must permit `io_uring`. Each cache needs its own backing file.
 
 Disk caching is disabled by default. Opening a disk cache waits for metadata recovery.
 

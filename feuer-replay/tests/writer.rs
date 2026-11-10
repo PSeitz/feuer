@@ -25,8 +25,7 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let cache = Cache::builder()
         .memory_capacity(1 << 20)
-        .open()
-        .await?
+        .open()?
         .with_trace(move |package| ready(sender.send(package).map_err(io::Error::other)));
     let key = ObjectKeyHash::from("object");
     cache
@@ -126,8 +125,7 @@ async fn decodes_empty_object_from_current_writer() -> Result<()> {
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let cache = Cache::builder()
         .memory_capacity(1 << 20)
-        .open()
-        .await?
+        .open()?
         .with_trace(move |package| ready(sender.send(package).map_err(io::Error::other)));
     assert!(cache.get("empty").await.is_none());
     cache

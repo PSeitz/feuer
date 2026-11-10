@@ -14,6 +14,8 @@ Eviction considers how often an object is requested, its size, and the cost of f
 
 The disk tier uses Linux `io_uring` and direct I/O. Memory-only operation works on every supported platform.
 
+`CacheBuilder::open()` is synchronous. Disk opening blocks until metadata recovery completes and requires an entered Tokio runtime for background workers. Memory-only opening needs no runtime.
+
 ## How lookups work
 
 1. **Memory hit:** return the cached bytes.

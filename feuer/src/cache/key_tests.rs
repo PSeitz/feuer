@@ -14,7 +14,7 @@ struct Key<T> {
 
 #[tokio::test]
 async fn structured_keys_fetch_and_lookup() {
-    let cache = Cache::builder().memory_capacity(1_000_000).open().await.unwrap();
+    let cache = Cache::builder().memory_capacity(1_000_000).open().unwrap();
     let key = Key {
         split: "split",
         range: 100..200,
@@ -46,7 +46,7 @@ async fn structured_keys_fetch_and_lookup() {
 
 #[tokio::test]
 async fn structured_keys_share_concurrent_fetches() {
-    let cache = Cache::builder().memory_capacity(1_000_000).open().await.unwrap();
+    let cache = Cache::builder().memory_capacity(1_000_000).open().unwrap();
     let key = Key {
         split: "split",
         range: 100..200,
@@ -70,7 +70,7 @@ async fn lookup_futures_release_keys_and_are_send() {
     fn require_send<T: Send>(value: T) -> T {
         value
     }
-    let cache = Cache::builder().memory_capacity(1_000_000).open().await.unwrap();
+    let cache = Cache::builder().memory_capacity(1_000_000).open().unwrap();
     let lookup = {
         let key = ("key".to_owned(), std::rc::Rc::new(1u64));
         require_send(cache.get(&key))

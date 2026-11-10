@@ -224,8 +224,7 @@ async fn main() -> Result<()> {
         .prefix("feuer-read-write-")
         .tempdir_in(&args.directory)?;
     let pool = MemoryCache::new(4 * 1024 * MIB).buffer_pool();
-    let file =
-        DataFile::open_with_io_queues(temp.path(), "data", capacity, IoMetrics::noop(), pool.clone(), None).await?;
+    let file = DataFile::open_with_io_queues(temp.path(), "data", capacity, IoMetrics::noop(), pool.clone(), None)?;
     let mut buffer = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(MIB as usize).unwrap())?;
     buffer.as_mut().fill(0x5a);
     let payload = buffer.into_bytes();

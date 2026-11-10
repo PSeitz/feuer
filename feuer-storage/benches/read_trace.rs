@@ -40,7 +40,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap();
     let temp = Builder::new().prefix("feuer-read-trace-").tempdir_in(root)?;
     let registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
-    let file = DataFile::open(temp.path(), capacity, IoMetrics::new(&registry)).await?;
+    let file = DataFile::open(temp.path(), capacity, IoMetrics::new(&registry))?;
 
     // Initialize only referenced disk ranges, keeping original addresses in a sparse file.
     let max_length = reads.iter().map(|[_, _, length]| length).max().unwrap();

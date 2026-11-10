@@ -5,7 +5,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::{task::yield_now, time};
 
-async fn measured_disk() -> (TempDir, DiskCache, Registry) {
+fn measured_disk() -> (TempDir, DiskCache, Registry) {
     let directory = tempfile::tempdir().unwrap();
     let (registry, backend) = registry();
     let disk = DiskCache::open(
@@ -16,7 +16,6 @@ async fn measured_disk() -> (TempDir, DiskCache, Registry) {
             ..Default::default()
         },
     )
-    .await
     .unwrap();
     (directory, disk, registry)
 }
@@ -27,7 +26,7 @@ fn enqueue(disk: &DiskCache, key: &str) {
 
 #[tokio::test]
 async fn queue_metrics_cover_pressure_dequeue_and_cancellation() {
-    let (_directory, mut disk, registry) = measured_disk().await;
+    let (_directory, mut disk, registry) = measured_disk();
     assert_eq!(disk.write_sender.max_capacity(), 512);
     let (sender, mut receiver) = mpsc::channel(1);
     disk.write_sender = sender;
@@ -67,7 +66,7 @@ async fn queue_metrics_cover_pressure_dequeue_and_cancellation() {
 
 #[tokio::test]
 async fn disk_timer_flushes_direct_and_queued_writes() {
-    let (_directory, disk, registry) = measured_disk().await;
+    let (_directory, disk, registry) = measured_disk();
 
     for (count, queued) in [(0, false), (1, true)] {
         time::pause();
@@ -110,7 +109,7 @@ async fn disk_timer_flushes_direct_and_queued_writes() {
 
 #[tokio::test]
 async fn closing_disk_drains_writes_and_discards_partial_chunks() {
-    let (_directory, mut disk, registry) = measured_disk().await;
+    let (_directory, mut disk, registry) = measured_disk();
     let (sender, receiver) = mpsc::channel(2);
     disk.write_sender = sender;
     disk.enqueue_if_space_available(ObjectKeyHash::from("large"), Bytes::from(vec![7; 512 * 1024]));

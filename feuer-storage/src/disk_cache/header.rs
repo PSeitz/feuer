@@ -11,12 +11,12 @@ const FORMAT_TAG: &[u8; 8] = b"FEUHDR15";
 
 /// Clears shard metadata chains when the file header is incompatible, then writes a replacement.
 /// A matching format, payload version, capacity, and header checksum leave the file unchanged.
-pub(super) async fn clear_incompatible_metadata(
+pub(super) fn clear_incompatible_metadata(
     file: &DataFile,
     payload_version: u64,
     num_shards: usize,
 ) -> DataFileResult<()> {
-    let header = file.read_at(0, HEADER_BYTES).await?;
+    let header = file.read_at_blocking(0, HEADER_BYTES)?;
     if header[8..16] == *FORMAT_TAG
         && header[16..24] == payload_version.to_le_bytes()
         && header[24..32] == file.capacity().to_le_bytes()
@@ -27,19 +27,19 @@ pub(super) async fn clear_incompatible_metadata(
     let empty_chunk = Bytes::from(vec![0; CHUNK_BYTES as usize]);
     for shard_index in 0..num_shards {
         let start = shard_disk_range(file.capacity(), num_shards, shard_index).start;
-        file.write_at(start, &empty_chunk).await?;
+        file.write_at_blocking(start, &empty_chunk)?;
     }
     // Persist every cleared chain before publishing the new payload version.
-    file.sync_all().await?;
+    file.sync_all()?;
     let mut header = vec![0; HEADER_BYTES];
     header[8..16].copy_from_slice(FORMAT_TAG);
     header[16..24].copy_from_slice(&payload_version.to_le_bytes());
     header[24..32].copy_from_slice(&file.capacity().to_le_bytes());
     let checksum = XxHash64::oneshot(0, &header[8..]);
     header[..8].copy_from_slice(&checksum.to_le_bytes());
-    file.write_at(0, &Bytes::from(header)).await?;
+    file.write_at_blocking(0, &header)?;
     // Persist the new header before allowing entries in the new payload format.
-    file.sync_all().await
+    file.sync_all()
 }
 
 #[cfg(test)]
@@ -56,7 +56,7 @@ mod tests {
     use std::path::Path;
 
     /// Opens a cache with manually written metadata.
-    async fn open_cache(directory: &Path, capacity_chunks: u64, payload_version: u64) -> DiskCache {
+    fn open_cache(directory: &Path, capacity_chunks: u64, payload_version: u64) -> DiskCache {
         with_manual_metadata_writes(
             DiskCache::open(
                 directory,
@@ -66,7 +66,6 @@ mod tests {
                     ..DiskCacheOptions::default()
                 },
             )
-            .await
             .unwrap(),
         )
     }
@@ -82,21 +81,21 @@ mod tests {
     #[tokio::test]
     async fn payload_version_changes_discard_entries_across_shards_and_reopens() {
         let directory = tempfile::tempdir().unwrap();
-        let cache = open_cache(directory.path(), 384, 0).await;
+        let cache = open_cache(directory.path(), 384, 0);
         assert_eq!(cache.disk.shards.len(), 2);
         // Each shard needs two pages of entry metadata, so clearing only the first page is insufficient.
         insert_entries(&cache, 0..204, 1).await;
         cache.write_dirty_metadata_pages().await;
         drop(cache);
 
-        let cache = open_cache(directory.path(), 384, 0).await;
+        let cache = open_cache(directory.path(), 384, 0);
         for key in 0..204 {
             assert!(cache.get(&ObjectKeyHash(key)).await.is_some());
         }
         drop(cache);
 
         for payload_version in [u64::MAX, 0] {
-            let cache = open_cache(directory.path(), 384, payload_version).await;
+            let cache = open_cache(directory.path(), 384, payload_version);
             for key in 0..206 {
                 assert!(cache.get(&ObjectKeyHash(key)).await.is_none());
             }
@@ -105,7 +104,7 @@ mod tests {
             }
             cache.write_dirty_metadata_pages().await;
             drop(cache);
-            let cache = open_cache(directory.path(), 384, payload_version).await;
+            let cache = open_cache(directory.path(), 384, payload_version);
             for key in 0..204 {
                 assert!(cache.get(&ObjectKeyHash(key)).await.is_none());
             }
@@ -119,7 +118,7 @@ mod tests {
     #[tokio::test]
     async fn version_change_preserves_payload_bytes_and_initializes_reused_metadata_chunks() {
         let directory = tempfile::tempdir().unwrap();
-        let cache = open_cache(directory.path(), 255, 0).await;
+        let cache = open_cache(directory.path(), 255, 0);
         // Fill two metadata chunks and two pages in a third chunk of shard zero.
         let entries = 2 * ENTRIES_PER_METADATA_CHUNK + ENTRIES_PER_METADATA_PAGE + 1;
         insert_entries(&cache, (0..2 * entries).step_by(2), 2).await;
@@ -134,7 +133,7 @@ mod tests {
         let (payload, _) = entry_disk_ranges(&cache, &ObjectKeyHash(0)).await;
         drop(cache);
 
-        let cache = open_cache(directory.path(), 255, 1).await;
+        let cache = open_cache(directory.path(), 255, 1);
         let file = &cache.disk.file;
         assert_eq!(file.read_at(payload.start, 2).await.unwrap(), download(0, 2));
         assert_eq!(
@@ -152,9 +151,7 @@ mod tests {
             .start;
         assert_eq!(reused_chunk_address, second_chunk_address);
         let short_directory = tempfile::tempdir().unwrap();
-        let short_file = DataFile::open(short_directory.path(), second_chunk_address, IoMetrics::noop())
-            .await
-            .unwrap();
+        let short_file = DataFile::open(short_directory.path(), second_chunk_address, IoMetrics::noop()).unwrap();
         assert!(shard.write_dirty_metadata_pages(&short_file).await.is_err());
         // Only the first chunk changes after the second chunk's initialization failed.
         shard.remove_entry(&ObjectKeyHash(first_new_key as u128));
@@ -163,7 +160,7 @@ mod tests {
         cache.write_dirty_metadata_pages().await;
         drop(cache);
 
-        let cache = open_cache(directory.path(), 255, 1).await;
+        let cache = open_cache(directory.path(), 255, 1);
         for key in 0..entries {
             assert!(!cache.contains(&ObjectKeyHash(2 * key as u128)));
         }
@@ -178,7 +175,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         // The second shard starts at chunk 129 or 130. Resizing back must not follow the old chain.
         for (capacity_chunks, payload_version) in [(258, 0), (260, 1), (258, 1)] {
-            let cache = open_cache(directory.path(), capacity_chunks, payload_version).await;
+            let cache = open_cache(directory.path(), capacity_chunks, payload_version);
             assert!(cache.get(&ObjectKeyHash(3)).await.is_none());
             if payload_version == 0 {
                 // The second payload stays beyond either shard start.
@@ -202,7 +199,7 @@ mod tests {
             Some(32),
             Some(HEADER_BYTES - 1),
         ] {
-            let cache = open_cache(directory.path(), 384, 7).await;
+            let cache = open_cache(directory.path(), 384, 7);
             assert!(cache.insert(ObjectKeyHash(1), download(0, 1)).await.unwrap());
             cache.write_dirty_metadata_pages().await;
             let header = cache.disk.file.read_at(0, HEADER_BYTES).await.unwrap();
@@ -223,7 +220,7 @@ mod tests {
             }
             cache.disk.file.write_at(0, &Bytes::from(corrupt_header)).await.unwrap();
             drop(cache);
-            let cache = open_cache(directory.path(), 384, 7).await;
+            let cache = open_cache(directory.path(), 384, 7);
             assert!(cache.get(&ObjectKeyHash(1)).await.is_none());
             assert_eq!(cache.disk.file.read_at(0, HEADER_BYTES).await.unwrap(), header);
         }

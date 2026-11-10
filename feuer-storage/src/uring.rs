@@ -1,4 +1,4 @@
-//! Separate single-owner rings for reads and writes. Only this module hands buffer pointers to the kernel.
+//! Separate single-owner rings for reads and writes. Only this module submits buffer pointers to io_uring.
 //! Requests must be nonempty, with offsets and lengths aligned to DIRECT_IO_ALIGNMENT_BYTES.
 //!
 //! # Kernel pointer lifetime
@@ -66,7 +66,8 @@ pub(crate) struct DataFileAndLock {
 
 /// One read queue and one write queue shared by independent caches on the same SSD.
 ///
-/// All attached files share capacity for 64 reads and 8 writes awaiting completion, plus waiting channels
+/// Startup uses blocking direct I/O outside these queues.
+/// All attached files share capacity for 64 async reads and 8 async writes awaiting completion, plus waiting channels
 /// for another 64 reads and 8 writes. Requests run in arrival order. There is no per-cache fairness.
 /// While reads wait for channel capacity, new writes are paced at 1 GiB/s and wait for active
 /// writes to finish. These limits continue for 100 ms after the last read stops waiting.
@@ -344,11 +345,6 @@ pub(crate) struct WriteQueue {
 }
 
 impl WriteQueue {
-    /// Syncs completed writes and file metadata on the calling thread.
-    pub(crate) fn sync_all(&self) -> io::Result<()> {
-        self.files.file.sync_all()
-    }
-
     #[cfg(test)]
     pub(crate) fn new(files: Arc<DataFileAndLock>) -> io::Result<Self> {
         Ok(Self {

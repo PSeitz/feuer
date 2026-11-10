@@ -249,13 +249,14 @@ impl<'a> CacheBuilder<'a> {
         self
     }
 
-    /// Opens a cache, using only memory when disk capacity is zero.
+    /// Opens a cache synchronously, using only memory when disk capacity is zero.
     /// Memory-only operation works on every platform without a Tokio runtime.
     /// Nonzero disk capacity returns an error unless built for Linux with the `disk` feature.
-    /// Disk caching requires Tokio, io_uring and direct I/O, locks the backing file,
-    /// and waits for metadata recovery. Disk failures never fall back to memory.
+    /// Disk caching requires an entered Tokio runtime for background workers, io_uring
+    /// and direct I/O. Opening locks the backing file and blocks until metadata recovery
+    /// completes. Disk failures never fall back to memory.
     /// Validates settings and reads environment defaults before opening any files.
-    pub async fn open(self) -> Result<Cache, CacheOpenError> {
+    pub fn open(self) -> Result<Cache, CacheOpenError> {
         let config = self.resolve_config()?;
         #[cfg(not(all(target_os = "linux", feature = "disk")))]
         {
@@ -288,7 +289,7 @@ impl<'a> CacheBuilder<'a> {
                 io_queues: self.io_queues,
                 retention_scorer: self.disk_scorer,
             };
-            let disk = DiskCache::open(config.directory(), config.disk_capacity(), options).await?;
+            let disk = DiskCache::open(config.directory(), config.disk_capacity(), options)?;
             Some(disk)
         };
         Ok(Cache {
@@ -672,7 +673,6 @@ mod tests {
             .with_memory_retention_scorer(scorer.clone())
             .with_disk_retention_scorer(disk_scorer.clone())
             .open()
-            .await
             .unwrap();
         // More entries than memory shards force the memory scorer to run.
         for index in 0..65 {
@@ -718,7 +718,6 @@ mod tests {
             .memory_capacity(32)
             .with_metrics(&backend)
             .open()
-            .await
             .unwrap();
         let key = "object".to_owned();
         assert!(Arc::ptr_eq(
@@ -808,14 +807,13 @@ mod tests {
         assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
     }
 
-    async fn cache(memory_capacity: u64) -> (TempDir, Cache) {
+    fn cache(memory_capacity: u64) -> (TempDir, Cache) {
         let directory = tempfile::tempdir().unwrap();
         let cache = Cache::builder()
             .directory(directory.path())
             .disk_capacity(4 << 20)
             .memory_capacity(memory_capacity)
             .open()
-            .await
             .unwrap();
         (directory, cache)
     }
@@ -845,7 +843,6 @@ mod tests {
             .with_metrics(&backend)
             .with_io_queues(queues.clone())
             .open()
-            .await
             .unwrap();
         // Queue sharing does not require the caches to use the same metrics configuration.
         let second = Cache::builder()
@@ -856,7 +853,6 @@ mod tests {
             .access_count_half_life(4)
             .with_io_queues(queues)
             .open()
-            .await
             .unwrap();
         assert!(!Arc::ptr_eq(
             &first.inner.memory.buffer_pool(),
@@ -922,7 +918,7 @@ mod tests {
 
     #[tokio::test]
     async fn whole_object_buffer_and_disk_hits_promote_all_bytes() {
-        let (_directory, cache) = cache(32).await;
+        let (_directory, cache) = cache(32);
         let key = ("whole-object".to_owned(), 100u64..106);
         let hash = ObjectKeyHash::from_hash(&key);
         let payload = Bytes::from_static(b"abcdef");
@@ -954,7 +950,7 @@ mod tests {
 
     #[tokio::test]
     async fn disk_promotion_charges_buffer_capacity_and_preserves_returned_bytes_after_removal() {
-        let (_directory, cache) = cache(32).await;
+        let (_directory, cache) = cache(32);
         let key = "large-entry".to_owned();
         let hash = ObjectKeyHash::from(key.as_str());
         let disk = cache.inner.disk.as_ref().unwrap();
@@ -976,7 +972,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_disk_promotions_share_the_object_and_charge_once() {
-        let (_directory, cache) = cache(8 << 20).await;
+        let (_directory, cache) = cache(8 << 20);
         let key = "shared-entry".to_owned();
         let hash = ObjectKeyHash::from(key.as_str());
         let payload = Bytes::from(vec![0x77; 40 * 1024]);
@@ -1001,7 +997,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_cancellation_keeps_the_recorded_request_without_inserting() {
-        let (_directory, cache) = cache(32).await;
+        let (_directory, cache) = cache(32);
         let key = String::from("canceled");
         let history = cache.inner.memory.access_histories();
         let entered = Arc::new(Notify::new());
@@ -1030,14 +1026,13 @@ mod tests {
 
     #[tokio::test]
     async fn opening_validates_disk_capacity_and_exclusive_file_ownership() {
-        let (directory, cache) = cache(32).await;
+        let (directory, cache) = cache(32);
         assert!(
             Cache::builder()
                 .directory(cache.config().directory())
                 .disk_capacity(cache.config().disk_capacity())
                 .memory_capacity(cache.config().memory_capacity())
                 .open()
-                .await
                 .is_err()
         );
         assert!(matches!(
@@ -1045,8 +1040,7 @@ mod tests {
                 .directory(directory.path())
                 .disk_capacity(1024)
                 .memory_capacity(32)
-                .open()
-                .await,
+                .open(),
             Err(CacheOpenError::Disk(DiskCacheError::InvalidCapacity))
         ));
     }
@@ -1061,12 +1055,7 @@ mod tests {
     async fn callback_and_memory_hit_share_the_object_without_creating_disk_files() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("unused");
-        let cache = Cache::builder()
-            .directory(&path)
-            .memory_capacity(32)
-            .open()
-            .await
-            .unwrap();
+        let cache = Cache::builder().directory(&path).memory_capacity(32).open().unwrap();
         let key = String::from("object");
         let payload = Bytes::from_static(b"abcdefghij");
         let download = payload.clone();
@@ -1089,7 +1078,7 @@ mod tests {
 
     #[tokio::test]
     async fn callback_errors_are_returned_without_retry_or_insertion() {
-        let (_directory, cache) = cache(8).await;
+        let (_directory, cache) = cache(8);
         let key = String::from("object");
         let callback_count = Arc::new(AtomicU64::new(0));
 
@@ -1110,7 +1099,7 @@ mod tests {
 
     #[tokio::test]
     async fn retains_oversized_callback_results() {
-        let (_directory, cache) = cache(4).await;
+        let (_directory, cache) = cache(4);
         let key = String::from("object");
         let result = cache
             .get_or_fetch(&key, || async { Ok::<_, Infallible>(Bytes::from_static(b"abcde")) })
@@ -1128,7 +1117,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_racing_memory_insertion_is_not_replaced_by_the_callback() {
-        let (_directory, cache) = cache(32).await;
+        let (_directory, cache) = cache(32);
         let key = String::from("object");
         let callback_entered = Arc::new(Notify::new());
         let release_callback = Arc::new(Notify::new());

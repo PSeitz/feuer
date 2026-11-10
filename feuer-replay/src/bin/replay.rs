@@ -326,8 +326,7 @@ mod linux {
             .with_metrics(&metrics)
             .with_memory_retention_scorer(scorer(memory_cost))
             .with_disk_retention_scorer(scorer(disk_cost))
-            .open()
-            .await?;
+            .open()?;
         writeln!(summary, "open_seconds,{}", opening.elapsed().as_secs_f64())?;
         writeln!(
             summary,
@@ -499,7 +498,6 @@ mod linux {
                 .memory_capacity(4 << 20)
                 .with_metrics(&metrics)
                 .open()
-                .await
                 .unwrap();
             let source = SyntheticDownloads::new(&registry, false).unwrap();
             let request = Request {
@@ -534,7 +532,7 @@ mod linux {
 
         #[tokio::test]
         async fn source_callbacks_wait_for_download_permits_then_complete_independently() {
-            let cache = Cache::builder().memory_capacity(4 << 20).open().await.unwrap();
+            let cache = Cache::builder().memory_capacity(4 << 20).open().unwrap();
             let source = Arc::new(SyntheticDownloads::new(&Registry::new(), true).unwrap());
             let mut held = source
                 .download_permits

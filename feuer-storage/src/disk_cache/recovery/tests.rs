@@ -10,16 +10,67 @@ async fn reopen(directory: &Path, cache: DiskCache) -> DiskCache {
     cache.write_dirty_metadata_pages().await;
     let capacity = cache.disk.file.capacity();
     drop(cache);
-    with_manual_metadata_writes(
-        DiskCache::open(directory, capacity, DiskCacheOptions::default())
-            .await
-            .unwrap(),
-    )
+    with_manual_metadata_writes(DiskCache::open(directory, capacity, DiskCacheOptions::default()).unwrap())
+}
+
+#[test]
+fn opens_and_recovers_with_one_blocking_worker_and_an_idle_runtime() {
+    let (finished, completion) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let runtime = Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let (directory, cache) = open_test_cache(256 * CHUNK_BYTES);
+        assert_eq!(cache.disk.shards.len(), 2);
+        let capacity = cache.disk.file.capacity();
+        let entries = vec![(ObjectKeyHash(0), download(0, 17)), (ObjectKeyHash(1), download(1, 31))];
+        runtime.block_on(async {
+            assert_eq!(cache.insert_batch(entries.clone()).await.unwrap(), entries.len());
+            cache.write_dirty_metadata_pages().await;
+        });
+        drop(cache);
+
+        for on_blocking_worker in [false, true] {
+            let cache = if on_blocking_worker {
+                let path = directory.path().to_owned();
+                let (opened, result) = std::sync::mpsc::channel();
+                runtime.spawn_blocking(move || {
+                    opened
+                        .send(DiskCache::open(path, capacity, DiskCacheOptions::default()))
+                        .unwrap();
+                });
+                // The sole blocking worker must finish while the runtime stays idle.
+                result.recv().unwrap().unwrap()
+            } else {
+                DiskCache::open(directory.path(), capacity, DiskCacheOptions::default()).unwrap()
+            };
+            let cache = with_manual_metadata_writes(cache);
+            for (key, _) in &entries {
+                assert!(cache.contains(key));
+            }
+            runtime.block_on(async {
+                for (key, bytes) in &entries {
+                    assert_eq!(cache.get(key).await.unwrap(), *bytes);
+                }
+            });
+            drop(cache);
+        }
+        drop(_entered);
+        drop(runtime);
+        finished.send(()).unwrap();
+    });
+    completion
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("cache startup must finish without runtime scheduling or another blocking worker");
+    thread.join().unwrap();
 }
 
 #[tokio::test]
 async fn metadata_chains_start_at_each_shards_first_chunk_without_a_sidecar() {
-    let (directory, cache) = open_test_cache(256 * CHUNK_BYTES).await;
+    let (directory, cache) = open_test_cache(256 * CHUNK_BYTES);
     let cache = reopen(directory.path(), cache).await;
     assert_eq!(cache.disk.shards.len(), 2);
     for index in 0..cache.disk.shards.len() {
@@ -94,7 +145,7 @@ proptest! {
             let payload_capacity = lengths.iter()
                 .map(|&length| (length as u64).max(1).div_ceil(CHUNK_BYTES))
                 .sum::<u64>() * CHUNK_BYTES;
-            let (directory, mut cache) = open_test_cache(payload_capacity).await;
+            let (directory, mut cache) = open_test_cache(payload_capacity);
             let inputs: Vec<_> = lengths.into_iter().enumerate()
                 .map(|(i, length)| (ObjectKeyHash(i as u128), download(seed.wrapping_add(i as u64), length)))
                 .collect();
@@ -159,7 +210,7 @@ proptest! {
 
 #[tokio::test]
 async fn concurrent_batches_grow_metadata_chain_and_recover_every_entry() {
-    let (directory, cache) = open_test_cache(110 * CHUNK_BYTES).await;
+    let (directory, cache) = open_test_cache(110 * CHUNK_BYTES);
     let entries = ENTRIES_PER_METADATA_CHUNK + 17;
     let inputs = |keys: Range<usize>| keys.map(|i| (ObjectKeyHash(i as u128), download(0, 1))).collect();
     let (first, second) = tokio::join!(
@@ -184,7 +235,7 @@ async fn concurrent_batches_grow_metadata_chain_and_recover_every_entry() {
 
 #[tokio::test]
 async fn multiple_batches_update_one_metadata_chunk_and_reuse_entry_metadata() {
-    let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+    let (directory, cache) = open_test_cache(3 * CHUNK_BYTES);
     let shard = &cache.disk.shards[0];
     for i in 0..20 {
         assert!(
@@ -212,7 +263,7 @@ async fn multiple_batches_update_one_metadata_chunk_and_reuse_entry_metadata() {
 
 #[tokio::test]
 async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES);
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 1)).await.unwrap());
     let shard = &cache.disk.shards[0];
@@ -235,7 +286,7 @@ async fn index_entry_destruction_does_not_change_metadata_or_payload_occupancy()
 
 #[tokio::test]
 async fn eviction_does_not_recover_old_metadata_for_reused_payload_chunks() {
-    let (directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (directory, cache) = open_test_cache(CHUNK_BYTES);
     let old = ObjectKeyHash(1);
     let new = ObjectKeyHash(2);
     assert!(cache.insert(old, download(0, 4096)).await.unwrap());
@@ -249,7 +300,7 @@ async fn eviction_does_not_recover_old_metadata_for_reused_payload_chunks() {
 async fn metadata_reuse_preserves_multi_chunk_recovery() {
     for recover_before_removal in [false, true] {
         for reverse_removal in [false, true] {
-            let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+            let (directory, cache) = open_test_cache(2 * CHUNK_BYTES);
             let first = ObjectKeyHash(1);
             let second = ObjectKeyHash(2);
             let large = ObjectKeyHash(3);
@@ -282,7 +333,7 @@ async fn metadata_reuse_preserves_multi_chunk_recovery() {
 
 #[tokio::test]
 async fn torn_entry_metadata_page_does_not_reject_other_pages() {
-    let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+    let (directory, cache) = open_test_cache(3 * CHUNK_BYTES);
     let entries = ENTRIES_PER_METADATA_PAGE + 1;
     assert_eq!(
         cache
@@ -332,7 +383,7 @@ async fn corrupt_unaligned_or_cyclic_link_terminates_recovery_and_can_be_repaire
         (3 * CHUNK_BYTES, false),
         (5 * CHUNK_BYTES, false),
     ] {
-        let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+        let (directory, cache) = open_test_cache(3 * CHUNK_BYTES);
         assert!(cache.insert(ObjectKeyHash(1), download(0, 1)).await.unwrap());
         cache.write_dirty_metadata_pages().await;
         let offset = CHUNK_BYTES + (ENTRY_METADATA_PAGES_PER_CHUNK * METADATA_PAGE_BYTES) as u64;
@@ -362,7 +413,7 @@ async fn corrupt_unaligned_or_cyclic_link_terminates_recovery_and_can_be_repaire
 
 #[tokio::test]
 async fn payload_corruption_remains_a_checksum_miss() {
-    let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    let (directory, cache) = open_test_cache(2 * CHUNK_BYTES);
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 1)).await.unwrap());
     let address = cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key[&key].payload_address;
@@ -378,7 +429,7 @@ async fn payload_corruption_remains_a_checksum_miss() {
 
 #[tokio::test]
 async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES);
     let entries = ENTRIES_PER_METADATA_PAGE + 1;
     assert_eq!(
         cache
@@ -398,7 +449,6 @@ async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
         CHUNK_BYTES + METADATA_PAGE_BYTES as u64,
         IoMetrics::noop(),
     )
-    .await
     .unwrap();
     assert!(shard.write_dirty_metadata_pages(&short_file).await.is_err());
     assert!(shard.metadata_pages.lock().unwrap().dirty_pages.is_empty());
@@ -426,7 +476,7 @@ async fn failed_metadata_writes_do_not_retry_or_block_payload_use() {
 
 #[tokio::test]
 async fn a_write_after_open_preserves_recovered_entries() {
-    let (directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+    let (directory, cache) = open_test_cache(3 * CHUNK_BYTES);
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(10, 10)).await.unwrap());
     let cache = reopen(directory.path(), cache).await;
@@ -438,7 +488,7 @@ async fn a_write_after_open_preserves_recovered_entries() {
 
 #[tokio::test]
 async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
-    let (directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    let (directory, cache) = open_test_cache(2 * CHUNK_BYTES);
     assert_eq!(
         cache
             .insert_batch(vec![
@@ -471,7 +521,7 @@ async fn metadata_cannot_claim_a_metadata_chunk_as_payload() {
 async fn recovery_deduplicates_keys_and_restores_allocator_availability() {
     for second_length in [50, 100, 200, CHUNK_BYTES as usize + 1] {
         let retained_length = second_length.max(100);
-        let (directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
+        let (directory, cache) = open_test_cache(4 * CHUNK_BYTES);
         let key = ObjectKeyHash(1);
         cache
             .insert_batch(vec![
@@ -508,7 +558,6 @@ async fn recovery_deduplicates_keys_and_restores_allocator_availability() {
                 ..Default::default()
             },
         )
-        .await
         .unwrap();
         let shard = &cache.disk.shards[0];
         {
@@ -551,7 +600,7 @@ async fn recovery_deduplicates_keys_and_restores_allocator_availability() {
 
 #[tokio::test]
 async fn stale_metadata_after_payload_reuse_recovers_as_a_checksum_miss() {
-    let (directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (directory, cache) = open_test_cache(CHUNK_BYTES);
     let key = ObjectKeyHash(1);
     assert!(cache.insert(key, download(0, 100)).await.unwrap());
     cache.write_dirty_metadata_pages().await;

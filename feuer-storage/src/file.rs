@@ -4,14 +4,18 @@ use std::{
     future::Future,
     io,
     mem::MaybeUninit,
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    num::NonZeroUsize,
+    os::{
+        fd::AsRawFd,
+        unix::fs::{FileExt, OpenOptionsExt},
+    },
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use bytes::Bytes;
-use feuer_memory::BufferPool;
+use feuer_memory::{AlignedBuffer, BufferPool};
 use fs4::fs_std::FileExt as LockFileExt;
 use tokio::{runtime::Handle, sync::SemaphorePermit};
 use tracing::{Instrument, Span, field};
@@ -28,6 +32,7 @@ pub(crate) fn payload_disk_bytes(length: u64) -> u64 {
 
 /// Queues, path, capacity, and metrics shared by cloned data-file handles.
 struct DataFileState {
+    files: Arc<uring::DataFileAndLock>,
     read_queue: uring::ReadQueue,
     write_queue: uring::WriteQueue,
     data_path: PathBuf,
@@ -37,9 +42,10 @@ struct DataFileState {
 
 /// An exclusively owned, fixed-capacity Linux direct-I/O file for payloads and metadata.
 ///
-/// Reads and writes have separate io_uring rings and worker threads, with up to
+/// Async reads and writes have separate io_uring rings and worker threads, with up to
 /// 64 active reads and 8 active writes, plus waiting channels for another 64 reads and 8 writes.
 /// Files opened with shared [`crate::IoQueues`] share these limits and threads.
+/// Startup uses blocking direct I/O outside these queues.
 /// Queues schedule in arrival order. Submission order does not guarantee completion order.
 /// Each I/O request transfers at most 1 MiB. Reads queue multiple pieces concurrently into one
 /// allocation. Request limits do not bound full read-result allocations.
@@ -85,15 +91,16 @@ impl DataFile {
     /// Requires Linux with io_uring and filesystem STATX_DIOALIGN support. The
     /// directory is created if needed and the file is set to exactly `capacity`.
     /// A second concurrent open fails with [`crate::DataFileErrorKind::AlreadyOpen`].
-    pub async fn open(directory: impl AsRef<Path>, capacity: u64, metrics: Arc<IoMetrics>) -> DataFileResult<Self> {
-        Self::open_with_io_queues(directory, "data", capacity, metrics, BufferPool::unpooled(), None).await
+    /// Blocks until the file and I/O queues are ready. Requires an entered Tokio runtime.
+    pub fn open(directory: impl AsRef<Path>, capacity: u64, metrics: Arc<IoMetrics>) -> DataFileResult<Self> {
+        Self::open_with_io_queues(directory, "data", capacity, metrics, BufferPool::unpooled(), None)
     }
 
     /// Opens storage with independent file ownership and buffer pooling, optionally sharing I/O queues.
     /// `None` creates dedicated queues. Pending requests retain this file's lock.
     /// `file_name` must be a single filename without NUL bytes or the reserved `.feuer.` prefix.
     /// Each filename has its own lock, allowing independent files in one directory.
-    pub async fn open_with_io_queues(
+    pub fn open_with_io_queues(
         directory: impl AsRef<Path>,
         file_name: &str,
         capacity: u64,
@@ -103,7 +110,7 @@ impl DataFile {
     ) -> DataFileResult<Self> {
         let directory = directory.as_ref().to_path_buf();
         let file_name = file_name.to_owned();
-        let runtime = Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
+        Handle::try_current().map_err(|_| DataFileError::RuntimeUnavailable)?;
         let started = Instant::now();
         let span = tracing::info_span!(
             target: "feuer::storage::io",
@@ -113,27 +120,20 @@ impl DataFile {
             error_kind = field::Empty,
             duration_seconds = field::Empty,
         );
-        let result = async {
-            let state = runtime
-                .spawn_blocking(move || {
-                    open_file_state(directory, file_name, capacity, buffer_pool, metrics, io_queues)
-                })
-                .await
-                .map_err(|source| DataFileError::Task {
-                    operation: IoOperation::OpenDataFile,
-                    source: Box::new(source),
-                })??;
+        let result = span.in_scope(|| {
+            let state = open_file_state(directory, file_name, capacity, buffer_pool, metrics, io_queues)?;
             let file = Self { state: Arc::new(state) };
             // Verify an aligned direct read before returning success.
+            let mut buffer =
+                AlignedBuffer::allocate_zeroed(NonZeroUsize::new(uring::DIRECT_IO_ALIGNMENT_BYTES).unwrap())
+                    .map_err(|source| file.io_error(IoOperation::OpenDataFile, source))?;
             file.state
-                .read_queue
-                .read(0, uring::DIRECT_IO_ALIGNMENT_BYTES)
-                .await
+                .files
+                .file
+                .read_exact_at(buffer.as_mut(), 0)
                 .map_err(|source| file.io_error(IoOperation::OpenDataFile, source))?;
             Ok(file)
-        }
-        .instrument(span.clone())
-        .await;
+        });
         record_span_outcome(&span, started.elapsed(), &result);
         result
     }
@@ -205,16 +205,63 @@ impl DataFile {
         .await
     }
 
-    /// Syncs completed writes and file metadata. Callers must await writes first.
-    pub(crate) async fn sync_all(&self) -> DataFileResult<()> {
-        let state = self.state.clone();
-        tokio::task::spawn_blocking(move || state.write_queue.sync_all())
-            .await
-            .map_err(|source| DataFileError::Task {
-                operation: IoOperation::SyncDataFile,
-                source: Box::new(source),
-            })?
+    /// Reads aligned metadata on the calling thread during startup.
+    pub(crate) fn read_at_blocking(&self, offset: u64, length: usize) -> DataFileResult<Bytes> {
+        self.measure_blocking_io(IoOperation::Read, offset, length, || {
+            let mut buffer = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(length).unwrap())?;
+            self.state.files.file.read_exact_at(buffer.as_mut(), offset)?;
+            Ok(buffer.into_bytes())
+        })
+    }
+
+    /// Writes aligned metadata on the calling thread during startup.
+    pub(crate) fn write_at_blocking(&self, offset: u64, bytes: &[u8]) -> DataFileResult<()> {
+        self.measure_blocking_io(IoOperation::Write, offset, bytes.len(), || {
+            let mut buffer = AlignedBuffer::allocate_zeroed(NonZeroUsize::new(bytes.len()).unwrap())?;
+            buffer.as_mut().copy_from_slice(bytes);
+            self.state.files.file.write_all_at(buffer.as_ref(), offset)
+        })
+    }
+
+    /// Syncs startup writes and file metadata on the calling thread.
+    pub(crate) fn sync_all(&self) -> DataFileResult<()> {
+        self.state
+            .files
+            .file
+            .sync_all()
             .map_err(|source| self.io_error(IoOperation::SyncDataFile, source))
+    }
+
+    fn measure_blocking_io<T>(
+        &self,
+        operation: IoOperation,
+        offset: u64,
+        length: usize,
+        execute: impl FnOnce() -> io::Result<T>,
+    ) -> DataFileResult<T> {
+        assert!(offset.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES as u64));
+        assert!(length.is_multiple_of(uring::DIRECT_IO_ALIGNMENT_BYTES));
+        let started = Instant::now();
+        let span = tracing::trace_span!(
+            target: "feuer::storage::io",
+            "feuer.storage.data_file.io",
+            operation = operation.as_str(),
+            offset,
+            bytes = length as u64,
+            outcome = field::Empty,
+            error_kind = field::Empty,
+            duration_seconds = field::Empty,
+        );
+        let result = span.in_scope(|| {
+            check_range_fits_file(operation, offset, length as u64, self.state.capacity)
+                .and_then(|()| execute().map_err(|source| self.io_error(operation, source)))
+        });
+        let elapsed = started.elapsed();
+        self.state
+            .metrics
+            .record(operation, length as u64, elapsed, result.is_ok());
+        record_span_outcome(&span, elapsed, &result);
+        result
     }
 
     fn io_error(&self, operation: IoOperation, source: io::Error) -> DataFileError {
@@ -352,6 +399,7 @@ fn open_file_state(
         .set_len(capacity)
         .map_err(|source| error(IoOperation::ResizeDataFile, source))?;
     Ok(DataFileState {
+        files,
         read_queue,
         write_queue,
         data_path,
@@ -433,7 +481,7 @@ mod tests {
     async fn reads_exact_aligned_and_unaligned_ranges_after_aligned_writes() {
         let temp = tempdir().unwrap();
         let directory = temp.path().join("cache/inner");
-        let file = DataFile::open(&directory, CAPACITY, IoMetrics::noop()).await.unwrap();
+        let file = DataFile::open(&directory, CAPACITY, IoMetrics::noop()).unwrap();
         let original = Bytes::from(
             (0..CAPACITY)
                 .map(|offset| 0x55 + (offset / CHUNK_BYTES) as u8)
@@ -482,7 +530,6 @@ mod tests {
             pool.clone(),
             None,
         )
-        .await
         .unwrap();
         drop(pool.allocate(76 * mib).unwrap());
         let (bytes, capacity) = file.read_payload(0, 70 * mib).await.unwrap();
@@ -493,7 +540,7 @@ mod tests {
     #[tokio::test]
     async fn disk_reads_preserve_held_bytes_across_overwrites() {
         let temp = tempdir().unwrap();
-        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
+        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).unwrap();
         let length = 2 * uring::DIRECT_IO_ALIGNMENT_BYTES;
         file.write_at(0, &Bytes::from(vec![0x55; length])).await.unwrap();
         let bytes = file.read_at(0, length).await.unwrap();
@@ -512,7 +559,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_ranges_exceeding_capacity_and_accepts_empty_ranges() {
         let temp = tempdir().unwrap();
-        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
+        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).unwrap();
         assert_eq!(
             file.read_at(CAPACITY - 1, 2).await.unwrap_err().kind(),
             DataFileErrorKind::RangeExceedsCapacity
@@ -533,7 +580,7 @@ mod tests {
     #[tokio::test]
     async fn fails_short_reads_instead_of_returning_uncertain_bytes() {
         let temp = tempdir().unwrap();
-        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
+        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).unwrap();
         OpenOptions::new()
             .write(true)
             .open(temp.path().join(DATA_FILE_NAME))
@@ -549,12 +596,11 @@ mod tests {
     #[tokio::test]
     async fn holds_exclusive_ownership_and_reopens_after_shutdown() {
         let temp = tempdir().unwrap();
-        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
+        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).unwrap();
         let clone = file.clone();
         drop(file);
         assert_eq!(
             DataFile::open(temp.path(), CAPACITY, IoMetrics::noop())
-                .await
                 .unwrap_err()
                 .kind(),
             DataFileErrorKind::AlreadyOpen
@@ -563,9 +609,7 @@ mod tests {
         page[17..27].copy_from_slice(b"persistent");
         clone.write_at(0, &Bytes::from(page)).await.unwrap();
         drop(clone);
-        let file = DataFile::open(temp.path(), CAPACITY / 2, IoMetrics::noop())
-            .await
-            .unwrap();
+        let file = DataFile::open(temp.path(), CAPACITY / 2, IoMetrics::noop()).unwrap();
         assert_eq!(file.capacity(), CAPACITY / 2);
         assert_eq!(file.read_at(17, 10).await.unwrap(), Bytes::from_static(b"persistent"));
     }
@@ -582,7 +626,6 @@ mod tests {
             BufferPool::unpooled(),
             Some(queues.clone()),
         )
-        .await
         .unwrap();
         let second = DataFile::open_with_io_queues(
             directory.path(),
@@ -592,7 +635,6 @@ mod tests {
             BufferPool::unpooled(),
             Some(queues.clone()),
         )
-        .await
         .unwrap();
         let first_bytes = Bytes::from(vec![0x55; 4096]);
         let second_bytes = Bytes::from(vec![0x99; 4096]);
@@ -604,7 +646,6 @@ mod tests {
         assert_eq!(second.read_at(0, 4096).await.unwrap(), second_bytes);
         assert_eq!(
             DataFile::open(directory.path(), CAPACITY, IoMetrics::noop())
-                .await
                 .unwrap_err()
                 .kind(),
             DataFileErrorKind::AlreadyOpen,
@@ -619,7 +660,6 @@ mod tests {
             BufferPool::unpooled(),
             Some(queues.clone()),
         )
-        .await
         .unwrap();
         assert_eq!(reopened.read_at(0, 4096).await.unwrap(), first_bytes);
         drop(reopened);
@@ -630,7 +670,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_mixed_io_with_caller_serialized_shared_page() {
         let temp = tempdir().unwrap();
-        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
+        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).unwrap();
         let mut tasks = Vec::new();
         let shared_pages = Arc::new(Mutex::new(()));
         // Callers serialize access to shared byte ranges. I/O on disjoint ranges runs concurrently.
@@ -664,7 +704,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn shutdown_and_reuse_after_aborting_write_callers() {
         let temp = tempdir().unwrap();
-        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
+        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).unwrap();
         let mut tasks = Vec::new();
         for i in 0..256u64 {
             let file = file.clone();
@@ -682,7 +722,7 @@ mod tests {
             let _ = task.await;
         }
         drop(file); // joins the queue thread, even if completion receivers were dropped
-        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
+        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).unwrap();
         file.write_at(0, &Bytes::from(vec![0x55; uring::MAX_IO_REQUEST_BYTES]))
             .await
             .unwrap();
@@ -694,16 +734,8 @@ mod tests {
 
     #[test]
     fn reports_missing_runtime() {
-        use std::{
-            future::Future,
-            task::{Context, Poll, Waker},
-        };
         let temp = tempdir().unwrap();
-        let mut open = Box::pin(DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()));
-        let mut context = Context::from_waker(Waker::noop());
-        let Poll::Ready(result) = open.as_mut().poll(&mut context) else {
-            panic!("unexpectedly pending");
-        };
+        let result = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop());
         assert_eq!(result.unwrap_err().kind(), DataFileErrorKind::Task);
     }
 
@@ -729,13 +761,12 @@ mod tests {
         for capacity in [0, 1, 4095, 4097, u64::MAX, 1 << 63] {
             assert_eq!(
                 DataFile::open(temp.path(), capacity, IoMetrics::noop())
-                    .await
                     .unwrap_err()
                     .kind(),
                 DataFileErrorKind::InvalidConfiguration
             );
         }
-        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).await.unwrap();
+        let file = DataFile::open(temp.path(), CAPACITY, IoMetrics::noop()).unwrap();
         assert_eq!(format!("{file:?}"), format!("DataFile {{ capacity: {CAPACITY}, .. }}"));
     }
 }

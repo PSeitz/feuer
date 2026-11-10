@@ -44,8 +44,7 @@ let cache = feuer::Cache::builder()
     .disk_capacity(1 << 30)
     .with_memory_retention_scorer(scorer.clone())
     .with_disk_retention_scorer(scorer)
-    .open()
-    .await?;
+    .open()?;
 ```
 
 The builder accepts separate memory and disk scorers. Clone an `Arc` into both

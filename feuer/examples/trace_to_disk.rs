@@ -25,8 +25,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (write_result_sender, mut write_results) = unbounded_channel();
     let cache = Cache::builder()
         .memory_capacity(1 << 20)
-        .open()
-        .await?
+        .open()?
         .with_trace(move |package| {
             let path = directory.join(format!("{file_number:012}.feuer"));
             file_number += 1;

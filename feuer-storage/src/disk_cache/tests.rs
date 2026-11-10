@@ -34,7 +34,7 @@ pub(super) fn download(seed: u64, length: usize) -> Bytes {
     )
 }
 
-pub(super) async fn open_test_cache(capacity: u64) -> (TempDir, DiskCache) {
+pub(super) fn open_test_cache(capacity: u64) -> (TempDir, DiskCache) {
     let directory = tempfile::tempdir().unwrap();
     // Keep the requested payload capacity, plus one metadata chunk per shard and the global header.
     let shards = (capacity / (128 * CHUNK_BYTES)).clamp(1, 64);
@@ -43,7 +43,6 @@ pub(super) async fn open_test_cache(capacity: u64) -> (TempDir, DiskCache) {
         capacity + (shards + 1) * CHUNK_BYTES,
         DiskCacheOptions::default(),
     )
-    .await
     .unwrap();
     (directory, with_manual_metadata_writes(cache))
 }
@@ -76,14 +75,14 @@ pub(super) async fn entry_disk_ranges(cache: &DiskCache, key: &ObjectKeyHash) ->
 async fn rejects_invalid_capacity() {
     let directory = tempfile::tempdir().unwrap();
     for capacity in [0, 2 * CHUNK_BYTES - 1, 1 << 63, u64::MAX] {
-        let result = DiskCache::open(directory.path(), capacity, DiskCacheOptions::default()).await;
+        let result = DiskCache::open(directory.path(), capacity, DiskCacheOptions::default());
         assert!(matches!(result, Err(DiskCacheError::InvalidCapacity)));
     }
 }
 
 #[tokio::test]
 async fn metadata_changes_after_copying_remain_dirty() {
-    let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES);
     let first = ObjectKeyHash(1);
     let second = ObjectKeyHash(2);
     cache.insert(first, download(0, 1)).await.unwrap();
@@ -108,7 +107,7 @@ async fn metadata_changes_after_copying_remain_dirty() {
 
 #[tokio::test]
 async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
-    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES);
     assert_eq!(cache.insert_batch(Vec::new()).await.unwrap(), 0);
     let mut inputs = vec![(ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize))];
     inputs.extend((0..130).map(|i| (ObjectKeyHash::from(format!("small-{i}")), download(i, 1024))));
@@ -133,7 +132,7 @@ async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
 #[tokio::test]
 async fn full_and_no_fit_chunks_flush_across_metadata_pages() {
     for length in [4096, 12 * 1024] {
-        let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES).await;
+        let (_directory, cache) = open_test_cache(3 * CHUNK_BYTES);
         let count = CHUNK_BYTES as usize / length;
         let source = download(0, length);
         let mut published = 0;
@@ -165,7 +164,7 @@ async fn full_and_no_fit_chunks_flush_across_metadata_pages() {
 
 #[tokio::test]
 async fn failed_large_reservation_leaves_buffered_entries_and_metadata_slots_untouched() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES);
     let shard = &cache.disk.shards[0];
     let source = download(0, 4097);
     let bytes = source.clone();
@@ -215,7 +214,6 @@ async fn cancellation_or_lost_metadata_capacity_discards_the_whole_flush() {
                     ..Default::default()
                 },
             )
-            .await
             .unwrap(),
         );
         for key in [ObjectKeyHash(1), ObjectKeyHash(2)] {
@@ -265,7 +263,7 @@ async fn cancellation_or_lost_metadata_capacity_discards_the_whole_flush() {
 
 #[tokio::test]
 async fn pressure_reclaims_shared_and_exclusive_chunks_during_mixed_size_churn() {
-    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES);
     for cycle in 0..20 {
         let inputs: Vec<_> = [1, 4097, CHUNK_BYTES as usize + 17]
             .into_iter()
@@ -291,7 +289,7 @@ async fn pressure_reclaims_shared_and_exclusive_chunks_during_mixed_size_churn()
 
 #[tokio::test]
 async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
-    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
     let key = ObjectKeyHash::from("large");
     let source = download(3, CHUNK_BYTES as usize + 17);
     cache.insert(key, source.clone()).await.unwrap();
@@ -316,7 +314,7 @@ async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
 
 #[tokio::test]
 async fn eviction_budgets_and_active_reservations_bound_reclamation() {
-    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
     let key = ObjectKeyHash::from("large");
     cache.insert(key, download(0, CHUNK_BYTES as usize + 1)).await.unwrap();
     let shard = &cache.disk.shards[0];
@@ -363,7 +361,7 @@ async fn eviction_budgets_and_active_reservations_bound_reclamation() {
 
 #[tokio::test]
 async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_reads() {
-    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
     let hot = ObjectKeyHash::from("hot");
     let cold = ObjectKeyHash::from("cold");
     let other = ObjectKeyHash::from("other");
@@ -408,7 +406,7 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
 
 #[tokio::test]
 async fn disk_value_uses_payload_length_rather_than_padding_or_chunk_size() {
-    let (_directory, mut cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    let (_directory, mut cache) = open_test_cache(2 * CHUNK_BYTES);
     Arc::get_mut(&mut cache.disk).unwrap().retention_scorer = Arc::new(FetchCostScorer {
         cost_per_request: 1.0,
         cost_per_byte: 0.0,
@@ -428,7 +426,7 @@ async fn disk_value_uses_payload_length_rather_than_padding_or_chunk_size() {
 #[tokio::test]
 async fn eviction_respects_sample_size_and_keeps_first_sampled_on_ties() {
     for sample_size in [1, RECLAIM_SAMPLE_SIZE] {
-        let (_directory, mut cache) = open_test_cache(2 * CHUNK_BYTES).await;
+        let (_directory, mut cache) = open_test_cache(2 * CHUNK_BYTES);
         Arc::get_mut(&mut cache.disk).unwrap().reclaim_sample_size = sample_size;
         let older = ObjectKeyHash(1);
         let newer = ObjectKeyHash(2);
@@ -464,7 +462,6 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
             ..Default::default()
         },
     )
-    .await
     .unwrap();
     let hot = ObjectKeyHash::from("hot");
     let cold = ObjectKeyHash::from("cold");
@@ -501,7 +498,7 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
 
 #[tokio::test]
 async fn admission_eviction_limit_does_not_force_out_a_shared_chunks_last_entry() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES);
     let hot = ObjectKeyHash::from("hot");
     let mut inputs: Vec<_> = (0..MAX_EVICTION_ATTEMPTS)
         .map(|i| (ObjectKeyHash::from(format!("cold-{i}")), download(0, 1)))
@@ -530,7 +527,7 @@ async fn admission_eviction_limit_does_not_force_out_a_shared_chunks_last_entry(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_pressure_and_reads_never_return_reused_bytes() {
-    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES);
     let entries = (0..4)
         .map(|worker| (ObjectKeyHash::from(format!("{worker}-0")), download(worker * 53, 8193)))
         .collect();
@@ -564,7 +561,7 @@ async fn concurrent_pressure_and_reads_never_return_reused_bytes() {
 
 #[tokio::test]
 async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk() {
-    let (directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (directory, cache) = open_test_cache(CHUNK_BYTES);
     let key = ObjectKeyHash::from("small entry");
     let source = download(3, 1024);
     assert_eq!(
@@ -591,7 +588,7 @@ async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk() {
 
 #[tokio::test]
 async fn alignment_padding_is_not_part_of_the_entry_checksum() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES);
     let key = ObjectKeyHash::from("small entry");
     let source = download(3, 1024);
     cache.insert(key, source.clone()).await.unwrap();
@@ -611,7 +608,7 @@ async fn alignment_padding_is_not_part_of_the_entry_checksum() {
 
 #[tokio::test]
 async fn removing_one_shared_payload_does_not_free_its_neighbors_chunks() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES);
     let first = ObjectKeyHash::from("first");
     let neighbor = ObjectKeyHash::from("neighbor");
     assert_eq!(
@@ -653,7 +650,7 @@ async fn removing_one_shared_payload_does_not_free_its_neighbors_chunks() {
 
 #[tokio::test]
 async fn batch_rejects_fragmented_space_without_consuming_it() {
-    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES);
     let shard = &cache.disk.shards[0];
     // Reserve metadata first, leaving four payload chunks to fragment.
     shard
@@ -682,7 +679,7 @@ async fn batch_rejects_fragmented_space_without_consuming_it() {
 
 #[tokio::test]
 async fn writes_key_hash_length_and_payload_address_in_fixed_size_metadata() {
-    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES);
     let key = ObjectKeyHash(17);
     let source = download(17, (CHUNK_BYTES + 7) as usize);
     assert!(cache.insert(key, source.clone()).await.unwrap());
@@ -706,7 +703,7 @@ async fn writes_key_hash_length_and_payload_address_in_fixed_size_metadata() {
 
 #[tokio::test]
 async fn batch_skips_oversized_and_duplicate_entries_without_losing_accepted_entries() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES);
     assert_eq!(
         cache
             .insert_batch(vec![
@@ -729,7 +726,7 @@ async fn batch_skips_oversized_and_duplicate_entries_without_losing_accepted_ent
 
 #[tokio::test]
 async fn entry_metadata_space_is_charged_and_failed_reservations_roll_back() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES);
     // The separate metadata chunk is charged, leaving exactly one payload chunk.
     assert!(
         !cache
@@ -755,7 +752,7 @@ async fn entry_metadata_space_is_charged_and_failed_reservations_roll_back() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn racing_duplicate_writes_revalidate_publication() {
-    let (_directory, cache) = open_test_cache(16 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(16 * CHUNK_BYTES);
     let start_barrier = Arc::new(Barrier::new(16));
     let mut tasks = Vec::new();
     for _ in 0..16 {
@@ -794,7 +791,7 @@ async fn racing_duplicate_writes_revalidate_publication() {
 
 #[tokio::test]
 async fn publishes_each_region_before_reserving_the_next() {
-    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
     let small = ObjectKeyHash::from("small");
     let large = ObjectKeyHash::from("large");
     let published = cache
@@ -812,7 +809,7 @@ async fn publishes_each_region_before_reserving_the_next() {
 
 #[tokio::test]
 async fn canceled_requester_does_not_abort_the_reservation_owner() {
-    let (_directory, cache) = open_test_cache(CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(CHUNK_BYTES);
     let mut requester = Box::pin(cache.insert(ObjectKeyHash::from("object"), download(0, 100)));
     // On the current-thread runtime, one poll spawns the owner without letting it run yet.
     assert!(
@@ -838,7 +835,7 @@ async fn canceled_requester_does_not_abort_the_reservation_owner() {
 
 #[tokio::test]
 async fn read_addresses_and_results_do_not_delay_replaced_payload_reuse() {
-    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
     let key = ObjectKeyHash::from("object");
     cache.insert(key, download(5, 100)).await.unwrap();
     let (address, payload_checksum) = {
@@ -858,7 +855,7 @@ async fn read_addresses_and_results_do_not_delay_replaced_payload_reuse() {
 #[tokio::test]
 async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
     for stale in [false, true] {
-        let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+        let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
         let key = ObjectKeyHash::from("object");
         cache.insert(key, download(3, 50)).await.unwrap();
         let (payload, _) = entry_disk_ranges(&cache, &key).await;
@@ -902,7 +899,7 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
 
 #[tokio::test]
 async fn failed_multi_chunk_write_keeps_earlier_entries_and_releases_its_storage() {
-    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES).await;
+    let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
     // The first exclusive entry succeeds. The large entry's reserved range exceeds the file.
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
     disk.shards[0].allocator = DiskChunkAllocator::for_disk_range(CHUNK_BYTES..5 * CHUNK_BYTES);
@@ -935,7 +932,7 @@ async fn failed_multi_chunk_write_keeps_earlier_entries_and_releases_its_storage
 #[tokio::test]
 async fn reads_30_mib_contiguous_payloads_and_trims_final_padding() {
     for length in [30 * CHUNK_BYTES as usize, 30 * CHUNK_BYTES as usize + 17] {
-        let (_directory, cache) = open_test_cache(32 * CHUNK_BYTES).await;
+        let (_directory, cache) = open_test_cache(32 * CHUNK_BYTES);
         let key = ObjectKeyHash::from("large read");
         let source = download(7, length);
         assert!(cache.insert(key, source.clone()).await.unwrap());
@@ -950,7 +947,7 @@ async fn reads_30_mib_contiguous_payloads_and_trims_final_padding() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shards_are_disjoint_and_recovered_before_open_returns() {
-    let (directory, cache) = open_test_cache(256 * CHUNK_BYTES + 1).await;
+    let (directory, cache) = open_test_cache(256 * CHUNK_BYTES + 1);
     assert_eq!(cache.disk.shards.len(), 2);
     let keys = [ObjectKeyHash(0), ObjectKeyHash(1)];
     for key in keys {
@@ -967,9 +964,7 @@ async fn shards_are_disjoint_and_recovered_before_open_returns() {
     cache.write_dirty_metadata_pages().await;
     let capacity = cache.disk.file.capacity();
     drop(cache);
-    let reopened = DiskCache::open(directory.path(), capacity, DiskCacheOptions::default())
-        .await
-        .unwrap();
+    let reopened = DiskCache::open(directory.path(), capacity, DiskCacheOptions::default()).unwrap();
     assert!(keys.iter().all(|key| reopened.contains(key)));
     for key in &keys {
         assert_eq!(reopened.get(key).await.unwrap(), download(0, 100));

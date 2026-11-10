@@ -9,8 +9,6 @@ fn insert_needs_no_runtime_and_records_no_lookup_demand() {
         .memory_capacity(1 << 20)
         .with_metrics(&backend)
         .open()
-        .now_or_never()
-        .unwrap()
         .unwrap();
     for (key, bytes) in [("object", Bytes::from_static(b"payload")), ("empty", Bytes::new())] {
         let key = (key, 100u64..200);
@@ -36,12 +34,7 @@ fn insert_needs_no_runtime_and_records_no_lookup_demand() {
 
 #[test]
 fn insert_preserves_buffer_charge_and_duplicate_memory_entry() {
-    let cache = Cache::builder()
-        .memory_capacity(1 << 20)
-        .open()
-        .now_or_never()
-        .unwrap()
-        .unwrap();
+    let cache = Cache::builder().memory_capacity(1 << 20).open().unwrap();
     let mut buffer = cache.allocate_buffer(4).unwrap();
     buffer.as_mut().copy_from_slice(b"abcd");
     let address = buffer.as_ref().as_ptr();
@@ -64,12 +57,7 @@ fn insert_preserves_buffer_charge_and_duplicate_memory_entry() {
 
 #[test]
 fn insert_during_fetch_keeps_inserted_bytes_and_does_not_add_demand() {
-    let cache = Cache::builder()
-        .memory_capacity(1 << 20)
-        .open()
-        .now_or_never()
-        .unwrap()
-        .unwrap();
+    let cache = Cache::builder().memory_capacity(1 << 20).open().unwrap();
     let (sender, receiver) = tokio::sync::oneshot::channel();
     let mut fetch = Box::pin(cache.get_or_fetch("object", || receiver));
     assert!(fetch.as_mut().now_or_never().is_none());
@@ -95,16 +83,16 @@ fn insert_without_entering_runtime_enqueues_disk_and_keeps_memory_when_queue_is_
         .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let (registry, backend) = registry();
-    let cache = runtime
-        .block_on(
-            Cache::builder()
-                .directory(directory.path())
-                .disk_capacity(4 << 20)
-                .memory_capacity(1 << 20)
-                .with_metrics(&backend)
-                .open(),
-        )
-        .unwrap();
+    let cache = {
+        let _runtime = runtime.enter();
+        Cache::builder()
+            .directory(directory.path())
+            .disk_capacity(4 << 20)
+            .memory_capacity(1 << 20)
+            .with_metrics(&backend)
+            .open()
+            .unwrap()
+    };
     assert!(tokio::runtime::Handle::try_current().is_err());
     let initial_memory_charge = cache.inner.memory.used_bytes();
     // The current-thread runtime is stopped, so the writer cannot drain the queue.

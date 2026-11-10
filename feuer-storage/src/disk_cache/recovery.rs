@@ -20,11 +20,11 @@ pub(super) fn shard_disk_range(capacity: u64, num_shards: usize, shard_index: us
 
 impl DiskCacheInner {
     /// Recovers a shard's entries from metadata before the cache becomes available.
-    pub(super) async fn recover_shard(&self, shard_index: usize) {
+    pub(super) fn recover_shard(&self, shard_index: usize) {
         let shard = &self.shards[shard_index];
         let shard_disk_range = shard_disk_range(self.file.capacity(), self.shards.len(), shard_index);
         // Reserve every metadata chunk before accepting any payload addresses.
-        shard.load_metadata_chain(&self.file, shard_disk_range.start).await;
+        shard.load_metadata_chain(&self.file, shard_disk_range.start);
         let mut metadata = shard.metadata_pages.lock().unwrap();
         let mut disk_index = shard.entry_index.lock().unwrap();
         let mut recovered_entries = 0;
@@ -65,14 +65,14 @@ impl DiskCacheInner {
 
 impl DiskCacheShard {
     /// Reads the metadata chain and decodes entry metadata before reserving payload chunks.
-    async fn load_metadata_chain(&self, file: &DataFile, mut address: u64) {
+    fn load_metadata_chain(&self, file: &DataFile, mut address: u64) {
         let mut metadata = metadata::MetadataChunks::default();
         while address != NO_CHUNK && address.is_multiple_of(CHUNK_BYTES) {
             // Reservations enforce shard bounds and stop cycles.
             let Some(mut reserved_chunk) = self.allocator.reserve_chunks_at(address / CHUNK_BYTES, 1) else {
                 break;
             };
-            let Ok(bytes) = file.read_at(address, CHUNK_BYTES as usize).await else {
+            let Ok(bytes) = file.read_at_blocking(address, CHUNK_BYTES as usize) else {
                 break;
             };
             // An unwritten chunk ends the chain.

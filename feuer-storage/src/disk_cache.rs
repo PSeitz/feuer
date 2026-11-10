@@ -36,9 +36,8 @@ use feuer_utils::ObjectKeyHash;
 use page_format::METADATA_PAGE_BYTES;
 use rustc_hash::FxHashMap;
 use tokio::{
-    runtime::Handle,
     sync::{Mutex as AsyncMutex, OnceCell, mpsc},
-    task::{JoinError, JoinSet},
+    task::JoinError,
 };
 use twox_hash::XxHash64;
 
@@ -187,11 +186,8 @@ impl Default for DiskCacheOptions {
 
 impl DiskCache {
     /// Opens an exclusively locked, fixed-capacity file after scanning every shard's metadata.
-    pub async fn open(
-        directory: impl AsRef<Path>,
-        capacity: u64,
-        options: DiskCacheOptions,
-    ) -> Result<Self, DiskCacheError> {
+    /// Blocks until recovery completes. Requires an entered Tokio runtime for background writes.
+    pub fn open(directory: impl AsRef<Path>, capacity: u64, options: DiskCacheOptions) -> Result<Self, DiskCacheError> {
         let DiskCacheOptions {
             file_name,
             payload_version,
@@ -208,10 +204,9 @@ impl DiskCache {
             return Err(DiskCacheError::InvalidCapacity);
         }
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
-        let file =
-            DataFile::open_with_io_queues(directory, &file_name, capacity, io_metrics, buffer_pool, io_queues).await?;
+        let file = DataFile::open_with_io_queues(directory, &file_name, capacity, io_metrics, buffer_pool, io_queues)?;
         let num_shards = ((capacity - CHUNK_BYTES) / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
-        header::clear_incompatible_metadata(&file, payload_version, num_shards).await?;
+        header::clear_incompatible_metadata(&file, payload_version, num_shards)?;
         let shards = (0..num_shards)
             .map(|shard_index| {
                 let range = recovery::shard_disk_range(capacity, num_shards, shard_index);
@@ -234,14 +229,12 @@ impl DiskCache {
         });
         let started = Instant::now();
         tracing::info!(target: "feuer::storage", "starting disk cache recovery");
-        let mut recovery_tasks = JoinSet::new();
-        for index in 0..disk.shards.len() {
-            let disk = disk.clone();
-            // Poll recovery on a blocking thread, including metadata parsing and index rebuilding.
-            // Its io_uring reads still use the runtime for asynchronous completion.
-            recovery_tasks.spawn_blocking(move || Handle::current().block_on(disk.recover_shard(index)));
-        }
-        recovery_tasks.join_all().await;
+        std::thread::scope(|scope| {
+            for index in 0..disk.shards.len() {
+                let disk = &disk;
+                scope.spawn(move || disk.recover_shard(index));
+            }
+        });
         tracing::info!(target: "feuer::storage", elapsed_seconds = started.elapsed().as_secs_f64(), "disk cache recovery finished");
         tokio::spawn(DiskCacheInner::write_metadata_periodically(Arc::downgrade(&disk)));
         tokio::spawn(DiskCacheInner::flush_payload_periodically(Arc::downgrade(&disk)));

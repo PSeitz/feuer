@@ -259,7 +259,7 @@ async fn check_cache_changes(image: DiskImage, changes: Vec<CacheChange>) {
     let directory = tempfile::tempdir().unwrap();
     let directory = directory.path();
     write_image(directory, &image).await;
-    let mut cache = open_with_manual_metadata_writes(directory, image.capacity_chunks).await;
+    let mut cache = open_with_manual_metadata_writes(directory, image.capacity_chunks);
     check_cache(&cache).await;
     for change in changes {
         match change {
@@ -279,7 +279,7 @@ async fn check_cache_changes(image: DiskImage, changes: Vec<CacheChange>) {
                 cache.write_dirty_metadata_pages().await;
                 let capacity_chunks = cache.disk.file.capacity() / CHUNK_BYTES;
                 drop(cache);
-                cache = open_with_manual_metadata_writes(directory, capacity_chunks).await;
+                cache = open_with_manual_metadata_writes(directory, capacity_chunks);
                 assert_eq!(cache.get(&key).await, Some(bytes));
             }
             CacheChange::Remove { entry_index } => {
@@ -299,7 +299,7 @@ async fn check_cache_changes(image: DiskImage, changes: Vec<CacheChange>) {
             CacheChange::Reopen { capacity_chunks } => {
                 cache.write_dirty_metadata_pages().await;
                 drop(cache);
-                cache = open_with_manual_metadata_writes(directory, capacity_chunks).await;
+                cache = open_with_manual_metadata_writes(directory, capacity_chunks);
             }
             CacheChange::ReopenAfterPartialMetadataWrite { persisted_page_seed } => {
                 for shard in &cache.disk.shards {
@@ -311,17 +311,15 @@ async fn check_cache_changes(image: DiskImage, changes: Vec<CacheChange>) {
                 cache.write_dirty_metadata_pages().await;
                 let capacity_chunks = cache.disk.file.capacity() / CHUNK_BYTES;
                 drop(cache);
-                cache = open_with_manual_metadata_writes(directory, capacity_chunks).await;
+                cache = open_with_manual_metadata_writes(directory, capacity_chunks);
             }
         }
         check_cache(&cache).await;
     }
 }
 
-async fn open_with_manual_metadata_writes(directory: &Path, capacity_chunks: u64) -> DiskCache {
-    let cache = DiskCache::open(directory, capacity_chunks * CHUNK_BYTES, DiskCacheOptions::default())
-        .await
-        .unwrap();
+fn open_with_manual_metadata_writes(directory: &Path, capacity_chunks: u64) -> DiskCache {
+    let cache = DiskCache::open(directory, capacity_chunks * CHUNK_BYTES, DiskCacheOptions::default()).unwrap();
     with_manual_metadata_writes(cache)
 }
 
@@ -338,7 +336,6 @@ async fn write_image(directory: &Path, image: &DiskImage) {
         image.capacity_chunks * CHUNK_BYTES,
         DiskCacheOptions::default(),
     )
-    .await
     .unwrap();
     let file = &cache.disk.file;
     let fits = |address: u64, length: u64| address.checked_add(length).is_some_and(|end| end <= file.capacity());
