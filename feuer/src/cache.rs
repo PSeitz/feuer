@@ -20,7 +20,10 @@ use feuer_memory::{
 use feuer_storage::{DiskCache, DiskCacheOptions, DiskMetrics, IoMetrics};
 use feuer_utils::{ObjectKeyHash, config::read_env_number};
 use futures_util::FutureExt;
-use mixtrics::{metrics::BoxedRegistry, registry::noop::NoopMetricsRegistry};
+use mixtrics::{
+    metrics::{BoxedCounter, BoxedRegistry},
+    registry::noop::NoopMetricsRegistry,
+};
 use thiserror::Error;
 
 use crate::{
@@ -423,22 +426,38 @@ impl Cache {
         self.insert_by_hash(object_key, &bytes, memory_charge);
     }
 
-    fn allows_admission(&self, filter: &Option<Box<AdmissionFilter>>, key: &ObjectKeyHash, bytes: &Bytes) -> bool {
-        filter
-            .as_ref()
-            .is_none_or(|filter| filter(key, bytes.len() as u64, self.inner.memory.access_histories()))
+    fn allows_admission(
+        &self,
+        filter: &Option<Box<AdmissionFilter>>,
+        counters: &[BoxedCounter; 2],
+        key: &ObjectKeyHash,
+        bytes: &Bytes,
+    ) -> bool {
+        let Some(filter) = filter else { return true };
+        let accepted = filter(key, bytes.len() as u64, self.inner.memory.access_histories());
+        counters[usize::from(accepted)].increase(1);
+        accepted
     }
 
     fn insert_by_hash(&self, object_key: ObjectKeyHash, bytes: &Bytes, memory_charge: usize) {
-        let duplicate = self.allows_admission(&self.inner.memory_admission_filter, &object_key, bytes)
-            && !self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
+        let duplicate = self.allows_admission(
+            &self.inner.memory_admission_filter,
+            &self.inner.metrics.memory_admission_filter,
+            &object_key,
+            bytes,
+        ) && !self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
         #[cfg(not(all(target_os = "linux", feature = "disk")))]
         let _ = duplicate;
         #[cfg(all(target_os = "linux", feature = "disk"))]
         if let Some(disk) = &self.inner.disk {
             if duplicate {
                 self.inner.metrics.disk_write_redundant.increase(1);
-            } else if self.allows_admission(&self.inner.disk_admission_filter, &object_key, bytes) {
+            } else if self.allows_admission(
+                &self.inner.disk_admission_filter,
+                &self.inner.metrics.disk_admission_filter,
+                &object_key,
+                bytes,
+            ) {
                 disk.enqueue_if_space_available(object_key, bytes.clone());
             }
         }
@@ -598,7 +617,12 @@ impl Cache {
         if let Some(disk) = &self.inner.disk
             && let Some((bytes, buffer_capacity)) = disk.get_with_fallthrough(&object_key, should_fall_through).await
         {
-            if self.allows_admission(&self.inner.memory_admission_filter, &object_key, &bytes) {
+            if self.allows_admission(
+                &self.inner.memory_admission_filter,
+                &self.inner.metrics.memory_admission_filter,
+                &object_key,
+                &bytes,
+            ) {
                 self.inner.memory.insert(object_key, bytes.clone(), buffer_capacity);
             }
             return (LookupOutcome::DiskHit, Some(bytes));
@@ -640,7 +664,14 @@ impl Cache {
             && disk.contains(&object_key)
         {
             self.inner.metrics.disk_write_already_covered.increase(1);
-            if fell_through && self.allows_admission(&self.inner.memory_admission_filter, &object_key, &bytes) {
+            if fell_through
+                && self.allows_admission(
+                    &self.inner.memory_admission_filter,
+                    &self.inner.metrics.memory_admission_filter,
+                    &object_key,
+                    &bytes,
+                )
+            {
                 self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
             }
             return (LookupOutcome::Callback, Ok(bytes));

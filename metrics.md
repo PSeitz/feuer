@@ -1,8 +1,8 @@
 # Metrics
 
 Use `Cache::builder().memory_capacity(bytes).with_metrics(&metrics_registry).open()`
-with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup and
-memory metrics, plus disk I/O, disk-cache and disk-write metrics when disk is enabled.
+with a `mixtrics::metrics::BoxedRegistry`. This registers the public lookup,
+admission-filter and memory metrics, plus disk I/O, disk-cache and disk-write metrics when disk is enabled.
 On Linux, `.with_io_queues(io_queues)` independently selects shared I/O queues.
 Omitting it gives the cache its own queues. Omitting `.with_metrics(...)` disables metrics.
 The application owns the registry and installs its exporter.
@@ -42,6 +42,23 @@ not once per execution. Callback outcomes do not measure source invocation count
 Use lookup counters for request-weighted hit ratios and lookup byte counters for
 byte-weighted hit ratios. Memory-tier counters also include internal memory
 operations. Use the public lookup counters to measure caller-visible behavior.
+
+## Admission filters
+
+| Metric | Type | Labels / meaning |
+|---|---|---|
+| `feuer_admission_filter_total` | Counter | `tier`: `memory`, `disk`. `outcome`: `accepted`, `rejected`. Completed caller-supplied predicate evaluations |
+
+Counts increase only when a configured filter returns. An unconfigured filter
+accepts implicitly and records no decision. Disabled disk caching skips the disk
+filter. Memory hits skip both filters. Disk-hit promotions evaluate only the
+memory filter. Explicit inserts and successful source fetches evaluate filters
+along their admission paths. Duplicate memory insertions skip the disk filter.
+Shared fetches count each filter evaluation once, regardless of waiter count.
+
+`accepted` means the predicate returned true. Memory insertion can still find an
+existing entry, and disk queueing or writing can still fail. `rejected` skips
+admission to that tier while preserving returned bytes and existing entries.
 
 ## Disk lookups, capacity and packing
 

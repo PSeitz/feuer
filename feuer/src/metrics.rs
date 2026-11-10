@@ -20,6 +20,9 @@ pub(crate) struct LookupMetrics {
     outcome_counts: [BoxedCounter; 5],
     success_durations: [[BoxedHistogram; 5]; 2],
     served_bytes: [BoxedCounter; 3],
+    pub(crate) memory_admission_filter: [BoxedCounter; 2],
+    #[cfg(all(target_os = "linux", feature = "disk"))]
+    pub(crate) disk_admission_filter: [BoxedCounter; 2],
     #[cfg(all(target_os = "linux", feature = "disk"))]
     pub(crate) disk_write_already_covered: BoxedCounter,
     #[cfg(all(target_os = "linux", feature = "disk"))]
@@ -44,6 +47,11 @@ impl LookupMetrics {
             "Object payload bytes returned by successful Feuer lookups".into(),
             &["source"],
         );
+        let admission_filter = registry.register_counter_vec(
+            "feuer_admission_filter_total".into(),
+            "Completed caller-supplied admission filter decisions".into(),
+            &["tier", "outcome"],
+        );
         #[cfg(all(target_os = "linux", feature = "disk"))]
         let writes = registry.register_counter_vec(
             "feuer_disk_write_queue_total".into(),
@@ -52,6 +60,11 @@ impl LookupMetrics {
             &["outcome"],
         );
         Self {
+            memory_admission_filter: ["rejected", "accepted"]
+                .map(|outcome| admission_filter.counter(&["memory".into(), outcome.into()])),
+            #[cfg(all(target_os = "linux", feature = "disk"))]
+            disk_admission_filter: ["rejected", "accepted"]
+                .map(|outcome| admission_filter.counter(&["disk".into(), outcome.into()])),
             #[cfg(all(target_os = "linux", feature = "disk"))]
             disk_write_already_covered: writes.counter(&["already_covered".into()]),
             #[cfg(all(target_os = "linux", feature = "disk"))]

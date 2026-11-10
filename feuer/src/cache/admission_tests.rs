@@ -1,12 +1,42 @@
 use super::*;
+use crate::test_metrics::{registry, value};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+fn assert_filter_counts(registry: &prometheus::Registry, tier: &str, accepted: u64, rejected: u64) {
+    for (outcome, count) in [("accepted", accepted), ("rejected", rejected)] {
+        assert_eq!(
+            value(
+                registry,
+                "feuer_admission_filter_total",
+                &[("tier", tier), ("outcome", outcome)]
+            ),
+            count as f64,
+        );
+    }
+}
+
+#[test]
+fn unconfigured_filters_record_no_decisions() {
+    let (registry, backend) = registry();
+    let cache = Cache::builder()
+        .memory_capacity(1 << 20)
+        .with_metrics(&backend)
+        .open()
+        .unwrap();
+    cache.insert("object", Bytes::from_static(b"abcd"));
+    assert_filter_counts(&registry, "memory", 0, 0);
+    #[cfg(all(target_os = "linux", feature = "disk"))]
+    assert_filter_counts(&registry, "disk", 0, 0);
+}
 
 #[tokio::test]
 async fn rejected_fetches_return_bytes_and_keep_demand_for_later_admission() {
+    let (registry, backend) = registry();
     let calls = Arc::new(AtomicUsize::new(0));
     let filter_calls = calls.clone();
     let cache = Cache::builder()
         .memory_capacity(1 << 20)
+        .with_metrics(&backend)
         .with_memory_admission_filter(move |key, payload_len, history| {
             assert_eq!(*key, ObjectKeyHash::from("object"));
             assert_eq!(payload_len, 4);
@@ -31,6 +61,9 @@ async fn rejected_fetches_return_bytes_and_keep_demand_for_later_admission() {
     assert_eq!(cache.get("object").await.unwrap(), b"abcd"[..]);
     assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert_eq!(cache.inner.memory.access_histories().request_count(), 3);
+    assert_filter_counts(&registry, "memory", 1, 1);
+    #[cfg(all(target_os = "linux", feature = "disk"))]
+    assert_filter_counts(&registry, "disk", 0, 0);
 }
 
 #[test]
@@ -66,10 +99,12 @@ fn insert_filter_receives_payload_length_and_preserves_existing_entries() {
 
 #[test]
 fn rejected_shared_fetch_runs_admission_once_and_errors_skip_admission() {
+    let (registry, backend) = registry();
     let calls = Arc::new(AtomicUsize::new(0));
     let filter_calls = calls.clone();
     let cache = Cache::builder()
         .memory_capacity(1 << 20)
+        .with_metrics(&backend)
         .with_memory_admission_filter(move |_, _, history| {
             assert_eq!(history.request_count(), 2);
             filter_calls.fetch_add(1, Ordering::Relaxed);
@@ -99,12 +134,12 @@ fn rejected_shared_fetch_runs_admission_once_and_errors_skip_admission() {
         Err(GetOrFetchError::Callback("failed"))
     );
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_filter_counts(&registry, "memory", 0, 1);
 }
 
 #[cfg(all(target_os = "linux", feature = "disk"))]
 #[tokio::test]
 async fn memory_and_disk_admission_are_independent_for_inserts_and_fetches() {
-    use crate::test_metrics::{registry, value};
     for admit_memory in [false, true] {
         for admit_disk in [false, true] {
             for fetch in [false, true] {
@@ -143,6 +178,8 @@ async fn memory_and_disk_admission_are_independent_for_inserts_and_fetches() {
                 }
                 let hash = ObjectKeyHash::from("object");
                 assert_eq!(cache.inner.memory.get(&hash).is_some(), admit_memory);
+                assert_filter_counts(&registry, "memory", u64::from(admit_memory), u64::from(!admit_memory));
+                assert_filter_counts(&registry, "disk", u64::from(admit_disk), u64::from(!admit_disk));
                 assert_eq!(
                     value(&registry, "feuer_disk_write_queue_total", &[("outcome", "queued")]),
                     if admit_disk { 1.0 } else { 0.0 }
@@ -159,6 +196,11 @@ async fn memory_and_disk_admission_are_independent_for_inserts_and_fetches() {
                     disk.flush().await.unwrap();
                 }
                 assert_eq!(disk.contains(&hash), admit_disk);
+                if admit_memory {
+                    cache.insert("object", Bytes::from_static(b"abcd"));
+                    assert_filter_counts(&registry, "memory", 2, 0);
+                    assert_filter_counts(&registry, "disk", u64::from(admit_disk), u64::from(!admit_disk));
+                }
             }
         }
     }
@@ -167,6 +209,7 @@ async fn memory_and_disk_admission_are_independent_for_inserts_and_fetches() {
 #[cfg(all(target_os = "linux", feature = "disk"))]
 #[tokio::test]
 async fn disk_hits_apply_only_memory_admission() {
+    let (registry, backend) = registry();
     let directory = tempfile::tempdir().unwrap();
     let key = ObjectKeyHash::from("object");
     let accept = Arc::new(AtomicBool::new(false));
@@ -177,6 +220,7 @@ async fn disk_hits_apply_only_memory_admission() {
         .directory(directory.path())
         .memory_capacity(1 << 20)
         .disk_capacity(4 << 20)
+        .with_metrics(&backend)
         .with_memory_admission_filter(move |hash, payload_len, history| {
             assert_eq!(*hash, key);
             assert_eq!(payload_len, 4);
@@ -210,4 +254,6 @@ async fn disk_hits_apply_only_memory_admission() {
     assert_eq!(cache.inner.memory.get(&key).unwrap(), b"abcd"[..]);
     assert_eq!(cache.get("object").await.unwrap(), b"abcd"[..]);
     assert_eq!(calls.load(Ordering::Relaxed), 3);
+    assert_filter_counts(&registry, "memory", 1, 2);
+    assert_filter_counts(&registry, "disk", 0, 0);
 }
