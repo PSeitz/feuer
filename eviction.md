@@ -86,7 +86,14 @@ enforce memory capacity. Scorers receive payload length.
 
 Applications can supply a custom scorer when linear size-based costs are
 insufficient. Eviction accounts for size, demand, and avoided fixed costs.
-Objects are queued for disk after memory admission.
+Caller-supplied admission filters can independently reject memory insertion or disk
+queueing. Both default to accepting all objects. Configure them through
+`.with_memory_admission_filter(...)` and `.with_disk_admission_filter(...)` on the
+builder. Each predicate receives the key hash, payload length, and shared request
+history. Memory rejection still permits disk admission. Fetched bytes reach callers
+regardless of admission. Memory filtering also applies to disk-hit promotions.
+Existing entries remain readable, including recovered disk entries. Admission
+filters run synchronously outside cache shard locks and may run concurrently.
 
 ## Access history
 

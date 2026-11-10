@@ -20,6 +20,7 @@ async fn records_each_started_request_before_any_result() {
             memory: MemoryCache::with_metrics(1024, MemoryMetrics::new(&registry)),
             metrics: LookupMetrics::new(&registry),
             pending_fetches: PendingFetches::default(),
+            memory_admission_filter: None,
         }),
         access_trace: None,
     };

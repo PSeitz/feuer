@@ -13,6 +13,9 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
             memory: MemoryCache::with_metrics(8 << 20, MemoryMetrics::new(&backend)),
             metrics: LookupMetrics::new(&backend),
             pending_fetches: PendingFetches::default(),
+            memory_admission_filter: None,
+            #[cfg(all(target_os = "linux", feature = "disk"))]
+            disk_admission_filter: None,
             #[cfg(all(target_os = "linux", feature = "disk"))]
             disk: None,
         }),

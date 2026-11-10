@@ -49,6 +49,30 @@
 //! Cloning a [`Cache`] shares its contents and in-flight work, so handles can be used
 //! across tasks. Callbacks that share a fetch must be interchangeable.
 //!
+//! # Admission filters
+//!
+//! Caller-supplied predicates control memory and disk admission separately. Both default
+//! to accepting all objects. Each receives the key hash, payload length, and request history.
+//!
+//! ```
+//! # fn example() -> Result<(), feuer::CacheOpenError> {
+//! let cache = feuer::Cache::builder()
+//!     .memory_capacity(64 * 1024 * 1024)
+//!     .with_memory_admission_filter(|_key, payload_len, _history| payload_len <= 1024 * 1024)
+//!     .with_disk_admission_filter(|key, _payload_len, history| {
+//!         history.decayed_request_count(key) > 1.5
+//!     })
+//!     .open()?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! This limits memory admission to objects up to 1 MiB. The disk predicate requires
+//! repeated recent demand and takes effect when disk caching is enabled. Rejected fetches
+//! still return bytes to callers and retain request history. Explicit inserts record no demand.
+//! Memory filtering also applies to disk-hit promotions. Existing cached entries remain readable.
+//! See [`CacheBuilder::with_memory_admission_filter`] and [`CacheBuilder::with_disk_admission_filter`].
+//!
 //! # Object identity and recovery
 //!
 //! Lookups accept borrowed [`Hash`](std::hash::Hash) keys, including strings, tuples, and derived structs.

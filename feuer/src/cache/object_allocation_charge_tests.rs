@@ -13,6 +13,9 @@ fn memory_cache(memory_capacity: u64, metrics_registry: &BoxedRegistry) -> Cache
             memory: MemoryCache::with_metrics(memory_capacity, MemoryMetrics::new(metrics_registry)),
             metrics: LookupMetrics::new(metrics_registry),
             pending_fetches: PendingFetches::default(),
+            memory_admission_filter: None,
+            #[cfg(all(target_os = "linux", feature = "disk"))]
+            disk_admission_filter: None,
             #[cfg(all(target_os = "linux", feature = "disk"))]
             disk: None,
         }),

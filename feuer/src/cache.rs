@@ -34,6 +34,9 @@ use pending_fetches::{PendingFetch, PendingFetches};
 
 type FetchResult<E> = (LookupOutcome, Result<Bytes, GetOrFetchError<E>>);
 
+// Decides whether an object's payload may enter a cache tier.
+type AdmissionFilter = dyn Fn(&ObjectKeyHash, u64, &ObjectAccessHistories) -> bool + Send + Sync;
+
 /// Bytes and the amount charged toward the cache's memory usage.
 ///
 /// Converting [`Bytes`] charges its length. Converting [`AlignedBuffer`] charges
@@ -66,6 +69,9 @@ struct CacheInner {
     memory: MemoryCache,
     metrics: LookupMetrics,
     pending_fetches: PendingFetches,
+    memory_admission_filter: Option<Box<AdmissionFilter>>,
+    #[cfg(all(target_os = "linux", feature = "disk"))]
+    disk_admission_filter: Option<Box<AdmissionFilter>>,
     #[cfg(all(target_os = "linux", feature = "disk"))]
     disk: Option<DiskCache>,
 }
@@ -122,6 +128,8 @@ pub struct CacheBuilder<'a> {
     io_queues: Option<IoQueues>,
     memory_scorer: Arc<dyn RetentionScorer>,
     disk_scorer: Arc<dyn RetentionScorer>,
+    memory_admission_filter: Option<Box<AdmissionFilter>>,
+    disk_admission_filter: Option<Box<AdmissionFilter>>,
 }
 
 impl<'a> CacheBuilder<'a> {
@@ -249,6 +257,38 @@ impl<'a> CacheBuilder<'a> {
         self
     }
 
+    /// Filters memory admission for explicit inserts, fetched objects, and disk-hit promotions.
+    /// Defaults to accepting all objects. Disk admission is independent.
+    ///
+    /// Receives the key hash, payload length in bytes (possibly zero), and shared request history.
+    /// Lookups record demand before admission. Explicit inserts record no demand.
+    /// Returning false skips insertion while preserving returned bytes and existing entries.
+    /// The filter runs synchronously and may run concurrently, outside cache shard locks.
+    /// Keep it cheap and avoid cache re-entry. Concurrent fetches sharing a result share admission.
+    pub fn with_memory_admission_filter<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(&ObjectKeyHash, u64, &ObjectAccessHistories) -> bool + Send + Sync + 'static,
+    {
+        self.memory_admission_filter = Some(Box::new(filter));
+        self
+    }
+
+    /// Filters disk writes from explicit inserts and fetched objects before queueing.
+    /// Defaults to accepting all objects. Rejecting memory admission still permits a disk write.
+    /// Inserts that retain an existing memory entry skip the disk write and its filter.
+    /// Disabled disk caching ignores this filter. Existing disk entries remain readable,
+    /// including entries recovered at open. Hits and recovery do not invoke the disk filter.
+    ///
+    /// Uses the same arguments and execution contract as [`Self::with_memory_admission_filter`].
+    /// Returning true still leaves writes subject to queue capacity and disk reclamation.
+    pub fn with_disk_admission_filter<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(&ObjectKeyHash, u64, &ObjectAccessHistories) -> bool + Send + Sync + 'static,
+    {
+        self.disk_admission_filter = Some(Box::new(filter));
+        self
+    }
+
     /// Opens a cache synchronously, using only memory when disk capacity is zero.
     /// Memory-only operation works on every platform without a Tokio runtime.
     /// Nonzero disk capacity returns an error unless built for Linux with the `disk` feature.
@@ -263,7 +303,7 @@ impl<'a> CacheBuilder<'a> {
             if config.disk_capacity() != 0 {
                 return Err(DiskCacheError::UnsupportedPlatform.into());
             }
-            let _ = (self.io_queues, self.disk_scorer);
+            let _ = (self.io_queues, self.disk_scorer, self.disk_admission_filter);
         }
         let noop_metrics_registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
         let metrics_registry = self.metrics_registry.unwrap_or(&noop_metrics_registry);
@@ -298,6 +338,9 @@ impl<'a> CacheBuilder<'a> {
                 memory,
                 metrics: LookupMetrics::new(metrics_registry),
                 pending_fetches: PendingFetches::default(),
+                memory_admission_filter: self.memory_admission_filter,
+                #[cfg(all(target_os = "linux", feature = "disk"))]
+                disk_admission_filter: self.disk_admission_filter,
                 #[cfg(all(target_os = "linux", feature = "disk"))]
                 disk,
             }),
@@ -324,6 +367,8 @@ impl Cache {
             io_queues: None,
             memory_scorer: scorer.clone(),
             disk_scorer: scorer,
+            memory_admission_filter: None,
+            disk_admission_filter: None,
         }
     }
 
@@ -356,15 +401,16 @@ impl Cache {
         self.inner.memory.buffer_pool().allocate(length)
     }
 
-    /// Inserts immutable bytes into memory synchronously, without recording lookup demand.
+    /// Admits immutable bytes synchronously, without recording lookup demand.
     ///
     /// Accepts [`Bytes`] or [`AlignedBuffer`], including empty objects, without copying
     /// the payload. Charges memory by length for [`Bytes`] and capacity for
     /// [`AlignedBuffer`]. The memory target is soft and entries remain subject to eviction.
-    /// An existing memory entry is retained without another disk enqueue.
+    /// Memory admission that finds an existing entry retains it without another disk enqueue.
     ///
-    /// Newly inserted entries are queued to disk when enabled, using best-effort admission.
-    /// A full or closed queue skips the disk write while preserving the memory insertion.
+    /// Memory and disk admission filters apply independently. Rejection preserves existing entries.
+    /// Eligible entries are queued to disk when enabled, using best-effort admission.
+    /// A full or closed queue skips the disk write while preserving any memory insertion.
     /// This call performs no disk lookup, waits for no I/O, and requires no Tokio runtime.
     /// The runtime that opened the disk cache drives background writes.
     ///
@@ -374,21 +420,32 @@ impl Cache {
     pub fn insert<K: Hash + ?Sized, V: Into<BytesAndMemoryCharge>>(&self, object_key: &K, value: V) {
         let object_key = ObjectKeyHash::from_hash(object_key);
         let BytesAndMemoryCharge { bytes, memory_charge } = value.into();
-        let inserted = self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
+        self.insert_by_hash(object_key, &bytes, memory_charge);
+    }
+
+    fn allows_admission(&self, filter: &Option<Box<AdmissionFilter>>, key: &ObjectKeyHash, bytes: &Bytes) -> bool {
+        filter
+            .as_ref()
+            .is_none_or(|filter| filter(key, bytes.len() as u64, self.inner.memory.access_histories()))
+    }
+
+    fn insert_by_hash(&self, object_key: ObjectKeyHash, bytes: &Bytes, memory_charge: usize) {
+        let duplicate = self.allows_admission(&self.inner.memory_admission_filter, &object_key, bytes)
+            && !self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
         #[cfg(not(all(target_os = "linux", feature = "disk")))]
-        let _ = inserted;
+        let _ = duplicate;
         #[cfg(all(target_os = "linux", feature = "disk"))]
         if let Some(disk) = &self.inner.disk {
-            if inserted {
-                disk.enqueue_if_space_available(object_key, bytes);
-            } else {
+            if duplicate {
                 self.inner.metrics.disk_write_redundant.increase(1);
+            } else if self.allows_admission(&self.inner.disk_admission_filter, &object_key, bytes) {
+                disk.enqueue_if_space_available(object_key, bytes.clone());
             }
         }
     }
 
     /// Returns an object from memory or disk, or `None` on a miss.
-    /// Does not invoke or wait for source callbacks. Disk hits are promoted to memory.
+    /// Does not invoke or wait for source callbacks. Disk hits are subject to memory admission.
     /// The key is hashed immediately. The returned future retains only its fingerprint.
     /// Keys must follow the identity contract in [`ObjectKeyHash::from_hash`].
     pub fn get<'cache, K: Hash + ?Sized>(
@@ -414,7 +471,7 @@ impl Cache {
 
     /// Returns the object from memory, disk, or a shared callback.
     ///
-    /// Disk hits promote the object to memory. Concurrent memory misses with
+    /// Disk hits promote the object subject to the memory admission filter. Concurrent memory misses with
     /// the same key and exact error type share one disk-or-callback operation, including errors.
     /// Callbacks for matching requests must be interchangeable. Each callback runs at most once.
     /// Any waiter can drive the shared fetch. Cancelling one caller preserves the original callback
@@ -429,7 +486,9 @@ impl Cache {
     ///
     /// Every started request records demand exactly once, before checking either tier.
     /// Failures and cancellation still count. Insertion records no request.
-    /// Callback results are queued to disk immediately, subject to queue capacity.
+    /// Callback results are admitted independently to memory and disk through the configured filters.
+    /// Eligible disk writes are queued immediately, subject to queue capacity.
+    /// Rejected results still reach all callers sharing the fetch.
     /// Tracing can backpressure lookups but never changes their results.
     /// The key is hashed immediately. The returned future retains only its fingerprint.
     /// Keys must follow the identity contract in [`ObjectKeyHash::from_hash`].
@@ -456,7 +515,7 @@ impl Cache {
     /// in a waiting caller's task and should be cheap. Shared fetches retain the original
     /// caller's decision closure even if that caller cancels.
     ///
-    /// Fallthrough preserves the disk entry and admits successful downloads to memory
+    /// Fallthrough preserves the disk entry and applies memory admission to successful downloads
     /// without rewriting them to disk. Source failures return without retrying disk.
     /// Keys must follow the identity contract in [`ObjectKeyHash::from_hash`].
     pub fn get_or_fetch_with_disk_fallthrough<'cache, K, S, F, Fut, V, E>(
@@ -539,7 +598,9 @@ impl Cache {
         if let Some(disk) = &self.inner.disk
             && let Some((bytes, buffer_capacity)) = disk.get_with_fallthrough(&object_key, should_fall_through).await
         {
-            self.inner.memory.insert(object_key, bytes.clone(), buffer_capacity);
+            if self.allows_admission(&self.inner.memory_admission_filter, &object_key, &bytes) {
+                self.inner.memory.insert(object_key, bytes.clone(), buffer_capacity);
+            }
             return (LookupOutcome::DiskHit, Some(bytes));
         }
         (LookupOutcome::Miss, None)
@@ -575,21 +636,16 @@ impl Cache {
             }
         };
         #[cfg(all(target_os = "linux", feature = "disk"))]
-        if let Some(disk) = &self.inner.disk {
-            let metrics = &self.inner.metrics;
-            if disk.contains(&object_key) {
-                metrics.disk_write_already_covered.increase(1);
-                if fell_through {
-                    self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
-                }
-            } else if self.inner.memory.insert(object_key, bytes.clone(), memory_charge) {
-                disk.enqueue_if_space_available(object_key, bytes.clone());
-            } else {
-                metrics.disk_write_redundant.increase(1);
+        if let Some(disk) = &self.inner.disk
+            && disk.contains(&object_key)
+        {
+            self.inner.metrics.disk_write_already_covered.increase(1);
+            if fell_through && self.allows_admission(&self.inner.memory_admission_filter, &object_key, &bytes) {
+                self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
             }
             return (LookupOutcome::Callback, Ok(bytes));
         }
-        self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
+        self.insert_by_hash(object_key, &bytes, memory_charge);
         (LookupOutcome::Callback, Ok(bytes))
     }
 }
@@ -613,6 +669,9 @@ mod key_tests;
 
 #[cfg(test)]
 mod insert_tests;
+
+#[cfg(test)]
+mod admission_tests;
 
 #[cfg(test)]
 mod sharing_tests;
