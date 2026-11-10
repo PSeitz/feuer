@@ -1,6 +1,6 @@
 use std::{
     any::{Any, TypeId},
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     ptr::addr_eq,
     sync::{Arc, Mutex, OnceLock, Weak},
 };
@@ -13,21 +13,26 @@ use futures_util::{
 use super::{FetchResult, ObjectKeyHash};
 
 type FetchKey = (ObjectKeyHash, TypeId);
-pub(super) type PendingFetches = Arc<Mutex<HashMap<FetchKey, Weak<dyn Any + Send + Sync>>>>;
-pub(super) type BatchResult<E> = Shared<BoxFuture<'static, Arc<Vec<FetchResult<E>>>>>;
+type RegistryEntry = (Weak<dyn Any + Send + Sync>, usize);
+pub(super) type PendingFetches = Arc<Mutex<HashMap<FetchKey, RegistryEntry>>>;
+type ResultSlot<E> = OnceLock<FetchResult<E>>;
 
-enum Fetch<E> {
-    One(Shared<BoxFuture<'static, FetchResult<E>>>),
-    Batch { result: BatchResult<E>, index: usize },
+/// One caller's object result and the producer that can fill it.
+/// Result slots are shared only by callers requesting that object.
+pub(super) struct PendingFetch<E> {
+    producer: Arc<FetchProducer<E>>,
+    result: Arc<ResultSlot<E>>,
 }
 
-/// A disk-or-source fetch owned by its callers. The registry holds weak references.
-/// Any waiter can drive the fetch. Dropping the last caller cancels it.
-/// Batch members reference one shared future rather than per-object source futures.
-pub(super) struct PendingFetch<E> {
-    key: FetchKey,
+/// A scalar or batch source operation. Every key stays discoverable until completion
+/// or cancellation, even when only one member still has a caller. The producer owns
+/// weak result slots so completed payloads live only as long as their own callers.
+struct FetchProducer<E> {
+    keys: Vec<FetchKey>,
     registry: PendingFetches,
-    result: OnceLock<Fetch<E>>,
+    // Joining and completion always lock the registry before accessing members.
+    members: Mutex<Vec<Weak<ResultSlot<E>>>>,
+    future: OnceLock<Shared<BoxFuture<'static, ()>>>,
 }
 
 impl<E: Clone + Send + Sync + 'static> PendingFetch<E> {
@@ -35,118 +40,136 @@ impl<E: Clone + Send + Sync + 'static> PendingFetch<E> {
         registry: &PendingFetches,
         key: ObjectKeyHash,
         create: impl FnOnce() -> Shared<BoxFuture<'static, FetchResult<E>>>,
-    ) -> Arc<Self> {
-        let mut entries = registry.lock().unwrap();
-        let fetch = Self::entry(registry, &mut entries, key);
-        if fetch.result.get().is_some() {
-            // Discard unused callbacks outside the lock. Their captures can own other fetches.
-            drop(entries);
-            return fetch;
-        }
-        fetch.result.get_or_init(|| Fetch::One(create()));
-        fetch
+    ) -> Self {
+        Self::join_many(registry, &[(0, key)], |keys| {
+            debug_assert_eq!(keys.len(), 1);
+            let result = create();
+            async move { vec![result.await] }.boxed()
+        })
+        .pop()
+        .unwrap()
     }
 
-    /// Claims and initializes all new members while holding the registry lock.
-    /// The new group's future must depend only on these members, never existing fetches.
-    /// This keeps overlapping groups independent even when callers request opposite key orders.
+    /// Claim all new keys under one lock. A new producer depends only on its own
+    /// keys, so overlapping requests cannot introduce producer dependency cycles.
     pub(super) fn join_many(
         registry: &PendingFetches,
         keys: &[(usize, ObjectKeyHash)],
-        create: impl FnOnce(Vec<(usize, ObjectKeyHash)>) -> BoxFuture<'static, Arc<Vec<FetchResult<E>>>>,
-    ) -> (Vec<Arc<Self>>, Option<BatchResult<E>>) {
+        create: impl FnOnce(Vec<(usize, ObjectKeyHash)>) -> BoxFuture<'static, Vec<FetchResult<E>>>,
+    ) -> Vec<Self> {
         let mut entries = registry.lock().unwrap();
-        let mut claimed = HashSet::new();
         let mut new_keys = Vec::new();
-        let mut new_fetches = Vec::new();
+        let mut new_slots = Vec::new();
+        let mut claimed = HashMap::new();
         let mut fetches = Vec::with_capacity(keys.len());
         for &(index, key) in keys {
-            let fetch = Self::entry(registry, &mut entries, key);
-            // A new entry can occur again in this batch before its result is initialized.
-            if fetch.result.get().is_none() && claimed.insert(key) {
-                new_keys.push((index, key));
-                new_fetches.push(fetch.clone());
+            let fetch_key = (key, TypeId::of::<E>());
+            if let Some((producer, slot)) = entries
+                .get(&fetch_key)
+                .and_then(|(producer, slot)| producer.upgrade().map(|producer| (producer, *slot)))
+            {
+                let producer = producer
+                    .downcast::<FetchProducer<E>>()
+                    .expect("fetch key includes its error type");
+                let result = {
+                    let mut members = producer.members.lock().unwrap();
+                    members[slot].upgrade().unwrap_or_else(|| {
+                        let result = Arc::new(OnceLock::new());
+                        members[slot] = Arc::downgrade(&result);
+                        result
+                    })
+                };
+                fetches.push(Ok(Self { producer, result }));
+            } else {
+                let slot = *claimed.entry(key).or_insert_with(|| {
+                    new_keys.push((index, key));
+                    new_slots.push(Arc::new(OnceLock::new()));
+                    new_slots.len() - 1
+                });
+                fetches.push(Err(slot));
             }
-            fetches.push(fetch);
         }
-        let batch = if new_keys.is_empty() {
+        let producer = if new_keys.is_empty() {
             None
         } else {
-            let result = create(new_keys);
-            let members: Vec<_> = new_fetches.iter().map(Arc::downgrade).collect();
-            let result = async move {
-                let result = result.await;
-                // Remove every completed member even when its caller is still waiting on
-                // an unrelated fetch. Weak references keep the group free of ownership cycles.
-                for member in members {
-                    if let Some(member) = member.upgrade() {
-                        member.remove_from_registry();
+            let producer = Arc::new(FetchProducer {
+                keys: new_keys.iter().map(|&(_, key)| (key, TypeId::of::<E>())).collect(),
+                registry: registry.clone(),
+                members: Mutex::new(new_slots.iter().map(Arc::downgrade).collect()),
+                future: OnceLock::new(),
+            });
+            let source = create(new_keys);
+            let weak = Arc::downgrade(&producer);
+            let future = async move {
+                let results = source.await;
+                // A polling waiter owns the producer. Upgrade only after the source
+                // completes to keep pending operations free of ownership cycles.
+                let producer = weak.upgrade().expect("polling waiter owns producer");
+                let members = {
+                    let mut entries = producer.registry.lock().unwrap();
+                    let members: Vec<_> = producer.members.lock().unwrap().iter().map(Weak::upgrade).collect();
+                    // Snapshot recipients and remove entries under the join lock.
+                    // Later callers start fresh lookups. Existing callers await publication.
+                    producer.remove_entries(&mut entries);
+                    members
+                };
+                assert_eq!(results.len(), members.len());
+                // Payload destructors can own other fetches. Publish and release
+                // unrequested results outside the registry and membership locks.
+                for (member, result) in members.into_iter().zip(results) {
+                    if let Some(member) = member {
+                        assert!(member.set(result).is_ok());
                     }
                 }
-                result
             }
             .boxed()
             .shared();
-            for (index, fetch) in new_fetches.into_iter().enumerate() {
-                assert!(
-                    fetch
-                        .result
-                        .set(Fetch::Batch {
-                            result: result.clone(),
-                            index
-                        })
-                        .is_ok()
+            assert!(producer.future.set(future).is_ok());
+            for (slot, &key) in producer.keys.iter().enumerate() {
+                entries.insert(
+                    key,
+                    (Arc::downgrade(&(producer.clone() as Arc<dyn Any + Send + Sync>)), slot),
                 );
             }
-            Some(result)
+            Some(producer)
         };
-        (fetches, batch)
+        // Unused callbacks and their captures must be dropped outside the lock.
+        drop(entries);
+        fetches
+            .into_iter()
+            .map(|fetch| {
+                fetch.unwrap_or_else(|slot| Self {
+                    producer: producer.as_ref().unwrap().clone(),
+                    result: new_slots[slot].clone(),
+                })
+            })
+            .collect()
     }
 
-    fn entry(
-        registry: &PendingFetches,
-        entries: &mut HashMap<FetchKey, Weak<dyn Any + Send + Sync>>,
-        key: ObjectKeyHash,
-    ) -> Arc<Self> {
-        let key = (key, TypeId::of::<E>());
-        if let Some(fetch) = entries.get(&key).and_then(Weak::upgrade) {
-            return fetch.downcast().expect("fetch key includes its error type");
-        }
-        let fetch = Arc::new(Self {
-            key,
-            registry: registry.clone(),
-            result: OnceLock::new(),
-        });
-        entries.insert(key, Arc::downgrade(&(fetch.clone() as Arc<dyn Any + Send + Sync>)));
-        fetch
-    }
-
-    pub(super) async fn wait(&self) -> FetchResult<E> {
-        let result = match self.result.get().expect("initialized under the registry lock") {
-            Fetch::One(result) => result.clone().await,
-            Fetch::Batch { result, index } => result.clone().await[*index].clone(),
-        };
-        self.remove_from_registry();
-        result
+    pub(super) async fn wait(self) -> FetchResult<E> {
+        self.producer
+            .future
+            .get()
+            .expect("initialized under registry lock")
+            .clone()
+            .await;
+        self.result.get().expect("producer published result").clone()
     }
 }
 
-impl<E> PendingFetch<E> {
-    /// Remove this fetch from the registry. Existing waiters keep its result.
-    /// Pointer identity protects a newer fetch for the same key and error type.
-    pub(super) fn remove_from_registry(&self) {
-        let mut entries = self.registry.lock().unwrap();
-        if entries
-            .get(&self.key)
-            .is_some_and(|entry| addr_eq(entry.as_ptr(), self))
-        {
-            entries.remove(&self.key);
+impl<E> FetchProducer<E> {
+    fn remove_entries(&self, entries: &mut HashMap<FetchKey, RegistryEntry>) {
+        for key in &self.keys {
+            // A completed caller can outlive a newer operation for the same key.
+            if entries.get(key).is_some_and(|(entry, _)| addr_eq(entry.as_ptr(), self)) {
+                entries.remove(key);
+            }
         }
     }
 }
 
-impl<E> Drop for PendingFetch<E> {
+impl<E> Drop for FetchProducer<E> {
     fn drop(&mut self) {
-        self.remove_from_registry();
+        self.remove_entries(&mut self.registry.lock().unwrap());
     }
 }

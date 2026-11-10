@@ -19,6 +19,8 @@ impl Cache {
     /// Any waiter can drive the batch it joined. Cancelling its original caller preserves the
     /// callback for surviving waiters. The source batch is the cancellation unit. Dropping its
     /// last waiter cancels it, while one surviving member retains the whole source batch.
+    /// All joined producers are driven concurrently, including after their original callers
+    /// cancel. After completion, each caller retains only the objects it requested.
     /// Completed failures are not cached for later requests.
     pub async fn get_or_fetch_many<K, F, Fut, V, E>(
         &self,
@@ -59,25 +61,20 @@ impl Cache {
             .filter(|&(index, _)| results[index].is_none())
             .map(|(index, &key)| (index, key))
             .collect();
-        let (fetches, batch) = PendingFetch::<E>::join_many(&self.inner.pending_fetches, &missing, |new_keys| {
+        let fetches = PendingFetch::<E>::join_many(&self.inner.pending_fetches, &missing, |new_keys| {
             let cache = self.clone();
-            async move { Arc::new(cache.fetch_many(new_keys, callback).await) }.boxed()
+            async move { cache.fetch_many(new_keys, callback).await }.boxed()
         });
-        // Drive our source batch even if an earlier input joined an older, slow fetch.
-        futures_util::future::join(
-            async {
-                for ((index, _), fetch) in missing.into_iter().zip(&fetches) {
-                    results[index] = Some(fetch.wait().await);
-                }
-            },
-            async {
-                if let Some(batch) = batch {
-                    batch.await;
-                }
-            },
-        )
-        .await;
-        drop(fetches);
+        // These are small result waiters. Each producer owns just one source future,
+        // and every joined producer can progress independently of input order.
+        let mut waiting: futures_util::stream::FuturesUnordered<_> = missing
+            .into_iter()
+            .zip(fetches)
+            .map(|((index, _), fetch)| async move { (index, fetch.wait().await) })
+            .collect();
+        while let Some((index, result)) = waiting.next().await {
+            results[index] = Some(result);
+        }
         let mut output = Vec::with_capacity(keys.len());
         for ((key, request_id), result) in keys.into_iter().zip(request_ids).zip(results) {
             let (outcome, result) = result.expect("each input is a memory hit or a joined fetch");
@@ -137,6 +134,9 @@ impl Cache {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod regression_tests;
 
 #[cfg(all(test, target_os = "linux", feature = "disk"))]
 mod disk_tests;

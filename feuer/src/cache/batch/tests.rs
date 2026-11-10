@@ -7,15 +7,15 @@ use std::{
 };
 use tokio::sync::Notify;
 
-async fn cache() -> Cache {
+pub(super) async fn cache() -> Cache {
     Cache::builder().memory_capacity(8 << 20).open().await.unwrap()
 }
 
-async fn unexpected_callback(_: Vec<usize>) -> Vec<Result<Bytes, &'static str>> {
+pub(super) async fn unexpected_callback(_: Vec<usize>) -> Vec<Result<Bytes, &'static str>> {
     panic!("cache hits and joined fetches must not invoke a callback")
 }
 
-fn assert_pending(future: Pin<&mut impl Future>) {
+pub(super) fn assert_pending(future: Pin<&mut (impl Future + ?Sized)>) {
     assert!(future.poll(&mut Context::from_waker(Waker::noop())).is_pending());
 }
 
