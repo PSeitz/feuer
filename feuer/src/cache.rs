@@ -28,6 +28,7 @@ use crate::{
     metrics::{LookupMetrics, LookupOutcome},
 };
 
+mod batch;
 mod pending_fetches;
 use pending_fetches::{PendingFetch, PendingFetches};
 
@@ -447,19 +448,13 @@ impl Cache {
         let (outcome, result) = if let Some(bytes) = self.inner.memory.get(&object_key) {
             (LookupOutcome::MemoryHit, Ok(bytes))
         } else {
-            let fetch = PendingFetch::<E>::join(&self.inner.pending_fetches, object_key);
-            let result = fetch
-                .result
-                .get_or_init(|| {
-                    let cache = self.clone();
-                    async move { cache.fetch(object_key, should_fall_through, callback).await }
-                        .boxed()
-                        .shared()
-                })
-                .clone()
-                .await;
-            fetch.remove_from_registry();
-            result
+            let fetch = PendingFetch::<E>::join(&self.inner.pending_fetches, object_key, || {
+                let cache = self.clone();
+                async move { cache.fetch(object_key, should_fall_through, callback).await }
+                    .boxed()
+                    .shared()
+            });
+            fetch.wait().await
         };
         let payload_length = result.as_ref().map(|bytes| bytes.len() as u64).unwrap_or(0);
         self.inner.metrics.record(outcome, started.elapsed(), payload_length);
@@ -516,12 +511,19 @@ impl Cache {
             return (outcome, Ok(bytes));
         }
 
-        let BytesAndMemoryCharge { bytes, memory_charge } = match callback().await {
+        let value = match callback().await {
             Ok(result) => result,
             Err(error) => {
                 return (LookupOutcome::CallbackError, Err(GetOrFetchError::Callback(error)));
             }
         };
+        (LookupOutcome::Callback, Ok(self.admit(object_key, value, fell_through)))
+    }
+
+    fn admit(&self, object_key: ObjectKeyHash, value: BytesAndMemoryCharge, fell_through: bool) -> Bytes {
+        let BytesAndMemoryCharge { bytes, memory_charge } = value;
+        #[cfg(not(all(target_os = "linux", feature = "disk")))]
+        let _ = fell_through;
         #[cfg(all(target_os = "linux", feature = "disk"))]
         if let Some(disk) = &self.inner.disk {
             let metrics = &self.inner.metrics;
@@ -535,10 +537,10 @@ impl Cache {
             } else {
                 metrics.disk_write_redundant.increase(1);
             }
-            return (LookupOutcome::Callback, Ok(bytes));
+            return bytes;
         }
         self.inner.memory.insert(object_key, bytes.clone(), memory_charge);
-        (LookupOutcome::Callback, Ok(bytes))
+        bytes
     }
 }
 

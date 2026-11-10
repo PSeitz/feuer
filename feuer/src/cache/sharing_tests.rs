@@ -180,8 +180,10 @@ async fn old_waiter_cannot_remove_a_new_attempt() {
 #[test]
 fn simultaneous_cancellation_removes_the_last_callers() {
     let pending = PendingFetches::default();
-    let first = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"));
-    let second = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"));
+    let first = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"), || {
+        std::future::pending::<FetchResult<&str>>().boxed().shared()
+    });
+    let second = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"), || unreachable!());
     let barrier = Barrier::new(2);
     scope(|scope| {
         scope.spawn(|| {
@@ -194,6 +196,30 @@ fn simultaneous_cancellation_removes_the_last_callers() {
         });
     });
     assert!(pending.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn unused_callback_captures_drop_outside_the_registry_lock() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct CheckDrop(PendingFetches, Arc<AtomicBool>);
+    impl Drop for CheckDrop {
+        fn drop(&mut self) {
+            self.1.store(self.0.try_lock().is_ok(), Ordering::Relaxed);
+        }
+    }
+
+    let (cache, _) = cache().await;
+    let dropped_outside_lock = Arc::new(AtomicBool::new(false));
+    let capture = CheckDrop(cache.inner.pending_fetches.clone(), dropped_outside_lock.clone());
+    let mut first = Box::pin(cache.get_or_fetch("object", pending::<Result<Bytes, &str>>));
+    assert_pending(first.as_mut());
+    let mut second = Box::pin(cache.get_or_fetch("object", move || async move {
+        drop(capture);
+        Err::<Bytes, &str>("must share")
+    }));
+    assert_pending(second.as_mut());
+    assert!(dropped_outside_lock.load(Ordering::Relaxed));
 }
 
 #[tokio::test]

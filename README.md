@@ -115,6 +115,16 @@ Configure each tier's scorer with `.with_memory_retention_scorer(scorer)` and
 
 Use `get(key)` to read from memory or disk without fetching from the source.
 
+`get_or_fetch_many(&keys, callback)` returns results in input order. Its callback receives
+one `Vec<usize>` containing the original indices of every unique source miss and returns
+one `Vec<Result<V, E>>` in that order, where `V` converts to `BytesAndMemoryCharge`.
+Memory hits, disk hits, and existing shared fetches are excluded from the callback.
+Each input records demand once, including duplicates. Disk checks use at most five
+concurrent operations, followed by one source future for the full miss batch.
+Batch and scalar calls share work when their keys and error types match. Any surviving
+member can drive the original batch. The whole source batch is cancelled when its last
+waiter is dropped. Completed failures can be retried by later requests.
+
 If you'd rather fetch from the source than wait for a busy disk, use `get_or_fetch_with_disk_fallthrough`.
 This allows to maximize utilization of your resources. E.g. network bandwidth can be used to fetch from the source while disk is busy.
 
