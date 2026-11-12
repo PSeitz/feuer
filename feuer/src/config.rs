@@ -22,6 +22,7 @@ pub struct CacheConfig {
     pub(super) payload_version: u64,
     pub(super) disk_capacity: u64,
     pub(super) memory_capacity: u64,
+    pub(super) memory_shard_count: usize,
     pub(super) access_count_half_life: NonZeroU64,
     pub(super) history_entry_limit: NonZeroUsize,
     pub(super) reclaim_sample_size: usize,
@@ -63,6 +64,11 @@ impl CacheConfig {
         self.disk_capacity
     }
 
+    /// Returns the number of memory cache shards.
+    pub const fn memory_shard_count(&self) -> usize {
+        self.memory_shard_count
+    }
+
     /// Returns the soft memory eviction target for entry allocation charges in bytes.
     pub const fn memory_capacity(&self) -> u64 {
         self.memory_capacity
@@ -78,6 +84,9 @@ pub enum CacheConfigError {
     /// The configured memory eviction target must be positive.
     #[error("memory capacity must be greater than zero")]
     InvalidMemoryCapacity,
+    /// The memory shard count must be positive.
+    #[error("memory shard count must be greater than zero; check FEUER_MEMORY_SHARD_COUNT or the explicit setting")]
+    InvalidMemoryShardCount,
     /// The eviction candidate limit must be a positive integer that fits in `usize`.
     #[error(
         "reclaim sample size must be a positive number fitting usize; check FEUER_RECLAIM_SAMPLE_SIZE (e.g. 1KiB) or the explicit setting"
@@ -118,6 +127,63 @@ mod tests {
             let output = command.output().unwrap();
             assert!(output.status.success(), "{output:?}");
         }
+    }
+
+    #[test]
+    fn memory_shard_count() {
+        for (capacity, expected) in [(1, 1), (100 * 1024 * 1024 * 1024, 12)] {
+            assert_eq!(
+                builder()
+                    .memory_capacity(capacity)
+                    .resolve_config()
+                    .unwrap()
+                    .memory_shard_count(),
+                expected
+            );
+            let cache = builder()
+                .memory_capacity(capacity)
+                .memory_shard_count(4)
+                .open()
+                .unwrap();
+            assert_eq!(cache.config().memory_shard_count(), 4);
+        }
+        assert_eq!(
+            builder().memory_shard_count(0).resolve_config(),
+            Err(CacheConfigError::InvalidMemoryShardCount)
+        );
+    }
+
+    #[test]
+    fn memory_shard_count_environment_override() {
+        if let Ok(expected) = var("FEUER_TEST_MEMORY_SHARD_COUNT_CHILD") {
+            assert_eq!(
+                builder().resolve_config().map(|config| config.memory_shard_count()),
+                expected
+                    .parse::<usize>()
+                    .map_err(|_| CacheConfigError::InvalidMemoryShardCount)
+            );
+            assert_eq!(
+                builder()
+                    .memory_shard_count(4)
+                    .resolve_config()
+                    .unwrap()
+                    .memory_shard_count(),
+                4
+            );
+            return;
+        }
+        check_environment_overrides(
+            "config::tests::memory_shard_count_environment_override",
+            "FEUER_MEMORY_SHARD_COUNT",
+            "FEUER_TEST_MEMORY_SHARD_COUNT_CHILD",
+            &[
+                (None, "1"),
+                (Some("16"), "16"),
+                (Some("0"), "error"),
+                (Some("bad"), "error"),
+                (Some("18446744073709551616"), "error"),
+            ],
+        );
     }
 
     #[test]
@@ -236,7 +302,7 @@ mod tests {
             "FEUER_HISTORY_ENTRY_LIMIT",
             "FEUER_TEST_HISTORY_ENTRY_LIMIT_CHILD",
             &[
-                (None, "2000000"),
+                (None, "10000000"),
                 (Some("1"), "1"),
                 (Some("1KiB"), "1024"),
                 (Some("0"), "error"),

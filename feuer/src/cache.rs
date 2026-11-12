@@ -13,7 +13,7 @@ use std::{
 use bytes::Bytes;
 use feuer_historian::{DEFAULT_ACCESS_COUNT_HALF_LIFE, DEFAULT_HISTORY_ENTRY_LIMIT, ObjectAccessHistories};
 use feuer_memory::{
-    AlignedBuffer, MemoryCache, MemoryMetrics,
+    AlignedBuffer, MemoryCache, MemoryMetrics, default_shard_count,
     retention::{FetchCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer},
 };
 #[cfg(all(target_os = "linux", feature = "disk"))]
@@ -123,6 +123,7 @@ pub struct CacheBuilder<'a> {
     file_name: String,
     disk_capacity: u64,
     memory_capacity: u64,
+    memory_shard_count: Option<usize>,
     payload_version: u64,
     access_count_half_life: Option<u64>,
     history_entry_limit: Option<usize>,
@@ -139,6 +140,14 @@ impl<'a> CacheBuilder<'a> {
     /// Sets the memory eviction target in bytes. Must be positive.
     pub fn memory_capacity(mut self, bytes: u64) -> Self {
         self.memory_capacity = bytes;
+        self
+    }
+
+    /// Sets the number of memory cache shards. Must be positive.
+    /// Overrides `FEUER_MEMORY_SHARD_COUNT`, which defaults to one shard per 8 GiB
+    /// of memory capacity, rounded down, with at least one shard.
+    pub fn memory_shard_count(mut self, count: usize) -> Self {
+        self.memory_shard_count = Some(count);
         self
     }
 
@@ -177,7 +186,7 @@ impl<'a> CacheBuilder<'a> {
     }
 
     /// Sets the entry-count cleanup threshold for request history. Must be positive.
-    /// Overrides `FEUER_HISTORY_ENTRY_LIMIT`, whose default is 2,000,000.
+    /// Overrides `FEUER_HISTORY_ENTRY_LIMIT`, whose default is 10,000,000.
     pub fn history_entry_limit(mut self, entries: usize) -> Self {
         self.history_entry_limit = Some(entries);
         self
@@ -193,6 +202,16 @@ impl<'a> CacheBuilder<'a> {
     pub(super) fn resolve_config(&self) -> Result<CacheConfig, CacheConfigError> {
         if self.memory_capacity == 0 {
             return Err(CacheConfigError::InvalidMemoryCapacity);
+        }
+        let memory_shard_count = self
+            .memory_shard_count
+            .map(Ok)
+            .unwrap_or_else(|| {
+                read_env_number("FEUER_MEMORY_SHARD_COUNT", default_shard_count(self.memory_capacity), 1)
+            })
+            .map_err(|_| CacheConfigError::InvalidMemoryShardCount)?;
+        if memory_shard_count == 0 {
+            return Err(CacheConfigError::InvalidMemoryShardCount);
         }
         if Path::new(&self.file_name).file_name() != Some(OsStr::new(&self.file_name))
             || self.file_name.contains('\0')
@@ -224,6 +243,7 @@ impl<'a> CacheBuilder<'a> {
             payload_version: self.payload_version,
             disk_capacity: self.disk_capacity,
             memory_capacity: self.memory_capacity,
+            memory_shard_count,
             access_count_half_life: NonZeroU64::new(half_life).ok_or(CacheConfigError::InvalidAccessCountHalfLife)?,
             history_entry_limit: NonZeroUsize::new(history_limit).ok_or(CacheConfigError::InvalidHistoryEntryLimit)?,
             reclaim_sample_size: sample_size,
@@ -310,13 +330,17 @@ impl<'a> CacheBuilder<'a> {
         }
         let noop_metrics_registry: BoxedRegistry = Box::new(NoopMetricsRegistry);
         let metrics_registry = self.metrics_registry.unwrap_or(&noop_metrics_registry);
-        let memory = MemoryCache::with_metrics(config.memory_capacity(), MemoryMetrics::new(metrics_registry))
-            .with_access_histories(Arc::new(ObjectAccessHistories::with_half_life_and_entry_limit(
-                config.access_count_half_life(),
-                config.history_entry_limit(),
-            )))
-            .with_reclaim_sample_size(config.reclaim_sample_size())
-            .with_retention_scorer(self.memory_scorer);
+        let memory = MemoryCache::with_metrics_and_shards(
+            config.memory_capacity(),
+            MemoryMetrics::new(metrics_registry),
+            config.memory_shard_count(),
+        )
+        .with_access_histories(Arc::new(ObjectAccessHistories::with_half_life_and_entry_limit(
+            config.access_count_half_life(),
+            config.history_entry_limit(),
+        )))
+        .with_reclaim_sample_size(config.reclaim_sample_size())
+        .with_retention_scorer(self.memory_scorer);
         #[cfg(all(target_os = "linux", feature = "disk"))]
         let disk = if config.disk_capacity() == 0 {
             None
@@ -362,6 +386,7 @@ impl Cache {
             file_name: "data".to_owned(),
             disk_capacity: 0,
             memory_capacity: 0,
+            memory_shard_count: None,
             payload_version: 0,
             access_count_half_life: None,
             history_entry_limit: None,

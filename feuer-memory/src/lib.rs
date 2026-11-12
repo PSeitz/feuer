@@ -14,4 +14,4 @@ mod test_metrics;
 
 pub use buffer::{AlignedBuffer, BUFFER_ALIGNMENT, BufferPool};
 pub use metrics::MemoryMetrics;
-pub use store::MemoryCache;
+pub use store::{MemoryCache, default_shard_count};

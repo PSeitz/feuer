@@ -59,7 +59,12 @@ impl MemoryCache {
 
     /// Creates a cache with registered metrics. Idle buffers use capacity left by cached objects.
     pub fn with_metrics(capacity: u64, metrics: Arc<MemoryMetrics>) -> Self {
-        Self::with_shard_count(BufferPool::new(capacity, metrics), default_shard_count(capacity))
+        Self::with_metrics_and_shards(capacity, metrics, default_shard_count(capacity))
+    }
+
+    /// Creates a cache with registered metrics and an explicit, positive shard count.
+    pub fn with_metrics_and_shards(capacity: u64, metrics: Arc<MemoryMetrics>, num_shards: usize) -> Self {
+        Self::with_shard_count(BufferPool::new(capacity, metrics), num_shards)
     }
 
     /// Consults the supplied request history for retention decisions.
@@ -193,6 +198,7 @@ fn shard_capacity_for(total_capacity: u64, num_shards: usize, shard_index: usize
     total_capacity / num_shards + u64::from((shard_index as u64) < total_capacity % num_shards)
 }
 
-fn default_shard_count(capacity: u64) -> usize {
+/// Returns one shard per 8 GiB of capacity, rounded down, with at least one shard.
+pub fn default_shard_count(capacity: u64) -> usize {
     (capacity / (8 * 1024 * 1024 * 1024)).max(1) as usize
 }

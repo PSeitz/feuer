@@ -25,7 +25,7 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 pub const DEFAULT_ACCESS_COUNT_HALF_LIFE: NonZeroU64 = NonZeroU64::new(262_144).unwrap();
 
 /// Default entry count above which background cleanup removes old history.
-pub const DEFAULT_HISTORY_ENTRY_LIMIT: NonZeroUsize = NonZeroUsize::new(2_000_000).unwrap();
+pub const DEFAULT_HISTORY_ENTRY_LIMIT: NonZeroUsize = NonZeroUsize::new(10_000_000).unwrap();
 
 /// Request history shared by both cache tiers.
 /// Object keys select one of 64 independently locked history maps. The request clock remains global.

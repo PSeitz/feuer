@@ -365,6 +365,13 @@ fn default_shard_count_scales_with_capacity() {
 }
 
 #[test]
+fn explicit_shard_count_overrides_capacity_default() {
+    let cache = MemoryCache::with_metrics_and_shards(1024, MemoryMetrics::noop(), 4);
+    assert_eq!(cache.shards.len(), 4);
+    assert_eq!(cache.capacity(), 1024);
+}
+
+#[test]
 fn configured_target_is_divided_without_losing_remainder_bytes() {
     assert_eq!(
         (0..2).map(|index| shard_capacity_for(3, 2, index)).collect::<Vec<_>>(),

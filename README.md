@@ -144,15 +144,22 @@ Memory and disk can use different scorers.
 
 See [eviction](eviction.md) for the formula, configuration examples, and trade-offs.
 
+### Memory shards
+
+Set `FEUER_MEMORY_SHARD_COUNT` or use `.memory_shard_count(n)` to set a positive shard count per cache. The default
+is one shard per 8 GiB of memory capacity, rounded down, with at least one shard.
+More shards can reduce lock contention. The memory eviction target is divided among them.
+
 ### Environment variables
 
 `.open()` reads these defaults. Builder setters override them per cache.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `FEUER_MEMORY_SHARD_COUNT` | `max(1, memory_capacity / 8 GiB)` | Memory cache shard count. Must be positive. |
 | `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Candidates per eviction. Must be positive. |
 | `FEUER_ACCESS_COUNT_HALF_LIFE` | `262144` | Requests across keys before demand weight halves. Must be positive. |
-| `FEUER_HISTORY_ENTRY_LIMIT` | `2000000` | History entry-count cleanup threshold per cache. Must be positive. |
+| `FEUER_HISTORY_ENTRY_LIMIT` | `10000000` | History entry-count cleanup threshold per cache. Must be positive. |
 
 Values accept integers and size suffixes such as `8KiB` or `1.5 GiB`.
 Binary suffixes use powers of 1024, decimal suffixes powers of 1000.
