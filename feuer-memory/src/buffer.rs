@@ -18,8 +18,8 @@ use std::ptr::null_mut;
 use bytes::Bytes;
 #[cfg(target_os = "linux")]
 use libc::{
-    _SC_PAGESIZE, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MREMAP_MAYMOVE, PROT_READ, PROT_WRITE, mmap, mremap, munmap,
-    sysconf,
+    _SC_PAGESIZE, MADV_HUGEPAGE, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MREMAP_MAYMOVE, PROT_READ, PROT_WRITE,
+    madvise, mmap, mremap, munmap, sysconf,
 };
 use parking_lot::Mutex;
 
@@ -247,6 +247,9 @@ impl LargeBuffer {
             if ptr == MAP_FAILED {
                 return Err(io::Error::last_os_error());
             }
+            // Prefer transparent huge pages. Unsupported advice leaves the mapping usable.
+            // SAFETY: ptr is page-aligned and owns a mapping covering layout.size() bytes.
+            let _ = unsafe { madvise(ptr, layout.size(), MADV_HUGEPAGE) };
             Ok(Self {
                 ptr: NonNull::new(ptr.cast()).expect("mmap returned a null address"),
                 length,
