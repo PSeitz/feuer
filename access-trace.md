@@ -33,8 +33,15 @@ Every event refers to an object.
 | 0 | `u8` | Kind: 0 start, 1 memory hit, 2 disk/buffered hit, 3 callback success, 4 callback error, 5 lookup-only miss |
 | 1 | `u64` | Request ID, starts at 1, local to this trace |
 | 9 | `u64` | Elapsed nanoseconds since trace creation |
-| 17 | `u128` | Object key hash, seed-zero XXH3-128 |
+| 17 | `u128` | Object key hash, per-cache SipHash-1-3-128 |
 | 33 | `u64` | Object payload length for successful kinds 1–3, otherwise zero |
+
+Current writers use the cache's random secret 128-bit SipHash key. The key is persisted
+with disk caches and shared by cloned handles. Use `cache.hash_key(&key)` to match an
+application key to a traced identity. Independent caches have different identities.
+FETR v1 also covers historical XXH3 traces. Its header does not identify the hash
+algorithm or cache key, so keep traces from different caches separate. Hashes remain
+opaque identities to replay.
 
 Successful lookups of empty objects have length zero. A `get` returning
 `None` emits kind 5. Replay learns object lengths from successful outcomes and

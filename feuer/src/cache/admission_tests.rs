@@ -1,6 +1,9 @@
 use super::*;
 use crate::test_metrics::{registry, value};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 fn assert_filter_counts(registry: &prometheus::Registry, tier: &str, accepted: u64, rejected: u64) {
     for (outcome, count) in [("accepted", accepted), ("rejected", rejected)] {
@@ -34,11 +37,13 @@ async fn rejected_fetches_return_bytes_and_keep_demand_for_later_admission() {
     let (registry, backend) = registry();
     let calls = Arc::new(AtomicUsize::new(0));
     let filter_calls = calls.clone();
+    let expected_key = Arc::new(OnceLock::<ObjectKeyHash>::new());
+    let filter_key = expected_key.clone();
     let cache = Cache::builder()
         .memory_capacity(1 << 20)
         .with_metrics(&backend)
         .with_memory_admission_filter(move |key, payload_len, history| {
-            assert_eq!(*key, ObjectKeyHash::from("object"));
+            assert_eq!(key, filter_key.get().unwrap());
             assert_eq!(payload_len, 4);
             filter_calls.fetch_add(1, Ordering::Relaxed);
             history.decayed_request_count(key) > 1.5
@@ -46,6 +51,7 @@ async fn rejected_fetches_return_bytes_and_keep_demand_for_later_admission() {
         .with_disk_admission_filter(|_, _, _| panic!("disk is disabled"))
         .open()
         .unwrap();
+    expected_key.set(cache.hash_key("object")).unwrap();
     let clone = cache.clone();
     for (cache, admitted) in [(&cache, false), (&clone, true)] {
         let bytes = cache
@@ -53,10 +59,7 @@ async fn rejected_fetches_return_bytes_and_keep_demand_for_later_admission() {
             .await
             .unwrap();
         assert_eq!(bytes, b"abcd"[..]);
-        assert_eq!(
-            cache.inner.memory.get(&ObjectKeyHash::from("object")).is_some(),
-            admitted
-        );
+        assert_eq!(cache.inner.memory.get(&cache.hash_key("object")).is_some(), admitted);
     }
     assert_eq!(cache.get("object").await.unwrap(), b"abcd"[..]);
     assert_eq!(calls.load(Ordering::Relaxed), 2);
@@ -70,15 +73,18 @@ async fn rejected_fetches_return_bytes_and_keep_demand_for_later_admission() {
 fn insert_filter_receives_payload_length_and_preserves_existing_entries() {
     let accept = Arc::new(AtomicBool::new(true));
     let filter_accept = accept.clone();
+    let empty_key = Arc::new(OnceLock::<ObjectKeyHash>::new());
+    let filter_empty_key = empty_key.clone();
     let cache = Cache::builder()
         .memory_capacity(1 << 20)
         .with_memory_admission_filter(move |key, payload_len, history| {
             assert_eq!(history.request_count(), 0);
-            assert_eq!(payload_len, if *key == ObjectKeyHash::from("empty") { 0 } else { 4 });
+            assert_eq!(payload_len, if key == filter_empty_key.get().unwrap() { 0 } else { 4 });
             filter_accept.load(Ordering::Relaxed)
         })
         .open()
         .unwrap();
+    empty_key.set(cache.hash_key("empty")).unwrap();
     let mut buffer = cache.allocate_buffer(4).unwrap();
     buffer.as_mut().copy_from_slice(b"abcd");
     let capacity = buffer.capacity();
@@ -89,12 +95,12 @@ fn insert_filter_receives_payload_length_and_preserves_existing_entries() {
     cache.insert("rejected", Bytes::from_static(b"abcd"));
     cache.insert("empty", Bytes::new());
     assert_eq!(
-        cache.inner.memory.get(&ObjectKeyHash::from("object")).unwrap().as_ptr(),
+        cache.inner.memory.get(&cache.hash_key("object")).unwrap().as_ptr(),
         address
     );
     assert_eq!(cache.inner.memory.used_bytes(), capacity as u64);
-    assert!(cache.inner.memory.get(&ObjectKeyHash::from("rejected")).is_none());
-    assert!(cache.inner.memory.get(&ObjectKeyHash::from("empty")).is_none());
+    assert!(cache.inner.memory.get(&cache.hash_key("rejected")).is_none());
+    assert!(cache.inner.memory.get(&cache.hash_key("empty")).is_none());
 }
 
 #[test]
@@ -125,7 +131,7 @@ fn rejected_shared_fetch_runs_admission_once_and_errors_skip_admission() {
     assert_eq!(first.now_or_never().unwrap().unwrap(), bytes);
     assert_eq!(second.now_or_never().unwrap().unwrap(), bytes);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
-    assert!(cache.inner.memory.get(&ObjectKeyHash::from("object")).is_none());
+    assert!(cache.inner.memory.get(&cache.hash_key("object")).is_none());
     assert_eq!(
         cache
             .get_or_fetch("object", || async { Err::<Bytes, _>("failed") })
@@ -145,25 +151,30 @@ async fn memory_and_disk_admission_are_independent_for_inserts_and_fetches() {
             for fetch in [false, true] {
                 let directory = tempfile::tempdir().unwrap();
                 let (registry, backend) = registry();
+                let expected_key = Arc::new(OnceLock::<ObjectKeyHash>::new());
+                let memory_key = expected_key.clone();
+                let disk_key = expected_key.clone();
                 let cache = Cache::builder()
                     .directory(directory.path())
                     .memory_capacity(1 << 20)
                     .disk_capacity(4 << 20)
                     .with_metrics(&backend)
                     .with_memory_admission_filter(move |key, payload_len, history| {
-                        assert_eq!(*key, ObjectKeyHash::from("object"));
+                        assert_eq!(key, memory_key.get().unwrap());
                         assert_eq!(payload_len, 4);
                         assert_eq!(history.request_count(), u64::from(fetch));
                         admit_memory
                     })
                     .with_disk_admission_filter(move |key, payload_len, history| {
-                        assert_eq!(*key, ObjectKeyHash::from("object"));
+                        assert_eq!(key, disk_key.get().unwrap());
                         assert_eq!(payload_len, 4);
                         assert_eq!(history.request_count(), u64::from(fetch));
                         admit_disk
                     })
                     .open()
                     .unwrap();
+                let hash = cache.hash_key("object");
+                expected_key.set(hash).unwrap();
                 let bytes = Bytes::from_static(b"abcd");
                 if fetch {
                     assert_eq!(
@@ -176,7 +187,6 @@ async fn memory_and_disk_admission_are_independent_for_inserts_and_fetches() {
                 } else {
                     cache.insert("object", bytes);
                 }
-                let hash = ObjectKeyHash::from("object");
                 assert_eq!(cache.inner.memory.get(&hash).is_some(), admit_memory);
                 assert_filter_counts(&registry, "memory", u64::from(admit_memory), u64::from(!admit_memory));
                 assert_filter_counts(&registry, "disk", u64::from(admit_disk), u64::from(!admit_disk));
@@ -211,7 +221,8 @@ async fn memory_and_disk_admission_are_independent_for_inserts_and_fetches() {
 async fn disk_hits_apply_only_memory_admission() {
     let (registry, backend) = registry();
     let directory = tempfile::tempdir().unwrap();
-    let key = ObjectKeyHash::from("object");
+    let expected_key = Arc::new(OnceLock::<ObjectKeyHash>::new());
+    let filter_key = expected_key.clone();
     let accept = Arc::new(AtomicBool::new(false));
     let filter_accept = accept.clone();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -222,7 +233,7 @@ async fn disk_hits_apply_only_memory_admission() {
         .disk_capacity(4 << 20)
         .with_metrics(&backend)
         .with_memory_admission_filter(move |hash, payload_len, history| {
-            assert_eq!(*hash, key);
+            assert_eq!(hash, filter_key.get().unwrap());
             assert_eq!(payload_len, 4);
             assert!(history.decayed_request_count(hash) >= 1.0);
             filter_calls.fetch_add(1, Ordering::Relaxed);
@@ -231,6 +242,8 @@ async fn disk_hits_apply_only_memory_admission() {
         .with_disk_admission_filter(|_, _, _| panic!("hits must skip disk admission"))
         .open()
         .unwrap();
+    let key = cache.hash_key("object");
+    expected_key.set(key).unwrap();
     cache
         .inner
         .disk

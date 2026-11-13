@@ -12,6 +12,7 @@ async fn records_each_started_request_before_any_result() {
     let (metrics_registry, registry) = registry();
     let cache = Cache {
         inner: Arc::new(CacheInner {
+            key_hasher: ObjectKeyHasher::new().unwrap(),
             config: Cache::builder()
                 .disk_capacity(4 << 20)
                 .memory_capacity(1024)
@@ -71,5 +72,5 @@ async fn records_each_started_request_before_any_result() {
         value(&metrics_registry, "feuer_lookup_bytes_total", &[("source", "memory")]),
         1.0
     );
-    assert!(history.decayed_request_count(&ObjectKeyHash::from(key)) > 3.0);
+    assert!(history.decayed_request_count(&cache.hash_key(key)) > 3.0);
 }

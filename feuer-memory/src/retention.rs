@@ -129,7 +129,7 @@ proptest! {
         requests in 0i32..8,
     ) {
         let histories = ObjectAccessHistories::with_half_life(NonZeroU64::MIN);
-        let key = ObjectKeyHash::from("object");
+        let key = ObjectKeyHash(1);
         for _ in 0..requests {
             histories.record_request(&key);
         }
@@ -144,7 +144,7 @@ proptest! {
             let expected = demand * (fixed_cost as f64 / 8.0 + payload_len as f64 * (byte_cost as f64 / 8.0)).max(0.0)
                 / payload_len.max(1) as f64;
             prop_assert_eq!(scorer.score(&key, payload_len, &histories).to_bits(), expected.to_bits());
-            prop_assert_eq!(scorer.score(&ObjectKeyHash::from("unknown"), payload_len, &histories), 0.0);
+            prop_assert_eq!(scorer.score(&ObjectKeyHash(2), payload_len, &histories), 0.0);
             let savings_scorer = CacheReadSavingsScorer {
                 fallback_cost_per_request: scorer.cost_per_request,
                 fallback_cost_per_byte: scorer.cost_per_byte,
@@ -174,14 +174,14 @@ fn samples_at_most_64_candidates() {
 #[test]
 fn scores_follow_decayed_object_demand() {
     let histories = ObjectAccessHistories::with_half_life(NonZeroU64::new(2).unwrap());
-    let key = ObjectKeyHash::from("object");
+    let key = ObjectKeyHash(1);
     histories.record_request(&key);
     let scorer = FetchCostScorer::default();
     assert_eq!(scorer.cost_per_request, 0.0);
     assert_eq!(scorer.cost_per_byte, 1.0);
     assert_eq!(scorer.score(&key, 10, &histories), 1.0);
     for _ in 0..2 {
-        histories.record_request(&ObjectKeyHash::from("other"));
+        histories.record_request(&ObjectKeyHash(2));
     }
     assert_eq!(scorer.score(&key, 10, &histories), 0.5);
     assert_eq!(scorer.score(&key, 20, &histories), 0.5);
@@ -191,7 +191,7 @@ fn scores_follow_decayed_object_demand() {
 #[test]
 fn source_minus_disk_costs_determine_retention_benefit() {
     let histories = ObjectAccessHistories::new();
-    let key = ObjectKeyHash::from("object");
+    let key = ObjectKeyHash(1);
     histories.record_request(&key);
     // Source retrieval costs 100 + 3 * size. Disk retrieval costs 120 + size.
     let scorer = CacheReadSavingsScorer {
@@ -204,7 +204,7 @@ fn source_minus_disk_costs_determine_retention_benefit() {
     assert_eq!(scorer.score(&key, 10, &histories), 0.0);
     assert_eq!(scorer.score(&key, 20, &histories), 1.0);
     assert_eq!(scorer.score(&key, 0, &histories), -20.0);
-    assert_eq!(scorer.score(&ObjectKeyHash::from("unknown"), 20, &histories), 0.0);
+    assert_eq!(scorer.score(&ObjectKeyHash(2), 20, &histories), 0.0);
 
     let cheaper_reads = CacheReadSavingsScorer {
         cache_read_cost_per_request: 80.0,
@@ -217,7 +217,7 @@ fn source_minus_disk_costs_determine_retention_benefit() {
 #[test]
 fn fixed_fetch_cost_favors_smaller_objects_at_equal_demand() {
     let histories = ObjectAccessHistories::new();
-    let key = ObjectKeyHash::from("object");
+    let key = ObjectKeyHash(1);
     histories.record_request(&key);
     let scorer = FetchCostScorer {
         cost_per_request: 100.0,

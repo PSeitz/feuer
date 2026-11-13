@@ -26,6 +26,11 @@ impl DiskCache {
     }
 }
 
+// Use a fixed secret so test key routing is independent of each cache's random secret.
+pub(super) fn hash_key(key: impl std::hash::Hash) -> ObjectKeyHash {
+    ObjectKeyHasher::from_key([0; 16]).hash_key(&key)
+}
+
 pub(super) fn download(seed: u64, length: usize) -> Bytes {
     Bytes::from(
         (0..length)
@@ -109,13 +114,13 @@ async fn metadata_changes_after_copying_remain_dirty() {
 async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
     let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES);
     assert_eq!(cache.insert_batch(Vec::new()).await.unwrap(), 0);
-    let mut inputs = vec![(ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize))];
-    inputs.extend((0..130).map(|i| (ObjectKeyHash::from(format!("small-{i}")), download(i, 1024))));
+    let mut inputs = vec![(hash_key("large"), download(0, CHUNK_BYTES as usize))];
+    inputs.extend((0..130).map(|i| (hash_key(format!("small-{i}")), download(i, 1024))));
     assert_eq!(cache.insert_batch(inputs).await.unwrap(), 131);
-    let large_start = entry_disk_ranges(&cache, &ObjectKeyHash::from("large")).await.0.start;
+    let large_start = entry_disk_ranges(&cache, &hash_key("large")).await.0.start;
     let entry_metadata_pages_end = CHUNK_BYTES + 2 * METADATA_PAGE_BYTES as u64;
     for i in 0..130 {
-        let key = ObjectKeyHash::from(format!("small-{i}"));
+        let key = hash_key(format!("small-{i}"));
         assert_eq!(cache.get(&key).await.unwrap(), download(i, 1024));
         let (payload, metadata) = entry_disk_ranges(&cache, &key).await;
         assert!((3 * CHUNK_BYTES..4 * CHUNK_BYTES).contains(&payload.start));
@@ -124,7 +129,7 @@ async fn mixed_batch_shares_metadata_separately_from_payload_chunks() {
     assert_eq!(large_start, 2 * CHUNK_BYTES);
     assert_eq!(cache.disk.shards[0].allocator.available_bytes(), 2 * CHUNK_BYTES);
     assert_eq!(
-        cache.get(&ObjectKeyHash::from("large")).await.unwrap(),
+        cache.get(&hash_key("large")).await.unwrap(),
         download(0, CHUNK_BYTES as usize)
     );
 }
@@ -268,7 +273,7 @@ async fn pressure_reclaims_shared_and_exclusive_chunks_during_mixed_size_churn()
         let inputs: Vec<_> = [1, 4097, CHUNK_BYTES as usize + 17]
             .into_iter()
             .enumerate()
-            .map(|(i, length)| (ObjectKeyHash::from(format!("{cycle}-{i}")), download(cycle * 7, length)))
+            .map(|(i, length)| (hash_key(format!("{cycle}-{i}")), download(cycle * 7, length)))
             .collect();
         assert_eq!(cache.insert_batch(inputs.clone()).await.unwrap(), inputs.len());
         // The final region remains published. Admitting it may evict earlier entries in the same batch.
@@ -290,7 +295,7 @@ async fn pressure_reclaims_shared_and_exclusive_chunks_during_mixed_size_churn()
 #[tokio::test]
 async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
-    let key = ObjectKeyHash::from("large");
+    let key = hash_key("large");
     let source = download(3, CHUNK_BYTES as usize + 17);
     cache.insert(key, source.clone()).await.unwrap();
     let read = cache.disk.shards[0]
@@ -303,7 +308,7 @@ async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
         .share_read();
     assert!(
         cache
-            .insert(ObjectKeyHash::from("new"), download(0, CHUNK_BYTES as usize))
+            .insert(hash_key("new"), download(0, CHUNK_BYTES as usize))
             .await
             .unwrap()
     );
@@ -315,7 +320,7 @@ async fn multi_chunk_reuse_turns_an_old_read_into_a_checksum_miss() {
 #[tokio::test]
 async fn eviction_budgets_and_active_reservations_bound_reclamation() {
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
-    let key = ObjectKeyHash::from("large");
+    let key = hash_key("large");
     cache.insert(key, download(0, CHUNK_BYTES as usize + 1)).await.unwrap();
     let shard = &cache.disk.shards[0];
     let mut remaining_eviction_attempts = 0;
@@ -344,27 +349,17 @@ async fn eviction_budgets_and_active_reservations_bound_reclamation() {
     assert_eq!(remaining_eviction_chunks, MAX_EVICTION_CHUNKS - 2);
     shard.write_dirty_metadata_pages(&cache.disk.file).await.unwrap();
     let active = shard.allocator.reserve_chunks(2).unwrap();
-    assert!(
-        !cache
-            .insert(ObjectKeyHash::from("blocked"), download(0, 1))
-            .await
-            .unwrap()
-    );
+    assert!(!cache.insert(hash_key("blocked"), download(0, 1)).await.unwrap());
     drop(active);
-    assert!(
-        cache
-            .insert(ObjectKeyHash::from("unblocked"), download(0, 1))
-            .await
-            .unwrap()
-    );
+    assert!(cache.insert(hash_key("unblocked"), download(0, 1)).await.unwrap());
 }
 
 #[tokio::test]
 async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_reads() {
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
-    let hot = ObjectKeyHash::from("hot");
-    let cold = ObjectKeyHash::from("cold");
-    let other = ObjectKeyHash::from("other");
+    let hot = hash_key("hot");
+    let cold = hash_key("cold");
+    let other = hash_key("other");
     cache
         .insert_batch(vec![(hot, download(0, 100)), (cold, download(0, 100))])
         .await
@@ -394,12 +389,7 @@ async fn value_aware_eviction_preserves_hot_neighbors_and_needs_no_metadata_read
     assert!(cache.get(&cold).await.is_none());
     assert!(cache.get(&hot).await.is_some());
     assert_eq!(shard.allocator.available_bytes(), 0); // Hot neighbor still owns the chunk.
-    assert!(
-        cache
-            .insert(ObjectKeyHash::from("new"), download(0, 100))
-            .await
-            .unwrap()
-    );
+    assert!(cache.insert(hash_key("new"), download(0, 100)).await.unwrap());
     assert!(cache.get(&other).await.is_none());
     assert!(cache.get(&hot).await.is_some());
 }
@@ -411,14 +401,14 @@ async fn disk_value_uses_payload_length_rather_than_padding_or_chunk_size() {
         cost_per_request: 1.0,
         cost_per_byte: 0.0,
     });
-    let small = ObjectKeyHash::from("small");
-    let large = ObjectKeyHash::from("large");
+    let small = hash_key("small");
+    let large = hash_key("large");
     // Both entries occupy one payload chunk, with different payload lengths.
     cache.insert(small, download(0, 1)).await.unwrap();
     cache.insert(large, download(0, 3000)).await.unwrap();
     cache.access_histories().record_request(&small);
     cache.access_histories().record_request(&large);
-    assert!(cache.insert(ObjectKeyHash::from("new"), download(0, 1)).await.unwrap());
+    assert!(cache.insert(hash_key("new"), download(0, 1)).await.unwrap());
     assert!(cache.get(&small).await.is_some());
     assert!(cache.get(&large).await.is_none());
 }
@@ -437,12 +427,7 @@ async fn eviction_respects_sample_size_and_keeps_first_sampled_on_ties() {
         }
         // Sample the newer entry first. A one-entry sample must not consider the cheaper older entry.
         cache.disk.shards[0].entry_index.lock().unwrap().next_sample_start = usize::MAX;
-        assert!(
-            cache
-                .insert(ObjectKeyHash::from("incoming"), download(0, 1))
-                .await
-                .unwrap()
-        );
+        assert!(cache.insert(hash_key("incoming"), download(0, 1)).await.unwrap());
         assert!(cache.get(&older).await.is_some());
         assert!(cache.get(&newer).await.is_none());
     }
@@ -463,8 +448,8 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
         },
     )
     .unwrap();
-    let hot = ObjectKeyHash::from("hot");
-    let cold = ObjectKeyHash::from("cold");
+    let hot = hash_key("hot");
+    let cold = hash_key("cold");
     memory.insert(hot, download(0, 100), 100);
     history.record_request(&hot);
     cache.insert(hot, download(0, 100)).await.unwrap();
@@ -475,12 +460,7 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
         history.record_request(&hot);
     }
     assert_eq!(history.request_count(), 5);
-    assert!(
-        cache
-            .insert(ObjectKeyHash::from("new"), download(0, 100))
-            .await
-            .unwrap()
-    );
+    assert!(cache.insert(hash_key("new"), download(0, 100)).await.unwrap());
     assert!(cache.get(&cold).await.is_none());
     assert!(memory.remove(&hot));
     assert!(memory.get(&hot).is_none());
@@ -499,20 +479,15 @@ async fn memory_and_disk_use_the_same_evidence_through_memory_eviction() {
 #[tokio::test]
 async fn admission_eviction_limit_does_not_force_out_a_shared_chunks_last_entry() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES);
-    let hot = ObjectKeyHash::from("hot");
+    let hot = hash_key("hot");
     let mut inputs: Vec<_> = (0..MAX_EVICTION_ATTEMPTS)
-        .map(|i| (ObjectKeyHash::from(format!("cold-{i}")), download(0, 1)))
+        .map(|i| (hash_key(format!("cold-{i}")), download(0, 1)))
         .collect();
     inputs.push((hot, download(0, 1)));
     cache.insert_batch(inputs).await.unwrap();
     cache.access_histories().record_request(&hot);
     // Removing 64 individually chosen cold entries still cannot release the chunk with its hot neighbor.
-    assert!(
-        !cache
-            .insert(ObjectKeyHash::from("incoming"), download(0, 1))
-            .await
-            .unwrap()
-    );
+    assert!(!cache.insert(hash_key("incoming"), download(0, 1)).await.unwrap());
     assert!(cache.get(&hot).await.is_some());
     assert_eq!(
         cache.disk.shards[0]
@@ -529,7 +504,7 @@ async fn admission_eviction_limit_does_not_force_out_a_shared_chunks_last_entry(
 async fn concurrent_pressure_and_reads_never_return_reused_bytes() {
     let (_directory, cache) = open_test_cache(4 * CHUNK_BYTES);
     let entries = (0..4)
-        .map(|worker| (ObjectKeyHash::from(format!("{worker}-0")), download(worker * 53, 8193)))
+        .map(|worker| (hash_key(format!("{worker}-0")), download(worker * 53, 8193)))
         .collect();
     assert_eq!(cache.insert_batch(entries).await.unwrap(), 4);
     let mut tasks = Vec::new();
@@ -539,13 +514,13 @@ async fn concurrent_pressure_and_reads_never_return_reused_bytes() {
         let read_barrier = read_barrier.clone();
         tasks.push(tokio::spawn(async move {
             // Every reader must observe bytes before any worker starts eviction pressure.
-            let key = ObjectKeyHash::from(format!("{worker}-0"));
+            let key = hash_key(format!("{worker}-0"));
             let source = download(worker * 53, 8193);
             let bytes = cache.get(&key).await;
             read_barrier.wait().await;
             assert_eq!(bytes.unwrap(), source);
             for cycle in 1..20 {
-                let key = ObjectKeyHash::from(format!("{worker}-{cycle}"));
+                let key = hash_key(format!("{worker}-{cycle}"));
                 let source = download(worker * 53 + cycle, 8193);
                 cache.insert(key, source.clone()).await.unwrap();
                 if let Some(bytes) = cache.get(&key).await {
@@ -562,14 +537,11 @@ async fn concurrent_pressure_and_reads_never_return_reused_bytes() {
 #[tokio::test]
 async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk() {
     let (directory, cache) = open_test_cache(CHUNK_BYTES);
-    let key = ObjectKeyHash::from("small entry");
+    let key = hash_key("small entry");
     let source = download(3, 1024);
     assert_eq!(
         cache
-            .insert_batch(vec![
-                (key, source.clone()),
-                (ObjectKeyHash::from("neighbor"), download(0, 8192))
-            ])
+            .insert_batch(vec![(key, source.clone()), (hash_key("neighbor"), download(0, 8192))])
             .await
             .unwrap(),
         2
@@ -589,7 +561,7 @@ async fn a_small_entry_read_does_not_need_the_rest_of_its_chunk() {
 #[tokio::test]
 async fn alignment_padding_is_not_part_of_the_entry_checksum() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES);
-    let key = ObjectKeyHash::from("small entry");
+    let key = hash_key("small entry");
     let source = download(3, 1024);
     cache.insert(key, source.clone()).await.unwrap();
     let (payload, _) = entry_disk_ranges(&cache, &key).await;
@@ -609,8 +581,8 @@ async fn alignment_padding_is_not_part_of_the_entry_checksum() {
 #[tokio::test]
 async fn removing_one_shared_payload_does_not_free_its_neighbors_chunks() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES);
-    let first = ObjectKeyHash::from("first");
-    let neighbor = ObjectKeyHash::from("neighbor");
+    let first = hash_key("first");
+    let neighbor = hash_key("neighbor");
     assert_eq!(
         cache
             .insert_batch(vec![(first, download(3, 1024)), (neighbor, download(7, 4097))])
@@ -665,7 +637,7 @@ async fn batch_rejects_fragmented_space_without_consuming_it() {
     let third = allocator.reserve_chunks(1).unwrap();
     let fourth = allocator.reserve_chunks(1).unwrap();
     drop((first, third));
-    let key = ObjectKeyHash::from("large");
+    let key = hash_key("large");
     let source = download(0, CHUNK_BYTES as usize + 1);
     assert!(!cache.insert(key, source.clone()).await.unwrap());
     assert_eq!(allocator.available_bytes(), 2 * CHUNK_BYTES);
@@ -707,20 +679,17 @@ async fn batch_skips_oversized_and_duplicate_entries_without_losing_accepted_ent
     assert_eq!(
         cache
             .insert_batch(vec![
-                (ObjectKeyHash::from("object"), download(5, 100)),
-                (ObjectKeyHash::from("too large"), download(0, CHUNK_BYTES as usize + 1)),
-                (ObjectKeyHash::from("object"), download(0, 200)),
-                (ObjectKeyHash::from("object"), download(0, 200)),
+                (hash_key("object"), download(5, 100)),
+                (hash_key("too large"), download(0, CHUNK_BYTES as usize + 1)),
+                (hash_key("object"), download(0, 200)),
+                (hash_key("object"), download(0, 200)),
             ])
             .await
             .unwrap(),
         1
     );
-    assert_eq!(
-        cache.get(&ObjectKeyHash::from("object")).await.unwrap(),
-        download(5, 100)
-    );
-    assert!(cache.get(&ObjectKeyHash::from("too large")).await.is_none());
+    assert_eq!(cache.get(&hash_key("object")).await.unwrap(), download(5, 100));
+    assert!(cache.get(&hash_key("too large")).await.is_none());
     assert_eq!(cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key.len(), 1);
 }
 
@@ -730,23 +699,23 @@ async fn entry_metadata_space_is_charged_and_failed_reservations_roll_back() {
     // The separate metadata chunk is charged, leaving exactly one payload chunk.
     assert!(
         !cache
-            .insert(ObjectKeyHash::from("too large"), download(0, CHUNK_BYTES as usize + 1))
+            .insert(hash_key("too large"), download(0, CHUNK_BYTES as usize + 1))
             .await
             .unwrap()
     );
     // Payloads can now occupy the entire chunk.
-    let key = ObjectKeyHash::from("fits exactly");
+    let key = hash_key("fits exactly");
     assert!(cache.insert(key, download(7, CHUNK_BYTES as usize)).await.unwrap());
     assert!(cache.disk.shards[0].allocator.reserve_chunks(1).is_none());
     // A two-chunk entry cannot fit this shard. Do not evict the existing entry in vain.
     assert!(
         !cache
-            .insert(ObjectKeyHash::from("oversized"), download(0, CHUNK_BYTES as usize + 1))
+            .insert(hash_key("oversized"), download(0, CHUNK_BYTES as usize + 1))
             .await
             .unwrap()
     );
     assert!(cache.get(&key).await.is_some());
-    assert!(cache.insert(ObjectKeyHash::from("full"), download(0, 1)).await.unwrap());
+    assert!(cache.insert(hash_key("full"), download(0, 1)).await.unwrap());
     assert!(cache.get(&key).await.is_none());
 }
 
@@ -760,10 +729,7 @@ async fn racing_duplicate_writes_revalidate_publication() {
         let start_barrier = start_barrier.clone();
         tasks.push(tokio::spawn(async move {
             start_barrier.wait().await;
-            cache
-                .insert(ObjectKeyHash::from("object"), download(7, 100))
-                .await
-                .unwrap()
+            cache.insert(hash_key("object"), download(7, 100)).await.unwrap()
         }));
     }
     let mut published = 0;
@@ -775,16 +741,13 @@ async fn racing_duplicate_writes_revalidate_publication() {
     for (seed, length) in [(3, 120), (0, 200), (5, 150), (300, 50)] {
         let cache = cache.clone();
         tasks.push(tokio::spawn(async move {
-            cache
-                .insert(ObjectKeyHash::from("object"), download(seed, length))
-                .await
-                .unwrap()
+            cache.insert(hash_key("object"), download(seed, length)).await.unwrap()
         }));
     }
     for task in tasks {
         task.await.unwrap();
     }
-    let key = ObjectKeyHash::from("object");
+    let key = hash_key("object");
     assert_eq!(cache.disk.shards[0].entry_index.lock().unwrap().entries_by_key.len(), 1);
     assert_eq!(cache.get(&key).await.unwrap(), download(7, 100));
 }
@@ -792,8 +755,8 @@ async fn racing_duplicate_writes_revalidate_publication() {
 #[tokio::test]
 async fn publishes_each_region_before_reserving_the_next() {
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
-    let small = ObjectKeyHash::from("small");
-    let large = ObjectKeyHash::from("large");
+    let small = hash_key("small");
+    let large = hash_key("large");
     let published = cache
         .insert_batch(vec![
             (small, download(0, 512 * 1024)),
@@ -810,7 +773,7 @@ async fn publishes_each_region_before_reserving_the_next() {
 #[tokio::test]
 async fn canceled_requester_does_not_abort_the_reservation_owner() {
     let (_directory, cache) = open_test_cache(CHUNK_BYTES);
-    let mut requester = Box::pin(cache.insert(ObjectKeyHash::from("object"), download(0, 100)));
+    let mut requester = Box::pin(cache.insert(hash_key("object"), download(0, 100)));
     // On the current-thread runtime, one poll spawns the owner without letting it run yet.
     assert!(
         poll_fn(|cx| Poll::Ready(requester.as_mut().poll(cx)))
@@ -819,10 +782,10 @@ async fn canceled_requester_does_not_abort_the_reservation_owner() {
     );
     drop(requester);
     assert_eq!(cache.write_sender.strong_count(), 1);
-    assert!(cache.get(&ObjectKeyHash::from("object")).await.is_none());
+    assert!(cache.get(&hash_key("object")).await.is_none());
     let bytes = timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(bytes) = cache.get(&ObjectKeyHash::from("object")).await {
+            if let Some(bytes) = cache.get(&hash_key("object")).await {
                 break bytes;
             }
             yield_now().await;
@@ -836,7 +799,7 @@ async fn canceled_requester_does_not_abort_the_reservation_owner() {
 #[tokio::test]
 async fn read_addresses_and_results_do_not_delay_replaced_payload_reuse() {
     let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
-    let key = ObjectKeyHash::from("object");
+    let key = hash_key("object");
     cache.insert(key, download(5, 100)).await.unwrap();
     let (address, payload_checksum) = {
         let mut disk_index = cache.disk.shards[0].entry_index.lock().unwrap();
@@ -856,7 +819,7 @@ async fn read_addresses_and_results_do_not_delay_replaced_payload_reuse() {
 async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
     for stale in [false, true] {
         let (_directory, cache) = open_test_cache(2 * CHUNK_BYTES);
-        let key = ObjectKeyHash::from("object");
+        let key = hash_key("object");
         cache.insert(key, download(3, 50)).await.unwrap();
         let (payload, _) = entry_disk_ranges(&cache, &key).await;
         let address = payload.start;
@@ -869,7 +832,7 @@ async fn corrupted_and_reused_payload_miss_and_invalidate_the_entry() {
             .to_vec();
         if stale {
             // Another valid entry's payload must not match this entry metadata's expected checksum.
-            let other = ObjectKeyHash::from("other object");
+            let other = hash_key("other object");
             cache.insert(other, download(100, 50)).await.unwrap();
             let (other_payload, _) = entry_disk_ranges(&cache, &other).await;
             bytes = cache
@@ -910,17 +873,14 @@ async fn failed_multi_chunk_write_keeps_earlier_entries_and_releases_its_storage
     assert!(matches!(
         cache
             .insert_batch(vec![
-                (ObjectKeyHash::from("small"), download(0, 512 * 1024)),
-                (ObjectKeyHash::from("large"), download(0, CHUNK_BYTES as usize + 1)),
+                (hash_key("small"), download(0, 512 * 1024)),
+                (hash_key("large"), download(0, CHUNK_BYTES as usize + 1)),
             ])
             .await,
         Err(DiskCacheError::DataFile(DataFileError::RangeExceedsCapacity { .. }))
     ));
-    assert_eq!(
-        cache.get(&ObjectKeyHash::from("small")).await.unwrap(),
-        download(0, 512 * 1024)
-    );
-    assert!(cache.get(&ObjectKeyHash::from("large")).await.is_none());
+    assert_eq!(cache.get(&hash_key("small")).await.unwrap(), download(0, 512 * 1024));
+    assert!(cache.get(&hash_key("large")).await.is_none());
     let shard = &cache.disk.shards[0];
     assert_eq!(shard.allocator.available_bytes(), 2 * CHUNK_BYTES);
     assert_eq!(
@@ -933,7 +893,7 @@ async fn failed_multi_chunk_write_keeps_earlier_entries_and_releases_its_storage
 async fn reads_30_mib_contiguous_payloads_and_trims_final_padding() {
     for length in [30 * CHUNK_BYTES as usize, 30 * CHUNK_BYTES as usize + 17] {
         let (_directory, cache) = open_test_cache(32 * CHUNK_BYTES);
-        let key = ObjectKeyHash::from("large read");
+        let key = hash_key("large read");
         let source = download(7, length);
         assert!(cache.insert(key, source.clone()).await.unwrap());
         let (bytes, capacity) = cache.get_with_fallthrough(&key, || false).await.unwrap();

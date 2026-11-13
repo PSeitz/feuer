@@ -31,7 +31,7 @@ use feuer_memory::{
     BufferPool,
     retention::{FetchCostScorer, RECLAIM_SAMPLE_SIZE, RetentionScorer, sample_candidates},
 };
-use feuer_utils::ObjectKeyHash;
+use feuer_utils::{ObjectKeyHash, ObjectKeyHasher};
 #[cfg(test)]
 use page_format::METADATA_PAGE_BYTES;
 use rustc_hash::FxHashMap;
@@ -63,7 +63,7 @@ const MAX_EVICTION_CHUNKS: usize = 4096;
 /// The key hash selects an independently allocated shard. Admission may fail despite space elsewhere.
 ///
 /// Pressure eviction uses sampled retention scores, defaulting to retrieval value per payload byte.
-/// The first chunk holds a global header with the application's payload version and reserved space.
+/// The first chunk holds a global header with the application's payload version and SipHash key.
 /// Opening clears incompatible files, then waits for all shards to recover before making the cache available.
 /// The experimental format is neither a persistence guarantee nor a stable on-disk interface.
 #[derive(Clone)]
@@ -75,6 +75,7 @@ pub struct DiskCache {
 /// Shared disk-cache internals: file, shards, access histories, and metrics.
 struct DiskCacheInner {
     file: DataFile,
+    key_hasher: ObjectKeyHasher,
     shards: Box<[DiskCacheShard]>,
     access_histories: Arc<ObjectAccessHistories>,
     retention_scorer: Arc<dyn RetentionScorer>,
@@ -127,6 +128,9 @@ pub enum DiskCacheError {
     /// Raw storage failed.
     #[error(transparent)]
     DataFile(#[from] DataFileError),
+    /// Generating the cache's random SipHash key failed.
+    #[error("generating the disk cache hash key failed: {0}")]
+    HashKeyGeneration(#[source] std::io::Error),
     /// The task performing a disk write failed. Submitted I/O may still finish.
     #[error("disk write task failed: {0}")]
     WriteTaskFailed(#[source] JoinError),
@@ -206,7 +210,7 @@ impl DiskCache {
         let capacity = capacity / CHUNK_BYTES * CHUNK_BYTES;
         let file = DataFile::open_with_io_queues(directory, &file_name, capacity, io_metrics, buffer_pool, io_queues)?;
         let num_shards = ((capacity - CHUNK_BYTES) / (128 * CHUNK_BYTES)).clamp(1, 64) as usize;
-        header::clear_incompatible_metadata(&file, payload_version, num_shards)?;
+        let key_hasher = header::clear_incompatible_metadata(&file, payload_version, num_shards)?;
         let shards = (0..num_shards)
             .map(|shard_index| {
                 let range = recovery::shard_disk_range(capacity, num_shards, shard_index);
@@ -221,6 +225,7 @@ impl DiskCache {
             .collect::<Result<_, DataFileError>>()?;
         let disk = Arc::new(DiskCacheInner {
             file,
+            key_hasher,
             shards,
             access_histories,
             retention_scorer,
@@ -269,6 +274,11 @@ impl DiskCache {
         completion: impl Send + 'static,
     ) -> Result<usize, DiskCacheError> {
         self.disk.write(key, bytes, completion).await
+    }
+
+    /// Hashes object keys with the secret persisted in this cache's header.
+    pub fn key_hasher(&self) -> &ObjectKeyHasher {
+        &self.disk.key_hasher
     }
 
     /// Shared history for recording requests once, before lookup and outside raw storage operations.

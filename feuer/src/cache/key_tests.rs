@@ -12,6 +12,19 @@ struct Key<T> {
     range: Range<u64>,
 }
 
+#[test]
+fn memory_cache_clones_share_hashes_and_independent_caches_differ() {
+    let cache = Cache::builder().memory_capacity(1_000_000).open().unwrap();
+    let clone = cache.clone();
+    let other = Cache::builder().memory_capacity(1_000_000).open().unwrap();
+    let key = Key {
+        split: "split",
+        range: 100..200,
+    };
+    assert_eq!(cache.hash_key(&key), clone.hash_key(&key));
+    assert_ne!(cache.hash_key(&key), other.hash_key(&key));
+}
+
 #[tokio::test]
 async fn structured_keys_fetch_and_lookup() {
     let cache = Cache::builder().memory_capacity(1_000_000).open().unwrap();

@@ -9,6 +9,7 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
     let (sender, mut receiver) = unbounded_channel();
     let cache = Cache {
         inner: Arc::new(CacheInner {
+            key_hasher: ObjectKeyHasher::new().unwrap(),
             config: Cache::builder().memory_capacity(8 << 20).resolve_config().unwrap(),
             memory: MemoryCache::with_metrics(8 << 20, MemoryMetrics::new(&backend)),
             metrics: LookupMetrics::new(&backend),
@@ -61,7 +62,7 @@ async fn download_and_memory_hit_share_the_buffer_and_charge_its_capacity() {
             .unwrap();
         assert_eq!(hit, payload);
         assert_eq!(hit.as_ptr(), payload.as_ptr());
-        assert!(cache.inner.memory.contains_entry(&ObjectKeyHash::from(key)));
+        assert!(cache.inner.memory.contains_entry(&cache.hash_key(&key)));
     }
     drop(cache);
     let package = receiver.recv().await.unwrap();

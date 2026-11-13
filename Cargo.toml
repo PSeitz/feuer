@@ -30,15 +30,16 @@ feuer-memory = { version = "0.23.0-dev", path = "feuer-memory" }
 feuer-utils = { version = "0.23.0-dev", path = "feuer-utils" }
 fs4 = { version = "0.13", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+getrandom = "0.4"
 mixtrics = "0.2"
 parking_lot = "0.12"
 prometheus = { version = "0.14", default-features = false }
 rustc-hash = "2"
+siphasher = "1"
 tempfile = "3"
 thiserror = "2.0.20"
 tokio = { version = "1", default-features = false }
 tracing = "0.1"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [workspace.lints.rust]
 missing_docs = "warn"

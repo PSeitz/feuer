@@ -27,7 +27,7 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
         .memory_capacity(1 << 20)
         .open()?
         .with_trace(move |package| ready(sender.send(package).map_err(io::Error::other)));
-    let key = ObjectKeyHash::from("object");
+    let key = cache.hash_key("object");
     cache
         .get_or_fetch("object", || async { Ok::<_, Infallible>(Bytes::from_static(b"abcd")) })
         .await?;
@@ -75,7 +75,7 @@ async fn decodes_current_writer_and_preserves_hashes() -> Result<()> {
 fn replays_objects_with_and_without_disk() -> Result<()> {
     let dir = tempdir()?;
     let path = dir.path().join("trace.feuer");
-    let key = ObjectKeyHash::from("object");
+    let key = ObjectKeyHash(1);
     let mut package = b"FETR\x01\0\0\0".to_vec();
     for (kind, request_id, time_ns) in [(0u8, 1u64, 0u64), (3, 1, 1), (0, 2, 2)] {
         package.push(kind);
@@ -127,6 +127,7 @@ async fn decodes_empty_object_from_current_writer() -> Result<()> {
         .memory_capacity(1 << 20)
         .open()?
         .with_trace(move |package| ready(sender.send(package).map_err(io::Error::other)));
+    let key = cache.hash_key("empty");
     assert!(cache.get("empty").await.is_none());
     cache
         .get_or_fetch("empty", || async { Ok::<_, Infallible>(Bytes::new()) })
@@ -149,13 +150,16 @@ async fn decodes_empty_object_from_current_writer() -> Result<()> {
     fs::write(&path, package)?;
     let access_trace = load_requests(&path, None)?;
     assert_eq!(access_trace.requests.len(), 3);
-    assert!(access_trace.requests.iter().all(|request| {
-        request.object_key == ObjectKeyHash::from("empty").0.to_string() && request.payload_len == 0
-    }));
+    assert!(
+        access_trace
+            .requests
+            .iter()
+            .all(|request| request.object_key == key.0.to_string() && request.payload_len == 0)
+    );
     assert_eq!(access_trace.unmatched_starts, 0);
     assert_eq!(access_trace.outcomes, [0, 1, 0, 1, 0, 1]);
     for event in events {
-        assert_eq!(event.object_key, ObjectKeyHash::from("empty"));
+        assert_eq!(event.object_key, key);
     }
     Ok(())
 }

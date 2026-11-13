@@ -1,4 +1,4 @@
-use super::*;
+use super::{tests::hash_key, *};
 use crate::test_metrics::{registry, value};
 use prometheus::Registry;
 use std::{fs::OpenOptions, time::Duration};
@@ -135,9 +135,9 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
     let capacity = 8 * CHUNK_BYTES;
     let (directory, cache, registry) = measured_cache(capacity);
     let inputs = vec![
-        (ObjectKeyHash::from("small-a"), download(4)),
-        (ObjectKeyHash::from("small-b"), download(8)),
-        (ObjectKeyHash::from("large"), download(2 * CHUNK_BYTES as usize + 17)),
+        (hash_key("small-a"), download(4)),
+        (hash_key("small-b"), download(8)),
+        (hash_key("large"), download(2 * CHUNK_BYTES as usize + 17)),
     ];
     cache.insert_batch(inputs.clone()).await.unwrap();
     assert_eq!(
@@ -180,12 +180,12 @@ async fn recovered_chunk_gauge_counts_shared_and_multi_chunk_ownership() {
 #[tokio::test]
 async fn records_write_outcomes_packing_and_index_usage() {
     let (_directory, cache, registry) = measured_cache(4 * CHUNK_BYTES);
-    let key = ObjectKeyHash::from("object");
+    let key = hash_key("object");
 
     let outcome = |label| value(&registry, "feuer_disk_write_entries_total", &[("outcome", label)]);
     assert_eq!(
         cache
-            .insert_batch(vec![(key, download(4)), ("neighbor".into(), download(8))])
+            .insert_batch(vec![(key, download(4)), (hash_key("neighbor"), download(8))])
             .await
             .unwrap(),
         2
@@ -207,14 +207,14 @@ async fn records_write_outcomes_packing_and_index_usage() {
     assert_eq!(value(&registry, "feuer_disk_chunks", &[("state", "allocated")]), 2.0);
     assert_eq!(
         cache
-            .insert_batch(vec![("oversized".into(), download(4 * CHUNK_BYTES as usize))])
+            .insert_batch(vec![(hash_key("oversized"), download(4 * CHUNK_BYTES as usize))])
             .await
             .unwrap(),
         0
     );
     assert_eq!(outcome("no_capacity"), 1.0);
     assert!(cache.get(&key).await.is_some());
-    assert!(cache.get(&"absent".into()).await.is_none());
+    assert!(cache.get(&hash_key("absent")).await.is_none());
     for label in ["hit", "absent"] {
         assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", label)]), 1.0);
     }
@@ -233,26 +233,38 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
     let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES);
     let triggering = || value(&registry, "feuer_disk_eviction_triggering_insertions_total", &[]);
     cache
-        .insert_batch(vec![("first".into(), download(4)), ("second".into(), download(4))])
+        .insert_batch(vec![
+            (hash_key("first"), download(4)),
+            (hash_key("second"), download(4)),
+        ])
         .await
         .unwrap();
     assert_eq!(triggering(), 0.0);
     cache
-        .insert_batch(vec![("third".into(), download(4)), ("fourth".into(), download(4))])
+        .insert_batch(vec![
+            (hash_key("third"), download(4)),
+            (hash_key("fourth"), download(4)),
+        ])
         .await
         .unwrap();
     // The first incoming entry evicts both old chunk owners. Its batch neighbor evicts nothing.
-    assert!(!cache.contains(&"first".into()));
-    assert!(!cache.contains(&"second".into()));
+    assert!(!cache.contains(&hash_key("first")));
+    assert!(!cache.contains(&hash_key("second")));
     assert_eq!(triggering(), 1.0);
     assert_eq!(
         value(&registry, "feuer_disk_write_entries_total", &[("outcome", "published")]),
         4.0
     );
-    cache.insert_batch(vec![("third".into(), download(4))]).await.unwrap();
+    cache
+        .insert_batch(vec![(hash_key("third"), download(4))])
+        .await
+        .unwrap();
     assert_eq!(triggering(), 1.0);
 
-    assert_eq!(cache.insert_batch(vec![("next".into(), download(4))]).await.unwrap(), 1);
+    assert_eq!(
+        cache.insert_batch(vec![(hash_key("next"), download(4))]).await.unwrap(),
+        1
+    );
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 1.0);
     assert_eq!(triggering(), 2.0);
 }
@@ -261,7 +273,7 @@ async fn eviction_triggering_insertions_count_entries_not_victims_or_batches() {
 async fn io_errors_preserve_entries() {
     let (directory, cache, registry) = measured_cache(2 * CHUNK_BYTES);
 
-    let key = ObjectKeyHash::from("unreadable");
+    let key = hash_key("unreadable");
     cache.insert_batch(vec![(key, download(4))]).await.unwrap();
     let (payload, _) = tests::entry_disk_ranges(&cache, &key).await;
     // Leave only part of the payload readable so the lookup encounters a partial read.
@@ -286,8 +298,14 @@ async fn io_errors_preserve_entries() {
 async fn pressure_eviction_and_write_failure_record_each_entry_outcome() {
     let (_directory, cache, registry) = measured_cache(2 * CHUNK_BYTES);
     let outcome = |label| value(&registry, "feuer_disk_write_entries_total", &[("outcome", label)]);
-    cache.insert_batch(vec![("first".into(), download(4))]).await.unwrap();
-    cache.insert_batch(vec![("second".into(), download(4))]).await.unwrap();
+    cache
+        .insert_batch(vec![(hash_key("first"), download(4))])
+        .await
+        .unwrap();
+    cache
+        .insert_batch(vec![(hash_key("second"), download(4))])
+        .await
+        .unwrap();
     assert_eq!(
         value(&registry, "feuer_disk_eviction_triggering_insertions_total", &[]),
         1.0
@@ -296,7 +314,7 @@ async fn pressure_eviction_and_write_failure_record_each_entry_outcome() {
     // As in the existing write-failure test, let allocation exceed the actual file.
     let mut disk = Arc::try_unwrap(cache.disk).ok().unwrap();
     let shard = &disk.shards[0];
-    shard.remove_entry(&ObjectKeyHash::from("second"));
+    shard.remove_entry(&hash_key("second"));
     disk.shards[0].allocator = DiskChunkAllocator::with_metrics(2 * CHUNK_BYTES..5 * CHUNK_BYTES, disk.metrics.clone());
     let cache = DiskCache {
         disk: Arc::new(disk),
@@ -305,8 +323,8 @@ async fn pressure_eviction_and_write_failure_record_each_entry_outcome() {
     assert!(
         cache
             .insert_batch(vec![
-                ("small".into(), download(1)),
-                ("large".into(), download(2 * CHUNK_BYTES as usize))
+                (hash_key("small"), download(1)),
+                (hash_key("large"), download(2 * CHUNK_BYTES as usize))
             ])
             .await
             .is_err()
@@ -315,7 +333,7 @@ async fn pressure_eviction_and_write_failure_record_each_entry_outcome() {
     assert_eq!(value(&registry, "feuer_disk_written_entries_total", &[]), 2.0);
     assert_eq!(value(&registry, "feuer_disk_entries", &[]), 0.0);
     assert_eq!(outcome("published"), 2.0);
-    assert!(cache.contains(&"small".into()));
+    assert!(cache.contains(&hash_key("small")));
     cache.discard_pending().await;
     assert_eq!(outcome("canceled"), 1.0);
     // The small entry never reserved disk space. Discarding it only releases its buffered bytes and accounting.

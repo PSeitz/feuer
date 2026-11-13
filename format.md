@@ -1,4 +1,4 @@
-# Disk cache format v15
+# Disk cache format v16
 
 Experimental, best-effort cache format with no durability or compatibility guarantee.
 
@@ -63,10 +63,11 @@ The first 4 KiB of the file contain:
 | Offset | Bytes | Field |
 | --- | --- | --- |
 | 0 | 8 | Seed-zero XXHash64 of header bytes `[8, 4096)` |
-| 8 | 8 | ASCII disk-format tag: `FEUHDR15` |
+| 8 | 8 | ASCII disk-format tag: `FEUHDR16` |
 | 16 | 8 | Application payload version, default `0` |
 | 24 | 8 | File capacity in bytes, aligned to 1 MiB |
-| 32 | 4064 | Reserved for future global metadata; written as zero |
+| 32 | 16 | Random per-cache SipHash secret |
+| 48 | 4048 | Reserved for future global metadata, written as zero |
 
 The rest of the first chunk is reserved and unused. Shard chunks begin at 1 MiB.
 Configured capacity includes this header chunk and must be at least 2 MiB.
@@ -83,7 +84,13 @@ Both upgrades and downgrades discard old entries. Headerless formats are discard
 not migrated. Header reads or initialization writes that fail abort opening.
 Matching headers are not rewritten. Capacity changes also clear the chains because shard
 starts move and could otherwise expose metadata from a previous payload version.
-The header checksum covers reserved bytes, but readers do not require them to be zero.
+The header checksum covers the SipHash secret and reserved bytes. Readers do not require
+reserved bytes to be zero.
+
+New or incompatible files receive a fresh 16-byte random SipHash secret. Compatible reopens
+reuse the stored secret so object keys produce the same hashes. The metadata chains are cleared
+and synced before the replacement header publishes a new secret. Random generation failures
+abort opening. Format v15 files are discarded even when their header checksum is valid.
 
 ## Metadata chunks
 
@@ -107,6 +114,8 @@ Every page begins with this 32-byte header:
 | 16 | 8 | Count: 101 entry records or 1 next-chunk address |
 | 24 | 8 | ASCII tag: `FEUDES15` for records, `FEUNXT15` for next-chunk address |
 
+Metadata page tags remain unchanged because the page layout is unchanged.
+
 A record page holds 101 consecutive 40-byte records after the header, then 24 zero
 bytes. An all-zero record is unused. The next-chunk page holds one `u64` address
 after its header, with the rest zero. The address must be chunk-aligned within the
@@ -118,7 +127,7 @@ Offsets are relative to the start of the 40-byte record:
 
 | Offset | Bytes | Field |
 | --- | --- | --- |
-| 0 | 16 | Object key hash, full key is not stored |
+| 0 | 16 | SipHash-1-3 128-bit object key hash using the header's secret, full key is not stored |
 | 16 | 8 | Object payload length |
 | 24 | 8 | Payload address |
 | 32 | 8 | Seed-zero XXHash64 of payload, excluding alignment padding |

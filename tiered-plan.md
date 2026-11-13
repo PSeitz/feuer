@@ -14,9 +14,17 @@ Callers do not supply object lengths.
 The application owns source correctness and must give different content different
 keys, including across process restarts and application upgrades.
 
-The public key is a UTF-8 `String`. Feuer hashes it once with seed-zero XXH3-128.
-Both tiers, history, and recovery compare only that 128-bit identity. Full keys
-are not retained or checked for collisions. Keys must not be adversarial.
+Public keys implement Rust `Hash`. Feuer hashes each lookup key with SipHash-1-3-128
+and a random secret 128-bit key per cache. Cloned handles share the key. Disk caches
+persist it across reopens. Both tiers, history, and recovery compare only that 128-bit
+identity. Full keys are not retained or checked for collisions. Colliding keys can
+return another key's payload. Protect the backing file, which contains the secret key.
+Use `cache.hash_key(&key)` for application metadata that must match cache identities.
+
+Include all distinguishing fields and a namespace when key types share a cache.
+Keep `Hash` encoding stable when reusing disk entries. Rust does not guarantee this
+encoding across compiler versions or platforms. Change `payload_version` when key
+encoding or payload semantics change.
 
 Admission, retention, writes, and recovery are best-effort. False misses and
 skipped or lost writes are allowed. One tier need not retain what the other holds.
@@ -164,8 +172,9 @@ The backing file is exclusively locked. Different files can share a directory
 and I/O queues. Pending I/O retains its target file and lock through completion.
 
 The global header identifies the disk format, application payload version, and
-capacity. A mismatch invalidates entries, including payload-version
-downgrades. Older disk formats are discarded rather than migrated.
+capacity. It also persists the cache's SipHash key. A mismatch invalidates entries,
+including payload-version downgrades. Format 16 invalidates older caches when adopting
+per-cache SipHash identities. Older disk formats are discarded rather than migrated.
 
 Recovery follows metadata-chunk links without scanning payloads. Corrupt record
 pages are discarded independently and invalid links terminate a chain. Payloads

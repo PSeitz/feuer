@@ -18,7 +18,7 @@ fn insert_needs_no_runtime_and_records_no_lookup_demand() {
             value(&registry, "feuer_lookup_total", &[("outcome", "memory_hit")]),
             0.0
         );
-        assert_eq!(cache.inner.memory.get(&ObjectKeyHash::from_hash(&key)), Some(bytes));
+        assert_eq!(cache.inner.memory.get(&cache.hash_key(&key)), Some(bytes));
     }
     assert_eq!(cache.inner.memory.used_bytes(), 7);
     assert_eq!(
@@ -50,7 +50,7 @@ fn insert_preserves_buffer_charge_and_duplicate_memory_entry() {
         .unwrap();
     assert_eq!(hit.as_ref(), b"abcd");
     assert_eq!(hit.as_ptr(), address);
-    assert!(cache.inner.memory.remove(&ObjectKeyHash::from("object")));
+    assert!(cache.inner.memory.remove(&cache.hash_key("object")));
     assert_eq!(cache.inner.memory.used_bytes(), 0);
     assert_eq!(hit.as_ref(), b"abcd");
 }
@@ -69,7 +69,7 @@ fn insert_during_fetch_keeps_inserted_bytes_and_does_not_add_demand() {
     let result = fetch.now_or_never().unwrap().unwrap();
     assert_eq!(result, inserted);
     assert_eq!(result.as_ptr(), downloaded.as_ptr());
-    let cached = cache.inner.memory.get(&ObjectKeyHash::from("object")).unwrap();
+    let cached = cache.inner.memory.get(&cache.hash_key("object")).unwrap();
     assert_eq!(cached.as_ptr(), inserted.as_ptr());
     assert_eq!(cache.inner.memory.used_bytes(), inserted.len() as u64);
 }
@@ -116,30 +116,27 @@ fn insert_without_entering_runtime_enqueues_disk_and_keeps_memory_when_queue_is_
             0.0
         );
     }
-    assert_eq!(
-        cache.inner.memory.get(&ObjectKeyHash::from("512")).unwrap(),
-        b"abcd"[..]
-    );
+    assert_eq!(cache.inner.memory.get(&cache.hash_key("512")).unwrap(), b"abcd"[..]);
     runtime.block_on(async {
         let disk = cache.inner.disk.as_ref().unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !disk.contains(&ObjectKeyHash::from("511")) {
+            while !disk.contains(&cache.hash_key("511")) {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
         disk.flush().await.unwrap();
-        assert!(cache.inner.memory.remove(&ObjectKeyHash::from("0")));
+        assert!(cache.inner.memory.remove(&cache.hash_key("0")));
         assert_eq!(cache.get("0").await.unwrap(), b"abcd"[..]);
-        assert!(!disk.contains(&ObjectKeyHash::from("512")));
+        assert!(!disk.contains(&cache.hash_key("512")));
     });
     // A disk-resident entry still gets synchronous memory admission without a disk lookup.
-    assert!(cache.inner.memory.remove(&ObjectKeyHash::from("0")));
+    assert!(cache.inner.memory.remove(&cache.hash_key("0")));
     let payload = Bytes::copy_from_slice(b"abcd");
     cache.insert("0", payload.clone());
     assert_eq!(
-        cache.inner.memory.get(&ObjectKeyHash::from("0")).unwrap().as_ptr(),
+        cache.inner.memory.get(&cache.hash_key("0")).unwrap().as_ptr(),
         payload.as_ptr()
     );
     assert_eq!(value(&registry, "feuer_disk_lookup_total", &[("outcome", "hit")]), 1.0);

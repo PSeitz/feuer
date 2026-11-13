@@ -29,13 +29,13 @@ fn idle_buffers_use_all_remaining_cache_capacity() {
     let size = 32 * 1024;
     let capacity = 4 * size as u64;
     let cache = MemoryCache::with_metrics(capacity, MemoryMetrics::noop());
-    cache.insert("cached".into(), Bytes::from_static(b"x"), size);
+    cache.insert(ObjectKeyHash(1), Bytes::from_static(b"x"), size);
     let pool = cache.buffer_pool();
     let buffers: Vec<_> = (0..5).map(|_| pool.allocate(size).unwrap()).collect();
     drop(buffers);
     assert_eq!(pool.idle_bytes(), 3 * size as u64);
     assert_eq!(cache.used_bytes(), capacity);
-    cache.remove(&"cached".into());
+    cache.remove(&ObjectKeyHash(1));
     let buffers: Vec<_> = (0..4).map(|_| pool.allocate(size).unwrap()).collect();
     drop(buffers);
     assert_eq!(pool.idle_bytes(), capacity);
@@ -54,7 +54,7 @@ fn cached_payloads_and_idle_buffers_share_allocation_accounting() {
     let buffer = pool.allocate(1).unwrap();
     let charge = buffer.capacity();
     let bytes = buffer.into_bytes();
-    let key = ObjectKeyHash::from("object");
+    let key = ObjectKeyHash(1);
     assert!(cache.insert(key, bytes.clone(), charge));
     assert_eq!(cache.used_bytes(), charge as u64);
     assert_eq!(pool.idle_bytes(), 0);
@@ -77,16 +77,16 @@ fn cached_payloads_and_idle_buffers_share_allocation_accounting() {
 #[test]
 fn cached_capacity_drives_eviction_not_payload_length() {
     let cache = cache(4 * 1024);
-    for key in ["first", "second"] {
+    for key in [1, 2] {
         let buffer = cache.buffer_pool().allocate(1).unwrap();
         let charge = buffer.capacity();
-        cache.insert(key.into(), buffer.into_bytes(), charge);
+        cache.insert(ObjectKeyHash(key), buffer.into_bytes(), charge);
     }
-    assert!(cache.get(&"first".into()).is_none());
-    assert!(cache.get(&"second".into()).is_some());
+    assert!(cache.get(&ObjectKeyHash(1)).is_none());
+    assert!(cache.get(&ObjectKeyHash(2)).is_some());
     assert_eq!(cache.used_bytes(), 4 * 1024);
     assert_eq!(cache.buffer_pool().idle_bytes(), 0);
-    cache.remove(&"second".into());
+    cache.remove(&ObjectKeyHash(2));
     assert_eq!(cache.used_bytes(), 4 * 1024);
     assert_eq!(cache.buffer_pool().idle_bytes(), 4 * 1024);
 }
@@ -103,18 +103,18 @@ fn cached_entries_displace_idle_buffers_and_released_bursts_cannot_displace_entr
     drop(pool.allocate(1).unwrap());
     assert_eq!(pool.idle_bytes(), capacity as u64);
     let waiting = pool.allocate(buffer_capacity).unwrap();
-    cache.insert("full".into(), Bytes::from(vec![0; capacity]), capacity);
+    cache.insert(ObjectKeyHash(1), Bytes::from(vec![0; capacity]), capacity);
     assert_eq!(pool.idle_bytes(), 0);
     drop(waiting);
     assert_eq!(pool.idle_bytes(), 0);
     assert_eq!(cache.used_bytes(), capacity as u64);
-    assert_eq!(cache.get(&"full".into()).unwrap().len(), capacity);
+    assert_eq!(cache.get(&ObjectKeyHash(1)).unwrap().len(), capacity);
 }
 
 #[test]
 fn entry_presence_tracks_removal_and_reinsertion() {
     let cache = cache(1024);
-    let key = ObjectKeyHash::from("object");
+    let key = ObjectKeyHash(1);
     let payload = Bytes::from_static(b"abcd");
     assert!(!cache.remove(&key));
     assert!(!cache.contains_entry(&key));
@@ -131,7 +131,7 @@ fn entry_presence_tracks_removal_and_reinsertion() {
 #[test]
 fn redundant_insertions_preserve_cached_bytes_and_usage() {
     let cache = cache(16);
-    let key = ObjectKeyHash::from("object");
+    let key = ObjectKeyHash(1);
     let bytes = Bytes::from_static(b"abcdefghij");
     cache.insert(key, bytes.clone(), bytes.len());
     for length in [0, 6, 10, 20] {
@@ -142,19 +142,19 @@ fn redundant_insertions_preserve_cached_bytes_and_usage() {
         assert_eq!(cache.get(&key).unwrap(), bytes);
         assert_eq!(cache.get(&key).unwrap().as_ptr(), bytes.as_ptr());
     }
-    assert!(cache.get(&"missing".into()).is_none());
+    assert!(cache.get(&ObjectKeyHash(2)).is_none());
 }
 
 #[test]
 #[should_panic]
 fn rejects_charge_smaller_than_payload() {
-    cache(16).insert("object".into(), Bytes::from_static(b"payload"), 6);
+    cache(16).insert(ObjectKeyHash(1), Bytes::from_static(b"payload"), 6);
 }
 
 #[test]
 fn empty_objects_are_present_without_payload_charges() {
     let cache = cache(0);
-    let key = ObjectKeyHash::from("empty");
+    let key = ObjectKeyHash(1);
     assert!(cache.insert(key, Bytes::new(), 0));
     assert_eq!(cache.get(&key), Some(Bytes::new()));
     assert!(cache.contains_entry(&key));
@@ -170,21 +170,21 @@ fn eviction_triggering_insertions_count_once_per_attempt_not_per_victim() {
     let cache = cache_with_metrics(4, MemoryMetrics::new(&backend));
     let triggering = || value(&registry, "feuer_memory_eviction_triggering_insertions_total", &[]);
     let operation = |label| value(&registry, "feuer_memory_operations_total", &[("operation", label)]);
-    for key in ["first", "second"] {
-        cache.insert(key.into(), Bytes::from_static(b"ab"), 2);
+    for key in [1, 2] {
+        cache.insert(ObjectKeyHash(key), Bytes::from_static(b"ab"), 2);
     }
     assert_eq!(triggering(), 0.0);
-    cache.insert("large".into(), Bytes::from_static(b"abcd"), 4);
+    cache.insert(ObjectKeyHash(3), Bytes::from_static(b"abcd"), 4);
     assert_eq!(cache.entry_count(), 1);
     assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 4.0);
     assert_eq!(value(&registry, "feuer_memory_entries", &[]), 1.0);
     assert_eq!(triggering(), 1.0);
-    assert!(!cache.insert("large".into(), Bytes::from_static(b"abcd"), 4));
+    assert!(!cache.insert(ObjectKeyHash(3), Bytes::from_static(b"abcd"), 4));
     assert_eq!(triggering(), 1.0);
     assert_eq!(operation("insert"), 3.0);
     assert_eq!(operation("redundant"), 1.0);
-    assert!(cache.remove(&"large".into()));
-    assert!(!cache.remove(&"large".into()));
+    assert!(cache.remove(&ObjectKeyHash(3)));
+    assert!(!cache.remove(&ObjectKeyHash(3)));
     assert_eq!(operation("remove"), 1.0);
     assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 0.0);
     assert_eq!(value(&registry, "feuer_memory_entries", &[]), 0.0);
@@ -259,10 +259,10 @@ fn eviction_samples_advance_between_decisions() {
 fn oversized_insertion_empties_its_shard_and_remains_cached() {
     for capacity in [0, 3] {
         let cache = cache(capacity);
-        cache.insert("old".into(), Bytes::from_static(b"ok"), 2);
-        cache.insert("new".into(), Bytes::from_static(b"data"), 4);
-        assert!(cache.get(&"old".into()).is_none());
-        assert_eq!(cache.get(&"new".into()).unwrap(), Bytes::from_static(b"data"));
+        cache.insert(ObjectKeyHash(1), Bytes::from_static(b"ok"), 2);
+        cache.insert(ObjectKeyHash(2), Bytes::from_static(b"data"), 4);
+        assert!(cache.get(&ObjectKeyHash(1)).is_none());
+        assert_eq!(cache.get(&ObjectKeyHash(2)).unwrap(), Bytes::from_static(b"data"));
         assert_eq!(cache.used_bytes(), 4);
         assert_eq!(cache.entry_count(), 1);
         assert!(cache.used_bytes() > cache.capacity());
@@ -272,28 +272,28 @@ fn oversized_insertion_empties_its_shard_and_remains_cached() {
 #[test]
 fn maximum_allocation_charge_is_evicted_before_admission() {
     let cache = cache(usize::MAX as u64);
-    cache.insert("old".into(), Bytes::from_static(b"x"), usize::MAX);
-    cache.insert("new".into(), Bytes::from_static(b"y"), 1);
+    cache.insert(ObjectKeyHash(1), Bytes::from_static(b"x"), usize::MAX);
+    cache.insert(ObjectKeyHash(2), Bytes::from_static(b"y"), 1);
     assert_eq!(cache.used_bytes(), 1);
-    assert!(!cache.contains_entry(&"old".into()));
-    assert!(cache.contains_entry(&"new".into()));
+    assert!(!cache.contains_entry(&ObjectKeyHash(1)));
+    assert!(cache.contains_entry(&ObjectKeyHash(2)));
 }
 
 #[test]
 fn evicts_entry_with_lower_retrieval_value() {
     for hot_charge in [1, 100] {
         let cache = cache(hot_charge as u64 + 1);
-        let hot = ObjectKeyHash::from("hot");
-        let cold = ObjectKeyHash::from("cold");
+        let hot = ObjectKeyHash(1);
+        let cold = ObjectKeyHash(2);
         let payload = Bytes::from_static(b"x");
         cache.insert(hot, payload.clone(), hot_charge);
         cache.insert(cold, payload.clone(), 1);
         cache.access_histories.record_request(&cold);
         repeat_request(&cache, hot, 2);
-        cache.insert("incoming".into(), payload, 1);
+        cache.insert(ObjectKeyHash(3), payload, 1);
         assert!(cache.get(&hot).is_some());
         assert!(cache.get(&cold).is_none());
-        assert!(cache.get(&"incoming".into()).is_some());
+        assert!(cache.get(&ObjectKeyHash(3)).is_some());
     }
 }
 
@@ -302,9 +302,9 @@ fn stale_frequency_decays_below_recent_accesses() {
     let cache = cache(3).with_access_histories(Arc::new(ObjectAccessHistories::with_half_life(
         std::num::NonZeroU64::new(16).unwrap(),
     )));
-    let stale = ObjectKeyHash::from("stale");
-    let fresh = ObjectKeyHash::from("fresh");
-    let clock = ObjectKeyHash::from("clock");
+    let stale = ObjectKeyHash(1);
+    let fresh = ObjectKeyHash(2);
+    let clock = ObjectKeyHash(3);
     let payload = Bytes::from_static(b"x");
     for key in [stale, fresh, clock] {
         cache.insert(key, payload.clone(), 1);
@@ -312,7 +312,7 @@ fn stale_frequency_decays_below_recent_accesses() {
     repeat_request(&cache, stale, 8);
     repeat_request(&cache, clock, cache.access_histories.half_life().get() * 4);
     cache.access_histories.record_request(&fresh);
-    cache.insert("incoming".into(), payload, 1);
+    cache.insert(ObjectKeyHash(4), payload, 1);
     assert!(cache.get(&stale).is_none());
     assert!(cache.get(&fresh).is_some());
 }
@@ -320,7 +320,7 @@ fn stale_frequency_decays_below_recent_accesses() {
 #[test]
 fn access_history_is_independent_of_cache_operations_and_lifetime() {
     let cache = cache(1);
-    let key = ObjectKeyHash::from("object");
+    let key = ObjectKeyHash(1);
     let history = cache.access_histories().clone();
     let payload = Bytes::from_static(b"a");
     cache.insert(key, payload.clone(), 1);
@@ -330,7 +330,7 @@ fn access_history_is_independent_of_cache_operations_and_lifetime() {
     assert!(cache.remove(&key));
     assert_eq!(history.decayed_request_count(&key), 1.0);
     cache.insert(key, payload.clone(), 1);
-    cache.insert("incoming".into(), payload.clone(), 1);
+    cache.insert(ObjectKeyHash(2), payload.clone(), 1);
     assert!(!cache.contains_entry(&key));
     assert_eq!(history.decayed_request_count(&key), 1.0);
     history.record_request(&key);
@@ -388,7 +388,7 @@ fn oversized_objects_in_separate_shards_exceed_cache_capacity() {
     let cache = MemoryCache::with_shard_count(BufferPool::new(2, MemoryMetrics::noop()), 2);
     let [first, second] = from_fn(|shard_index| {
         (0..100)
-            .map(|candidate| ObjectKeyHash::from(format!("object-{candidate}")))
+            .map(ObjectKeyHash)
             .find(|key| cache.shard_index(key) == shard_index)
             .expect("test keys must cover both shards")
     });
@@ -406,7 +406,7 @@ fn concurrent_shards_respect_their_targets_for_regular_entries() {
             let cache = &cache;
             scope.spawn(move || {
                 for index in 0..500_u64 {
-                    let key = ObjectKeyHash::from(format!("object-{worker}-{index}"));
+                    let key = ObjectKeyHash((worker * 500 + index) as u128);
                     cache.insert(key, Bytes::from(vec![worker as u8; 8]), 8);
                     assert!(cache.used_bytes() <= cache.capacity());
                 }

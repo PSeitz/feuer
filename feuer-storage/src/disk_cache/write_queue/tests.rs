@@ -1,5 +1,8 @@
 use super::*;
-use crate::test_metrics::{registry, value};
+use crate::{
+    disk_cache::tests::hash_key,
+    test_metrics::{registry, value},
+};
 use prometheus::Registry;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -21,7 +24,7 @@ fn measured_disk() -> (TempDir, DiskCache, Registry) {
 }
 
 fn enqueue(disk: &DiskCache, key: &str) {
-    disk.enqueue_if_space_available(ObjectKeyHash::from(key), Bytes::from_static(b"abcd"));
+    disk.enqueue_if_space_available(hash_key(key), Bytes::from_static(b"abcd"));
 }
 
 #[tokio::test]
@@ -112,7 +115,7 @@ async fn closing_disk_drains_writes_and_discards_partial_chunks() {
     let (_directory, mut disk, registry) = measured_disk();
     let (sender, receiver) = mpsc::channel(2);
     disk.write_sender = sender;
-    disk.enqueue_if_space_available(ObjectKeyHash::from("large"), Bytes::from(vec![7; 512 * 1024]));
+    disk.enqueue_if_space_available(hash_key("large"), Bytes::from(vec![7; 512 * 1024]));
     enqueue(&disk, "small");
     let weak = Arc::downgrade(&disk.disk);
     drop(disk);

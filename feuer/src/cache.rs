@@ -18,7 +18,7 @@ use feuer_memory::{
 };
 #[cfg(all(target_os = "linux", feature = "disk"))]
 use feuer_storage::{DiskCache, DiskCacheOptions, DiskMetrics, IoMetrics};
-use feuer_utils::{ObjectKeyHash, config::read_env_number};
+use feuer_utils::{ObjectKeyHash, ObjectKeyHasher, config::read_env_number};
 use futures_util::FutureExt;
 use mixtrics::{
     metrics::{BoxedCounter, BoxedRegistry},
@@ -69,6 +69,7 @@ impl From<AlignedBuffer> for BytesAndMemoryCharge {
 /// Configuration and cache tiers shared by cloned handles.
 struct CacheInner {
     config: CacheConfig,
+    key_hasher: ObjectKeyHasher,
     memory: MemoryCache,
     metrics: LookupMetrics,
     pending_fetches: PendingFetches,
@@ -110,6 +111,9 @@ pub enum CacheOpenError {
     /// The disk cache could not be opened.
     #[error(transparent)]
     Disk(#[from] DiskCacheError),
+    /// Operating-system randomness for the cache's secret hash key failed.
+    #[error("generating cache hash key failed: {0}")]
+    HashKeyGeneration(#[source] io::Error),
 }
 
 /// Settings and optional resources used to open a [`Cache`].
@@ -359,9 +363,17 @@ impl<'a> CacheBuilder<'a> {
             let disk = DiskCache::open(config.directory(), config.disk_capacity(), options)?;
             Some(disk)
         };
+        #[cfg(all(target_os = "linux", feature = "disk"))]
+        let key_hasher = match &disk {
+            Some(disk) => disk.key_hasher().clone(),
+            None => ObjectKeyHasher::new().map_err(CacheOpenError::HashKeyGeneration)?,
+        };
+        #[cfg(not(all(target_os = "linux", feature = "disk")))]
+        let key_hasher = ObjectKeyHasher::new().map_err(CacheOpenError::HashKeyGeneration)?;
         Ok(Cache {
             inner: Arc::new(CacheInner {
                 config,
+                key_hasher,
                 memory,
                 metrics: LookupMetrics::new(metrics_registry),
                 pending_fetches: PendingFetches::default(),
@@ -421,6 +433,18 @@ impl Cache {
         &self.inner.config
     }
 
+    /// Hashes an object key with this cache's secret SipHash-1-3-128 key.
+    /// Cloned handles share hashes. Disk caches preserve their secret across compatible reopenings.
+    /// Independently created caches use different secrets.
+    ///
+    /// Include everything that distinguishes objects, including a namespace when different key
+    /// types share a cache. Keep the `Hash` encoding stable to reuse disk entries. Rust does not
+    /// guarantee that encoding across compiler versions or platforms. Invalidate persistent
+    /// caches when it changes. Colliding hashes identify the same object without a full-key check.
+    pub fn hash_key(&self, key: &(impl Hash + ?Sized)) -> ObjectKeyHash {
+        self.inner.key_hasher.hash_key(key)
+    }
+
     /// Acquires an aligned buffer from the same pool used by disk reads.
     /// Fill its exposed slice and return it from [`Self::get_or_fetch`]'s callback
     /// without copying. It returns to the pool after its last owner releases it,
@@ -444,9 +468,9 @@ impl Cache {
     ///
     /// All insertions and fetch callbacks for a key must supply equivalent immutable bytes.
     /// In-flight fetches continue independently and may return their own equivalent bytes.
-    /// Keys must follow the identity contract in [`ObjectKeyHash::from_hash`].
+    /// Keys must follow the identity contract in [`Self::hash_key`].
     pub fn insert<K: Hash + ?Sized, V: Into<BytesAndMemoryCharge>>(&self, object_key: &K, value: V) {
-        let object_key = ObjectKeyHash::from_hash(object_key);
+        let object_key = self.hash_key(object_key);
         let BytesAndMemoryCharge { bytes, memory_charge } = value.into();
         self.insert_by_hash(object_key, &bytes, memory_charge);
     }
@@ -491,12 +515,12 @@ impl Cache {
     /// Returns an object from memory or disk, or `None` on a miss.
     /// Does not invoke or wait for source callbacks. Disk hits are subject to memory admission.
     /// The key is hashed immediately. The returned future retains only its fingerprint.
-    /// Keys must follow the identity contract in [`ObjectKeyHash::from_hash`].
+    /// Keys must follow the identity contract in [`Self::hash_key`].
     pub fn get<'cache, K: Hash + ?Sized>(
         &'cache self,
         object_key: &K,
     ) -> impl Future<Output = Option<Bytes>> + Send + use<'cache, K> {
-        let object_key = ObjectKeyHash::from_hash(object_key);
+        let object_key = self.hash_key(object_key);
         async move {
             self.inner.memory.access_histories().record_request(&object_key);
             let request_id = self.trace_request_start(object_key).await;
@@ -535,7 +559,7 @@ impl Cache {
     /// Rejected results still reach all callers sharing the fetch.
     /// Tracing can backpressure lookups but never changes their results.
     /// The key is hashed immediately. The returned future retains only its fingerprint.
-    /// Keys must follow the identity contract in [`ObjectKeyHash::from_hash`].
+    /// Keys must follow the identity contract in [`Self::hash_key`].
     pub fn get_or_fetch<'cache, K, F, Fut, V, E>(
         &'cache self,
         object_key: &K,
@@ -561,7 +585,7 @@ impl Cache {
     ///
     /// Fallthrough preserves the disk entry and applies memory admission to successful downloads
     /// without rewriting them to disk. Source failures return without retrying disk.
-    /// Keys must follow the identity contract in [`ObjectKeyHash::from_hash`].
+    /// Keys must follow the identity contract in [`Self::hash_key`].
     pub fn get_or_fetch_with_disk_fallthrough<'cache, K, S, F, Fut, V, E>(
         &'cache self,
         object_key: &K,
@@ -576,7 +600,7 @@ impl Cache {
         Fut: Future<Output = Result<V, E>> + Send + 'static,
         V: Into<BytesAndMemoryCharge>,
     {
-        let object_key = ObjectKeyHash::from_hash(object_key);
+        let object_key = self.hash_key(object_key);
         async move {
             self.get_or_fetch_by_hash(object_key, should_fall_through, move || async move {
                 callback().await.map(Into::into)
@@ -792,7 +816,7 @@ mod tests {
         // More entries than memory shards force the memory scorer to run.
         for index in 0..65 {
             cache.inner.memory.insert(
-                ObjectKeyHash::from(format!("memory-{index}")),
+                cache.hash_key(&format!("memory-{index}")),
                 Bytes::from_static(b"x"),
                 100,
             );
@@ -800,7 +824,7 @@ mod tests {
         let disk = cache.inner.disk.as_ref().unwrap();
         for index in 0..3 {
             disk.insert_batch(vec![(
-                ObjectKeyHash::from(format!("disk-{index}")),
+                cache.hash_key(&format!("disk-{index}")),
                 Bytes::from(vec![0; 1 << 20]),
             )])
             .await
@@ -824,7 +848,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_registry_observes_memory_disk_callbacks_and_writes() {
+    async fn public_registry_observes_memory_disk_callbacks_writes_and_recovery() {
         let directory = tempfile::tempdir().unwrap();
         let (registry, backend) = registry();
         let cache = Cache::builder()
@@ -855,7 +879,7 @@ mod tests {
             .get_or_fetch(&key, || async { Err::<Bytes, _>("memory hit must not fetch") })
             .await
             .unwrap();
-        assert!(cache.inner.memory.remove(&ObjectKeyHash::from(key.as_str())));
+        assert!(cache.inner.memory.remove(&cache.hash_key(&key)));
         cache
             .get_or_fetch(&key, || async { Err::<Bytes, _>("disk hit must not fetch") })
             .await
@@ -907,6 +931,7 @@ mod tests {
             4,
             "every request is recorded, including errors"
         );
+        let hash = cache.hash_key(&key);
         // Closing the cache also releases the detached disk-write worker's gauges.
         drop(cache);
         timeout(Duration::from_secs(10), async {
@@ -920,6 +945,17 @@ mod tests {
         assert_eq!(value(&registry, "feuer_disk_write_queued_entries", &[]), 0.0);
         assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 0.0);
         assert_eq!(value(&registry, "feuer_disk_payload_bytes", &[]), 0.0);
+
+        let cache = Cache::builder()
+            .directory(directory.path())
+            .disk_capacity(4 << 20)
+            .memory_capacity(32)
+            .open()
+            .unwrap();
+        assert_eq!(cache.hash_key(&key), hash);
+        assert!(cache.inner.memory.get(&hash).is_none());
+        assert_eq!(cache.get(&key).await.unwrap(), Bytes::from_static(b"bc"));
+        assert_eq!(cache.inner.memory.get(&hash).unwrap(), Bytes::from_static(b"bc"));
     }
 
     fn cache(memory_capacity: u64) -> (TempDir, Cache) {
@@ -935,7 +971,7 @@ mod tests {
 
     async fn wait_for_buffered(cache: &Cache, key: &(impl Hash + ?Sized)) {
         let disk = cache.inner.disk.as_ref().unwrap();
-        let hash = ObjectKeyHash::from_hash(key);
+        let hash = cache.hash_key(key);
         timeout(Duration::from_secs(10), async {
             while !disk.contains(&hash) {
                 yield_now().await;
@@ -985,7 +1021,9 @@ mod tests {
             );
         }
         let key = "object-v1";
-        let hash = ObjectKeyHash::from(key);
+        let first_hash = first.hash_key(key);
+        let second_hash = second.hash_key(key);
+        assert_ne!(first_hash, second_hash);
         let first_bytes = Bytes::from_static(b"first object");
         let second_bytes = Bytes::from_static(b"second object");
         let first_download = first_bytes.clone();
@@ -1008,8 +1046,8 @@ mod tests {
         );
         first_flush.unwrap();
         second_flush.unwrap();
-        assert!(first.inner.memory.remove(&hash));
-        assert!(second.inner.memory.remove(&hash));
+        assert!(first.inner.memory.remove(&first_hash));
+        assert!(second.inner.memory.remove(&second_hash));
         let (first_result, second_result) = tokio::join!(
             first.get_or_fetch(key, || async { Err::<Bytes, _>("must hit first disk") }),
             second.get_or_fetch(key, || async { Err::<Bytes, _>("must hit second disk") }),
@@ -1021,7 +1059,7 @@ mod tests {
             1.0
         );
         drop(first);
-        assert!(second.inner.memory.remove(&hash));
+        assert!(second.inner.memory.remove(&second_hash));
         assert_eq!(
             second
                 .get_or_fetch(key, || async { Err::<Bytes, _>("must hit surviving disk") })
@@ -1035,7 +1073,7 @@ mod tests {
     async fn whole_object_buffer_and_disk_hits_promote_all_bytes() {
         let (_directory, cache) = cache(32);
         let key = ("whole-object".to_owned(), 100u64..106);
-        let hash = ObjectKeyHash::from_hash(&key);
+        let hash = cache.hash_key(&key);
         let payload = Bytes::from_static(b"abcdef");
         let download = payload.clone();
         cache
@@ -1067,7 +1105,7 @@ mod tests {
     async fn disk_promotion_charges_buffer_capacity_and_preserves_returned_bytes_after_removal() {
         let (_directory, cache) = cache(32);
         let key = "large-entry".to_owned();
-        let hash = ObjectKeyHash::from(key.as_str());
+        let hash = cache.hash_key(&key);
         let disk = cache.inner.disk.as_ref().unwrap();
         disk.insert_batch(vec![(hash, Bytes::from(vec![0x77; 40 * 1024]))])
             .await
@@ -1089,7 +1127,7 @@ mod tests {
     async fn concurrent_disk_promotions_share_the_object_and_charge_once() {
         let (_directory, cache) = cache(8 << 20);
         let key = "shared-entry".to_owned();
-        let hash = ObjectKeyHash::from(key.as_str());
+        let hash = cache.hash_key(&key);
         let payload = Bytes::from(vec![0x77; 40 * 1024]);
         let disk = cache.inner.disk.as_ref().unwrap();
         disk.insert_batch(vec![(hash, payload.clone())]).await.unwrap();
@@ -1133,9 +1171,9 @@ mod tests {
         assert_eq!(history.request_count(), 1, "recorded before the callback completes");
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        assert!(cache.inner.memory.get(&ObjectKeyHash::from(key.as_str())).is_none());
+        assert!(cache.inner.memory.get(&cache.hash_key(&key)).is_none());
         let disk = cache.inner.disk.as_ref().unwrap();
-        assert!(!disk.contains(&ObjectKeyHash::from(key.as_str())));
+        assert!(!disk.contains(&cache.hash_key(&key)));
         assert_eq!(history.request_count(), 1);
     }
 
@@ -1259,7 +1297,7 @@ mod tests {
         cache
             .inner
             .memory
-            .insert(ObjectKeyHash::from(key.as_str()), payload.clone(), payload.len());
+            .insert(cache.hash_key(&key), payload.clone(), payload.len());
         release_callback.notify_one();
 
         let returned = pending.await.unwrap();

@@ -6,6 +6,7 @@ use prometheus::Registry;
 fn memory_cache(memory_capacity: u64, metrics_registry: &BoxedRegistry) -> Cache {
     Cache {
         inner: Arc::new(CacheInner {
+            key_hasher: ObjectKeyHasher::new().unwrap(),
             config: Cache::builder()
                 .memory_capacity(memory_capacity)
                 .resolve_config()
@@ -66,13 +67,13 @@ async fn shared_bytes_slices_charge_payload_length() {
         allocation_capacity as f64
     );
     // Each source slice is an object in the cache.
-    assert!(cache.inner.memory.remove(&ObjectKeyHash::from(object_keys[0])));
+    assert!(cache.inner.memory.remove(&cache.hash_key(object_keys[0])));
     assert_eq!(value(&registry, "feuer_memory_used_bytes", &[]), 1024.0);
     assert_eq!(
         checked_out_buffer_capacity(&registry, "2 MiB"),
         allocation_capacity as f64
     );
-    assert!(cache.inner.memory.remove(&ObjectKeyHash::from(object_keys[1])));
+    assert!(cache.inner.memory.remove(&cache.hash_key(object_keys[1])));
     assert_eq!(
         value(&registry, "feuer_memory_used_bytes", &[]),
         allocation_capacity as f64

@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn history_needs_no_cached_entry_and_keeps_one_counter_per_key() {
     let histories = ObjectAccessHistories::new();
-    let key = ObjectKeyHash::from("object");
+    let key = ObjectKeyHash(1);
     assert_eq!(histories.decayed_request_count(&key), 0.0);
     assert_eq!(histories.request_count(), 0);
     assert!(histories.shards.iter().all(|shard| shard.lock().is_empty()));
@@ -20,7 +20,7 @@ fn history_needs_no_cached_entry_and_keeps_one_counter_per_key() {
 #[test]
 fn concurrent_recording_counts_every_request() {
     let histories = ObjectAccessHistories::new();
-    let key = ObjectKeyHash::from("object");
+    let key = ObjectKeyHash(1);
     thread::scope(|scope| {
         for _ in 0..8 {
             scope.spawn(|| {
@@ -45,9 +45,9 @@ fn concurrent_recording_counts_every_request() {
 #[test]
 fn another_history_shard_can_record_and_read_while_one_is_locked() {
     let histories = ObjectAccessHistories::new();
-    let locked_key = ObjectKeyHash::from("locked");
+    let locked_key = ObjectKeyHash(1);
     let other = (0..1000)
-        .map(|index| ObjectKeyHash::from(format!("other-{index}")))
+        .map(ObjectKeyHash)
         .find(|key| !ptr::eq(histories.shard(&locked_key), histories.shard(key)))
         .unwrap();
     let (done, received) = mpsc::channel();
@@ -66,9 +66,7 @@ fn another_history_shard_can_record_and_read_while_one_is_locked() {
 #[test]
 fn concurrent_keys_share_one_clock() {
     let histories = ObjectAccessHistories::new();
-    let keys: Vec<_> = (0..32)
-        .map(|index| ObjectKeyHash::from(format!("object-{index}")))
-        .collect();
+    let keys: Vec<_> = (0..32).map(ObjectKeyHash).collect();
     thread::scope(|scope| {
         for key in &keys {
             let histories = &histories;
@@ -88,8 +86,8 @@ fn concurrent_keys_share_one_clock() {
 
 #[test]
 fn counts_decay_and_new_accesses_add_one() {
-    let key = ObjectKeyHash::from("object");
-    let other = ObjectKeyHash::from("other");
+    let key = ObjectKeyHash(1);
+    let other = ObjectKeyHash(2);
     for half_life in [2, 4, DEFAULT_ACCESS_COUNT_HALF_LIFE.get()] {
         let histories = ObjectAccessHistories::with_half_life(NonZeroU64::new(half_life).unwrap());
         histories.record_request(&key);
@@ -108,10 +106,10 @@ fn counts_decay_and_new_accesses_add_one() {
 #[test]
 fn counters_remain_after_their_demand_decays_to_zero() {
     let histories = ObjectAccessHistories::with_half_life(NonZeroU64::MIN);
-    let key = ObjectKeyHash::from("old");
+    let key = ObjectKeyHash(1);
     histories.record_request(&key);
     for _ in 0..126 {
-        histories.record_request(&ObjectKeyHash::from("other"));
+        histories.record_request(&ObjectKeyHash(2));
     }
     assert_eq!(histories.decayed_request_count(&key), 0.0);
     assert!(histories.shard(&key).lock().contains_key(&key));

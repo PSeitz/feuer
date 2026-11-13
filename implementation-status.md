@@ -9,13 +9,19 @@ callback**. The [contract](tiered-plan.md) describes behavior, and the
 | Crate | Responsibility |
 | --- | --- |
 | `feuer` | Cloneable tiered handle, lookup, shared in-flight work, optional disk-pressure fallthrough, metrics, and access tracing |
-| `feuer-utils` | XXH3-128 object identity and configuration helpers |
+| `feuer-utils` | Per-cache SipHash-1-3-128 object identity and configuration helpers |
 | `feuer-historian` | One decayed request counter per object, shared by both tiers and independent of cache residency |
 | `feuer-memory` | Sharded object index, sampled eviction, cached allocation accounting, and aligned buffer pool |
 | `feuer-storage` | Linux direct I/O and io_uring, object index, payload checksums, chunk packing, background writes, metadata persistence, and recovery |
 | `feuer-replay` | Trace decoding and workload replay tooling |
 
 ## Lookup and retention
+
+- Keys implement Rust `Hash`. Each cache uses a random secret 128-bit SipHash key,
+  persisted with disk caches. `Cache::hash_key` exposes matching identities for
+  scorer metadata. Full keys are not retained or checked for collisions. Keep
+  `Hash` encoding stable when reusing disk entries and change `payload_version`
+  when it changes. Rust does not guarantee this encoding across compilers or platforms.
 
 - `get_or_fetch` and `get_or_fetch_with_disk_fallthrough` accept callbacks returning
   `Result<V, E>` where `V: Into<BytesAndMemoryCharge>`. Both accept `Bytes` or
@@ -53,6 +59,8 @@ the target. The target is not an RSS limit.
 ## Disk and I/O
 
 - Disk APIs accept and return payloads as `Bytes`.
+- Disk format 16 persists the SipHash key and invalidates older caches. Protect the
+  backing file because it contains this secret key.
 - Zero disk capacity disables storage. Otherwise Linux direct I/O and io_uring are
   required, and opening waits for every shard's metadata recovery.
 - A 512-entry queue schedules best-effort writes independently of memory retention.

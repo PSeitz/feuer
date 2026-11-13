@@ -97,13 +97,13 @@ fn memory_only_history_cleanup_preserves_cached_payloads_without_a_runtime() {
     for key in ["old", "new"] {
         ready(cache.get_or_fetch(key, || async { Ok::<_, &str>(Bytes::from_static(b"payload")) })).unwrap();
     }
-    let old = ObjectKeyHash::from("old");
+    let old = cache.hash_key("old");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while histories.decayed_request_count(&old) != 0.0 {
         assert!(std::time::Instant::now() < deadline, "history cleanup did not finish");
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert_eq!(histories.decayed_request_count(&ObjectKeyHash::from("new")), 1.0);
+    assert_eq!(histories.decayed_request_count(&cache.hash_key("new")), 1.0);
     assert_eq!(cache.inner.memory.get(&old), Some(Bytes::from_static(b"payload")));
 }
 

@@ -15,7 +15,7 @@ async fn fallthrough_callbacks_are_not_called_without_disk_pressure() {
             .open()
             .unwrap();
         let key = "download";
-        let hash = ObjectKeyHash::from(key);
+        let hash = cache.hash_key(key);
         let source = Bytes::from_static(b"abcd");
         let fetch_cache = cache.clone();
         let fetch_source = source.clone();

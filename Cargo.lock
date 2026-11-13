@@ -397,7 +397,8 @@ name = "feuer-utils"
 version = "0.23.0-dev"
 dependencies = [
  "bytesize",
- "xxhash-rust",
+ "getrandom 0.4.3",
+ "siphasher",
 ]
 
 [[package]]
@@ -1036,6 +1037,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "siphasher"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33f4fe9184a62d842c9ef383018f3306d8ba224fd9d836f56d7288308847c256"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1414,12 +1421,6 @@ dependencies = [
  "libc",
  "rustix 1.1.4",
 ]
-
-[[package]]
-name = "xxhash-rust"
-version = "0.8.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
 name = "yansi"

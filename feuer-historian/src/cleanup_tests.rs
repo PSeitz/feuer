@@ -13,7 +13,7 @@ fn wait_until(mut ready: impl FnMut() -> bool) {
 #[test]
 fn cleanup_removes_least_recent_requests_across_shards() {
     let histories = ObjectAccessHistories::new();
-    let keys: Vec<_> = (0..11).map(|i| ObjectKeyHash::from(format!("key-{i}"))).collect();
+    let keys: Vec<_> = (0..11).map(ObjectKeyHash).collect();
     for key in &keys {
         histories.record_request(key);
     }
@@ -45,7 +45,7 @@ fn background_cleanup_handles_concurrent_requests_and_releases_history_on_drop()
             let histories = &histories;
             scope.spawn(move || {
                 for i in 0..1000 {
-                    histories.record_request(&ObjectKeyHash::from(format!("{worker}-{}", i / 2)));
+                    histories.record_request(&ObjectKeyHash(worker * 500 + i / 2));
                 }
             });
         }

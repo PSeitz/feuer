@@ -9,7 +9,7 @@ use std::{
 use tempfile::TempDir;
 use tokio::{task::yield_now, time::timeout};
 
-use super::*;
+use super::{tests::hash_key, *};
 use crate::{
     IoQueues,
     test_metrics::{registry, value},
@@ -85,7 +85,7 @@ async fn reaching_fallthrough_threshold_checks_earlier_reads_without_issuing_io(
 #[tokio::test]
 async fn declining_fallthrough_reads_disk() {
     let (_directory, cache, queues, _registry) = open();
-    let key = ObjectKeyHash::from("object");
+    let key = hash_key("object");
     let source = tests::download(0, 8192);
     cache.insert(key, source.clone()).await.unwrap();
     let held_reads = queues.hold_queued_reads();
@@ -102,7 +102,7 @@ async fn declining_fallthrough_reads_disk() {
 #[tokio::test]
 async fn absent_buffered_and_uncongested_reads_do_not_consult_fallthrough() {
     let (_directory, cache, queues, _registry) = open();
-    let key = ObjectKeyHash::from("object");
+    let key = hash_key("object");
     let source = tests::download(0, 8192);
     cache.insert(key, source.clone()).await.unwrap();
     let (bytes, _) = cache
@@ -112,14 +112,14 @@ async fn absent_buffered_and_uncongested_reads_do_not_consult_fallthrough() {
     assert_eq!(bytes, source);
 
     let held_reads = queues.hold_queued_reads();
-    let missing = ObjectKeyHash::from("missing");
+    let missing = hash_key("missing");
     assert!(
         cache
             .get_with_fallthrough(&missing, || panic!("no disk entry"))
             .await
             .is_none()
     );
-    let buffered = ObjectKeyHash::from("buffered");
+    let buffered = hash_key("buffered");
     cache.enqueue_if_space_available(buffered, source.clone());
     timeout(Duration::from_secs(5), async {
         while !cache.contains(&buffered) {
@@ -139,7 +139,7 @@ async fn absent_buffered_and_uncongested_reads_do_not_consult_fallthrough() {
 #[tokio::test]
 async fn shared_read_waiter_does_not_consult_fallthrough() {
     let (_directory, cache, queues, _registry) = open();
-    let key = ObjectKeyHash::from("shared");
+    let key = hash_key("shared");
     let source = tests::download(0, 8192);
     cache.insert(key, source.clone()).await.unwrap();
     let held_reads = queues.hold_queued_reads();
@@ -156,7 +156,7 @@ async fn shared_read_waiter_does_not_consult_fallthrough() {
 #[tokio::test]
 async fn canceled_initializer_allows_independent_waiter_decisions() {
     let (_directory, cache, queues, _registry) = open();
-    let key = ObjectKeyHash::from("shared");
+    let key = hash_key("shared");
     let source = tests::download(0, 8192);
     cache.insert(key, source.clone()).await.unwrap();
     let held_reads = queues.hold_queued_reads();

@@ -93,9 +93,10 @@ Closing the in-memory index does not invalidate live entries needed by the next 
 
 ## Format and recovery
 
-[format.md](../format.md) documents experimental **v15**: the global header, shard boundaries,
+[format.md](../format.md) documents experimental **v16**: the global header, shard boundaries,
 fixed chain starts, page headers, entry records, checksums, and write ordering. The first chunk
-is reserved for the global header, including the application payload version and file capacity.
+is reserved for the global header, including the application payload version, file capacity, and
+random 16-byte SipHash key. Compatible reopens preserve the key. Resets generate a new key.
 A mismatched version or capacity, or an invalid header, clears each shard's first metadata chunk.
 A version change with unchanged capacity leaves payload bytes untouched.
 Each metadata chain starts at the first chunk of its shard.
@@ -129,4 +130,4 @@ size, metadata updates, independently reclaimable payloads, reuse without waitin
 or metadata writes, duplicate-key recovery, stale-record checksum misses, malformed/cyclic links, corrupt record pages,
 metadata/payload ownership conflicts, fixed chain starts, replacement after reopening, and payload checksum
 failures. Tests also cover packing, fragmentation, cancellation, eviction, and contiguous payloads
-up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v15.
+up to 100 MiB. Recovery/write throughput and device power-loss behavior remain to be measured for v16.

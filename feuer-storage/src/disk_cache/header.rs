@@ -1,45 +1,49 @@
 //! Global file metadata in the first chunk, separate from shard metadata and payload chunks.
 
 use bytes::Bytes;
+use feuer_utils::ObjectKeyHasher;
 use twox_hash::XxHash64;
 
-use super::recovery::shard_disk_range;
-use crate::{DataFile, DataFileResult, allocation::CHUNK_BYTES};
+use super::{DiskCacheError, recovery::shard_disk_range};
+use crate::{DataFile, allocation::CHUNK_BYTES};
 
 const HEADER_BYTES: usize = 4096;
-const FORMAT_TAG: &[u8; 8] = b"FEUHDR15";
+const FORMAT_TAG: &[u8; 8] = b"FEUHDR16";
 
 /// Clears shard metadata chains when the file header is incompatible, then writes a replacement.
-/// A matching format, payload version, capacity, and header checksum leave the file unchanged.
+/// A matching format, payload version, capacity, and header checksum preserve the file and SipHash key.
 pub(super) fn clear_incompatible_metadata(
     file: &DataFile,
     payload_version: u64,
     num_shards: usize,
-) -> DataFileResult<()> {
+) -> Result<ObjectKeyHasher, DiskCacheError> {
     let header = file.read_at_blocking(0, HEADER_BYTES)?;
     if header[8..16] == *FORMAT_TAG
         && header[16..24] == payload_version.to_le_bytes()
         && header[24..32] == file.capacity().to_le_bytes()
         && header[..8] == XxHash64::oneshot(0, &header[8..]).to_le_bytes()
     {
-        return Ok(());
+        return Ok(ObjectKeyHasher::from_key(header[32..48].try_into().unwrap()));
     }
+    let key_hasher = ObjectKeyHasher::new().map_err(DiskCacheError::HashKeyGeneration)?;
     let empty_chunk = Bytes::from(vec![0; CHUNK_BYTES as usize]);
     for shard_index in 0..num_shards {
         let start = shard_disk_range(file.capacity(), num_shards, shard_index).start;
         file.write_at_blocking(start, &empty_chunk)?;
     }
-    // Persist every cleared chain before publishing the new payload version.
+    // Persist every cleared chain before publishing the new payload version and SipHash key.
     file.sync_all()?;
     let mut header = vec![0; HEADER_BYTES];
     header[8..16].copy_from_slice(FORMAT_TAG);
     header[16..24].copy_from_slice(&payload_version.to_le_bytes());
     header[24..32].copy_from_slice(&file.capacity().to_le_bytes());
+    header[32..48].copy_from_slice(&key_hasher.key());
     let checksum = XxHash64::oneshot(0, &header[8..]);
     header[..8].copy_from_slice(&checksum.to_le_bytes());
     file.write_at_blocking(0, &header)?;
-    // Persist the new header before allowing entries in the new payload format.
-    file.sync_all()
+    // Persist the new header before allowing entries with the new payload format and SipHash key.
+    file.sync_all()?;
+    Ok(key_hasher)
 }
 
 #[cfg(test)]
@@ -76,6 +80,41 @@ mod tests {
             .map(|key| (ObjectKeyHash(key as u128), download(0, payload_length)))
             .collect();
         assert_eq!(cache.insert_batch(entries).await.unwrap(), count);
+    }
+
+    #[tokio::test]
+    async fn keyed_entries_and_header_survive_reopening() {
+        let directory = tempfile::tempdir().unwrap();
+        let other_directory = tempfile::tempdir().unwrap();
+        let cache = open_cache(directory.path(), 4, 7);
+        let other = open_cache(other_directory.path(), 4, 7);
+        assert_ne!(cache.key_hasher().key(), other.key_hasher().key());
+        let key = cache.key_hasher().hash_key("object");
+        let payload = download(19, 100);
+        assert!(cache.insert(key, payload.clone()).await.unwrap());
+        cache.write_dirty_metadata_pages().await;
+        let header = cache.disk.file.read_at(0, HEADER_BYTES).await.unwrap();
+        assert_eq!(header[32..48], cache.key_hasher().key());
+        drop(cache);
+
+        let cache = open_cache(directory.path(), 4, 7);
+        assert_eq!(cache.disk.file.read_at(0, HEADER_BYTES).await.unwrap(), header);
+        assert_eq!(cache.key_hasher().hash_key("object"), key);
+        assert_eq!(
+            cache.get(&cache.key_hasher().hash_key("object")).await.unwrap(),
+            payload
+        );
+        let secret = cache.key_hasher().key();
+        drop(cache);
+
+        let cache = open_cache(directory.path(), 4, 8);
+        assert_ne!(cache.key_hasher().key(), secret);
+        assert!(cache.get(&key).await.is_none());
+        let secret = cache.key_hasher().key();
+        drop(cache);
+
+        let cache = open_cache(directory.path(), 5, 8);
+        assert_ne!(cache.key_hasher().key(), secret);
     }
 
     #[tokio::test]
@@ -197,21 +236,26 @@ mod tests {
             Some(16),
             Some(24),
             Some(32),
+            Some(47),
+            Some(48),
             Some(HEADER_BYTES - 1),
         ] {
             let cache = open_cache(directory.path(), 384, 7);
             assert!(cache.insert(ObjectKeyHash(1), download(0, 1)).await.unwrap());
             cache.write_dirty_metadata_pages().await;
             let header = cache.disk.file.read_at(0, HEADER_BYTES).await.unwrap();
-            assert_eq!(&header[8..16], b"FEUHDR15");
+            assert_eq!(&header[8..16], b"FEUHDR16");
             assert_eq!(header[16..24], 7u64.to_le_bytes());
             assert_eq!(header[24..32], (384 * CHUNK_BYTES).to_le_bytes());
-            assert!(header[32..].iter().all(|&byte| byte == 0));
+            assert_eq!(header[32..48], cache.key_hasher().key());
+            assert!(header[48..].iter().all(|&byte| byte == 0));
             let mut corrupt_header = header.to_vec();
             if let Some(offset) = header_byte_offset {
                 corrupt_header[offset] ^= 1;
                 if offset == 8 {
-                    // An unsupported format must be rejected even with an intact checksum.
+                    // The old format must be rejected even with an intact checksum.
+                    corrupt_header[8..16].copy_from_slice(b"FEUHDR15");
+                    corrupt_header[32..].fill(0);
                     let checksum = XxHash64::oneshot(0, &corrupt_header[8..]);
                     corrupt_header[..8].copy_from_slice(&checksum.to_le_bytes());
                 }
@@ -222,7 +266,15 @@ mod tests {
             drop(cache);
             let cache = open_cache(directory.path(), 384, 7);
             assert!(cache.get(&ObjectKeyHash(1)).await.is_none());
-            assert_eq!(cache.disk.file.read_at(0, HEADER_BYTES).await.unwrap(), header);
+            let replacement = cache.disk.file.read_at(0, HEADER_BYTES).await.unwrap();
+            assert_eq!(&replacement[8..32], &header[8..32]);
+            assert_ne!(&replacement[32..48], &header[32..48]);
+            assert_eq!(replacement[32..48], cache.key_hasher().key());
+            assert!(replacement[48..].iter().all(|&byte| byte == 0));
+            assert_eq!(replacement[..8], XxHash64::oneshot(0, &replacement[8..]).to_le_bytes());
+            drop(cache);
+            let cache = open_cache(directory.path(), 384, 7);
+            assert_eq!(cache.disk.file.read_at(0, HEADER_BYTES).await.unwrap(), replacement);
         }
     }
 }

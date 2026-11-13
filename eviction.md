@@ -116,8 +116,10 @@ cached payloads. History is not persisted across restarts.
 ## Custom retention scores
 
 A `RetentionScorer` receives the key hash, object payload length, and request history. It can own per-object computation costs keyed by
-`ObjectKeyHash::from(key.as_str())`. Higher finite scores favor retention. Any
-byte normalization belongs to the scorer.
+`cache.hash_key(&key)`. This uses the cache's secret SipHash key so metadata matches
+identities passed to the scorer. Independent caches have different identities. Disk
+caches persist their hashing key across reopens. Higher finite scores favor retention.
+Any byte normalization belongs to the scorer.
 
 Scoring runs concurrently under shard locks. Avoid I/O, cache re-entry, and lock
 ordering that could deadlock with cache operations. Applications own the persistence

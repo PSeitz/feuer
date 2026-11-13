@@ -1,4 +1,4 @@
-//! Experimental v15 metadata chunks. Each chunk contains 255 independently checksummed
+//! Experimental v16 metadata chunks. Each chunk contains 255 independently checksummed
 //! entry-metadata pages and one checksummed next-chunk page. All-zero entry metadata is unused.
 //! Payloads live in separate chunks. An entry's metadata never crosses a page boundary.
 

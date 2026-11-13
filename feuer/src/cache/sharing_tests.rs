@@ -72,7 +72,7 @@ async fn callback_output_types_share_successes_and_errors_but_not_completed_fail
         );
         let history = cache.inner.memory.access_histories();
         assert_eq!(history.request_count(), 2);
-        assert!(history.decayed_request_count(&ObjectKeyHash::from("object")) > 1.0);
+        assert!(history.decayed_request_count(&cache.hash_key("object")) > 1.0);
         assert_eq!(pending_count(&cache), 0);
         if first.is_err() {
             assert_eq!(
@@ -179,8 +179,8 @@ async fn old_waiter_cannot_remove_a_new_attempt() {
 #[test]
 fn simultaneous_cancellation_removes_the_last_callers() {
     let pending = PendingFetches::default();
-    let first = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"));
-    let second = PendingFetch::<&str>::join(&pending, ObjectKeyHash::from("object"));
+    let first = PendingFetch::<&str>::join(&pending, ObjectKeyHash(1));
+    let second = PendingFetch::<&str>::join(&pending, ObjectKeyHash(1));
     let barrier = Barrier::new(2);
     scope(|scope| {
         scope.spawn(|| {
@@ -210,7 +210,7 @@ async fn lookup_only_checks_cached_bytes_without_waiting_for_a_callback() {
         cache
             .inner
             .memory
-            .insert(ObjectKeyHash::from(key), bytes.clone(), bytes.len());
+            .insert(cache.hash_key(key), bytes.clone(), bytes.len());
         assert_eq!(cache.get(key).await, Some(bytes));
     }
     assert_eq!(cache.inner.memory.access_histories().request_count(), 4);

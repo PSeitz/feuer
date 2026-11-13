@@ -76,8 +76,11 @@
 //! # Object identity and recovery
 //!
 //! Lookups accept borrowed [`Hash`](std::hash::Hash) keys, including strings, tuples, and derived structs.
-//! Feuer streams their hash input directly into XXH3-128. Keys do not need to implement `Eq`.
+//! Feuer streams their hash input into SipHash-1-3-128 with a random secret 128-bit key per cache.
+//! Disk caches persist this key so identities survive reopening. Memory-only caches generate a new
+//! key on each open. Cloned handles share the same key. Keys do not need to implement `Eq`.
 //! Include every field that distinguishes objects and a namespace when key types share a cache.
+//! Use [`Cache::hash_key`] for scorer metadata and other integrations needing the same identity.
 //!
 //! ```
 //! # async fn example(cache: &feuer::Cache) -> Result<(), Box<dyn std::error::Error>> {
@@ -92,13 +95,13 @@
 //!
 //! Keep key hashing stable when reusing persistent entries. Rust's `Hash` encoding can change across
 //! compiler versions and platforms. Change [`payload_version`](CacheBuilder::payload_version) when
-//! key encoding or payload semantics change to clear old entries on reopen. Switching from raw UTF-8
-//! string hashing to `Hash` also changes fingerprints. See [`ObjectKeyHash::from_hash`].
+//! key encoding or payload semantics change to clear old entries on reopen. Disk format 16
+//! invalidates older caches when adopting per-cache SipHash identities.
 //!
-//! Keys must be non-adversarial. Feuer stores only each key's XXH3-128 hash, without
-//! retaining the original key or checking for collisions. XXH3 is a non-cryptographic hash
-//! and provides no protection against deliberately constructed collisions. Colliding keys
-//! identify the same object, so a lookup can return another key's payload.
+//! Feuer stores only each key's 128-bit hash and performs no full-key collision check.
+//! Colliding keys identify the same object, so a lookup can return another key's payload.
+//! The secret key makes deliberately constructing collisions harder. Protect the backing file,
+//! which contains this key. Hashing does not authenticate cached payloads or anonymize traces.
 //!
 //! Each key must identify one immutable payload. Use a new key when the content changes.
 //! Feuer has no invalidation API. Your application remains responsible for source retries
@@ -173,7 +176,7 @@ pub enum IoQueues {}
 
 /// An owned string key. Cache lookups also accept any borrowed [`Hash`](std::hash::Hash) key.
 ///
-/// Keys must be non-adversarial. Only the XXH3-128 hash is stored, with no collision checks.
-/// XXH3 is non-cryptographic and provides no protection against deliberately constructed
-/// collisions. Colliding keys identify the same object, so a lookup can return another key's payload.
+/// Only the SipHash-1-3-128 identity is stored, using a random secret key per cache.
+/// Full keys are not checked for collisions. Colliding keys identify the same object,
+/// so a lookup can return another key's payload. See [`Cache::hash_key`].
 pub type ObjectKey = String;

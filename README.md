@@ -121,14 +121,17 @@ This allows to maximize utilization of your resources. E.g. network bandwidth ca
 
 - Don't use the same key for different payloads. If you mutate an object, use a new key.
   Feuer has no invalidation API.
-- Keys must be non-adversarial. Feuer stores only XXH3-128 hashes, without retaining the
-  original keys or checking for collisions. XXH3 is non-cryptographic and provides no protection
-  against deliberately constructed collisions. Colliding keys identify the same object, so a
-  lookup can return another key's payload.
+- Feuer hashes Rust `Hash` keys with SipHash-1-3-128 and a random secret 128-bit key per
+  cache, persisted with disk caches. It stores only hashes and performs no full-key collision
+  check. Colliding keys identify the same object, so a lookup can return another key's payload.
+  Protect the backing file, which contains the secret key. Use `cache.hash_key(&key)` for
+  scorer metadata and other integrations that need the cache's identity.
 - Disk caching and recovery are best-effort. Opening completes metadata recovery synchronously.
   Disk caching requires an entered Tokio runtime for background workers. Memory-only opening needs no runtime.
 - Changing capacity, disk format, or application payload version invalidates disk entries. Use
-  `.payload_version(n)` when changing your payload encoding.
+  `.payload_version(n)` when changing your payload encoding or key's `Hash` encoding.
+  Rust does not guarantee `Hash` encoding across compiler versions or platforms. Disk format
+  16 invalidates older caches when adopting per-cache SipHash identities.
 - Give each cache its own backing file. The file is exclusively locked while
   open. Use separate directories or `.file_name("images")`.
 
