@@ -222,15 +222,13 @@ impl Drop for FixedBuffer {
 /// Linux uses an anonymous mapping. Other platforms use the allocator.
 struct LargeBuffer {
     ptr: NonNull<u8>,
-    #[cfg(target_os = "linux")]
-    length: NonZeroUsize,
-    #[cfg(not(target_os = "linux"))]
-    layout: Layout,
+    length: usize,
 }
 
 impl LargeBuffer {
     fn allocate_zeroed(length: NonZeroUsize) -> io::Result<Self> {
-        let layout = AlignedBuffer::layout(length.get())?;
+        let length = length.get();
+        let layout = AlignedBuffer::layout(length)?;
         #[cfg(target_os = "linux")]
         {
             // SAFETY: length is nonzero and valid. Anonymous private pages are initialized to zero.
@@ -260,19 +258,12 @@ impl LargeBuffer {
             // SAFETY: layout is nonzero with a valid power-of-two alignment.
             let ptr = NonNull::new(unsafe { alloc_zeroed(layout) })
                 .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer allocation failed"))?;
-            Ok(Self { ptr, layout })
+            Ok(Self { ptr, length })
         }
     }
 
     fn capacity(&self) -> usize {
-        #[cfg(target_os = "linux")]
-        {
-            self.length.get()
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.layout.size()
-        }
+        self.length
     }
 
     /// Preserves initialized bytes and zeroes added bytes. Shrinks only when the old capacity
@@ -295,7 +286,7 @@ impl LargeBuffer {
             let resized = unsafe {
                 mremap(
                     self.ptr.as_ptr().cast(),
-                    self.length.get(),
+                    self.length,
                     layout.size(),
                     MREMAP_MAYMOVE,
                 )
@@ -304,7 +295,7 @@ impl LargeBuffer {
                 return Err(io::Error::last_os_error());
             }
             self.ptr = NonNull::new(resized.cast()).expect("mremap returned a null address");
-            self.length = capacity;
+            self.length = new_capacity;
             if new_capacity > old_capacity {
                 // New pages are zeroed by the kernel. Only the retained last page can contain
                 // old bytes beyond the previous capacity, after a shrink and subsequent growth.
@@ -317,11 +308,13 @@ impl LargeBuffer {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            // SAFETY: ptr was allocated with self.layout. The new size is nonzero and valid.
-            let resized = NonNull::new(unsafe { realloc(self.ptr.as_ptr(), self.layout, new_capacity) })
+            // SAFETY: length and BUFFER_ALIGNMENT reconstruct the original allocation layout.
+            let old_layout = unsafe { Layout::from_size_align_unchecked(self.length, BUFFER_ALIGNMENT) };
+            // SAFETY: ptr was allocated with old_layout. The new size is nonzero and valid.
+            let resized = NonNull::new(unsafe { realloc(self.ptr.as_ptr(), old_layout, layout.size()) })
                 .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned buffer resize failed"))?;
             self.ptr = resized;
-            self.layout = layout;
+            self.length = new_capacity;
             if new_capacity > old_capacity {
                 // SAFETY: bytes past the old capacity belong to the new allocation.
                 unsafe { self.ptr.add(old_capacity).write_bytes(0, new_capacity - old_capacity) };
@@ -336,12 +329,13 @@ impl Drop for LargeBuffer {
         #[cfg(target_os = "linux")]
         // SAFETY: this owner holds the mapping, which the kernel rounds to whole pages.
         unsafe {
-            munmap(self.ptr.as_ptr().cast(), self.length.get())
+            munmap(self.ptr.as_ptr().cast(), self.length)
         };
         #[cfg(not(target_os = "linux"))]
-        // SAFETY: this owner holds the allocation made with exactly this layout.
+        // SAFETY: length and BUFFER_ALIGNMENT reconstruct the layout of this owner's allocation.
         unsafe {
-            dealloc(self.ptr.as_ptr(), self.layout)
+            let layout = Layout::from_size_align_unchecked(self.length, BUFFER_ALIGNMENT);
+            dealloc(self.ptr.as_ptr(), layout)
         };
     }
 }
