@@ -159,6 +159,7 @@ More shards can reduce lock contention. The memory eviction target is divided am
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `FEUER_PAYLOAD_VERSION` | `0` | Application payload format version. Changing it clears previous disk entries when opening. |
 | `FEUER_MEMORY_SHARD_COUNT` | `max(1, memory_capacity / 8 GiB)` | Memory cache shard count. Must be positive. |
 | `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Candidates per eviction. Must be positive. |
 | `FEUER_ACCESS_COUNT_HALF_LIFE` | `262144` | Requests across keys before demand weight halves. Must be positive. |
@@ -167,7 +168,7 @@ More shards can reduce lock contention. The memory eviction target is divided am
 Values accept integers and size suffixes such as `8KiB` or `1.5 GiB`.
 Binary suffixes use powers of 1024, decimal suffixes powers of 1000.
 
-Use `.reclaim_sample_size(n)`, `.access_count_half_life(n)`, and
+Use `.payload_version(n)`, `.reclaim_sample_size(n)`, `.access_count_half_life(n)`, and
 `.history_entry_limit(n)` to override these defaults.
 
 ## Development

@@ -84,6 +84,9 @@ pub enum CacheConfigError {
     /// The configured memory eviction target must be positive.
     #[error("memory capacity must be greater than zero")]
     InvalidMemoryCapacity,
+    /// The payload version must be a nonnegative integer that fits in `u64`.
+    #[error("payload version must be a nonnegative number fitting u64; check FEUER_PAYLOAD_VERSION")]
+    InvalidPayloadVersion,
     /// The memory shard count must be positive.
     #[error("memory shard count must be greater than zero; check FEUER_MEMORY_SHARD_COUNT or the explicit setting")]
     InvalidMemoryShardCount,
@@ -182,6 +185,44 @@ mod tests {
                 (Some("0"), "error"),
                 (Some("bad"), "error"),
                 (Some("18446744073709551616"), "error"),
+            ],
+        );
+    }
+
+    #[test]
+    fn payload_version_environment_override() {
+        if let Ok(expected) = var("FEUER_TEST_PAYLOAD_VERSION_CHILD") {
+            assert_eq!(
+                builder().resolve_config().map(|config| config.payload_version()),
+                expected
+                    .parse::<u64>()
+                    .map_err(|_| CacheConfigError::InvalidPayloadVersion)
+            );
+            for version in [0, 42] {
+                assert_eq!(
+                    builder()
+                        .payload_version(version)
+                        .resolve_config()
+                        .unwrap()
+                        .payload_version(),
+                    version
+                );
+            }
+            return;
+        }
+        check_environment_overrides(
+            "config::tests::payload_version_environment_override",
+            "FEUER_PAYLOAD_VERSION",
+            "FEUER_TEST_PAYLOAD_VERSION_CHILD",
+            &[
+                (None, "0"),
+                (Some("0"), "0"),
+                (Some("42"), "42"),
+                (Some("18446744073709551615"), "18446744073709551615"),
+                (Some("18446744073709551616"), "error"),
+                (Some("-1"), "error"),
+                (Some("bad"), "error"),
+                (Some(""), "error"),
             ],
         );
     }

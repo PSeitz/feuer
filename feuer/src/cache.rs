@@ -128,7 +128,7 @@ pub struct CacheBuilder<'a> {
     disk_capacity: u64,
     memory_capacity: u64,
     memory_shard_count: Option<usize>,
-    payload_version: u64,
+    payload_version: Option<u64>,
     access_count_half_life: Option<u64>,
     history_entry_limit: Option<usize>,
     reclaim_sample_size: Option<usize>,
@@ -175,10 +175,11 @@ impl<'a> CacheBuilder<'a> {
         self
     }
 
-    /// Sets the application's payload format version. Defaults to zero.
+    /// Sets the application's payload format version.
+    /// Overrides `FEUER_PAYLOAD_VERSION`, whose default is zero.
     /// Changing the version clears previous disk entries when opening.
     pub fn payload_version(mut self, version: u64) -> Self {
-        self.payload_version = version;
+        self.payload_version = Some(version);
         self
     }
 
@@ -244,7 +245,11 @@ impl<'a> CacheBuilder<'a> {
         Ok(CacheConfig {
             directory: self.directory.clone(),
             file_name: self.file_name.clone(),
-            payload_version: self.payload_version,
+            payload_version: self
+                .payload_version
+                .map(Ok)
+                .unwrap_or_else(|| read_env_number("FEUER_PAYLOAD_VERSION", 0, 0))
+                .map_err(|_| CacheConfigError::InvalidPayloadVersion)?,
             disk_capacity: self.disk_capacity,
             memory_capacity: self.memory_capacity,
             memory_shard_count,
@@ -399,7 +404,7 @@ impl Cache {
             disk_capacity: 0,
             memory_capacity: 0,
             memory_shard_count: None,
-            payload_version: 0,
+            payload_version: None,
             access_count_half_life: None,
             history_entry_limit: None,
             reclaim_sample_size: None,
