@@ -9,7 +9,9 @@ Read and replay FETR packages with [the replay tools](feuer-replay/README.md).
   queue is full. A background task batches events into packages and calls
   `deliver_package` serially when a package reaches 8 MiB (at most one event over),
   or when all handles are dropped. Packages have no delivery timer.
-  Access-trace buffers are outside cache capacity. Slow delivery delays lookups.
+  Access-trace buffers are outside cache capacity. Events are dropped when the
+  queue is full, so slow delivery never delays lookups. Traces can contain
+  unmatched start and completion events.
 - The delivery callback owns retries and error reporting. Returning an error stops
   delivery and causes later events to be ignored. Tracing preserves cache results.
 - Dropping all handles triggers delivery of the remaining events and returns

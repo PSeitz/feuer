@@ -419,6 +419,7 @@ impl Cache {
 
     /// Delivers uncompressed binary access-trace packages as [`Bytes`] for this handle and its clones.
     /// Requires Tokio. Persist packages unchanged. The callback owns retries and error reporting.
+    /// Events are dropped when the trace queue is full, so delivery never delays lookups.
     pub fn with_trace<F, Fut>(mut self, deliver_package: F) -> Self
     where
         F: FnMut(Bytes) -> Fut + Send + 'static,
@@ -562,7 +563,7 @@ impl Cache {
     /// Callback results are admitted independently to memory and disk through the configured filters.
     /// Eligible disk writes are queued immediately, subject to queue capacity.
     /// Rejected results still reach all callers sharing the fetch.
-    /// Tracing can backpressure lookups but never changes their results.
+    /// Tracing drops events when its queue is full and never changes lookup results.
     /// The key is hashed immediately. The returned future retains only its fingerprint.
     /// Keys must follow the identity contract in [`Self::hash_key`].
     pub fn get_or_fetch<'cache, K, F, Fut, V, E>(
@@ -582,7 +583,7 @@ impl Cache {
 
     /// Like [`Self::get_or_fetch`], but may fetch from the source instead of a busy disk.
     ///
-    /// When the queue reaches 64 waiting payload reads, calls `should_fall_through`
+    /// When the queue reaches its configured waiter threshold (default 64), calls `should_fall_through`
     /// at most once per waiting read before I/O. Caches sharing `IoQueues` share this queue.
     /// True invokes `callback`, false waits for disk. The decision runs synchronously
     /// in a waiting caller's task and should be cheap. Shared fetches retain the original

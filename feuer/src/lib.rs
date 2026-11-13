@@ -157,7 +157,7 @@ pub use feuer_memory::{
     retention::{CacheReadSavingsScorer, FetchCostScorer, RetentionScorer},
 };
 #[cfg(all(target_os = "linux", feature = "disk"))]
-pub use feuer_storage::{DiskCacheError, IoQueues};
+pub use feuer_storage::{DiskCacheError, IoQueues, IoQueuesConfig};
 pub use feuer_utils::ObjectKeyHash;
 
 /// An error opening the disk cache in a build without disk caching support.

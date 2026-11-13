@@ -298,7 +298,7 @@ impl DiskCache {
     }
 
     /// Like [`Self::get`], but returns bytes and backing capacity and allows waiting reads to fall through.
-    /// At 64 payload reads waiting for a permit, every unchecked waiter is scheduled to call its own
+    /// At the configured payload-read waiter threshold (default 64), every unchecked waiter calls its own
     /// `should_fall_through`, even if other fallthroughs subsequently relieve the pressure.
     /// Each callback runs at most once, in its caller's task and without holding a cache lock.
     /// Buffered hits, absent entries, admitted reads, and shared-read waiters skip the check.

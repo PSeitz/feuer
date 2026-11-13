@@ -539,7 +539,7 @@ async fn read_queue_wait_metrics_track_admission_cancellation_and_closure() {
             thread: None,
             read_queue_waiters: queues.read.read_queue_waiters.clone(),
         }),
-        payload_reads: Arc::new(PayloadReadQueue::new()),
+        payload_reads: Arc::new(PayloadReadQueue::new(64)),
         files,
         buffer_pool: buffer_pool(),
         metrics: IoMetrics::new(&backend),
@@ -887,7 +887,7 @@ async fn reads_wait_for_channel_capacity_without_taking_idle_buffers() {
 async fn queue_exit_releases_admission_waiters_and_queued_requests() {
     let (queue, sender, files) = queue();
     let handle = ReadQueue {
-        payload_reads: Arc::new(PayloadReadQueue::new()),
+        payload_reads: Arc::new(PayloadReadQueue::new(64)),
         handle: Arc::new(IoQueueHandle {
             sender: Some(sender),
             wake_fd: queue.wake_fd.clone(),
@@ -1011,7 +1011,7 @@ async fn read_pieces_are_queued_together_and_reuse_one_allocation() {
     let (mut queue, sender, files) = queue();
     let pool = buffer_pool();
     let read = ReadQueue {
-        payload_reads: Arc::new(PayloadReadQueue::new()),
+        payload_reads: Arc::new(PayloadReadQueue::new(64)),
         handle: Arc::new(IoQueueHandle {
             sender: Some(sender),
             wake_fd: queue.wake_fd.clone(),
@@ -1073,7 +1073,7 @@ async fn one_read_fills_the_ring_and_retains_its_buffer_after_cancellation_or_er
         let weak_files = Arc::downgrade(&files);
         let pool = MemoryCache::new(4 * 1024 * 1024 * 1024).buffer_pool();
         let read = ReadQueue {
-            payload_reads: Arc::new(PayloadReadQueue::new()),
+            payload_reads: Arc::new(PayloadReadQueue::new(64)),
             handle: Arc::new(IoQueueHandle {
                 sender: Some(sender),
                 wake_fd: queue.wake_fd.clone(),

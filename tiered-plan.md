@@ -64,7 +64,10 @@ by callbacks and caller-held results.
 ### Disk-pressure fallthrough
 
 `get_or_fetch_with_disk_fallthrough` accepts a synchronous decision closure.
-At least 64 waiting payload reads trigger decisions for unchecked waiters.
+The waiting-read threshold defaults to 64. Configure it independently of the 64
+active payload-read permits through `IoQueues::with_config(IoQueuesConfig {
+fallthrough_waiters: 256 })`. The threshold must be positive and applies to every
+cache sharing those queues. Reaching it triggers decisions for unchecked waiters.
 A true result invokes the source callback instead of waiting for a disk-read permit.
 Each decision runs at most once in a waiting caller's task. `get_or_fetch` waits for disk.
 

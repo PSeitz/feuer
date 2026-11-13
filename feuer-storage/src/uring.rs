@@ -64,6 +64,22 @@ pub(crate) struct DataFileAndLock {
     pub(crate) _lock_file: Option<File>,
 }
 
+/// Configuration for shared disk I/O queues.
+#[derive(Clone, Copy, Debug)]
+pub struct IoQueuesConfig {
+    /// Number of waiting payload reads that triggers source-fallthrough checks.
+    /// Must be positive. Defaults to 64. The active-read limit remains 64.
+    pub fallthrough_waiters: usize,
+}
+
+impl Default for IoQueuesConfig {
+    fn default() -> Self {
+        Self {
+            fallthrough_waiters: 64,
+        }
+    }
+}
+
 /// One read queue and one write queue shared by independent caches on the same SSD.
 ///
 /// Startup uses blocking direct I/O outside these queues.
@@ -71,7 +87,7 @@ pub(crate) struct DataFileAndLock {
 /// for another 64 reads and 8 writes. Requests run in arrival order. There is no per-cache fairness.
 /// While reads wait for channel capacity, new writes are paced at 1 GiB/s and wait for active
 /// writes to finish. These limits continue for 100 ms after the last read stops waiting.
-/// Cached payload reads also share 64 permits. At 64 waiting reads,
+/// Cached payload reads also share 64 permits. At [`IoQueuesConfig::fallthrough_waiters`] waiting reads,
 /// all unchecked waiters are scheduled to consider source fallthrough before any payload I/O.
 /// File ownership and read-buffer pools remain independent. Idle queues retain no files.
 /// Dropping the last queue owner drains submitted I/O and joins both threads, which can block.
@@ -85,11 +101,23 @@ pub struct IoQueues {
 impl IoQueues {
     /// Creates the two io_uring rings and worker threads. Requires Linux io_uring support.
     pub fn new() -> io::Result<Self> {
+        Self::with_config(IoQueuesConfig::default())
+    }
+
+    /// Creates shared queues with the given configuration. Requires Linux io_uring support.
+    /// Returns [`io::ErrorKind::InvalidInput`] if `fallthrough_waiters` is zero.
+    pub fn with_config(config: IoQueuesConfig) -> io::Result<Self> {
+        if config.fallthrough_waiters == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "fallthrough_waiters must be positive",
+            ));
+        }
         let read_queue_waiters = Arc::new(Mutex::new(ReadQueueWaiters::default()));
         Ok(Self {
             read: Arc::new(IoQueueHandle::new(IoOperation::Read, read_queue_waiters.clone())?),
             write: Arc::new(IoQueueHandle::new(IoOperation::Write, read_queue_waiters)?),
-            payload_reads: Arc::new(PayloadReadQueue::new()),
+            payload_reads: Arc::new(PayloadReadQueue::new(config.fallthrough_waiters)),
         })
     }
 
@@ -271,7 +299,7 @@ impl ReadQueue {
                 IoOperation::Read,
                 Arc::new(Mutex::new(ReadQueueWaiters::default())),
             )?),
-            payload_reads: Arc::new(PayloadReadQueue::new()),
+            payload_reads: Arc::new(PayloadReadQueue::new(IoQueuesConfig::default().fallthrough_waiters)),
             files,
             buffer_pool,
             metrics,

@@ -10,18 +10,20 @@ use tokio::sync::{Notify, Semaphore, SemaphorePermit};
 use super::MAX_IN_FLIGHT_READS;
 
 /// Limits concurrent payload reads and queues reads waiting to start.
-/// At MAX_IN_FLIGHT_READS waiting reads, schedules fallthrough checks for all unchecked reads.
+/// At the configured number of waiting reads, schedules fallthrough checks for all unchecked reads.
 /// Callbacks run in their caller's future, outside the queue lock.
 pub(super) struct PayloadReadQueue {
     read_permits: Semaphore,
+    fallthrough_waiters: usize,
     // Each notification has a flag indicating whether its fallthrough check was scheduled.
     waiting_reads: Mutex<Vec<(Arc<Notify>, bool)>>,
 }
 
 impl PayloadReadQueue {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(fallthrough_waiters: usize) -> Self {
         Self {
             read_permits: Semaphore::new(MAX_IN_FLIGHT_READS),
+            fallthrough_waiters,
             waiting_reads: Mutex::new(Vec::new()),
         }
     }
@@ -69,7 +71,7 @@ impl PayloadReadQueue {
         let fallthrough_notification = Arc::new(Notify::new());
         let mut waiting_reads = self.waiting_reads.lock().unwrap();
         waiting_reads.push((fallthrough_notification.clone(), false));
-        if waiting_reads.len() >= MAX_IN_FLIGHT_READS {
+        if waiting_reads.len() >= self.fallthrough_waiters {
             for (notification, fallthrough_scheduled) in waiting_reads.iter_mut() {
                 if !*fallthrough_scheduled {
                     *fallthrough_scheduled = true;
@@ -93,7 +95,7 @@ impl PayloadReadQueue {
     #[cfg(test)]
     pub(super) fn hold_queued_reads(&self) -> impl Sized + '_ {
         let permits = self.hold_all_read_permits();
-        let waiting_reads: Vec<_> = (1..MAX_IN_FLIGHT_READS).map(|_| self.enqueue()).collect();
+        let waiting_reads: Vec<_> = (1..self.fallthrough_waiters).map(|_| self.enqueue()).collect();
         (permits, waiting_reads)
     }
 }
@@ -138,8 +140,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_threshold_is_independent_of_active_read_limit() {
+        use crate::{IoQueues, IoQueuesConfig};
+
+        assert_eq!(IoQueuesConfig::default().fallthrough_waiters, 64);
+        for fallthrough_waiters in [1, 4, 256] {
+            let queues = IoQueues::with_config(IoQueuesConfig { fallthrough_waiters }).unwrap();
+            let clone = queues.clone();
+            let queue = &clone.payload_reads;
+            assert_eq!(queue.read_permits.available_permits(), 64);
+            let _permits = queues.hold_all_read_permits();
+            let mut reads = Vec::new();
+            for _ in 1..fallthrough_waiters {
+                let mut read = Box::pin(queue.acquire_permit(|| true));
+                assert!(poll(read.as_mut()).await.is_pending());
+                reads.push(read);
+            }
+            assert_eq!(queue.waiting_reads.lock().unwrap().len(), fallthrough_waiters - 1);
+            assert!(queue.acquire_permit(|| true).await.is_none());
+            for read in reads {
+                assert!(read.await.is_none());
+            }
+            assert!(queue.waiting_reads.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn zero_fallthrough_waiters_is_rejected() {
+        let error = crate::IoQueues::with_config(crate::IoQueuesConfig { fallthrough_waiters: 0 })
+            .err()
+            .unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
     async fn reaching_fallthrough_threshold_checks_all_waiters_once_even_after_pressure_drops() {
-        let queue = PayloadReadQueue::new();
+        let queue = PayloadReadQueue::new(64);
         let read_permits = queue.hold_all_read_permits();
         let calls: Vec<_> = (0..MAX_IN_FLIGHT_READS).map(|_| Cell::new(0)).collect();
         let mut reads: Vec<_> = calls
@@ -205,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn scheduled_checks_run_before_admission_even_when_permits_become_available() {
-        let queue = PayloadReadQueue::new();
+        let queue = PayloadReadQueue::new(64);
         let read_permits = queue.hold_all_read_permits();
         let calls = Cell::new(0);
         let mut reads: Vec<_> = (0..MAX_IN_FLIGHT_READS)
@@ -232,7 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_removes_waiters_without_calling_their_callbacks() {
-        let queue = PayloadReadQueue::new();
+        let queue = PayloadReadQueue::new(64);
         let read_permits = queue.hold_all_read_permits();
         let mut read = Box::pin(queue.acquire_permit(|| panic!("queue is below the fallthrough threshold")));
         assert!(poll(read.as_mut()).await.is_pending());

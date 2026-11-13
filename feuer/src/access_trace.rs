@@ -62,7 +62,7 @@ impl AccessTrace {
         event_bytes[1..9].copy_from_slice(&request_id.to_le_bytes());
         event_bytes[9..17].copy_from_slice(&elapsed_ns.to_le_bytes());
         event_bytes[17..33].copy_from_slice(&object_key_hash.0.to_le_bytes());
-        let _ = self.event_sender.send(event_bytes).await;
+        let _ = self.event_sender.try_send(event_bytes);
         request_id
     }
 
@@ -81,7 +81,7 @@ impl AccessTrace {
         event_bytes[9..17].copy_from_slice(&(self.started_at.elapsed().as_nanos() as u64).to_le_bytes());
         event_bytes[17..33].copy_from_slice(&object_key_hash.0.to_le_bytes());
         event_bytes[33..41].copy_from_slice(&payload_length.to_le_bytes());
-        let _ = self.event_sender.send(event_bytes).await;
+        let _ = self.event_sender.try_send(event_bytes);
     }
 }
 
@@ -94,6 +94,30 @@ fn new_package() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn drops_events_when_queue_is_full() {
+        let (event_sender, mut receiver) = mpsc::channel(1);
+        let trace = AccessTrace {
+            event_sender,
+            next_request_id: Arc::new(AtomicU64::new(1)),
+            started_at: Instant::now(),
+        };
+        let key = ObjectKeyHash(1);
+        trace.send_request_start(key).await;
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let request_id = trace.send_request_start(key).await;
+            trace.send_outcome(request_id, key, LookupOutcome::MemoryHit, 10).await;
+        })
+        .await
+        .expect("full trace queue must not delay lookups");
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(u64::from_le_bytes(event[1..9].try_into().unwrap()), 1);
+        assert!(matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+        let request_id = trace.send_request_start(key).await;
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(u64::from_le_bytes(event[1..9].try_into().unwrap()), request_id);
+    }
 
     #[tokio::test]
     async fn encodes_lookup_outcomes_and_payload_lengths() {
