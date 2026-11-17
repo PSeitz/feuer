@@ -283,14 +283,7 @@ impl LargeBuffer {
         #[cfg(target_os = "linux")]
         {
             // SAFETY: this buffer owns an anonymous mapping. Both sizes are nonzero and valid.
-            let resized = unsafe {
-                mremap(
-                    self.ptr.as_ptr().cast(),
-                    self.length,
-                    layout.size(),
-                    MREMAP_MAYMOVE,
-                )
-            };
+            let resized = unsafe { mremap(self.ptr.as_ptr().cast(), self.length, layout.size(), MREMAP_MAYMOVE) };
             if resized == MAP_FAILED {
                 return Err(io::Error::last_os_error());
             }
