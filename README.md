@@ -163,7 +163,7 @@ More shards can reduce lock contention. The memory eviction target is divided am
 | `FEUER_MEMORY_SHARD_COUNT` | `max(1, memory_capacity / 8 GiB)` | Memory cache shard count. Must be positive. |
 | `FEUER_RECLAIM_SAMPLE_SIZE` | `64` | Candidates per eviction. Must be positive. |
 | `FEUER_ACCESS_COUNT_HALF_LIFE` | `262144` | Requests across keys before demand weight halves. Must be positive. |
-| `FEUER_HISTORY_ENTRY_LIMIT` | `10000000` | History entry-count cleanup threshold per cache. Must be positive. |
+| `FEUER_HISTORY_ENTRY_LIMIT` | `10000000` | History entry-count cleanup threshold per cache. Zero disables request history and its cleanup worker. |
 
 Values accept integers and size suffixes such as `8KiB` or `1.5 GiB`.
 Binary suffixes use powers of 1024, decimal suffixes powers of 1000.

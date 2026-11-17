@@ -4,7 +4,7 @@ use std::{
     future::Future,
     hash::Hash,
     io,
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroU64,
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
@@ -190,7 +190,7 @@ impl<'a> CacheBuilder<'a> {
         self
     }
 
-    /// Sets the entry-count cleanup threshold for request history. Must be positive.
+    /// Sets the entry-count cleanup threshold for request history. Zero disables history.
     /// Overrides `FEUER_HISTORY_ENTRY_LIMIT`, whose default is 10,000,000.
     pub fn history_entry_limit(mut self, entries: usize) -> Self {
         self.history_entry_limit = Some(entries);
@@ -240,7 +240,7 @@ impl<'a> CacheBuilder<'a> {
         let history_limit = self
             .history_entry_limit
             .map(Ok)
-            .unwrap_or_else(|| read_env_number("FEUER_HISTORY_ENTRY_LIMIT", DEFAULT_HISTORY_ENTRY_LIMIT.get(), 1))
+            .unwrap_or_else(|| read_env_number("FEUER_HISTORY_ENTRY_LIMIT", DEFAULT_HISTORY_ENTRY_LIMIT, 0))
             .map_err(|_| CacheConfigError::InvalidHistoryEntryLimit)?;
         Ok(CacheConfig {
             directory: self.directory.clone(),
@@ -254,7 +254,7 @@ impl<'a> CacheBuilder<'a> {
             memory_capacity: self.memory_capacity,
             memory_shard_count,
             access_count_half_life: NonZeroU64::new(half_life).ok_or(CacheConfigError::InvalidAccessCountHalfLife)?,
-            history_entry_limit: NonZeroUsize::new(history_limit).ok_or(CacheConfigError::InvalidHistoryEntryLimit)?,
+            history_entry_limit: history_limit,
             reclaim_sample_size: sample_size,
         })
     }

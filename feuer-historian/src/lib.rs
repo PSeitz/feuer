@@ -5,7 +5,7 @@
 use std::{
     array::from_fn,
     hash::BuildHasher,
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroU64,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -25,7 +25,7 @@ const ACCESS_HISTORY_SHARDS: usize = 64;
 pub const DEFAULT_ACCESS_COUNT_HALF_LIFE: NonZeroU64 = NonZeroU64::new(262_144).unwrap();
 
 /// Default entry count above which background cleanup removes old history.
-pub const DEFAULT_HISTORY_ENTRY_LIMIT: NonZeroUsize = NonZeroUsize::new(10_000_000).unwrap();
+pub const DEFAULT_HISTORY_ENTRY_LIMIT: usize = 10_000_000;
 
 /// Request history shared by both cache tiers.
 /// Object keys select one of 64 independently locked history maps. The request clock remains global.
@@ -36,6 +36,7 @@ pub struct ObjectAccessHistories {
     shards: Arc<[Mutex<FxHashMap<ObjectKeyHash, DecayedRequestCount>>; ACCESS_HISTORY_SHARDS]>,
     request_count: AtomicU64,
     half_life: NonZeroU64,
+    enabled: bool,
 }
 
 impl Default for ObjectAccessHistories {
@@ -57,20 +58,24 @@ impl ObjectAccessHistories {
 
     /// Creates empty history with a fixed decay half-life and an entry-count cleanup threshold.
     /// Cleanup needs no async runtime and locks only one history shard at a time.
-    pub fn with_half_life_and_entry_limit(half_life: NonZeroU64, entry_limit: NonZeroUsize) -> Self {
+    /// A zero entry limit disables recording and the cleanup worker. Counts remain zero.
+    pub fn with_half_life_and_entry_limit(half_life: NonZeroU64, entry_limit: usize) -> Self {
         let shards = Arc::new(from_fn(|_| Mutex::default()));
-        let weak = Arc::downgrade(&shards);
-        thread::spawn(move || {
-            loop {
-                thread::sleep(Duration::from_secs(1));
-                let Some(shards) = weak.upgrade() else { break };
-                Self::remove_oldest(&*shards, entry_limit.get());
-            }
-        });
+        if entry_limit > 0 {
+            let weak = Arc::downgrade(&shards);
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(Duration::from_secs(1));
+                    let Some(shards) = weak.upgrade() else { break };
+                    Self::remove_oldest(&*shards, entry_limit);
+                }
+            });
+        }
         Self {
             shards,
             request_count: AtomicU64::new(0),
             half_life,
+            enabled: entry_limit > 0,
         }
     }
 
@@ -104,6 +109,9 @@ impl ObjectAccessHistories {
     /// Repeated requests update the same counter.
     /// Cache insertion and eviction do not record or remove history.
     pub fn record_request(&self, key: &ObjectKeyHash) {
+        if !self.enabled {
+            return;
+        }
         let mut histories = self.shard(key).lock();
         // Assign the clock under the shard lock so this key's updates cannot arrive out of order.
         // The atomic only measures request age. The shard mutex protects the history itself.
@@ -121,8 +129,11 @@ impl ObjectAccessHistories {
     }
 
     /// Returns the object's request count decayed to the global request clock.
-    /// Unknown keys have a count of zero.
+    /// Unknown keys and disabled history have a count of zero.
     pub fn decayed_request_count(&self, key: &ObjectKeyHash) -> f64 {
+        if !self.enabled {
+            return 0.0;
+        }
         let histories = self.shard(key).lock();
         histories
             .get(key)

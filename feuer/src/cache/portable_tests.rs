@@ -31,10 +31,6 @@ fn builder_validates_settings_at_open_before_creating_files() {
             CacheConfigError::InvalidAccessCountHalfLife,
         ),
         (
-            Cache::builder().memory_capacity(1).history_entry_limit(0),
-            CacheConfigError::InvalidHistoryEntryLimit,
-        ),
-        (
             Cache::builder().memory_capacity(1).reclaim_sample_size(0),
             CacheConfigError::InvalidReclaimSampleSize,
         ),
@@ -83,6 +79,25 @@ fn memory_only_builder_and_lookups_need_no_runtime() {
         assert_eq!(cache.inner.memory.access_histories().request_count(), 4);
         assert!(!unused_directory.exists());
     }
+}
+
+#[test]
+fn zero_history_entry_limit_preserves_caching() {
+    let cache = Cache::builder()
+        .memory_capacity(1 << 20)
+        .history_entry_limit(0)
+        .open()
+        .unwrap();
+    assert_eq!(cache.config().history_entry_limit(), 0);
+    let payload = Bytes::from_static(b"payload");
+    assert_eq!(
+        ready(cache.get_or_fetch("object", || async { Ok::<_, &str>(Bytes::from_static(b"payload")) })).unwrap(),
+        payload
+    );
+    assert_eq!(ready(cache.get("object")), Some(payload));
+    let histories = cache.inner.memory.access_histories();
+    assert_eq!(histories.request_count(), 0);
+    assert_eq!(histories.decayed_request_count(&cache.hash_key("object")), 0.0);
 }
 
 #[test]

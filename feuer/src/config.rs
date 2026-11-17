@@ -1,5 +1,5 @@
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroU64,
     path::{Path, PathBuf},
 };
 
@@ -24,7 +24,7 @@ pub struct CacheConfig {
     pub(super) memory_capacity: u64,
     pub(super) memory_shard_count: usize,
     pub(super) access_count_half_life: NonZeroU64,
-    pub(super) history_entry_limit: NonZeroUsize,
+    pub(super) history_entry_limit: usize,
     pub(super) reclaim_sample_size: usize,
 }
 
@@ -45,7 +45,8 @@ impl CacheConfig {
     }
 
     /// Returns the entry-count cleanup threshold for the history shared by both cache tiers.
-    pub const fn history_entry_limit(&self) -> NonZeroUsize {
+    /// Zero disables request history.
+    pub const fn history_entry_limit(&self) -> usize {
         self.history_entry_limit
     }
 
@@ -100,9 +101,9 @@ pub enum CacheConfigError {
         "access count half-life must be greater than zero; check FEUER_ACCESS_COUNT_HALF_LIFE or the explicit setting"
     )]
     InvalidAccessCountHalfLife,
-    /// The history entry limit must be a positive integer that fits in `usize`.
+    /// The history entry limit must be a nonnegative integer that fits in `usize`.
     #[error(
-        "history entry limit must be a positive number fitting usize; check FEUER_HISTORY_ENTRY_LIMIT or the explicit setting"
+        "history entry limit must be a nonnegative number fitting usize; check FEUER_HISTORY_ENTRY_LIMIT or the explicit setting"
     )]
     InvalidHistoryEntryLimit,
 }
@@ -320,22 +321,21 @@ mod tests {
     fn history_entry_limit_environment_override() {
         if let Ok(expected) = var("FEUER_TEST_HISTORY_ENTRY_LIMIT_CHILD") {
             assert_eq!(
-                builder()
-                    .resolve_config()
-                    .map(|config| config.history_entry_limit().get()),
+                builder().resolve_config().map(|config| config.history_entry_limit()),
                 expected
                     .parse::<usize>()
                     .map_err(|_| CacheConfigError::InvalidHistoryEntryLimit)
             );
-            assert_eq!(
-                builder()
-                    .history_entry_limit(32)
-                    .resolve_config()
-                    .unwrap()
-                    .history_entry_limit()
-                    .get(),
-                32
-            );
+            for limit in [0, 32] {
+                assert_eq!(
+                    builder()
+                        .history_entry_limit(limit)
+                        .resolve_config()
+                        .unwrap()
+                        .history_entry_limit(),
+                    limit
+                );
+            }
             return;
         }
         check_environment_overrides(
@@ -346,7 +346,8 @@ mod tests {
                 (None, "10000000"),
                 (Some("1"), "1"),
                 (Some("1KiB"), "1024"),
-                (Some("0"), "error"),
+                (Some("0"), "0"),
+                (Some("-1"), "error"),
                 (Some("bad"), "error"),
                 (Some("18446744073709551616"), "error"),
             ],

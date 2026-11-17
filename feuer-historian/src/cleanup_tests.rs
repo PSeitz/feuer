@@ -11,6 +11,19 @@ fn wait_until(mut ready: impl FnMut() -> bool) {
 }
 
 #[test]
+fn zero_entry_limit_disables_history_and_cleanup() {
+    let histories = ObjectAccessHistories::with_half_life_and_entry_limit(DEFAULT_ACCESS_COUNT_HALF_LIFE, 0);
+    for i in 0..100 {
+        let key = ObjectKeyHash(i % 10);
+        histories.record_request(&key);
+        assert_eq!(histories.decayed_request_count(&key), 0.0);
+    }
+    assert_eq!(histories.request_count(), 0);
+    assert!(histories.shards.iter().all(|shard| shard.lock().is_empty()));
+    assert_eq!(Arc::weak_count(&histories.shards), 0);
+}
+
+#[test]
 fn cleanup_removes_least_recent_requests_across_shards() {
     let histories = ObjectAccessHistories::new();
     let keys: Vec<_> = (0..11).map(ObjectKeyHash).collect();
@@ -35,10 +48,7 @@ fn cleanup_removes_least_recent_requests_across_shards() {
 
 #[test]
 fn background_cleanup_handles_concurrent_requests_and_releases_history_on_drop() {
-    let histories = ObjectAccessHistories::with_half_life_and_entry_limit(
-        DEFAULT_ACCESS_COUNT_HALF_LIFE,
-        NonZeroUsize::new(100).unwrap(),
-    );
+    let histories = ObjectAccessHistories::with_half_life_and_entry_limit(DEFAULT_ACCESS_COUNT_HALF_LIFE, 100);
     let weak = Arc::downgrade(&histories.shards);
     thread::scope(|scope| {
         for worker in 0..8 {
